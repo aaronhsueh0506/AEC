@@ -540,8 +540,8 @@ cfg.enable_cng = 0;          /* 只覆寫你真的要改的 */
 
 | 欄位 | 型別 | 預設 | 允許範圍 | 說明／何時調整 |
 |---|---|---:|---|---|
-| `min_gain_floor_far_active_db` | `float` | `-28.0` | -300 – 50 | **這是三個 preset 唯一的差別**，也是主要的強度旋鈕。遠端在說話時允許的最低增益。**調低**（例如 -38）＝回音壓得更乾淨，但 double-talk 時近端更容易被壓掉；**調高**（例如 -20）＝近端保留較好，回音殘留較多。優先用 preset（§7）而不是自己填數字。 |
-| `min_gain_floor_dt_db` | `float` | `-20.0` | -300 – 50 | double-talk 期間專用的最低增益，與上一項分開。**調高**可在雙方同時說話時多保留近端。需 `dt_aware_res_floor_enabled = 1` 才生效。 |
+| `min_gain_floor_far_active_db` | `float` | `-28.0` | -300 – 50 | **mild/balanced preset 唯一的差別**，也是主要的強度旋鈕。遠端在說話時允許的最低增益。**調低**（例如 -38）＝回音壓得更乾淨，但 double-talk 時近端更容易被壓掉；**調高**（例如 -20）＝近端保留較好，回音殘留較多。優先用 preset（§7）而不是自己填數字。 |
+| `min_gain_floor_dt_db` | `float` | `-20.0` | -300 – 50 | double-talk 期間專用的最低增益，與上一項分開；aggressive preset 把這個欄位也調低到 `-30.0`（mild/balanced 仍共用 `-20.0`），不然 double-talk 觸發時三個 preset 會蓋回同一個值,聽不出強度差。**調高**可在雙方同時說話時多保留近端。需 `dt_aware_res_floor_enabled = 1` 才生效。 |
 | `dt_aware_res_floor_enabled` | `int` | `1` | 0 / 1 | 是否啟用上面這個 double-talk 專用下限。 |
 | `dt_aware_recovery_soft` | `int` | `1` | 0 / 1 | 近端最近有聲音時，改用非破壞性的方式做重新對齊，避免把近端語音削掉。 |
 
@@ -748,17 +748,22 @@ int aec_get_mem_breakdown(const AecConfig* cfg, AecMemBreakdown* out);
 aec_config_from_preset(&cfg, AEC_PRESET_BALANCED, 16000);
 ```
 
-三個 preset **只差一個欄位**：`min_gain_floor_far_active_db`。其餘欄位完全相同
-（已逐位元比對確認）。所以 preset 就是「回音壓多乾淨」對「近端保留多完整」的單一取捨軸。
+mild / balanced 兩個 preset **只差一個欄位**：`min_gain_floor_far_active_db`。
+aggressive 則**再加一個欄位**：`min_gain_floor_dt_db`（double-talk 時改用的
+地板）——否則 double-talk 偵測觸發時（含遠端單講上約 30% 的誤觸發）三個
+preset 會被硬蓋回同一個 `-20.0`，聽不出 preset 之間的強度差。其餘欄位三者
+完全相同（已逐位元比對確認）。所以 preset 就是「回音壓多乾淨」對「近端保留
+多完整」的單一取捨軸，只是用兩個欄位一起表達。
 
-| Preset | `min_gain_floor_far_active_db` | 適用情境 |
-|---|---:|---|
-| `AEC_PRESET_MILD` | `-20.0` | 近端音質優先。喇叭音量小、耦合弱的場景；可接受較多回音殘留。 |
-| `AEC_PRESET_BALANCED` | `-28.0` | **預設，一般通話建議值。** |
-| `AEC_PRESET_AGGRESSIVE` | `-38.0` | 回音抑制優先。大音量、喇叭與麥克風靠很近、耦合強的場景；double-talk 時近端較容易被壓抑。 |
+| Preset | `min_gain_floor_far_active_db` | `min_gain_floor_dt_db` | 適用情境 |
+|---|---:|---:|---|
+| `AEC_PRESET_MILD` | `-20.0` | `-20.0` | 近端音質優先。喇叭音量小、耦合弱的場景；可接受較多回音殘留。 |
+| `AEC_PRESET_BALANCED` | `-28.0` | `-20.0` | **預設，一般通話建議值。** |
+| `AEC_PRESET_AGGRESSIVE` | `-38.0` | `-30.0` | 回音抑制優先。大音量、喇叭與麥克風靠很近、耦合強的場景；double-talk 時近端較容易被壓抑（比單差一個欄位的舊版更明顯，這是刻意的）。 |
 
-先用 preset 調整，不要一開始就自己填 `min_gain_floor_far_active_db`。三個值之間需要
-中間值時，才直接覆寫該欄位。傳入超出 enum 範圍的 preset 值會退回 balanced 的設定。
+先用 preset 調整，不要一開始就自己填 `min_gain_floor_far_active_db` /
+`min_gain_floor_dt_db`。需要中間值時，才直接覆寫這兩個欄位。傳入超出 enum
+範圍的 preset 值會退回 balanced 的設定。
 
 ### 7.1 執行期切換 preset（`aec_set_preset`）
 
@@ -766,10 +771,12 @@ aec_config_from_preset(&cfg, AEC_PRESET_BALANCED, 16000);
 int aec_set_preset(Aec* a, AecPreset preset, float ramp_ms);
 ```
 
-不需要重建實例。三個 preset 只差 `min_gain_floor_far_active_db`，而該欄位是抑制器
-每個 hop 只讀一次的單一純量下限，所以換 preset 是**重新指定目標值**，不是重建：
-濾波器、延遲狀態、每一條平滑歷史、far-active latch 與 DominantNearend 計數器全部
-原封不動繼續跑。
+不需要重建實例。換 preset 是**重新指定目標值**，不是重建：濾波器、延遲狀態、
+每一條平滑歷史、far-active latch 與 DominantNearend 計數器全部原封不動繼續
+跑。但兩個欄位走不同的路：`min_gain_floor_far_active_db` 是抑制器每個 hop
+只讀一次的純量下限，`ramp_ms` 讓它用 dB 線性走到新值；`min_gain_floor_dt_db`
+是 double-talk 時的硬性覆寫，不是逐 hop 收斂的量，沒有 ramp 可言，不論
+`ramp_ms` 是多少都**立即套用**——C 跟 Python 兩邊語意相同。
 
 ```c
 #include "aec.h"
@@ -819,12 +826,15 @@ balanced**；這是 setter，有呼叫端可以回報，所以**直接拒絕**�
 
 int suppression_gain_set_split_floor_far_active_db(SuppressionGain* sg,
                                                    float db, float ramp_ms);
+int suppression_gain_set_split_floor_dt_db(SuppressionGain* sg, float db);
 ```
 
-`db` 就是 `AecConfig.min_gain_floor_far_active_db` 那個 dB-power 量，並且用**驗證器
-自己的**範圍 `[-300, 50]` 檢查——執行期呼叫不可能裝進一個 init 當初會拒絕的值。
-`ramp_ms` 語意與上表相同。它同樣不動任何平滑歷史、latch、DominantNearend 計數器
-或 `initial_state`。回 `0` 或 `-1`（NULL 或引數超出範圍），`-1` 時什麼都不寫：
+`db` 分別對應 `AecConfig.min_gain_floor_far_active_db` / `min_gain_floor_dt_db`
+那兩個 dB-power 量，並且用**驗證器自己的**範圍 `[-300, 50]` 檢查——執行期呼叫
+不可能裝進一個 init 當初會拒絕的值。遠端地板的 `ramp_ms` 語意與上表相同；DT
+地板**沒有** `ramp_ms` 參數，因為它是逐 hop 的硬性覆寫而不是逐 hop 收斂的量，
+呼叫即立即套用。兩者都不動任何平滑歷史、latch、DominantNearend 計數器或
+`initial_state`。回 `0` 或 `-1`（NULL 或引數超出範圍），`-1` 時什麼都不寫：
 所有值都先算完、驗完，才寫第一個 store。
 
 **四麥克風產品請勿對 lane 呼叫**。四條 lane 都以 `spatial_linear_context` 建立，
@@ -834,9 +844,11 @@ int suppression_gain_set_split_floor_far_active_db(SuppressionGain* sg,
 它針對的就是那個共用的 `AecRes`。
 
 **A/B 量測時該預期什麼**（先讀這段再下結論）：far-active 地板只在
-**far-active 且非 double-talk** 的 hop 上生效。double-talk 期間套用的是 DT 地板，
-而 DT 地板在三個 preset 之間**完全相同**；far-active latch 尚未觸發之前，
-套用的是 far-silent 地板。同一個 gain 還決定注入的 comfort noise 量
+**far-active 且非 double-talk** 的 hop 上生效。double-talk 期間套用的是 DT 地板
+（mild/balanced 共用 `-20.0`，aggressive 是 `-30.0`——兩者之間曾經完全相同，
+因為 aggressive 原本只動 far-active 地板，但那會讓 double-talk 觸發時三個
+preset 的輸出收斂到同一個值，所以後來把 aggressive 的 DT 地板也獨立出來）；
+far-active latch 尚未觸發之前，套用的是 far-silent 地板。同一個 gain 還決定注入的 comfort noise 量
 （振幅正比於 `sqrt(1 − G_res²)`，所以地板壓得越深、CNG 反而越多）。三件事合起來
 的結果是：**整段錄音的平均值移動幅度會小於 dB 落差所暗示的量**，而且一個只量
 echo／degradation 的 A/B 會把 CNG 的變化錯記到別的機制頭上。請在 echo 對齊

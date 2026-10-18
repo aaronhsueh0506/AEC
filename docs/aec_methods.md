@@ -78,18 +78,31 @@ AecConfig(
 )
 ```
 
-`mild` and `aggressive` are deliberate **Pareto operating points** that differ
-from `balanced` in exactly one field — `min_gain_floor_far_active_db`, the
-far-active min-gain floor (the single residual-echo strength knob):
+`mild` and `aggressive` are deliberate **Pareto operating points** on the same
+strength axis as `balanced`. `mild`/`balanced` differ in exactly one field —
+`min_gain_floor_far_active_db`, the far-active min-gain floor. `aggressive`
+additionally deepens `min_gain_floor_dt_db` (the floor used in its place
+during double-talk, see §3.4): without that second field, `dt_protect_active`
+hard-overrides the far-active floor with the SAME shared −20 dB for every
+preset whenever it fires (including a measured ~30% false-arm rate on
+far-end-singletalk), so the three presets used to collapse to indistinguishable
+behavior on exactly the hops a user would expect to hear the strength
+difference. `no_floor` is a fourth tier that removes the floor mechanism
+(`min_gain_split_floor_enabled=False`) entirely instead of deepening it
+further — the deepest point on the axis, and the one with the most near-end
+cost; see `AecConfig.from_preset`'s docstring for the full rationale and the
+47-case dev-pool numbers behind the `aggressive` dt-floor value.
 
-| preset | floor | character |
-|---|---|---|
-| `mild` | −20 dB | near-priority — more near kept, more echo leak (DT_static deg ≈ AEC2; FS echo below balanced's 3.5 bar by design) |
-| `balanced` | −28 dB | production — all four ship bars met |
-| `aggressive` | −38 dB | echo-priority — beats AEC2 on DT+FS echo, deg >2.0 and above AEC3 |
+| preset | far-active floor | dt floor | character |
+|---|---|---|---|
+| `mild` | −20 dB | −20 dB | near-priority — more near kept, more echo leak (DT_static deg ≈ AEC2; FS echo below balanced's 3.5 bar by design) |
+| `balanced` | −28 dB | −20 dB | production — all four ship bars met |
+| `aggressive` | −38 dB | −30 dB | echo-priority — beats AEC2 on DT+FS echo, deg >2.0 and above AEC3; dev-pool DT_static echo +0.17/+0.14 MOS vs the shared-floor point, at a real, bounded near-end cost (44-case mix battery's 200 ms clean-anchored guard 42/48→39/48 grid A, 44/48→43/48 grid B) |
+| `no_floor` | n/a (floor off) | n/a (floor off) | deepest point on the axis — purely audibility/R²-derived gain, no fixed-dB clamp at all; most near-end loss, including exposing a pre-existing cold-start R² pathology the floor had been masking |
 
 The DT-deg-vs-echo trade is a proven single-channel DSP Pareto wall; the strength
-axis exposes it honestly. See CHANGELOG `[3.22.4]` for the full-800 numbers.
+axis exposes it honestly. See CHANGELOG `[3.22.4]` for the full-800 numbers
+(pre-dates the `no_floor` tier and the aggressive dt-floor split).
 
 Everything else uses `AecConfig` dataclass defaults; the AEC3 chain has
 its own tuning embedded in `AecStateConfig` / `SuppressionGainConfig`
@@ -103,11 +116,13 @@ and `run_one_case.py`) seed before instantiation.
 
 ### Tunable parameters (`AecConfig`)
 
-The full release surface is `AecConfig` (`modules/config.py`). The three presets
-differ **only** in `min_gain_floor_far_active_db` (mild −20 / balanced −28 /
-aggressive −38); `from_preset` additionally pins a shared base
-(`enable_cng=True`, `shadow_mu_min=0.5`, `warmup_frames=100`,
-`kalman_q_high=1e-3`). Everything below uses dataclass defaults. Fields are
+The full release surface is `AecConfig` (`modules/config.py`). mild/balanced
+differ **only** in `min_gain_floor_far_active_db` (−20 / −28); aggressive
+additionally sets `min_gain_floor_dt_db` to −30 (shared −20 default
+otherwise); `no_floor` instead sets `min_gain_split_floor_enabled=False`.
+`from_preset` additionally pins a shared base (`enable_cng=True`,
+`shadow_mu_min=0.5`, `warmup_frames=100`, `kalman_q_high=1e-3`). Everything
+below uses dataclass defaults. Fields are
 grouped by subsystem; **ON**/**OFF** marks the default state of a feature flag.
 Frame-count fields marked as a 10 ms authored basis are converted at
 construction to preserve wall-clock duration on the selected grid; the table
@@ -125,13 +140,13 @@ shows their public configuration values, not necessarily the internal hop count.
 | | `enable_td_constraint` | **ON** | |
 | C′ ERLE coherence gate | `erle_coh_gate_enabled` | **ON** | Γ²(Ŷ,Y) per-bin ERLE freeze |
 | | `erle_coh_gate_threshold` / `_alpha` | 0.5 / 0.05 | |
-| Split min-gain floor (§3.4) | `min_gain_split_floor_enabled` | **ON** | |
-| | `min_gain_floor_far_active_db` | −28 | **preset strength knob** |
+| Split min-gain floor (§3.4) | `min_gain_split_floor_enabled` | **ON** | OFF for the `no_floor` preset |
+| | `min_gain_floor_far_active_db` | −28 | **preset strength knob** (mild −20 / balanced −28 / aggressive −38) |
 | | `min_gain_floor_far_silent_db` | −12 | pure-NE floor |
 | | `min_gain_far_latch_power` | 1e6 | far-active latch |
 | **DT-aware recovery group** | `dt_aware_recovery_soft` | **ON** | soft (non-destructive) delay/EPC recovery (§2.3) |
 | | `dt_aware_res_floor_enabled` | **ON** | RES floor lift (§3.4); default source is the near-recent latch alone |
-| | `min_gain_floor_dt_db` | −20 | floor used in double-talk |
+| | `min_gain_floor_dt_db` | −20 | floor used in double-talk; **−30 for aggressive**, shared −20 for mild/balanced |
 | | `ne_recent_threshold` | 0.3 | near-recent gate arm threshold |
 | | `ne_recent_hold` | 150 | 10 ms authored basis; approximately 1.5 s after grid retiming |
 | | `ne_recent_sustain` | 3 | frames above threshold to arm |
@@ -496,37 +511,43 @@ far-active criterion). It latches from the first far frame so FS/DT use the
 gentler floor throughout (no cold-start leak); only recordings where far is
 never active keep the strong floor. Config (`AecConfig`):
 `min_gain_split_floor_enabled`, `min_gain_floor_far_active_db` (balanced −28;
-mild −20 / aggressive −38 — the v3.22.4 preset strength knob),
+mild −20 / aggressive −38 — the preset strength knob),
 `min_gain_floor_far_silent_db` (−12), `min_gain_far_latch_power` (1e6). The
 floors are amplitude-domain dB; the orchestrator constructs `SuppressionGain`
 with these as `split_floor_*` (`orchestrator.py:960`). The far-active floor
 above is further lifted in double-talk by the DT-aware floor gating below.
 
 **Double-talk floor protection (DT-aware floor gating, v3.23.0, default ON).**
-The far-active floor (−28 dB) is deliberately aggressive so pure far-end
-single-talk cancels deep echo — but applying that same deep floor *during
-double-talk* over-suppresses near-end. The DT-gated floor lifts the floor from
-`min_gain_floor_far_active_db` (−28 dB) to `min_gain_floor_dt_db` (**−20 dB**)
-*only when near-end is present*, selectively protecting near-end in DT while
-keeping the aggressive far-active floor in pure FS:
+The far-active floor (balanced −28 dB) is deliberately aggressive so pure
+far-end single-talk cancels deep echo — but applying that same deep floor
+*during double-talk* over-suppresses near-end. The DT-gated floor lifts the
+floor from `min_gain_floor_far_active_db` to `min_gain_floor_dt_db` *only when
+near-end is present*, selectively protecting near-end in DT while keeping the
+aggressive far-active floor in pure FS:
 
 ```python
-# suppression_gain.py ~928 (_get_min_gain):
+# suppression_gain.py ~1067 (_get_min_gain):
 if self._far_active_latched:
-    base_floor = (self._split_floor_dt if self._dt_protect_active   # DT: −20 dB
-                  else self._split_floor_far_active)                # FS: −28 dB
+    base_floor = (self._split_floor_dt if self._dt_protect_active   # DT
+                  else self._split_floor_far_active)                # FS
 else:
     base_floor = self._split_floor_far_silent                       # pure NE: −12 dB
 ```
 
-The current `-20 dB` default is a measured Pareto choice, not a free detector
-improvement.  Against `-16 dB` on 832 paired files it recovers roughly
-0.46--0.53 dB far-end-single-talk ERLE and 0.053--0.064 echo MOS, while
+The `-20 dB` dt-floor default (mild/balanced) is a measured Pareto choice, not
+a free detector improvement.  Against `-16 dB` on 832 paired files it recovers
+roughly 0.46--0.53 dB far-end-single-talk ERLE and 0.053--0.064 echo MOS, while
 double-talk degradation MOS falls 0.027--0.030; near-end-only is neutral.
 The earlier `-16 dB` setting deliberately spent that echo headroom on near-end
 protection after the round-robin filter-constraint change.  Returning to
 `-20 dB` reverses that small policy exchange; it does not make the near/far
-latch more accurate.
+latch more accurate. **aggressive deepens this floor to −30 dB** instead —
+without a distinct value here, `dt_protect_active` (which also false-arms on
+~30% of pure far-end-singletalk hops) hard-overrides the far-active floor with
+the SAME −20 dB for every preset, masking most of the strength-axis
+difference exactly when a user would expect to hear it. See `AecConfig.
+from_preset`'s docstring for the dev-pool measurement behind that value and
+its near-end cost.
 
 The orchestrator sets `sg._dt_protect_active` immediately before `get_gain`:
 
@@ -538,7 +559,7 @@ self._aec3_sg._dt_protect_active = bool(
 
 The floor is armed by the energy-based `_ne_recent_frames` latch alone — the
 same gate `dt_aware_recovery_soft` uses. Config (`AecConfig`):
-`dt_aware_res_floor_enabled`, `min_gain_floor_dt_db` (−20),
+`dt_aware_res_floor_enabled`, `min_gain_floor_dt_db` (−20; −30 for aggressive),
 `ne_recent_threshold`/`ne_recent_hold`/`ne_recent_sustain`. Enabling
 `dt_aware_res_floor_enabled` itself with the default latch source, on the
 no-pre-align baseline (on top of `dt_aware_recovery_soft`): DT_static deg 2.016→2.074, DT_movement 2.088→2.140

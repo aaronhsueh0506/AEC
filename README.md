@@ -82,43 +82,57 @@ internal `RenderDelayController`; Speex internally), exactly as in production:
   DT-gated RES floor), which trades a little echo for DT-deg headroom above the
   pre-align reference while keeping all four ship bars.
 
-### Presets — one Pareto knob
+### Presets — a strength axis, four operating points
 
-Three presets differ **only** in `min_gain_floor_far_active_db`, the far-active
-residual-gain floor that trades echo suppression against near-end preservation:
+`mild` / `balanced` differ **only** in `min_gain_floor_far_active_db`, the
+far-active residual-gain floor that trades echo suppression against near-end
+preservation. `aggressive` also deepens `min_gain_floor_dt_db` (the floor
+used in its place during double-talk) — without it, `dt_protect_active`
+hard-overrides the far-active floor with the SAME shared −20 dB for every
+preset whenever it fires (including a measured ~30% false-arm rate on
+far-end-singletalk), masking most of the strength-axis difference on exactly
+the hops where a user would expect to hear it. `no_floor` is a fourth tier
+that removes the floor mechanism entirely (`min_gain_split_floor_enabled=
+False`) instead of deepening it further:
 
-| Preset | floor | character |
-|---|---|---|
-| `mild`       | −20 dB | near-priority — more near-end kept, more echo leak (FS dips below the 3.5 bar by design). Was `gentle` until 2026-07-15 (NR-style naming, same parameters) |
-| **`balanced` ★** | −28 dB | **production** — all four ship bars met |
-| `aggressive`   | −38 dB | echo-priority — deeper suppression, more near-end loss (deg stays >2.0, above AEC3) |
+| Preset | far-active floor | dt floor | character |
+|---|---|---|---|
+| `mild`       | −20 dB | −20 dB | near-priority — more near-end kept, more echo leak (FS dips below the 3.5 bar by design). Was `gentle` until 2026-07-15 (NR-style naming, same parameters) |
+| **`balanced` ★** | −28 dB | −20 dB | **production** — all four ship bars met |
+| `aggressive`   | −38 dB | −30 dB | echo-priority — deeper suppression, more near-end loss (deg stays >2.0, above AEC3); dev-pool DT_static echo +0.17/+0.14 MOS vs a shared-dt-floor aggressive, at a bounded near-end cost |
+| `no_floor`   | n/a (off) | n/a (off) | deepest point on the axis — purely audibility/R²-derived gain; most near-end loss |
 
-`mild` / `aggressive` are deliberate Pareto operating points on the proven
-single-channel DT-deg-vs-echo wall; all share the same `_aec3_post` chain and
-800-case-tuned base. Full version history → [CHANGELOG.md](CHANGELOG.md).
+`mild` / `aggressive` / `no_floor` are deliberate Pareto operating points on the
+proven single-channel DT-deg-vs-echo wall; all share the same `_aec3_post`
+chain and 800-case-tuned base. Full version history → [CHANGELOG.md](CHANGELOG.md).
 
 #### Retargeting a running instance
 
-Because the axis is one scalar clamp, the preset can be changed on a live
-instance without rebuilding it — the filter, the delay lock and every smoothing
-history carry on:
+The preset can be changed on a live instance without rebuilding it — the
+filter, the delay lock and every smoothing history carry on. `no_floor`
+changes a boolean the ramp below cannot represent, so it is construction-time
+only (`aec_set_preset`/`AEC.set_preset` reject it):
 
 ```c
 int aec_set_preset(Aec* a, AecPreset preset, float ramp_ms);   /* aec.h */
 ```
 
-`ramp_ms == 0` applies on the next hop (not an error) and lands on exactly the
-floor a fresh instance would hold; a positive value walks there linearly in dB,
-bounded at 60 s — worth using, since mild ↔ aggressive is an 18 dB step into a
+`ramp_ms == 0` applies the far-active floor on the next hop (not an error) and
+lands on exactly the floor a fresh instance would hold; a positive value walks
+there linearly in dB, bounded at 60 s — worth using, since mild ↔ aggressive is
+an 18 dB step into a
 hard clamp. Call between hops, serialised with processing; not thread-safe.
 Returns `0`, or `-1` with nothing written on NULL / out-of-enum preset /
 out-of-range `ramp_ms`. Unlike `aec_config_from_preset()`, which falls back to
 balanced for an unrecognised value, this **refuses** — a setter has a caller to
 tell.
 
-The primitive underneath, `suppression_gain_set_split_floor_far_active_db()`,
-is internal; a caller that owns a post-stage suppressor outside any `Aec` (the
-four-channel product) uses `aec_res_set_preset()` from `aec_res.h`.
+The primitives underneath, `suppression_gain_set_split_floor_far_active_db()`
+(ramped) and `suppression_gain_set_split_floor_dt_db()` (steps immediately —
+the DT floor is a hard per-hop override, not a value the gain rule converges
+toward, so `ramp_ms` does not apply to it), are internal; a caller that owns a
+post-stage suppressor outside any `Aec` (the four-channel product) uses
+`aec_res_set_preset()` from `aec_res.h`, same semantics.
 
 Two things to know before measuring a preset change: lanes built with
 `spatial_linear_context` never reach the suppressor's gain path, so retargeting

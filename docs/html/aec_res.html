@@ -76,7 +76,7 @@ aec_res_reset(res);                                          /* stream 邊界 */
 <tr><td><code>aec_res_init(mem, bytes, cfg)</code></td><td>在 <code>mem</code> 內建立實例;不需 destroy</td><td>NULL = 記憶體 NULL／未對齊／過小，或 cfg 無效</td></tr>
 <tr><td><code>aec_res_reset(r)</code></td><td>清除抑制器全部狀態;<b>保留</b>目前的 far-active 地板目標(含 <code>set_preset</code> 改過的)</td><td>void;NULL 安全</td></tr>
 <tr><td><code>aec_res_process(r, in)</code></td><td>一個 hop。回傳的指標由 <code>r</code> 擁有,到下一次對 <code>r</code> 的呼叫前有效</td><td>NULL = r／in 為 NULL 或任一輸入陣列為 NULL</td></tr>
-<tr><td><code>aec_res_set_preset(r, preset, ramp_ms)</code></td><td>與 <code>aec_set_preset()</code> 同語意:只改 far-active 地板;<code>ramp_ms==0</code> 於下一 hop 生效;上限 60 s</td><td>0／−1(NULL、非法 preset、ramp 超範圍;−1 時什麼都不寫)</td></tr>
+<tr><td><code>aec_res_set_preset(r, preset, ramp_ms)</code></td><td>與 <code>aec_set_preset()</code> 同語意:改 far-active 地板(<code>ramp_ms==0</code> 於下一 hop 生效,上限 60 s)與 DT 地板(aggressive 才跟其他兩個不同;無 ramp,立即套用)</td><td>0／−1(NULL、非法 preset、ramp 超範圍;−1 時什麼都不寫)</td></tr>
 <tr><td><code>aec_res_split_floor(r, &amp;live, &amp;target)</code></td><td>far-active 地板的功率比:<code>live</code> = 現行值,<code>target</code> = 正在走向的值</td><td>0／−1(r 為 NULL)</td></tr>
 <tr><td><code>aec_res_n_bins(r)</code>、<code>aec_res_hop_size(r)</code></td><td>陣列長度</td><td>0 = NULL</td></tr>
 <tr><td><code>aec_cng_fill(&amp;rng, spec, cn, g_res, g_nr, nr_floor, n)</code></td><td>在 bin 1…n−2 加上舒適噪音,見 §3</td><td>void;任一必要指標為 NULL 或 n&lt;3 則什麼都不動</td></tr>

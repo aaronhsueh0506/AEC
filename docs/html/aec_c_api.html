@@ -206,7 +206,7 @@ aec_get_linear_context(aec, &amp;lin);      /* 時域 seam:線性殘差 + 已對
 <h2>9. 執行期控制</h2>
 <div class="tblwrap"><table>
 <tr><th>函式</th><th>語意</th><th>回傳</th></tr>
-<tr><td><code>aec_set_preset(a, preset, ramp_ms)</code></td><td><b>只改 <code>min_gain_floor_far_active_db</code> 這一個純量</b>。濾波器／delay state／所有平滑歷史／far-active latch／DominantNearend 計數器<b>全部不動</b>。<code>ramp_ms==0</code> → 下一 hop 生效,落點與「一開始就用該 preset 建構」<b>逐位元相同</b>;<code>&gt;0</code> → 在 dB 上線性走,且<b>精確落到 target</b>(不是漸近逼近)</td><td><code>0</code>／<code>-1</code>。<code>-1</code> 時<b>一個 byte 都沒寫</b></td></tr>
+<tr><td><code>aec_set_preset(a, preset, ramp_ms)</code></td><td>改 <code>min_gain_floor_far_active_db</code>(受 <code>ramp_ms</code> 控制,線性走到 target)<b>與</b> <code>min_gain_floor_dt_db</code>(aggressive 才跟其他兩個不同;無 ramp,立即套用,跟 <code>ramp_ms</code> 無關)。濾波器／delay state／所有平滑歷史／far-active latch／DominantNearend 計數器<b>全部不動</b>。<code>ramp_ms==0</code> → far-active 地板下一 hop 生效,落點與「一開始就用該 preset 建構」<b>逐位元相同</b>;<code>&gt;0</code> → far-active 地板在 dB 上線性走,且<b>精確落到 target</b>(不是漸近逼近),DT 地板這段時間早已落地</td><td><code>0</code>／<code>-1</code>。<code>-1</code> 時<b>一個 byte 都沒寫</b></td></tr>
 <tr><td><code>aec_apply_external_realign(a, delta)</code></td><td><b>僅 EXTERNAL_ALIGNED</b>。<code>delta = 新對齊 − 舊對齊</code>。條件符合時<b>平移已學到的 IR</b>,否則做 filter-only reset(保留 synthesis OLA,輸出連續無垂直線)</td><td><code>1</code>=warm transfer／<code>0</code>=filter reset 或 <code>delta==0</code>／<code>-1</code>=NULL 或 mode 不對</td></tr>
 <tr><td><code>aec_reset(a)</code></td><td>回到「全新 instance」狀態。會重啟 WOLA → spectrogram 上會有垂直線。若只是外部對齊改變,<b>請用上一個函式而不是這個</b></td><td><code>void</code>,<b>⚠ 無 NULL 檢查</b></td></tr>
 </table></div>
