@@ -55,6 +55,7 @@ typedef struct FilterConvergence {
     /* Retimed in filter_convergence_init. conv_counter's threshold
      * (FC_CONV_FRAMES) is deliberately NOT here: it is an evidence count. */
     float  div_alpha;
+    float  div_alpha_c;   /* = 1.0f - div_alpha, cached at init */
     float  div_decay;
 } FilterConvergence;
 

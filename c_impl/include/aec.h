@@ -63,6 +63,16 @@ typedef enum AecDelayMode {
 #define AEC_CONTEXT_NO_GAIN     1
 #define AEC_CONTEXT_LINEAR_ONLY 2
 
+/* AMEND_35 bad-relock judgment (mirrors orchestrator.py's AMEND_34). Not a
+ * config field on either side -- Python hardcodes _DELAY_SHIFT_JUDGMENT_HOPS
+ * as a module constant for the same documented reason (100 is the
+ * documented upper end of "~50-100 frames of poor cancellation while taps
+ * re-converge", not a value a caller should be retuning per-deployment). */
+#define AEC_DELAY_SHIFT_JUDGMENT_HOPS 100
+/* Fixed cap for Aec::delay_reject_values -- see its field doc for why a
+ * fixed cap replaces Python's unbounded list. */
+#define AEC_DELAY_REJECT_CAP 8
+
 typedef struct AecConfig {
     int    sample_rate;        /* 16000 */
     int    fft_size;           /* frame size; 256/512 @16k, 1024 @48k */
@@ -140,7 +150,7 @@ typedef struct AecConfig {
     float  max_delay_ms;           /* 1024 */
     float  delay_buffer_ms;        /* 2048 */
     float  delay_est_init_s;       /* 0.3  */
-    float  delay_est_period_s;     /* 0.5  */
+    float  delay_est_period_s;     /* 0.0 (full-rate; AMEND_35) */
     /* Matched-filter bank size, [1, DA_NUM_FILTERS]; mirrors Python
      * AecConfig.delay_num_filters. 5 = the AEC3 default geometry and the
      * only value bench/dataset runs may use. Smaller is a COMPUTE AND
@@ -259,6 +269,23 @@ typedef struct AecConfig {
      * there is no search here). Same rule as the Python orchestrator's
      * ref_ring_samples(). */
     int    fixed_delay_samples;    /* -1 */
+
+    /* ── Live observer (A21 plan Stage 2): second independent PBFDAF filter,
+     * reading the far-end reference ring earlier-shifted than the main
+     * filter's own delay-compensated read, feeding extra residual-echo
+     * evidence into R² only while its own residual corroborates against
+     * the main filter's (never against its own past state -- see
+     * aec3_post.h's Aec3PostConfig observer_* fields for the full
+     * rationale). Mirrors python/modules/config.py's live_observer_*
+     * fields. Default OFF, byte-equal when off. Appended at the end,
+     * same convention as delay_mode/fixed_delay_samples above: every field
+     * before this one keeps the byte offset it had before this existed. */
+    int    live_observer_enabled;           /* 0 */
+    float  live_observer_shift_ms;          /* 24.0 */
+    float  live_observer_max_hz;            /* 1000.0 */
+    float  live_observer_mu;                /* 0.3 */
+    float  live_observer_corrob_ms;         /* 100.0 */
+    float  live_observer_corrob_margin_db;  /* 0.0 */
 } AecConfig;
 
 void aec_config_defaults(AecConfig* cfg, int sample_rate);
@@ -409,6 +436,45 @@ typedef struct Aec {
      * _hops: the window in cycles, derived once in aec_carve(); >= 1. */
     int    delay_quarantine_left;
     int    delay_quarantine_hops;
+    /* AMEND_35: C mirror of orchestrator.py's AMEND_34 bad-relock judgment.
+     * The matched-filter aggregator (shared design, both languages) accepts
+     * whichever lag correlates best with no check that it actually cancels
+     * better -- Path B judges a shift AEC_DELAY_SHIFT_JUDGMENT_HOPS after it
+     * commits, and reverts if erle_windowed is more than 1 dB worse than
+     * just before the shift (see aec_process_core's Path B block for why
+     * the window is 100, not delay_est_init_s).
+     * judgment_active: 0 = no pending judgment; 1 = counting down.
+     * judgment_pre_delay/_pre_erle: the ring alignment and erle_windowed
+     * from just before the shift being judged, to revert to / compare
+     * against.
+     * judgment_hops_left: counts down to 0, at which point the verdict
+     * fires (see judgment_pre_W doc below for why the hard-reset chain
+     * zeroes W first and the snapshot restores it after, not before).
+     * judgment_pre_W / judgment_pre_shadow_W: pool-carved snapshots of
+     * main_filter.W / shadow_filter.W at the moment the shift committed --
+     * same shape as the filters' own W (np*K Complex each), carved right
+     * after the live observer in aec_get_mem_size()/aec_carve(). shadow's
+     * is only carved/valid when cfg.enable_shadow. */
+    int    delay_shift_judgment_active;
+    int    delay_shift_judgment_pre_delay;
+    float  delay_shift_judgment_pre_erle;
+    int    delay_shift_judgment_hops_left;
+    Complex* delay_shift_judgment_pre_W;
+    Complex* delay_shift_judgment_pre_shadow_W;
+    /* Confirmed-bad relock candidates, remembered for the rest of this
+     * instance's life (cleared only by aec_reset()) so a bad lag gets one
+     * correction attempt, not an infinite retry loop -- mirrors Python's
+     * _delay_reject_values exactly EXCEPT for the cap: Python's list is
+     * unbounded, this is a fixed AEC_DELAY_REJECT_CAP-slot array because
+     * zero-heap static memory has no unbounded container. Saturates (stops
+     * recording further rejections) rather than overwriting the oldest
+     * entry on overflow -- an overwrite could un-reject a value that is
+     * still bad, and reaching the cap at all means the session is already
+     * far outside anything observed in testing (one rejection on the one
+     * real file this was built against; the 245-file movement-bucket
+     * validation never exercised a second). */
+    int    delay_reject_values[AEC_DELAY_REJECT_CAP];
+    int    delay_reject_count;
     /* Alignment-generation token for external consumers (AecLinearContext).
      * Bumped (saturating, never wrapping) at EVERY write that changes the
      * alignment the filter is matched to -- first acquisition, confirmed shift
@@ -424,19 +490,33 @@ typedef struct Aec {
                                 * (or the applied delay is exactly 0); 0 = raw,
                                 * unaligned far (pre-acquisition / ring not yet
                                 * filled / delay estimation disabled) */
-    /* Delay-estimator duty-cycle state — ALWAYS ACTIVE (baked in, no config
-     * gate): analyses every hop until the delay estimate is solid (confidence
-     * 1.0) AND unchanged for delay_est_init_s seconds, then self-gates the
-     * matched-filter analysis down to 1 hop in every K, where K = max(2,
-     * round(delay_est_period_s/hop_s)/5) — 10 with the default 0.5 s period
-     * @10 ms hop, cutting ~90% of the matched-filter cost. The estimator's
-     * decimators + render ring stay FED every hop regardless (only the
-     * analysis decimates), so the matched filter never sees gapped audio.
-     * Full-rate analysis resumes immediately when (a) the estimate changes or
-     * loses solidity, or (b) the ERLE watchdog fires: erle_windowed drops
-     * >6 dB below its running peak (peak leaks 0.1 dB/s at EVERY grid; armed
-     * only once the peak exceeds 6 dB, so it cannot fire before first
-     * convergence). */
+    /* Delay-estimator duty-cycle state. K = max(1, round(delay_est_period_s
+     * /hop_s)/5); with delay_est_period_s's AMEND_35 default of 0.0, K=1 ==
+     * full-rate, matching the Python reference exactly (no throttle, ever).
+     * Setting delay_est_period_s > 0 (or --delay-est-period) opts back into
+     * the old behaviour: once the delay estimate is solid (confidence 1.0)
+     * AND unchanged for delay_est_init_s seconds, self-gate the matched-
+     * filter analysis down to 1 hop in every K — e.g. K=10 at the old
+     * 0.5 s period @10 ms hop, cutting ~90% of the matched-filter cost, at
+     * the cost of the estimator finding different candidate lags than
+     * Python would on the same audio (confirmed on a real file, not just a
+     * timing difference). The estimator's decimators + render ring stay FED
+     * every hop regardless of K (only the analysis decimates), so the
+     * matched filter never sees gapped audio. When K>1, full-rate analysis
+     * resumes immediately when (a) the estimate changes or loses solidity,
+     * or (b) the ERLE watchdog fires: erle_windowed drops >6 dB below its
+     * running peak (peak leaks 0.1 dB/s at EVERY grid; armed only once the
+     * peak exceeds 6 dB, so it cannot fire before first convergence).
+     *
+     * AMEND_37 note: AMEND_33 considered redesigning this watchdog with a
+     * tighter relative threshold, found a real regression in that attempt,
+     * and reverted it (the root cause turned out to be the aggregator
+     * weakness Fix 1 / AMEND_34-36 now catches via the judgment+revert
+     * mechanism above, not a watchdog timing problem). Revisiting that
+     * redesign is now moot, not merely deferred: with delay_est_period_s
+     * defaulting to 0.0, duty_active never arms in production, so the
+     * watchdog it would retune has nothing to watch by default. A better
+     * watchdog for a throttle nobody runs by default has no consumer. */
     int    duty_active;        /* 1 = decimated analysis in effect */
     int    duty_stable_hops;   /* consecutive solid+unchanged hops (arming) */
     int    duty_pos;           /* position in the 1-in-K analysis cycle */
@@ -469,6 +549,14 @@ typedef struct Aec {
     /* linear filters */
     PBFDKF main_filter;
     PBFDAF shadow_filter;  int has_shadow;
+    /* Live observer (A21 Stage 2): third PBFDAF instance, same pattern as
+     * the shadow filter (static-init against the shared post_fft, same
+     * seeding/reset mirrors) -- see aec_carve()'s `cfg->live_observer_enabled`
+     * block. Unlike the shadow, it is driven from INSIDE aec3_post_run (not
+     * here in the main per-hop loop), at the exact hop AEC._aec3_post's
+     * own live-observer block runs in Python, because it reads this hop's
+     * dominant_ne/usable_linear verdicts which are only known there. */
+    PBFDAF observer_filter;  int has_observer;
 
     /* detectors / EPC / regime / RSA */
     RenderActivity    render_activity;
@@ -550,6 +638,15 @@ typedef struct Aec {
     int    leakage_div_sustain_hops;      /* was hardcoded 5 (clamp was 2x = 10) */
     int    stat_dt_hangover_hops;         /* was hardcoded 80 */
 
+    /* Matched-delay duty-cycle gate (aec_process_core's Path-A analysis skip):
+     * post-clamp lrintf(delay_est_init_s/hop_s) and lrintf(delay_est_period_s
+     * /hop_s)/5, cached here since hop_size/sample_rate/the two cfg seconds
+     * fields are all fixed for the instance's lifetime. Named distinctly from
+     * the function-local `K` (= a->n_freqs) duty_period_hops would otherwise
+     * shadow. */
+    int    duty_hold_hops;
+    int    duty_period_hops;
+
     /* FilterMisadjustmentEstimator accumulators */
     float  misadj_e2_acum, misadj_y2_acum;
     int    misadj_n_acum;
@@ -574,6 +671,17 @@ typedef struct Aec {
     float* raw_output;
     float* shadow_out;
     float* final_out;
+    /* Live observer only (has_observer): the far-end ring read earlier-
+     * shifted than far_hop's own delay-compensated read (see the ring-read
+     * block beside far_hop's own in aec.c). Written here (not inside
+     * aec3_post_run) because the ring itself is owned by this struct;
+     * read via Aec3PostRunIn.observer_far_end. The observer's OWN per-hop
+     * scratch (discarded time-domain output, corroboration magnitude
+     * arrays) lives in Aec3PostRunScratch instead, alongside sel_esw/r2/
+     * etc., since those are only ever touched from inside aec3_post_run. */
+    float* observer_far_hop;
+    int    observer_far_hop_valid;
+    int    observer_shift_hops;   /* ms_to_hops(live_observer_shift_ms), carve-time */
     float* filter_taps_full;   /* [n_partitions × hop] */
 
     /* per-hop freq-bin scratch: kept in the Aec instance (malloc'd in

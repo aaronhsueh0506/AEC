@@ -80,6 +80,14 @@ float aec3_per_block_growth_to_per_hop(float per_block_multiplier,
     return powf(per_block_multiplier, hop_seconds / block_seconds);
 }
 
+double aec3_ema_alpha_from_tau_ms(double tau_ms, double hop_ms) {
+    return exp(-hop_ms / tau_ms);
+}
+
+double aec3_db_to_linear(double db) {
+    return pow(10.0, db / 10.0);
+}
+
 float aec3_growth_rehop(float retention_at_ref, int ref_hop_samples,
                         int ref_sample_rate, int hop_samples,
                         int sample_rate) {

@@ -103,25 +103,31 @@ void linear_filter_select(LinearFilterSelect *s,
     float e2_coarse = sum_sq_f32(e_coarse_time, hop, sq);
     /* y2 */
     float y2 = sum_sq_f32(near_end, hop, sq);
-    /* s2_refined: build s_refined_time (f32) then sum-sq in f32 */
+    /* thresholds (all float32) */
     {
-        float *sref = s->scr_sref;   /* length hop */
-        for (int i = 0; i < hop; ++i) sref[i] = near_end[i] - e_refined_time[i];
-        float s2_refined = sum_sq_f32(sref, hop, sq);
-        /* s2_coarse */
-        float *scoa = s->scr_scoa;   /* length hop */
-        for (int i = 0; i < hop; ++i) scoa[i] = near_end[i] - e_coarse_time[i];
-        float s2_coarse = sum_sq_f32(scoa, hop, sq);
-
-        /* thresholds (all float32) */
         float int16_scale_sq = 32768.0f * 32768.0f;
         float thr_30 = (30.0f * 30.0f) * (float)hop / int16_scale_sq;
         float thr_60 = (60.0f * 60.0f) * (float)hop / int16_scale_sq;
 
-        int cond_coarse_cleaner =
-            (e2_coarse < 0.9f * e2_refined) &&
-            (y2 > thr_30) &&
-            (s2_refined > thr_60 || s2_coarse > thr_60);
+        /* s2_refined/s2_coarse (near - e_*, summed-squared, f32) only feed
+         * cond_coarse_cleaner's final (s2_refined>thr_60 || s2_coarse>thr_60)
+         * term -- short-circuit on both the outer (e2_coarse,y2) gate and on
+         * s2_refined alone clearing thr_60, so s2_coarse's build+reduction is
+         * skipped whenever it can't change the result. */
+        int cond_coarse_cleaner = 0;
+        if ((e2_coarse < 0.9f * e2_refined) && (y2 > thr_30)) {
+            float *sref = s->scr_sref;   /* length hop */
+            for (int i = 0; i < hop; ++i) sref[i] = near_end[i] - e_refined_time[i];
+            float s2_refined = sum_sq_f32(sref, hop, sq);
+            if (s2_refined > thr_60) {
+                cond_coarse_cleaner = 1;
+            } else {
+                float *scoa = s->scr_scoa;   /* length hop */
+                for (int i = 0; i < hop; ++i) scoa[i] = near_end[i] - e_coarse_time[i];
+                float s2_coarse = sum_sq_f32(scoa, hop, sq);
+                cond_coarse_cleaner = (s2_coarse > thr_60);
+            }
+        }
         int cond_refined_diverged =
             (e2_coarse < e2_refined) && (y2 < e2_refined);
         int use_refined = !(cond_coarse_cleaner || cond_refined_diverged);
@@ -172,22 +178,21 @@ void linear_filter_select(LinearFilterSelect *s,
         }
 
         /* _e_old = prev_output_time (zeros if None); _e_block = [e_old | e_form]
-         * _e_block_win = _e_block * sqrt_hann (length block_size, f32) */
-        for (int i = 0; i < hop; ++i) {
-            float eo = s->prev_output_valid ? s->prev_output_time[i] : 0.0f;
-            s->block_win[i] = eo * sqrt_hann[i];
-        }
-        for (int i = 0; i < hop; ++i)
-            s->block_win[hop + i] = s->e_form[i] * sqrt_hann[hop + i];
-
-        /* selected_esw = rfft(_e_block_win, fft_size).astype(complex64):
+         * _e_block_win = _e_block * sqrt_hann (length block_size, f32).
+         * selected_esw = rfft(_e_block_win, fft_size).astype(complex64):
          * zero-pad block_size samples to fft_size, forward FFT (bit-exact
-         * pocketfft). Mirrors pbfdkf.c rfft_padded. Instance scratch, not
-         * stack (see LinearFilterSelect struct comment). */
+         * pocketfft). Mirrors pbfdkf.c rfft_padded. Written straight into
+         * scr_tin (instance scratch, dead after the FFT call -> clobber-
+         * permitted) instead of via block_win -- nothing else reads
+         * block_win between the fill and this FFT. */
         {
-            float *tin = s->scr_tin;   /* length fft_size, dead after the
-                                        * call -> clobber-permitted rfft */
-            memcpy(tin, s->block_win, (size_t)blk * sizeof(float));
+            float *tin = s->scr_tin;   /* length fft_size */
+            for (int i = 0; i < hop; ++i) {
+                float eo = s->prev_output_valid ? s->prev_output_time[i] : 0.0f;
+                tin[i] = eo * sqrt_hann[i];
+            }
+            for (int i = 0; i < hop; ++i)
+                tin[hop + i] = s->e_form[i] * sqrt_hann[hop + i];
             memset(tin + blk, 0, (size_t)(fft_size - blk) * sizeof(float));
             fft_forward_scratch(fft, tin, s->sel_esw);
         }

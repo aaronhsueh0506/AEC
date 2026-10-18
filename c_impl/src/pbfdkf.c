@@ -489,8 +489,10 @@ static float pbfdaf_frontend(PBFDAF* p,
     p->last_s_max_abs = sk_max_abs_f32(p->time_scratch + hop, hop);
 
     /* error_spec: zero-pad, valid region [hop, block) = output */
-    memset(p->time_scratch, 0, (size_t)p->fft_size * sizeof(float));
-    for (int i = 0; i < hop; ++i) p->time_scratch[hop + i] = output[i];
+    memset(p->time_scratch, 0, (size_t)hop * sizeof(float));
+    memcpy(p->time_scratch + hop, output, (size_t)hop * sizeof(float));
+    if (p->fft_size > blk)
+        memset(p->time_scratch + blk, 0, (size_t)(p->fft_size - blk) * sizeof(float));
     fft_forward_scratch(p->fft, p->time_scratch, p->error_spec);
 
     /* windowed near (sqrt-Hann × near_buffer) − echo_spec. RES analysis = main
@@ -536,15 +538,24 @@ void pbfdaf_process(PBFDAF* p,
 
     if (far_hop_energy > 1e-4f) {
         /* === PBFDAF NLMS _update_weights (coarse_filter_update_gain.cc) === */
-        float* mu_local = p->scr_mu_local;   /* instance scratch, not stack: [n_freqs] */
         const float* mu_arr = mu_scale_arr;
+        int any_pos;
         if (mu_arr == NULL) {
-            for (int k = 0; k < K; ++k) mu_local[k] = mu_scale_scalar;
-            mu_arr = mu_local;
+            /* mu_local would be filled uniformly with mu_scale_scalar, so
+             * 'any element > 0' degenerates to just the scalar itself --
+             * skip the K-length fill and scan entirely when it's not. */
+            any_pos = (mu_scale_scalar > 0.0f);
+            if (!any_pos) { p->partition_idx = (p->partition_idx + 1) % N; return; }
+            {
+                float* mu_local = p->scr_mu_local;   /* instance scratch, not stack: [n_freqs] */
+                for (int k = 0; k < K; ++k) mu_local[k] = mu_scale_scalar;
+                mu_arr = mu_local;
+            }
+        } else {
+            any_pos = 0;
+            for (int k = 0; k < K; ++k) if (mu_arr[k] > 0.0f) { any_pos = 1; break; }
+            if (!any_pos) { p->partition_idx = (p->partition_idx + 1) % N; return; }
         }
-        int any_pos = 0;
-        for (int k = 0; k < K; ++k) if (mu_arr[k] > 0.0f) { any_pos = 1; break; }
-        if (!any_pos) { p->partition_idx = (p->partition_idx + 1) % N; return; }
         /* Increment before the saturation gate (mirrors AEC3/PBFDKF), floored at
          * LONG_MAX to avoid signed overflow. call_counter's raw value is compared
          * bit-exact against Python's unbounded counter
@@ -569,8 +580,8 @@ void pbfdaf_process(PBFDAF* p,
          * cmag2_np would return for each row; zero-init then one add per
          * element per partition keeps the summation order identical. */
         float *x2psum = p->scr_x2psum;   /* instance scratch, not stack: [n_freqs] */
-        for (int k = 0; k < K; ++k) x2psum[k] = 0.0f;
-        for (int part = 0; part < N; ++part) {
+        memcpy(x2psum, p->x2_cache, (size_t)K * sizeof(float));   /* part 0 */
+        for (int part = 1; part < N; ++part) {
             const float* x2p = p->x2_cache + (size_t)part * K;
             for (int k = 0; k < K; ++k) x2psum[k] += x2p[k];
         }
@@ -594,7 +605,11 @@ void pbfdaf_process(PBFDAF* p,
             if (p->enable_td_constraint &&
                 (!p->constraint_round_robin || part == p->partition_to_constrain)) {
                 fft_inverse(p->fft, Wp, p->time_scratch);
-                for (int i = 0; i < p->fft_size; ++i) p->time_scratch[i] *= p->td_window[i];
+                /* td_window[i]==1.0f for i<hop_size (pbfdaf_fill_windows) --
+                 * x*1.0f leaves every float bit pattern unchanged, so only the
+                 * [hop_size, fft_size) half (where td_window==0.0f) needs the
+                 * multiply. */
+                for (int i = p->hop_size; i < p->fft_size; ++i) p->time_scratch[i] *= p->td_window[i];
                 fft_forward_scratch(p->fft, p->time_scratch, Wp);
             }
         }
@@ -618,10 +633,17 @@ void pbfdaf_copy_weights_from(PBFDAF* dst, const PBFDAF* src) {
  * the filter, so the cold-start cancellation survives a delay realign.
  * Mirrors filters.py: raw irfft per partition (first hop taps) ->
  * concatenate -> left-shift by s -> rfft each hop block (zero-padded to
- * fft_size) back into W[p]. Keeps X_buf (Python _warm_clear_xbuf default
- * False). NO td_window -- Python uses a raw irfft here (unlike the
- * TD-constraint round-trip). Uses p->scr_ir instance scratch, not stack --
- * sized exactly n_partitions*hop_size at init (see pbfdkf.h PBFDAF comment).
+ * fft_size) back into W[p]. NO td_window -- Python uses a raw irfft here
+ * (unlike the TD-constraint round-trip). Uses p->scr_ir instance scratch,
+ * not stack -- sized exactly n_partitions*hop_size at init (see pbfdkf.h
+ * PBFDAF comment).
+ *
+ * Owns the far-history decision too, same as filters.py's Filter.warm_shift_ir
+ * (`if s < 0: self.X_buf.fill(0)`): a RETARD leaves the held far history
+ * ahead of the realigned stream, so pbfdaf_clear_far_history() runs below for
+ * that direction -- one spelling, not one per caller (this used to be
+ * duplicated inline at both call sites; AMEND_37 moved it here to match
+ * Python's ownership and cover any future call site for free).
  *
  * Returns 0 (applied) / -1 (refused). The span guard below is REACHABLE from
  * a legal config (n_partitions is admissible up to 256 and hop up to 512), and
@@ -655,6 +677,7 @@ int pbfdaf_warm_shift_ir(PBFDAF* p, int shift_samples) {
         fft_forward_scratch(p->fft, p->time_scratch, p->W + (size_t)part * K);
     }
     p->w_dirty = 1;
+    if (s < 0) pbfdaf_clear_far_history(p);
     return 0;
 }
 
@@ -1055,8 +1078,8 @@ static void pbfdkf_update_weights_aec3(PBFDKF* p, int curr_p,
      * rows, produced once each as the row entered history. */
     float *X2 = p->scr_X2;   /* instance scratch, not stack: [n_freqs] */
     if (b->call_counter > p->partition_sum_x2_startup_hops) {
-        for (int k = 0; k < K; ++k) X2[k] = 0.0f;
-        for (int part = 0; part < N; ++part) {
+        memcpy(X2, b->x2_cache, (size_t)K * sizeof(float));   /* part 0 */
+        for (int part = 1; part < N; ++part) {
             const float* x2p = b->x2_cache + (size_t)part * K;
             for (int k = 0; k < K; ++k) X2[k] += x2p[k];
         }
@@ -1094,7 +1117,7 @@ static void pbfdkf_update_weights_aec3(PBFDKF* p, int curr_p,
         if (b->enable_td_constraint &&
             (!b->constraint_round_robin || part == b->partition_to_constrain)) {
             fft_inverse(b->fft, Wp, b->time_scratch);
-            for (int i = 0; i < b->fft_size; ++i) b->time_scratch[i] *= b->td_window[i];
+            for (int i = b->hop_size; i < b->fft_size; ++i) b->time_scratch[i] *= b->td_window[i];
             fft_forward_scratch(b->fft, b->time_scratch, Wp);
         }
     }
@@ -1104,11 +1127,15 @@ static void pbfdkf_update_weights_aec3(PBFDKF* p, int curr_p,
 
     /* Scale mu_aec3 by mu_scale_arr before the H_error decay so that masked
      * bins (RSA narrowband mask + DT scale) do not decay while their W is frozen.
-     * Mirrors AEC3 refined_filter_update_gain.cc:113-119. */
-    for (int k = 0; k < K; ++k) mu_aec3[k] *= mu_scale_arr[k];
-    /* H_error decay (active branch only): H_error -= 0.5·mu·X²·H_error. */
-    for (int k = 0; k < K; ++k)
-        p->H_error_per_bin[k] -= 0.5f * mu_aec3[k] * X2[k] * p->H_error_per_bin[k];
+     * Mirrors AEC3 refined_filter_update_gain.cc:113-119. H_error decay (active
+     * branch only): H_error -= 0.5·mu·X²·H_error. mu_aec3 is fully recomputed
+     * at the top of every hop, so fusing the scale into this loop (instead of
+     * writing the scaled value back into mu_aec3[k]) changes nothing a later
+     * reader would see. */
+    for (int k = 0; k < K; ++k) {
+        float ms = mu_aec3[k] * mu_scale_arr[k];
+        p->H_error_per_bin[k] -= 0.5f * ms * X2[k] * p->H_error_per_bin[k];
+    }
 
     /* always-on refresh + clamp. */
     pbfdkf_h_error_refresh(p, e2_ref_bins);

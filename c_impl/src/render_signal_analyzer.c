@@ -190,39 +190,46 @@ static void identify_strong_narrow_band_component(RenderSignalAnalyzer *m,
     /* peak_bin = int(np.argmax(X2)) — first index of the maximum. */
     peak_bin = rsa_argmax_first(render_psd, m->n_freqs);
 
-    /* Non-peak power windows (avoiding ±5 bins around peak). */
-    lo_lo = peak_bin - 14; if (lo_lo < 0) lo_lo = 0;
-    lo_hi = peak_bin - 4;  if (lo_hi < lo_lo) lo_hi = lo_lo;
-    hi_lo = peak_bin + 5;  if (hi_lo > m->n_freqs) hi_lo = m->n_freqs;
-    hi_hi = peak_bin + 15; if (hi_hi > m->n_freqs) hi_hi = m->n_freqs;
+    /* Everything below is only read by the peak_bin>0 branch of the final
+     * check; when peak_bin==0 nothing here is observable, so skip the whole
+     * window-scan/max_abs/peak_level computation in that case. */
+    if (peak_bin > 0) {
+        /* Non-peak power windows (avoiding ±5 bins around peak). */
+        lo_lo = peak_bin - 14; if (lo_lo < 0) lo_lo = 0;
+        lo_hi = peak_bin - 4;  if (lo_hi < lo_lo) lo_hi = lo_lo;
+        hi_lo = peak_bin + 5;  if (hi_lo > m->n_freqs) hi_lo = m->n_freqs;
+        hi_hi = peak_bin + 15; if (hi_hi > m->n_freqs) hi_hi = m->n_freqs;
 
-    non_peak_power = 0.0f;
-    if (lo_hi > lo_lo) {
-        wmax = render_psd[lo_lo];               /* np.max over float32 window */
-        for (i = lo_lo + 1; i < lo_hi; ++i) {
-            if (render_psd[i] > wmax) wmax = render_psd[i];
+        non_peak_power = 0.0f;
+        if (lo_hi > lo_lo) {
+            wmax = render_psd[lo_lo];               /* np.max over float32 window */
+            for (i = lo_lo + 1; i < lo_hi; ++i) {
+                if (render_psd[i] > wmax) wmax = render_psd[i];
+            }
+            if (wmax > non_peak_power) non_peak_power = wmax;
         }
-        if (wmax > non_peak_power) non_peak_power = wmax;
-    }
-    if (hi_hi > hi_lo) {
-        wmax = render_psd[hi_lo];
-        for (i = hi_lo + 1; i < hi_hi; ++i) {
-            if (render_psd[i] > wmax) wmax = render_psd[i];
+        if (hi_hi > hi_lo) {
+            wmax = render_psd[hi_lo];
+            for (i = hi_lo + 1; i < hi_hi; ++i) {
+                if (render_psd[i] > wmax) wmax = render_psd[i];
+            }
+            if (wmax > non_peak_power) non_peak_power = wmax;
         }
-        if (wmax > non_peak_power) non_peak_power = wmax;
-    }
 
-    /* max_abs of render time block: np.max(np.abs(render_block)), kept in
-     * float32. */
-    max_abs = rsa_max_abs(render_block, render_block_len);
+        peak_level = render_psd[peak_bin];   /* X2[peak_bin], float32-by-design */
 
-    peak_level = render_psd[peak_bin];   /* X2[peak_bin], float32-by-design */
-
-    if (peak_bin > 0
-            && max_abs > RSA_MAX_ABS_THRESHOLD_FLOAT
-            && peak_level > RSA_PEAK_RATIO_STRONG * non_peak_power) {
-        m->narrow_peak_band = peak_bin;
-        m->narrow_peak_counter = 0;
+        /* max_abs of render time block (np.max(np.abs(render_block)), f32)
+         * is the more expensive of the two remaining checks (O(render_block_len)
+         * vs a single compare) -- only compute it once the cheap peak_level
+         * check has already passed. Reordering independent && operands
+         * doesn't change the final boolean. */
+        if (peak_level > RSA_PEAK_RATIO_STRONG * non_peak_power) {
+            max_abs = rsa_max_abs(render_block, render_block_len);
+            if (max_abs > RSA_MAX_ABS_THRESHOLD_FLOAT) {
+                m->narrow_peak_band = peak_bin;
+                m->narrow_peak_counter = 0;
+            }
+        }
     }
 }
 
@@ -251,6 +258,17 @@ int rsa_narrow_peak_band(const RenderSignalAnalyzer *m) {
  *   counter[k-1] > thr → mu[k-2..k+2]   (k in [2, N-1))
  *   counter[N-2] > thr → mu[N-1], mu[N]     where N = n_freqs_by2
  */
+int rsa_any_narrow_band_active(const RenderSignalAnalyzer *m) {
+    int N = m->n_freqs_by2;
+    int k;
+    if (m->counters[0] > RSA_COUNTER_THRESHOLD) return 1;
+    for (k = 2; k < N - 1; ++k) {
+        if (m->counters[k - 1] > RSA_COUNTER_THRESHOLD) return 1;
+    }
+    if (m->counters[N - 2] > RSA_COUNTER_THRESHOLD) return 1;
+    return 0;
+}
+
 void rsa_mask_regions_around_narrow_bands(const RenderSignalAnalyzer *m, float *mu) {
     int N = m->n_freqs_by2;  /* = n_freqs - 1 */
     int k, j;
@@ -261,10 +279,11 @@ void rsa_mask_regions_around_narrow_bands(const RenderSignalAnalyzer *m, float *
     }
     for (k = 2; k < N - 1; ++k) {
         if (m->counters[k - 1] > RSA_COUNTER_THRESHOLD) {
-            /* mu[k-2 : k+3] = 0.0  (k+2 inclusive, clamped to n_freqs-1) */
-            for (j = k - 2; j <= k + 2; ++j) {
-                if (j >= 0 && j < m->n_freqs) mu[j] = 0.0f;
-            }
+            /* mu[k-2 : k+3] = 0.0 (k+2 inclusive). For k in [2, N-2] (this
+             * loop's range, N = n_freqs-1), j = k-2..k+2 stays within
+             * [0, n_freqs) always -- min j = 0 at k=2, max j = N = n_freqs-1
+             * at k=N-2 -- so the bounds check is always true here. */
+            for (j = k - 2; j <= k + 2; ++j) mu[j] = 0.0f;
         }
     }
     if (m->counters[N - 2] > RSA_COUNTER_THRESHOLD) {

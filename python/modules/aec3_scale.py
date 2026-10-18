@@ -241,6 +241,21 @@ def per_block_growth_to_per_hop(per_block_multiplier: float,
     return per_block_multiplier ** (hop_seconds / block_seconds)
 
 
+def ema_alpha_from_tau_ms(tau_ms: float, hop_ms: float) -> float:
+    """Per-hop EMA retention for a time constant expressed directly in ms
+    (NOT the AEC3-block-grid conventions above): ``alpha = exp(-hop_ms /
+    tau_ms)``. A state update ``x <- alpha*x + (1-alpha)*new`` then decays
+    to 1/e of its initial value after ``tau_ms`` of wall-clock time,
+    independent of hop size.
+    """
+    return float(np.exp(-hop_ms / tau_ms))
+
+
+def db_to_linear(db: float) -> float:
+    """Convert a dB value to a linear power ratio: ``10 ** (db / 10)``."""
+    return float(10.0 ** (db / 10.0))
+
+
 def growth_rehop(retention_at_ref: float, ref_hop_samples: int, ref_sample_rate: int,
                  hop_samples: int, sample_rate: int) -> float:
     """Generalizes ``per_block_growth_to_per_hop``'s fixed AEC3-4ms-block

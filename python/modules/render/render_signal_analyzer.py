@@ -49,7 +49,10 @@ class RenderSignalAnalyzer:
         mask_regions_around_narrow_bands(mu)  -> in-place mu zeroing
     """
 
-    def __init__(self, n_freqs: int, strong_peak_freeze_duration: int = 6) -> None:
+    def __init__(self, n_freqs: int, strong_peak_freeze_duration: int = 6,
+                 counter_threshold_hops: int = _COUNTER_THRESHOLD,
+                 poor_excitation_threshold_hops: int = _POOR_EXCITATION_THRESHOLD
+                 ) -> None:
         # AEC3 array has size kFftLengthBy2 - 1 (= n_freqs - 2). Indexed by k-1
         # for bins k in [1, kFftLengthBy2 - 1).
         self._n_freqs = int(n_freqs)
@@ -62,6 +65,16 @@ class RenderSignalAnalyzer:
         self._strong_peak_freeze_duration = int(strong_peak_freeze_duration)
         self._narrow_peak_band: Optional[int] = None
         self._narrow_peak_counter = 0
+        # Persistence thresholds (hop counts). Default to the AEC3-literal
+        # module constants above (byte-equal). A21 plan Stage 4c
+        # (AecConfig.rsa_wallclock_persistence): these are hop-count
+        # thresholds applied identically regardless of grid, so the SAME
+        # hop count is a different wall-clock duration on different grids
+        # (e.g. grid A's 8ms hop vs grid B's 16ms hop at the project's two
+        # standard operating points) -- the caller may pass wall-clock-
+        # retimed hop counts instead when that flag is on.
+        self._counter_threshold = int(counter_threshold_hops)
+        self._poor_excitation_threshold = int(poor_excitation_threshold_hops)
 
     # -------------------------------------------------------- AEC3 detectors
     def _identify_small_narrow_band_regions(
@@ -142,7 +155,7 @@ class RenderSignalAnalyzer:
         """True iff ANY narrow-band counter > 10 (AEC3 cc:40-45)."""
         if self._counters.size == 0:
             return False
-        return bool(np.any(self._counters > _POOR_EXCITATION_THRESHOLD))
+        return bool(np.any(self._counters > self._poor_excitation_threshold))
 
     def narrow_peak_band(self) -> Optional[int]:
         return self._narrow_peak_band
@@ -161,16 +174,17 @@ class RenderSignalAnalyzer:
                 f"mu has {mu.shape[0]} bins, expected n_freqs={self._n_freqs}"
             )
         N = self._n_freqs_by2  # = n_freqs - 1
+        thr = self._counter_threshold
         # Edge: counter[0] (bin k=1) → mask bins 0, 1.
-        if self._counters[0] > _COUNTER_THRESHOLD:
+        if self._counters[0] > thr:
             mu[0] = 0.0
             mu[1] = 0.0
         # Interior: counter[k-1] (bin k, k in [2, N-1)) → mask bins k-2..k+2.
         for k in range(2, N - 1):
-            if self._counters[k - 1] > _COUNTER_THRESHOLD:
+            if self._counters[k - 1] > thr:
                 mu[k - 2:k + 3] = 0.0
         # Edge: counter[N-2] (bin k=N-1) → mask bins N-1, N (=n_freqs-1).
-        if self._counters[N - 2] > _COUNTER_THRESHOLD:
+        if self._counters[N - 2] > thr:
             mu[N - 1] = 0.0
             mu[N] = 0.0
         return mu

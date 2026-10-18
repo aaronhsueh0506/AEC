@@ -77,6 +77,8 @@ aec_destroy(a);   /* aec_init 實例為 no-op;pool 由呼叫端釋放 */</code><
 </table></div>
 <p class="small"><b>Backward-jump quarantine</b>(<code>cfg.delay_backward_quarantine_enabled</code>,<b>預設 0</b>=關閉,關閉時輸出逐位元不變):僅作用於 <code>MATCHED</code> 的 Path B,只延後、不治癒 pre-echo 誤鎖;判別式為唯讀 <code>aec_linear_is_cancelling(const Aec*)</code>。記憶體拆解用 <code>aec_get_mem_breakdown(&amp;cfg, &amp;out)</code>。實測與完整說明收在 <a href="aec_detail.html">aec_detail</a>。</p>
 
+<p class="small"><b>Live observer</b>(<code>cfg.live_observer_enabled</code>,<b>預設 0</b>=關閉,關閉時輸出逐位元不變;A21 campaign 2026-10-17):第三個獨立 PBFDAF 實例(跟 <code>shadow_filter</code> 同一個 struct,固定 NLMS、<code>lightweight=1</code> 省近端的加窗/未加窗兩個 FFT,同 shadow 省法),讀取遠端 ring 比主濾波器的延遲補償讀取早 <code>live_observer_shift_ms</code>(預設 24.0 ms)。每 hop 把自己的誤差能量 EMA 跟主濾波器(R² 實際採用的那條選線 <code>sel_esw</code>,不是恆取 main)的誤差能量 EMA 比較(EMA 時間常數 <code>live_observer_corrob_ms</code> 預設 100.0 ms、容忍度 <code>live_observer_corrob_margin_db</code> 預設 0.0 dB),只有在觀察器沒有比主濾波器差時才信任其證據;證據本身夾在主濾波器殘留回音功率以內(<code>min()</code>),經 <code>max(r2, evidence)</code> 注入 residual-echo R²(只到 <code>live_observer_max_hz</code> 預設 1000.0 Hz 的低頻段),從不碰輸出、delay 或任一濾波器的視窗/taps。注入邏輯跑在 <code>aec3_post_run_observer_step()</code>(<code>src/aec3_post.c</code>)內,不在 <code>aec_process_core()</code> 主迴圈(跟 shadow 不同),因為要讀當下 hop 才算出的 dominant_ne/usable_linear 判定。記憶體增量(<code>aec_get_mem_size()</code> 實測,delay_num_filters=5):8k/256 +30,000 B、16k/256(預設)+39,296 B、16k/512 +59,696 B、48k/1024 +143,712 B。算量增量(<code>bench_rtf --live-observer</code> 實測,三格):+10~15%;是否接受此成本待裁定,目前只是旗標存在、未進任何預設組合。</p>
+
 <p>四個 process 進入點<b>推進完全相同的內部 state</b>(都經 <code>aec_process_core()</code>),只差結果怎麼交付,可在同一實例上自由交錯、不需 reset:</p>
 <div class="tblwrap"><table>
 <tr><th>進入點</th><th>用途</th></tr>
@@ -192,6 +194,7 @@ seam 讀者     ctx(N-1) 有效至 ↘       ctx(N) 有效至 ↘         ctx(N+
 <tr><td><code>delay</code>(DelayAec3)</td><td>struct 內含 matched filter 累積器</td><td>AEC3 matched-filter 延遲估計 + duty-cycle 欄位(<code>duty_*</code>)</td></tr>
 <tr><td><code>main_filter</code>(PBFDKF)</td><td>taps Complex[n_partitions×n_freqs] + Kalman H_error 等</td><td>主線性濾波器(頻域分割塊摺積 + Kalman 步長)</td></tr>
 <tr><td><code>shadow_filter</code>(PBFDAF)</td><td>同階 taps</td><td>shadow(NLMS);收斂比較/regime 複製來源</td></tr>
+<tr><td><code>observer_filter</code>(PBFDAF,<code>live_observer_enabled</code> 時才建)</td><td>同階 taps(lightweight,省 2 個近端 FFT)+ 2 個 double 誤差 EMA 純量(<code>post.observer_obs_err_ema</code>/<code>observer_main_err_ema</code>)</td><td>第三個獨立 NLMS,讀遠端 ring 比主濾波器早 <code>live_observer_shift_ms</code>;證據經 corroboration 守門注入 R²,見上方「Live observer」段</td></tr>
 <tr><td>AEC3 post 鏈(<code>a3_state/a3_ree/a3_sg/a3_stat/a3_lfs/a3_sc/post</code>)</td><td>數十條 float32[n_freqs] + OLA float32[fft_size]</td><td>ERLE/ERL 表、R² 歷史、SuppressionGain 平滑、stationarity 噪聲底、LinearFilterSelect 交叉淡化、CNG</td></tr>
 <tr><td><code>render_fifo</code></td><td>float32[fifo_cap_hops×hop];cap = 2 的冪(320 ms → 32 或 64 hop,依格點)</td><td>僅串流 API 使用;lockstep 直通</td></tr>
 <tr><td>純量/計數器</td><td>~60 個 int/float 欄位</td><td>EMA 功率、ERLE 視窗、DT/EPC/warm-up/misadjustment 計數器(皆於 <code>aec_carve()</code> 依實際 hop 重定時)</td></tr>

@@ -31,6 +31,7 @@ void erl_estimator_init(ErlEstimator *e, int startup_phase_length_hops,
     /* self._x2_min = aec3_scale.per_bin_psd_threshold(_AEC3_X2_MIN, hop_size)
      * (ref_hop default 160; no-op at hop=160); float32 end-to-end. */
     e->x2_min = aec3_per_bin_psd_threshold(ERL_AEC3_X2_MIN, hop_size, 160);
+    e->x2_min_total = e->x2_min * (float)n_bins;
     e->erl = erl_storage;
     e->hold_counters = hold_counters_storage;
     /* self._erl = np.full(n_bins, _MAX_ERL, dtype=f32) */
@@ -108,7 +109,7 @@ void erl_estimator_update(ErlEstimator *e,
     /* Fullband ERL. x2_sum = pairwise f32 sum, consumed directly as float32. */
     {
         float x2_sum = f32_pairwise_sum(x2, (size_t)e->n_bins);
-        if (x2_sum > e->x2_min * (float)e->n_bins) {
+        if (x2_sum > e->x2_min_total) {
             float y2_sum = f32_pairwise_sum(y2, (size_t)e->n_bins);
             float new_erl = y2_sum / x2_sum;          /* f32 */
             if (new_erl < e->erl_time_domain) {

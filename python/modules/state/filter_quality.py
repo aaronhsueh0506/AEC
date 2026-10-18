@@ -37,9 +37,10 @@ class FilteringQualityAnalyzer:
         # Counter retained for diagnostic readers (always increments with
         # convergence_seen; no behaviour gate consumes it).
         self._convergence_hops_counter = 0
-        # AEC3 ~100/50 blocks (~400/200 ms). Was module-level constants
-        # (`HOPS_PER_SECOND` from state/_constants.py, baked at the stale
-        # hop=160/sr=16000 assumption); computed live here instead.
+        # AEC3 ~100/50 blocks (~400/200 ms). Was a module-level constant
+        # (`HOPS_PER_SECOND`, formerly state/_constants.py, since removed as
+        # dead code; baked in a stale hop=160/sr=16000 assumption);
+        # computed live here instead.
         self._startup_hops = _aec3_scale.ms_to_hops(400.0, hop_size, sample_rate)
         self._reset_hops = _aec3_scale.ms_to_hops(200.0, hop_size, sample_rate)
 

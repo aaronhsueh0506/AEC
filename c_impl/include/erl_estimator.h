@@ -65,6 +65,7 @@ typedef struct {
     int     hold_hops;             /* live-computed, was ERL_HOLD_HOPS */
     float   x2_min;                /* _x2_min (float32; result of
                                      * aec3_per_bin_psd_threshold(), itself float32) */
+    float   x2_min_total;          /* = x2_min * (float)n_bins, cached at init */
     float  *erl;                   /* _erl,           length n_bins     */
     int    *hold_counters;         /* _hold_counters, length n_bins-2   */
     float   erl_time_domain;       /* _erl_time_domain            */

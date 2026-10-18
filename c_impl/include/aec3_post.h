@@ -62,6 +62,7 @@
 #include "stationarity_estimator.h"
 #include "linear_filter_output.h"
 #include "filter_state_bridge.h"
+#include "pbfdkf.h"          /* PBFDAF -- the live observer (A21 Stage 2) */
 
 #ifdef __cplusplus
 extern "C" {
@@ -107,6 +108,34 @@ typedef struct {
      * selected signal-grid row provides one value per block sample;
      * aec3_post_apply_output asserts this equals block_size before OLA. */
     int    synth_window_len;
+
+    /* ── live observer (A21 Stage 2) ──────────────────────────────────────
+     * A second, independent PBFDAF reading the far-end reference ring
+     * earlier-shifted than the main filter's own read (caller-driven ring
+     * logic; see Aec3PostRunIn.observer_far_end). Its evidence is trusted
+     * into R² (`r2 = max(r2, ev)`, bounded R² only, never r2_unb) only
+     * while its own LF residual energy is no worse than the MAIN filter's
+     * own residual on the SAME hop (observer_err_ema_alpha-smoothed EMA
+     * pair, margin observer_corrob_margin) -- comparing against the
+     * observer's OWN past state (an earlier design, since abandoned)
+     * cannot tell correct extra cancellation from accidental near-end
+     * contamination, since both lower the observer's own residual;
+     * comparing against a different, independently-adapted filter seeing
+     * the same input can. Evidence is additionally capped at
+     * min(|observer.echo_spec - sel_echo|^2, |sel_esw|^2): a wrong
+     * observer can never claim more residual echo than the main filter's
+     * own residual actually contains. observer_max_bin bounds which bins
+     * the evidence (and the observer's own EMA sum) ever touches (LF-only,
+     * ceil(live_observer_max_hz / bin_hz)). Default OFF, byte-equal when
+     * off (factor-free: the whole block is skipped). */
+    int    observer_enabled;          /* 0 */
+    int    observer_max_bin;
+    /* double, not float -- orchestrator.py's `_a`/`_observer_corrob_margin`
+     * are Python `float` (C double) and the EMA recursion they drive is
+     * double arithmetic throughout; see observer_obs_err_ema's comment in
+     * the Aec3Post struct below for why this needs to match. */
+    double observer_err_ema_alpha;    /* exp(-hop_ms/live_observer_corrob_ms) */
+    double observer_corrob_margin;    /* 10^(live_observer_corrob_margin_db/10) */
 } Aec3PostConfig;
 
 /* Audio-passive per-hop trace capture. The three scalars below are decided
@@ -170,6 +199,25 @@ typedef struct {
     float   *e_out_full;           /* [fft_size] irfft output */
 
     FftHandle *fft;                /* caller-owned, sized fft_size */
+
+    /* Live observer (A21 Stage 2) corroboration EMAs. Zeroed in
+     * aec3_post_init and by aec3_post_reset (mirrors orchestrator.py's
+     * _observer_obs_err_ema/_observer_main_err_ema, which are also
+     * zeroed outside the AEC3-post-chain reset path by the realign
+     * handler -- see aec_reset_filter_for_realign's own explicit zeroing,
+     * since that path does not call aec3_post_reset). */
+    /* double, not float: orchestrator.py accumulates this EMA and compares
+     * it against a hard `<=` threshold in Python `float` (C double)
+     * throughout -- a float32 EMA here would drift from Python's and could
+     * flip the comparison's outcome near the boundary (same class of bug
+     * `aec3_scale.c`'s `ms_to_hops_f32` exists to prevent for a different
+     * quantity: a value exactly at a threshold in one precision need not
+     * be on the same side in another). The observer's own corroboration
+     * check (whether a hop's evidence gets injected into R^2 at all) is a
+     * discrete decision, not an ordinary numeric drift the project's usual
+     * float32-FFT tolerance already covers. */
+    double observer_obs_err_ema;
+    double observer_main_err_ema;
 } Aec3Post;
 
 /* Fill cfg with the balanced defaults the orchestrator uses (the caller still
@@ -405,6 +453,18 @@ typedef struct {
                                              * also set -- aec_validate_config()
                                              * enforces this precondition. */
     float          active_render_threshold;     /* _ar_thr = 5.96e-4       */
+
+    /* ── live observer (A21 Stage 2) ────────────────────────────────────── */
+    /* self._render_activity.is_active -- the persistent RenderActivityDetector
+     * updated once per hop by the caller BEFORE this call, distinct from
+     * this struct's active_render_threshold (a different, instantaneous
+     * quantity computed INSIDE aec3_post_run for AecState.update()). */
+    int            render_activity_is_active;
+    /* observer_far_end non-NULL iff live_observer_enabled AND this hop's
+     * shifted ring read was valid (mirrors Python's
+     * `self._observer_far_end is not None`). No separate bool field for
+     * this condition -- a non-NULL pointer already is one. */
+    const float   *observer_far_end;      /* [hop], or NULL              */
 } Aec3PostRunIn;
 
 /* Sub-module object bundle the driver wires. All caller-owned + constructed. */
@@ -415,6 +475,11 @@ typedef struct {
     StationarityEstimator *stationarity;
     LinearFilterSelect    *lfs;
     FftHandle             *fft;          /* sized fft_size (bridge irfft)  */
+    /* Live observer (A21 Stage 2): NULL when live_observer_enabled==0.
+     * Driven (pbfdaf_process) from INSIDE aec3_post_run, not by the
+     * caller, since it needs this hop's dominant_ne/usable_linear
+     * verdicts -- see aec3_post_run's own injection block. */
+    PBFDAF                *observer_filter;
 } Aec3PostRunObj;
 
 /* Scratch buffers the driver needs (caller-owned, sized to the geometry). */
@@ -438,6 +503,20 @@ typedef struct {
     float   *r2_unb;             /* [n_freqs] */
     float   *nearend_pwr;        /* [n_freqs] */
     unsigned char *stat_mask;    /* [n_freqs] band_stationary_mask         */
+
+    /* Live observer only (cfg.observer_enabled): per-hop corroboration
+     * scratch. observer_out discards pbfdaf_process's time-domain output
+     * (only its spectra are read); observer_diff_spec holds
+     * observer.echo_spec - sel_echo (plain complex subtraction, exact --
+     * NOT sk_cadd_f32 with a negated operand); observer_diff_mag2 /
+     * observer_cap_mag2 hold |observer_diff_spec|^2 / |sel_esw|^2 via
+     * sk_cmag2_np_f32 (the scaled-hypot kernel, to match numpy's
+     * sqrt-then-square np.abs(c64)**2 bit-for-bit -- re^2+im^2 directly
+     * would NOT). */
+    float   *observer_out;       /* [hop] */
+    Complex *observer_diff_spec; /* [n_freqs] */
+    float   *observer_diff_mag2; /* [n_freqs] */
+    float   *observer_cap_mag2;  /* [n_freqs] */
 } Aec3PostRunScratch;
 
 /* Process one hop end-to-end. `out[hop]` is always written: the synthesized

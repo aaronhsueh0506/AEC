@@ -432,6 +432,30 @@ The legacy two-path attribution (`attribute_legacy` in
 `modules/residual_estimator.py`) is kept for backward-compat callers but
 no longer driven by the production path.
 
+#### Live observer (A21 campaign, 2026-10-17; research, default OFF, not part of this doc's v3.23.0 line)
+
+`live_observer_enabled` (default 0; byte-exact when off) adds a third,
+independent PBFDAF instance (`modules/residual/tail_observer.py` design
+note; C: `aec3_post_run_observer_step()` in `aec3_post.c`, not the main
+hop loop, since it needs the current hop's `dominant_ne`/
+`usable_linear_estimate` verdicts). It reads the far-end ring
+`live_observer_shift_ms` earlier than the main filter's own
+delay-compensated read, so its echo estimate covers the span just ahead
+of the main filter's current window. Its evidence is injected as
+`R² = max(R², min(|observer.echo - sel_echo|², |sel_esw|²) × PSD_SCALE)`,
+bounded to `live_observer_max_hz` and gated on a corroboration check: the
+observer's own residual-error EMA must be no worse than the EMA of the
+*selected* linear output's own residual (not an unconditional `self.filter`
+reference — whichever of main/shadow R² actually used that hop) over a
+`live_observer_corrob_ms` time constant, within `live_observer_corrob_margin_db`.
+This never touches the linear filter, the delay estimate, or ERLE —
+only R² before SuppressionGain. Status: mechanism validated (fid0 ERLE
++0.64/+7.12 dB at the two product grids; 300-case FS Rule A 300/300 grid A,
+298/300 grid B with the two grid-B residual grazes accepted-but-flagged
+by the user); the measured compute cost (+10-15% at the C level, three
+grids) is an open acceptance question, not yet decided. See
+`SE/.research/2026-10-16/a21/` for the full trace.
+
 ### 3.4 SuppressionGain
 
 `modules/residual/suppression_gain.py` mirrors AEC3

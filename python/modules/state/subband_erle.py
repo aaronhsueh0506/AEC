@@ -5,8 +5,11 @@ Mirrors docs/aec3_extracts/src/aec3/subband_erle_estimator.{cc,h}.
 Single-channel port (num_capture_channels=1 always for us).
 
 Rate notes:
-  - ``kBlocksToHoldErle = 100`` AEC3 blocks (~400 ms) -> 40 hops.
-  - ``kBlocksForOnsetDetection = 250`` AEC3 blocks (~1 s) -> 100 hops.
+  - ``kBlocksToHoldErle = 100`` AEC3 blocks (~400 ms) -> wall-clock
+    ``ms_to_hops(400, ...)`` hops at whatever grid is live (not a fixed
+    hop count -- see ``__init__``'s ``_blocks_to_hold_erle``).
+  - ``kBlocksForOnsetDetection = 250`` AEC3 blocks (~1 s) -> likewise
+    ``ms_to_hops(1000, ...)`` (``_blocks_for_onset_detection``).
   - ``kPointsToAccumulate = 6`` is a count, not a time -> stays 6.
 """
 import numpy as np

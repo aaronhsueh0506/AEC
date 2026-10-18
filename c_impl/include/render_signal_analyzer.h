@@ -57,4 +57,10 @@ int  rsa_narrow_peak_band(const RenderSignalAnalyzer *m);
  * with counter > 5. */
 void rsa_mask_regions_around_narrow_bands(const RenderSignalAnalyzer *m, float *mu);
 
+/* Same gating conditions as rsa_mask_regions_around_narrow_bands, without
+ * touching mu: returns 1 iff that call would set at least one entry of a
+ * mu/mask array below 1.0 (i.e. iff the caller actually needs to fill and
+ * pass a mask array this hop), 0 otherwise. */
+int rsa_any_narrow_band_active(const RenderSignalAnalyzer *m);
+
 #endif /* RENDER_SIGNAL_ANALYZER_H */

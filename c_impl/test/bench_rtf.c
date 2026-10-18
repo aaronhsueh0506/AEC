@@ -161,7 +161,8 @@ static void print_usage(const char* prog) {
         "  --fft N                               FFT size (default: the preset's)\n"
         "  --stage {full|linear|both}            stages to run (default: both)\n"
         "  --scene {noise|bursts}                synthetic input: white noise (default) or the speech-like scene\n"
-        "  --wav <mic.wav> <ref.wav>             use a recording instead of synthetic input\n",
+        "  --wav <mic.wav> <ref.wav>             use a recording instead of synthetic input\n"
+        "  --live-observer                       A21 Stage 2 observer on (default off)\n",
         prog);
 }
 
@@ -284,6 +285,7 @@ int main(int argc, char** argv) {
     int use_wav = 0;
     const char* mic_path = NULL;
     const char* ref_path = NULL;
+    int live_observer = 0;   /* A21 Stage 2: real (not Python-level) RTF cost */
 
     for (int i = 1; i < argc; ++i) {
         const char* arg = argv[i];
@@ -320,6 +322,8 @@ int main(int argc, char** argv) {
             mic_path = argv[++i];
             ref_path = argv[++i];
             use_wav = 1;
+        } else if (!strcmp(arg, "--live-observer")) {
+            live_observer = 1;
         } else if (!strcmp(arg, "-h") || !strcmp(arg, "--help")) {
             print_usage(argv[0]);
             return 0;
@@ -368,6 +372,7 @@ int main(int argc, char** argv) {
     aec_config_from_preset(&full_cfg, preset, sample_rate);
     full_cfg.enable_cng = 1;   /* mirrors aec_wav's --cng path */
     if (fft_override > 0) full_cfg.fft_size = fft_override;
+    full_cfg.live_observer_enabled = live_observer;
 
     /* Probe hop size once (hop is a pure function of sample_rate/preset,
      * identical for the full and linear configs below); this instance is

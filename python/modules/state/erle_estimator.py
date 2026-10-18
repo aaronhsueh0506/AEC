@@ -2,9 +2,10 @@
 
 Mirrors docs/aec3_extracts/src/aec3/erle_estimator.{cc,h}.
 
-Startup-phase gating: ``startup_phase_length_blocks`` is supplied at
-construction time in OUR hop units (caller computes via _constants).
-AEC3 passes ``2 * kNumBlocksPerSecond`` (~2 s) -> our 200 hops.
+Startup-phase gating: ``startup_phase_length_hops`` is supplied at
+construction time in OUR hop units (caller resolves it via wall-clock
+``ms_to_hops``-style scaling, not a fixed count -- see AecState's
+``_resolve_startup_hops``). AEC3 passes ``2 * kNumBlocksPerSecond`` (~2 s).
 """
 from typing import Optional
 

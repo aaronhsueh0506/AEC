@@ -337,7 +337,7 @@ class ResidualEchoEstimator:
         aec_state: AecState,
         render_psd: np.ndarray,    # X² current frame (single-channel)
         capture_psd: np.ndarray,   # Y²
-        s2_linear: np.ndarray,     # |H·X|² from PBFDKF
+        s2_linear: np.ndarray,     # selected (coarse-or-refined via URO) |echo_spec|^2
         dominant_nearend: bool,
         filter_delay_blocks: int = 0,
         filter_length_blocks: int = 0,

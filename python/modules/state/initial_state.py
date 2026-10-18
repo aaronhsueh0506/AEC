@@ -30,11 +30,11 @@ class InitialState:
         sample_rate: int = 16000,
     ) -> None:
         self._conservative = bool(conservative_initial_phase)
-        # Was `int(initial_state_seconds * HOPS_PER_SECOND)` -- HOPS_PER_SECOND
-        # (state/_constants.py) bakes in a stale hop=160/sr=16000 assumption
-        # that matches none of the currently supported grids. Rescaled live
-        # via ms_to_hops so the window stays initial_state_seconds/5s at any
-        # grid.
+        # Was `int(initial_state_seconds * HOPS_PER_SECOND)` -- that constant
+        # (formerly state/_constants.py, since removed as dead code) baked in
+        # a stale hop=160/sr=16000 assumption that matches none of the
+        # currently supported grids. Rescaled live via ms_to_hops so the
+        # window stays initial_state_seconds/5s at any grid.
         self._initial_state_hops = _aec3_scale.ms_to_hops(
             initial_state_seconds * 1000.0, hop_size, sample_rate
         )

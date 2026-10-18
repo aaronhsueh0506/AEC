@@ -21,6 +21,10 @@ void initial_state_init(InitialState *s, int conservative_initial_phase,
         initial_state_seconds * 1000.0f, hop_size, sample_rate);
     /* AEC3 5 s conservative threshold. */
     s->conservative_hops = aec3_ms_to_hops(5000.0f, hop_size, sample_rate);
+    s->cap_hops = (s->conservative_hops > s->initial_state_hops)
+                      ? s->conservative_hops : s->initial_state_hops;
+    s->active_threshold_hops =
+        s->conservative ? s->conservative_hops : s->initial_state_hops;
     s->initial_state = 1;
     s->transition_triggered = 0;
     s->strong_not_saturated_render_blocks = 0;
@@ -44,20 +48,13 @@ void initial_state_update(InitialState *s, int active_render, int saturated_capt
          * comparison result matches the unbounded counter identically
          * forever, without ever risking signed-integer-overflow UB on a very
          * long streaming session. */
-        int cap = (s->conservative_hops > s->initial_state_hops)
-                      ? s->conservative_hops : s->initial_state_hops;
-        if (s->strong_not_saturated_render_blocks < cap) {
+        if (s->strong_not_saturated_render_blocks < s->cap_hops) {
             s->strong_not_saturated_render_blocks += 1;
         }
     }
     prev_initial = s->initial_state;
-    if (s->conservative) {
-        s->initial_state =
-            (s->strong_not_saturated_render_blocks < s->conservative_hops) ? 1 : 0;
-    } else {
-        s->initial_state =
-            (s->strong_not_saturated_render_blocks < s->initial_state_hops) ? 1 : 0;
-    }
+    s->initial_state =
+        (s->strong_not_saturated_render_blocks < s->active_threshold_hops) ? 1 : 0;
     s->transition_triggered = (!s->initial_state) && prev_initial ? 1 : 0;
 }
 

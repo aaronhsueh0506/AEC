@@ -82,20 +82,13 @@ void reverb_freq_resp_update(ReverbFrequencyResponse *r,
 
     /* Per-bin tail = direct(f32) * average_decay(f32), both float32. */
     decay_f = r->average_decay;
-    for (k = 0; k < N; ++k) {
-        tail[k] = direct[k] * decay_f;
-    }
+    sk_scale_f32(tail, direct, decay_f, N);
 
-    /* Conservative variant: point-wise max with raw last partition. */
+    /* Conservative variant: point-wise max with raw last partition.
+     * np.maximum: NaN-propagating; here the real data is non-negative |W|²,
+     * no NaN, so a straight compare-and-raise is exact. */
     if (r->use_conservative) {
-        for (k = 0; k < N; ++k) {
-            float t = tail[k];
-            float rt = tail_row[k];
-            /* np.maximum: NaN-propagating, picks rt on tie? numpy maximum is
-             * commutative for non-NaN; for ties either is identical. Here the
-             * real data is non-negative |W|², no NaN. Straight max. */
-            tail[k] = (rt > t) ? rt : t;
-        }
+        sk_raise_to_f32(tail, tail_row, N);
     }
 
     /* Neighbour-max smoothing (k=1..N-2), ascending in-place — AEC3 cc:101-105.

@@ -326,6 +326,11 @@ typedef struct {
 typedef struct {
     DaDecimator     capture_decimator;
     DaDecimator     render_decimator;
+    /* Cached da_decimator_same_coefficients(capture,render) result, recomputed
+     * whenever either decimator is (re)initialised -- avoids a memcmp pair
+     * every 64-sample inner block on the NEON paired-decimate fast path
+     * (delay_aec3.c). Unused on non-NEON builds. */
+    int             decimators_same_coefficients;
     DaRing          render_ring;
     DaMatchedFilter matched_filter;
     DaLagAggregator aggregator;

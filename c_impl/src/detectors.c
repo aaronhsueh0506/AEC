@@ -153,6 +153,7 @@ static const float FC_DIV_DECAY_REF = 0.95f;
 
 void filter_convergence_init(FilterConvergence* c, int hop_size, int sample_rate) {
     c->div_alpha = DET_REHOP(FC_DIV_ALPHA_REF, hop_size, sample_rate);
+    c->div_alpha_c = 1.0f - c->div_alpha;
     c->div_decay = DET_REHOP(FC_DIV_DECAY_REF, hop_size, sample_rate);
     filter_convergence_reset(c);
 }
@@ -176,7 +177,7 @@ void filter_convergence_update_divergence(FilterConvergence* c,
         float inst_erle_lin = near_power / (raw_error_power + 1e-10f);
         float is_div        = (inst_erle_lin < FC_DIV_ERLE_LIN) ? 1.0f : 0.0f;
         c->divergence = c->div_alpha * c->divergence
-                      + (1.0f - c->div_alpha) * is_div;
+                      + c->div_alpha_c * is_div;
     } else {
         c->divergence *= c->div_decay;
     }

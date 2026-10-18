@@ -64,16 +64,15 @@ static void cd_accumulate_slice(FaConsistentDetector *c, const float *taps,
     if (n <= 0) {
         return;
     }
-    for (i = 0; i < n; ++i) {
+    scratch[0] = fabsf(taps[lo]);
+    seg_max = scratch[0];
+    for (i = 1; i < n; ++i) {
         scratch[i] = fabsf(taps[lo + i]);
+        if (scratch[i] > seg_max) seg_max = scratch[i];
     }
     /* np.abs(seg).sum() : float32 pairwise, accumulated directly (float32-by-design) */
     c->floor_accum += fa_f32_pairwise_sum(scratch, (size_t)n);
     /* np.abs(seg).max(initial=0.0) : float32 max, stored directly (float32-by-design) */
-    seg_max = scratch[0];
-    for (i = 1; i < n; ++i) {
-        if (scratch[i] > seg_max) seg_max = scratch[i];
-    }
     if (seg_max > c->secondary_peak) {
         c->secondary_peak = seg_max;
     }
@@ -127,12 +126,9 @@ static int cd_detect(FaConsistentDetector *c, const float *h, int size,
     }
 
     if (c->significant_peak) {
-        int active, i;
-        for (i = 0; i < render_block_len; ++i) {
-            float v = render_block[i];  /* float32 (Python: astype(np.float64)) */
-            render_sq_scratch[i] = v * v;
-        }
-        active = (fa_f32_pairwise_sum(render_sq_scratch, (size_t)render_block_len)
+        int active;
+        (void)render_sq_scratch;
+        active = (sk_sum_sq_pairwise_f32(render_block, (size_t)render_block_len)
                   > c->active_render_threshold);
         if (c->delay_ref == delay_blocks) {
             /* Floored at LONG_MAX to avoid signed overflow (not at the
@@ -232,14 +228,19 @@ void fa_set_taps_provider(FilterAnalyzer *m, FaTapsProvider fn, void *ctx) {
 /* filter_analyzer.cc:161-187: zero region, then causal 3-tap convolution.
  * h_highpass already sized to `size` (init/reset zeroed it). */
 static void fa_preprocess(FilterAnalyzer *m, const float *filter_taps) {
-    int start, end, i;
-    /* h_highpass[region_start:region_end+1] = 0.0 */
-    for (i = m->region_start; i <= m->region_end; ++i) {
-        m->h_highpass[i] = 0.0f;
-    }
+    int start, end, zero_hi, i;
     start = FA_HPF_LEN - 1;                 /* _HPF_COEFFS.size - 1 = 2 */
     if (m->region_start > start) start = m->region_start;
     end = m->region_end + 1;
+    /* h_highpass[region_start:region_end+1] = 0.0 -- but only the prefix
+     * [region_start, start) the FIR loop below will never reach; the rest
+     * of the original range gets unconditionally overwritten by that loop
+     * (or, if start>=end, the FIR loop doesn't run at all and this zeroes
+     * the whole [region_start,end) range, matching the degenerate case). */
+    zero_hi = (start < end) ? start : end;
+    for (i = m->region_start; i < zero_hi; ++i) {
+        m->h_highpass[i] = 0.0f;
+    }
     if (start >= end) {
         return;
     }

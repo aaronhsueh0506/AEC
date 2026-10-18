@@ -2,6 +2,7 @@
 #include "aec_res.h"
 #include "aec_config_build.h"
 #include "aec3_balanced_config.h" /* AEC3B_SQRT2_SIN_LUT only */
+#include "aec_simd_kernels.h"
 #include "mem_align.h"
 #include "suppression_gain.h"
 
@@ -134,7 +135,7 @@ const float* aec_res_process(AecRes* r, const AecResInput* in) {
         }
         r->near_power[k] = n2 * AEC_RES_PSD_SCALE;
     }
-    for (k = 0; k < r->hop_size; ++k) r->render_scaled[k] = in->render_hop[k] * 32768.0f;
+    sk_scale_f32(r->render_scaled, in->render_hop, 32768.0f, r->hop_size);
 
     if (r->sg.initial_state && in->all_converged)
         suppression_gain_set_initial_state(&r->sg, 0);

@@ -24,7 +24,9 @@
  *      for delay_est_init_s), so "it never armed" is a real failure here,
  *      not a property of the stimulus.
  *   3. The realised engagement lands in the decimated regime rather than at
- *      full rate: with the default 0.5 s period at a 128-sample hop, K = 10,
+ *      full rate: with a 0.5 s period (opt-in since AMEND_35, 2026-10-18 --
+ *      0.0/full-rate is now the default, matching Python, which never
+ *      throttles) at a 128-sample hop, K = 10,
  *      so a machine that arms early and stays armed tends toward ~10%
  *      engagement plus the un-armed warm-up. Asserted as a band (>0%, <60%)
  *      rather than a point value -- the exact figure depends on how fast the
@@ -161,6 +163,11 @@ static int run_case(AecDelayMode mode, int fixed_delay_samples, int hops,
     int i;
 
     aec_config_from_preset(&cfg, AEC_PRESET_BALANCED, SR);
+    /* AMEND_35 changed the DEFAULT to 0.0 (full-rate, matches Python). This
+     * test's whole point is measuring the decimation machine itself, which
+     * only engages when opted into explicitly now -- restore the pre-
+     * AMEND_35 default here so the census below still exercises it. */
+    cfg.delay_est_period_s = 0.5f;
     cfg.delay_mode = mode;
     if (mode == AEC_DELAY_FIXED) cfg.fixed_delay_samples = fixed_delay_samples;
     if (aec_create(&aec, &cfg) != 0) return -1;

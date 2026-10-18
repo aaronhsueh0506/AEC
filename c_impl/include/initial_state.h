@@ -26,6 +26,8 @@ typedef struct {
     int conservative;                       /* bool _conservative              */
     int initial_state_hops;                 /* int(initial_state_seconds*HPS)  */
     int conservative_hops;                  /* 5 * HOPS_PER_SECOND             */
+    int cap_hops;                           /* max(conservative_hops, initial_state_hops), cached at init */
+    int active_threshold_hops;              /* conservative ? conservative_hops : initial_state_hops, cached at init */
     int initial_state;                      /* bool _initial_state             */
     int transition_triggered;               /* bool _transition_triggered      */
     int strong_not_saturated_render_blocks; /* int counter                     */

@@ -77,11 +77,15 @@ def main():
     ap.add_argument('--no-res', action='store_true',
                     help='linear filter only (enable_res=False, res-context '
                          'seam off); pass it to the replay checker too')
+    ap.add_argument('--live-observer', action='store_true',
+                    help='A21 Stage 2 live observer on (live_observer_enabled=True); '
+                         'pass it to the replay checker too')
     args = ap.parse_args()
 
     sr = args.sr
     cfg = AecConfig.from_preset(args.preset, sample_rate=sr,
-                                enable_res=not args.no_res)
+                                enable_res=not args.no_res,
+                                live_observer_enabled=args.live_observer)
     hop = cfg.hop_size   # was hardcoded "sr*10//1000" (10ms) -- diverged from
                           # AecConfig's real hop once 16kHz's default grid
                           # moved to 256/128 (8ms), crashing aec.process() on

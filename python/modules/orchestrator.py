@@ -40,6 +40,14 @@ _SIMPLE_MU_ALPHA_ATTACK = 0.3
 _SIMPLE_MU_ALPHA_HOLD = 0.99
 _SIMPLE_MU_ALPHA_RELEASE = 0.95
 
+# AMEND_34: how long a Path-B delay shift gets to prove itself before the
+# bad-relock judgment compares its erle_windowed against the pre-shift value.
+# 100 -- the documented upper end of "~50-100 frames of poor cancellation
+# while taps re-converge" (see the Path B default branch) -- not derived from
+# delay_est_init_s, which answers a different question (how long before an
+# estimate is trusted as solid) and is far too short here.
+_DELAY_SHIFT_JUDGMENT_HOPS = 100
+
 
 # Linear-filter output candidates, in the order the crossfade indexes them.
 _SEL_COARSE, _SEL_REFINED, _SEL_CAPTURE = 0, 1, 2
@@ -540,6 +548,22 @@ class AEC:
                 0.5 * (1.0 - np.cos(2.0 * np.pi * _idx / float(bs)))
             ).astype(np.float32)
             self._aec3_ola_buf = np.zeros(bs, dtype=np.float32)
+            # Stage 4b (A21 plan section 七, P6): comfort noise is drawn
+            # fresh (independent) each hop and windowed ONLY by this
+            # synthesis window before OLA -- unlike the real signal path,
+            # it has no paired analysis window to cancel the loss. For
+            # independent per-hop content the OLA's realized power scales
+            # by mean(window^2) relative to the N2 level it was specified
+            # at (periodic sqrt-Hann at 50% overlap: mean(Hann)=0.5, i.e.
+            # -3dB -- measured directly via a seeded-N2 A/B harness,
+            # tools/a21_s4b_cng_window_power_measure.py: -2.36/-4.03dB
+            # grid A/B, consistent with the analytic -3.01dB). Default OFF,
+            # byte-equal when off (factor 1.0).
+            if getattr(self.config, 'cng_window_power_compensation', False):
+                self._aec3_cng_window_power_comp = float(
+                    1.0 / np.sqrt(np.mean(self._aec3_synth_window ** 2)))
+            else:
+                self._aec3_cng_window_power_comp = 1.0
             # Strict port of AEC3 ComfortNoiseGenerator
             # (comfort_noise_generator.cc:131-218).
             #   Y2_smoothed — per-bin Y² EMA (α=0.1 per AEC3 block, cc:162-164)
@@ -643,9 +667,20 @@ class AEC:
         # while the delay is locking in.
         from .render.render_signal_analyzer import RenderSignalAnalyzer as _RSA
         if hasattr(self.filter, 'n_freqs') and hasattr(self.filter, 'n_partitions'):
+            _rsa_kwargs = {}
+            if getattr(self.config, 'rsa_wallclock_persistence', False):
+                from . import aec3_scale as _aec3_scale_rsa
+                _hop, _sr = self.config.hop_size, self.config.sample_rate
+                # threshold = hops-to-fire - 1 (fires when counter > threshold,
+                # i.e. on the hop AFTER the hold duration elapses).
+                _rsa_kwargs['counter_threshold_hops'] = max(0, _aec3_scale_rsa.ms_to_hops(
+                    self.config.rsa_mask_hold_ms, _hop, _sr) - 1)
+                _rsa_kwargs['poor_excitation_threshold_hops'] = max(0, _aec3_scale_rsa.ms_to_hops(
+                    self.config.rsa_poor_excitation_hold_ms, _hop, _sr) - 1)
             self._render_signal_analyzer = _RSA(
                 n_freqs=self.filter.n_freqs,
                 strong_peak_freeze_duration=self.filter.n_partitions,
+                **_rsa_kwargs,
             )
             # Wire RSA into refined filter for the per-bin mask; the startup
             # counter is seeded by _seed_poor_excitation_counters() once the
@@ -730,6 +765,99 @@ class AEC:
         self._per_band_erl = np.array([0.1, 0.1, 0.1], dtype=np.float64)
         # Double-talk analyzer (owns _dt_from_energy / _dt_from_shadow / _shadow_advantage)
         self._dt_analyzer = DoubleTalkAnalyzer(self.config)
+        # dt_protect_source == 'dne' extra-hold, converted once from ms (the
+        # field is directly ms-authored, no legacy-grid reinterpretation
+        # needed -- see AecConfig.dt_protect_extra_hold_ms).
+        from . import aec3_scale as _aec3_scale_dtp
+        self._dt_protect_extra_hold_hops = _aec3_scale_dtp.ms_to_hops(
+            getattr(self.config, 'dt_protect_extra_hold_ms', 0.0),
+            self.config.hop_size, self.config.sample_rate)
+        self._dt_protect_confirm_hops = _aec3_scale_dtp.ms_to_hops(
+            getattr(self.config, 'dt_protect_confirm_ms', 0.0),
+            self.config.hop_size, self.config.sample_rate)
+
+        # Filter-independent per-bin echo evidence (residual/tail_evidence.py).
+        # Constructed unconditionally (cheap, a few small arrays) so toggling
+        # the flag mid-life via a config replace() does not need a
+        # re-construction path; the update/injection call sites below are
+        # what's actually gated on tail_evidence_enabled.
+        from .residual.tail_evidence import TailEvidenceModel as _TailEvidenceModel
+        _te_n_bins = int(self.filter.n_freqs)
+        _te_bin_hz = self.config.sample_rate / float(self.config.frame_size)
+        _te_max_bin = int(np.ceil(
+            getattr(self.config, 'tail_evidence_max_hz', 1000.0) / _te_bin_hz))
+        _te_hop_ms = 1000.0 * self.config.hop_size / self.config.sample_rate
+        _te_decay = _aec3_scale_dtp.per_block_growth_to_per_hop(
+            getattr(self.config, 'tail_evidence_decay_per_4ms', 0.83),
+            self.config.hop_size, self.config.sample_rate)
+        _te_warmup_hops = max(1, _aec3_scale_dtp.ms_to_hops(
+            getattr(self.config, 'tail_evidence_warmup_ms', 250.0),
+            self.config.hop_size, self.config.sample_rate))
+        _te_tau_ms = max(1e-6, getattr(self.config, 'tail_evidence_ema_tau_ms', 500.0))
+        _te_ema_alpha = _aec3_scale_dtp.ema_alpha_from_tau_ms(_te_tau_ms, _te_hop_ms)
+        self._tail_evidence = _TailEvidenceModel(
+            n_bins=_te_n_bins,
+            decay_per_hop=np.full(_te_n_bins, _te_decay, dtype=np.float64),
+            max_bin=_te_max_bin,
+            g_max=float(getattr(self.config, 'tail_evidence_g_max', 10.0)),
+            ema_alpha=_te_ema_alpha,
+            warmup_hops=_te_warmup_hops,
+        )
+
+        # Live LF-only early-shifted observer filter (residual/tail_observer.py
+        # docstring has the full design note). A second, independent PBFDAF
+        # (always plain NLMS, regardless of the main filter's own mode),
+        # same partition count as the main filter, fed the far-end ring read
+        # `live_observer_shift_ms` EARLIER than the main filter's own
+        # delay-compensated read -- so it covers the span just ahead of
+        # today's window. `_lightweight=True`: this filter's near_spec /
+        # error_spec_windowed are never read, only `echo_spec` (the unwindowed
+        # echo estimate), so skip those two FFTs/hop like the shadow filter
+        # does. Constructed unconditionally (cheap) so toggling the flag mid-
+        # life does not need a re-construction path; only the per-hop read/
+        # process/inject call sites below are gated on live_observer_enabled.
+        self._observer_filter = PBFDAF(
+            block_size=block_size,
+            n_partitions=n_partitions,
+            mu=float(getattr(self.config, 'live_observer_mu', 0.3)),
+            delta=self.config.delta,
+            hop_size=self._internal_hop,
+            sample_rate=self.config.sample_rate,
+        )
+        self._observer_filter._lightweight = True
+        self._observer_shift_hops = _aec3_scale_dtp.ms_to_hops(
+            getattr(self.config, 'live_observer_shift_ms', 24.0),
+            self.config.hop_size, self.config.sample_rate)
+        _lo_bin_hz = self.config.sample_rate / float(self.config.frame_size)
+        self._observer_max_bin = int(np.ceil(
+            getattr(self.config, 'live_observer_max_hz', 1000.0) / _lo_bin_hz))
+        # Injection-guard EMA state (AMEND_12/13): corroborates the observer
+        # against the MAIN filter's own residual, not against the
+        # observer's own past state -- see config.py's live_observer_corrob_*
+        # docstring for why. _observer_filter._poor_excitation_counter is
+        # seeded immediately below (re-calling _seed_poor_excitation_counters
+        # now that the filter exists -- the __init__-time call above ran
+        # before this point and could not have seeded it).
+        _lo_hop_ms = 1000.0 * self.config.hop_size / self.config.sample_rate
+        _lo_corrob_ms = max(1e-6, getattr(self.config, 'live_observer_corrob_ms', 100.0))
+        self._observer_err_ema_alpha = _aec3_scale_dtp.ema_alpha_from_tau_ms(
+            _lo_corrob_ms, _lo_hop_ms)
+        self._observer_corrob_margin = _aec3_scale_dtp.db_to_linear(
+            getattr(self.config, 'live_observer_corrob_margin_db', 0.0))
+        self._observer_obs_err_ema = 0.0
+        self._observer_main_err_ema = 0.0
+        # Construction-time default. The per-hop assignment below only runs
+        # inside `if self._delay_active:` (process()'s ring-write block),
+        # which has no `else:` clause -- for delay_mode EXTERNAL_ALIGNED
+        # (_delay_active permanently False) that block, and therefore this
+        # attribute, would otherwise never be touched for the instance's
+        # whole lifetime, and the unguarded `if self._observer_far_end is
+        # not None:` read in process()'s live-observer block would raise
+        # AttributeError on the very first hop. Set here so every delay
+        # mode starts from a defined value; process() only ever narrows it
+        # further (None or a real array), never leaves it unset.
+        self._observer_far_end = None
+        self._seed_poor_excitation_counters()
 
         # P3f — Mini AecState trace (no behaviour change). post_reset_age_frames
         # is incremented per process() and zeroed by _reset_filter_derived_state.
@@ -911,6 +1039,54 @@ class AEC:
         self.filter._poor_excitation_counter = hops
         if self.shadow_filter:
             self.shadow_filter._poor_excitation_counter = hops
+        # The live observer (if constructed yet -- this method also runs
+        # from __init__ before it exists, see the explicit re-call right
+        # after construction) needs the same seed, or PBFDAF's own
+        # excitation guard (filters.py, _update_weights) holds its taps at
+        # zero forever. Missing this is exactly AMEND_12's root cause.
+        if getattr(self, '_observer_filter', None) is not None:
+            self._observer_filter._poor_excitation_counter = hops
+
+    def _rearm_filters_for_delay_change(self) -> None:
+        """Re-arm every live filter's excitation counters after a delay
+        change -- the exact AMEND_12/13 fix pattern repeated at the 3 call
+        sites that react to a newly-detected or newly-applied delay (soft
+        acquisition, the full delay-change chain, and the Path-B delay
+        shift). The observer is always constructed (unlike shadow_filter,
+        which may be None), so re-arming it is unconditional; doing so for
+        an inert, never-processed filter's counters is a no-op.
+        """
+        for _filt in (self.filter, self.shadow_filter):
+            if _filt is not None and hasattr(_filt, 'handle_echo_path_change'):
+                _filt.handle_echo_path_change(
+                    delay_change=True, gain_change=False, zero_filter=False)
+        self._observer_filter.handle_echo_path_change(
+            delay_change=True, gain_change=False, zero_filter=False)
+
+    def _apply_delay_shift_hard_reset(self, target_delay: int) -> None:
+        """Commit ``target_delay`` as the new ring-read alignment and run the
+        full delay-shift recovery chain (filter-derived-state reset, EPC
+        force_delay, Kalman Q/P boost, rearm). Factored out of Path B's
+        default branch so the bad-relock judgment below (AMEND_34) can reuse
+        the identical recovery when it reverts to the PRE-shift delay, not
+        just when Path B first shifts away from it — a revert is itself a
+        delay change and taps need the same chance to re-adapt cleanly.
+        """
+        self._current_delay = target_delay
+        self._reset_filter_derived_state(reason='delay_shift',
+                                         preserve_render_ema=True)
+        self._epc_det.force_delay()
+        for filt in [self.filter, self.shadow_filter]:
+            if filt is not None and hasattr(filt, 'Q'):
+                self._arc_m_q_boost(filt)
+                if isinstance(filt, PBFDKF):
+                    filt._p_max_override = 1.0
+                    filt._p_max_override_frames = 30
+        self._maybe_mark_diverged('delay_shift')
+        self._epc_reset_fired_this_frame = True
+        from .delay.delay_types import DelayAdjustment as _DA
+        self._aec3_pending_delay_change = _DA.NEW_DETECTED_DELAY
+        self._rearm_filters_for_delay_change()
 
     def reset(self):
         self.filter.reset()
@@ -1020,6 +1196,11 @@ class AEC:
         # Clear cross-case lazy state
         if hasattr(self, '_pending_delay'):
             del self._pending_delay
+        # AMEND_34: a fresh instance has no basis for a prior rejection.
+        if hasattr(self, '_delay_reject_values'):
+            del self._delay_reject_values
+        if hasattr(self, '_delay_shift_judgment'):
+            del self._delay_shift_judgment
         for _attr in ('_divergence_source_counts', '_last_divergence_source',
                       '_diag_prev_delay', '_diag_prev_divergence_counts',
                       '_raw_dt_pre_epc',
@@ -1031,10 +1212,22 @@ class AEC:
                       # by the run this reset ends must not still be steering
                       # the soft-recovery branches of the next one.
                       '_ne_above', '_ne_recent_frames',
+                      # dt_protect_source == 'dne' extra-hold + confirmation-
+                      # delay counters: same reasoning as the pair above, for
+                      # the DNE-driven dt-protect arming instead of the
+                      # energy-rule one.
+                      '_dt_protect_frames', '_dne_confirm_counter',
                       '_leakage_div_sustained_counter'):
             if hasattr(self, _attr):
                 delattr(self, _attr)
         # _conv_counter is owned by self._convergence (reset above)
+        if getattr(self, '_tail_evidence', None) is not None:
+            self._tail_evidence.reset()
+        if getattr(self, '_observer_filter', None) is not None:
+            self._observer_filter.reset()
+            self._observer_far_end = None
+            self._observer_obs_err_ema = 0.0
+            self._observer_main_err_ema = 0.0
         if self._hp_mic is not None:
             self._hp_mic.reset()
         if self._sat_detector_ref is not None:
@@ -1092,6 +1285,8 @@ class AEC:
                 getattr(cfg, "min_gain_floor_dt_db", -20.0)),
             split_floor_latch_power=float(
                 getattr(cfg, "min_gain_far_latch_power", 1.0e6)),
+            per_bin_floor_enabled=bool(
+                getattr(cfg, "per_bin_floor_enabled", False)),
         )
 
     def _reset_coherence_state(self) -> None:
@@ -1249,6 +1444,26 @@ class AEC:
         self.filter.reset()
         if self.shadow_filter is not None:
             self.shadow_filter.reset()
+        # Live observer: its far-end read is relative to _current_delay
+        # (preserved below), but its TAPS were trained against whatever
+        # alignment held before this recovery -- same argument as the main
+        # filter's own reset two lines up. _ref_ring itself is preserved
+        # (input-side), so the observer re-learns from still-valid history.
+        if getattr(self, '_observer_filter', None) is not None:
+            self._observer_filter.reset()
+            self._observer_obs_err_ema = 0.0
+            self._observer_main_err_ema = 0.0
+
+        # _tail_evidence's U/_log_g/_n_obs are fed error_psd -- filter-
+        # output-derived state, the same category this function's own
+        # contract (see its docstring) says must be cleared here or a
+        # stale, pre-recovery g (echo/render ratio learned under the
+        # alignment/echo level this recovery just invalidated) leaks into
+        # R^2 via evidence() for about one EMA time-constant after the
+        # reset. Mirrors the observer's own reset two lines up, which
+        # already gets this right.
+        if getattr(self, '_tail_evidence', None) is not None:
+            self._tail_evidence.reset()
 
         # Filter convergence
         self._convergence.reset()
@@ -1429,6 +1644,17 @@ class AEC:
         if self.shadow_filter is not None:
             self.shadow_filter.reset_taps()
             self.shadow_filter.far_buffer.fill(0)
+        if getattr(self, '_observer_filter', None) is not None:
+            self._observer_filter.reset_taps()
+            self._observer_filter.far_buffer.fill(0)
+            self._observer_obs_err_ema = 0.0
+            self._observer_main_err_ema = 0.0
+        # Same rationale as _reset_filter_derived_state's matching clear:
+        # _tail_evidence's learned state is filter-output-derived and would
+        # otherwise leak a pre-realign g into R^2 for about one EMA time-
+        # constant after this call.
+        if getattr(self, '_tail_evidence', None) is not None:
+            self._tail_evidence.reset()
 
         # mark_diverged directly, not _maybe_mark_diverged: the per-source
         # divergence census this engine keeps is about ITS OWN recovery paths,
@@ -1677,6 +1903,64 @@ class AEC:
                 _delay_eligible = (new_delay >= 0
                                     and self.delay_est._n_updates >= 3)
 
+                # AMEND_34: judge any pending post-shift window once per hop,
+                # before Path A/B run (see the Path B default branch below
+                # for why this exists). A confirmed-bad relock's candidate is
+                # remembered in _delay_reject_values for the rest of this
+                # instance's life (cleared only by reset()) rather than on a
+                # timed cooldown: the matched-filter aggregator's histogram
+                # has no mechanism to un-learn a candidate it favors, so a
+                # bounded cooldown just produces a periodic relapse into the
+                # same wrong answer once it expires -- confirmed empirically
+                # (a timed version of this guard relapsed within ~10s on the
+                # file this was built against).
+                if getattr(self, '_delay_shift_judgment', None) is not None:
+                    (_pre_delay, _pre_erle, _hops_left,
+                     _pre_W, _pre_shadow_W) = self._delay_shift_judgment
+                    _hops_left -= 1
+                    if _hops_left <= 0:
+                        _cur_erle = float(self._diag.get('erle_windowed', 0.0))
+                        # AMEND_34: erle_windowed alone cannot tell
+                        # "demonstrated worse" from "the filter has not
+                        # produced a real echo estimate at the new alignment
+                        # yet" -- both read ~0 dB either way (confirmed on
+                        # test_delay_backward_quarantine's multipath scene: a
+                        # deliberately minimal enable_res=False config where
+                        # raw_error_power == near_power EXACTLY, bit for bit,
+                        # for 100+ hops post-shift, because the echo estimate
+                        # is the literal zero vector there -- IEEE754 makes
+                        # near - 0.0 == near exact, not approximate -- so an
+                        # unguarded erle-only check reverted a shift the test
+                        # expects to stick). Require the echo estimate to be
+                        # demonstrably non-zero (raw_error_power measurably
+                        # below near_power) before trusting the dB reading at
+                        # all; no real estimate yet means no verdict, keep
+                        # the new delay.
+                        _has_estimate = (self.raw_error_power
+                                         < self.near_power * (1.0 - 1e-9))
+                        if _has_estimate and _cur_erle < _pre_erle - 1.0:
+                            _bad_delay = self._current_delay
+                            # Order matters: _apply_delay_shift_hard_reset
+                            # calls _reset_filter_derived_state, which always
+                            # wipes filter/shadow_filter.W via .reset() (the
+                            # right move for an ordinary forward shift, where
+                            # there is no known-good tap set to keep) --
+                            # restoring the pre-shift snapshot BEFORE that
+                            # call had it immediately zeroed again. Call the
+                            # reset chain first, then overwrite the
+                            # just-wiped taps with the snapshot.
+                            self._apply_delay_shift_hard_reset(_pre_delay)
+                            self.filter.W[:] = _pre_W
+                            if self.shadow_filter is not None and _pre_shadow_W is not None:
+                                self.shadow_filter.W[:] = _pre_shadow_W
+                            if not hasattr(self, '_delay_reject_values'):
+                                self._delay_reject_values = []
+                            self._delay_reject_values.append(_bad_delay)
+                        self._delay_shift_judgment = None
+                    else:
+                        self._delay_shift_judgment = (
+                            _pre_delay, _pre_erle, _hops_left, _pre_W, _pre_shadow_W)
+
                 # Path A: first delay acquisition. Heavy action (resets filter
                 # taps + downstream derived state). Demands solid PAR.
                 # Guard: if the filter is ALREADY cancelling well at the current
@@ -1747,15 +2031,10 @@ class AEC:
                         # no AecState full reset. Avoids the aggressive-recovery
                         # tail overfitting near-end that arrives after this
                         # (far-only) acquisition.
-                        if (self.filter is not None
-                                and hasattr(self.filter, 'handle_echo_path_change')):
-                            self.filter.handle_echo_path_change(
-                                delay_change=True, gain_change=False, zero_filter=False)
-                        if (self.shadow_filter is not None
-                                and hasattr(self.shadow_filter,
-                                            'handle_echo_path_change')):
-                            self.shadow_filter.handle_echo_path_change(
-                                delay_change=True, gain_change=False, zero_filter=False)
+                        # Re-arm main/shadow/observer excitation counters
+                        # (AMEND_12/13 fix pattern -- see
+                        # _rearm_filters_for_delay_change's docstring).
+                        self._rearm_filters_for_delay_change()
                     else:
                         # Reset filter taps + ALL filter-output-derived state
                         # (main_err_smooth / DTD / EPC / ERLE / mu / RES). The
@@ -1769,15 +2048,7 @@ class AEC:
                         # Full delay-change chain (delay_first): H_error
                         # reset + counter reset on refined and shadow,
                         # AecState._full_reset via _aec3_pending_delay_change.
-                        if (self.filter is not None
-                                and hasattr(self.filter, 'handle_echo_path_change')):
-                            self.filter.handle_echo_path_change(
-                                delay_change=True, gain_change=False, zero_filter=False)
-                        if (self.shadow_filter is not None
-                                and hasattr(self.shadow_filter,
-                                            'handle_echo_path_change')):
-                            self.shadow_filter.handle_echo_path_change(
-                                delay_change=True, gain_change=False, zero_filter=False)
+                        self._rearm_filters_for_delay_change()
                         from .delay.delay_types import DelayAdjustment as _DA
                         self._aec3_pending_delay_change = _DA.NEW_DETECTED_DELAY
 
@@ -1829,9 +2100,23 @@ class AEC:
                         and self._current_delay >= 0
                         and self.delay_est.confidence >= 0.5
                         and abs(new_delay - self._current_delay) > 32
-                        and not _change_blocked):
+                        and not _change_blocked
+                        and not any(abs(new_delay - _rv) < 16 for _rv in
+                                    getattr(self, '_delay_reject_values', ()))):
                     if (hasattr(self, '_pending_delay')
                             and abs(new_delay - self._pending_delay) < 16):
+                        old_delay_before_shift = self._current_delay
+                        _pre_shift_erle = float(self._diag.get('erle_windowed', 0.0))
+                        # AMEND_34: snapshot taps so a confirmed-bad relock
+                        # (judged below) can restore them exactly, not just
+                        # the ring alignment -- the ~judgment_hops of
+                        # Kalman-P-boosted adaptation against the wrong
+                        # alignment otherwise leaves them scarred even after
+                        # the delay itself reverts.
+                        _pre_shift_W = self.filter.W.copy()
+                        _pre_shift_shadow_W = (self.shadow_filter.W.copy()
+                                               if self.shadow_filter is not None
+                                               else None)
                         self._current_delay = new_delay
                         del self._pending_delay
                         if hasattr(self, '_pending_delay_ttl'):
@@ -1849,6 +2134,31 @@ class AEC:
                             # root cause). FS is unaffected (it has no near-end
                             # to overfit); FS_movement echo is empirically
                             # equal with/without the reset.
+                            #
+                            # The old taps are still trained for the OLD
+                            # alignment though, and this path's whole point is
+                            # to NOT wait out a cold reconverge -- so shift the
+                            # IR by the same delta the ring read just applied
+                            # (the primitive Path A's warm transfer and
+                            # apply_external_realign already use) instead of
+                            # leaving the mismatch to close at the unboosted
+                            # adaptation rate, which can take 100+ hops and
+                            # overshoot on any loud far-end burst in that
+                            # window. Confirmed on a real file: unfixed,
+                            # raw_output hit 2.2-2.4x full scale and clipped;
+                            # with the shift, the window holds a flat ERLE
+                            # instead of decaying, and AMEND_34's bad-relock
+                            # judgment correctly stops flagging this relock
+                            # as bad once the mismatch it was reacting to is
+                            # gone. Validated for an ADVANCE (positive delta)
+                            # shift; a RETARD also clears X_buf inside
+                            # warm_shift_ir (see its docstring) and has not
+                            # been separately measured here.
+                            _soft_delta = int(new_delay) - int(old_delay_before_shift)
+                            if abs(_soft_delta) < self.filter.tap_span:
+                                for _filt in (self.filter, self.shadow_filter):
+                                    if _filt is not None and hasattr(_filt, 'warm_shift_ir'):
+                                        _filt.warm_shift_ir(_soft_delta)
                             self._epc_reset_fired_this_frame = True
                         else:
                             # Filter taps were trained against the old delay
@@ -1856,39 +2166,79 @@ class AEC:
                             # filter-output-derived state) avoids ~50-100
                             # frames of poor cancellation while taps re-converge
                             # against state that no longer matches.
-                            self._reset_filter_derived_state(reason='delay_shift',
-                                                             preserve_render_ema=True)
-                            self._epc_det.force_delay()
-                            for filt in [self.filter, self.shadow_filter]:
-                                if filt is not None and hasattr(filt, 'Q'):
-                                    self._arc_m_q_boost(filt)
-                                    # PBFDKF-only Kalman P-override (NLMS shadow
-                                    # has no P state — skip cleanly).
-                                    if isinstance(filt, PBFDKF):
-                                        filt._p_max_override = 1.0
-                                        filt._p_max_override_frames = 30
-                            self._maybe_mark_diverged('delay_shift')
-                            self._epc_reset_fired_this_frame = True   # C.B FQA signal
-                            # AEC3-pattern dispatch (echo_remover.cc): queue
-                            # delay_change for next _aec3_post -> AecState runs
-                            # full reset cascade.
-                            from .delay.delay_types import DelayAdjustment as _DA
-                            self._aec3_pending_delay_change = _DA.NEW_DETECTED_DELAY
-                            # Full delay-change chain (delay_shift):
-                            # Steps 3-4: H_error reset + counter reset. AEC3 parity.
-                            if (self.filter is not None
-                                    and hasattr(self.filter, 'handle_echo_path_change')):
-                                self.filter.handle_echo_path_change(
-                                    delay_change=True, gain_change=False, zero_filter=False)
-                            if (self.shadow_filter is not None
-                                    and hasattr(self.shadow_filter,
-                                                'handle_echo_path_change')):
-                                self.shadow_filter.handle_echo_path_change(
-                                    delay_change=True, gain_change=False, zero_filter=False)
+                            self._apply_delay_shift_hard_reset(new_delay)
+                        # AMEND_34 bad-relock judgment (both branches above —
+                        # the aggregator's candidate can be wrong regardless
+                        # of which recovery treatment applies it): the
+                        # matched-filter aggregator (AEC3-faithful
+                        # 250-estimate histogram vote, see lag_aggregator.py)
+                        # accepts whichever lag correlates best, with no check
+                        # that it actually cancels better -- confirmed on a
+                        # real file where it relocks onto a lag that
+                        # correlates well but collapses erle_windowed from
+                        # ~3 dB to ~0 dB for the rest of the session,
+                        # reproducible even in this always-full-rate Python
+                        # path (not a duty-cycle artifact -- see AMEND_33).
+                        # Judge this shift only after _DELAY_SHIFT_JUDGMENT_HOPS
+                        # (100 -- the documented upper end of "~50-100 frames
+                        # of poor cancellation while taps re-converge" a few
+                        # lines up, NOT delay_est_init_s: an earlier version
+                        # of this reused that shorter constant and judged
+                        # genuine, still-reconverging good relocks as bad
+                        # before they'd had their documented recovery time,
+                        # breaking test_delay_backward_quarantine's forward-
+                        # -move and multipath rows). If erle_windowed is more
+                        # than 1 dB WORSE than just before the shift by then
+                        # (not merely "not yet better" -- a relock that is
+                        # simply slow to pay off is not what this guards
+                        # against), it's a confirmed-bad relock -- revert to the
+                        # pre-shift delay (itself run through the hard-reset
+                        # recovery chain, regardless of which treatment
+                        # applied the forward shift, since by this point the
+                        # softer treatment already failed to prevent the
+                        # damage) and refuse to re-accept this SAME candidate
+                        # for the rest of this instance's life, so a bad lag
+                        # gets one correction attempt, not an infinite retry
+                        # loop converging on the same wrong answer. A good
+                        # relock (the common case -- e.g. correcting an
+                        # initial lock that was merely imprecise) is judged
+                        # and kept; this costs nothing extra for it.
+                        #
+                        # AMEND_37 note (recorded, not changed): this
+                        # unconditionally OVERWRITES any still-pending
+                        # judgment from an earlier shift that has not yet
+                        # reached its verdict. If a second Path-B shift
+                        # lands inside the first one's judgment window, the
+                        # first judgment is silently dropped -- its taps
+                        # snapshot and pre-shift erle are simply discarded,
+                        # never compared against. Considered and rejected
+                        # two alternatives: resolving the pending judgment
+                        # early (defeats the whole reason the window is
+                        # _DELAY_SHIFT_JUDGMENT_HOPS long -- judging with
+                        # less evidence than that constant says is needed);
+                        # refusing the second shift until the first resolves
+                        # (blocks a correction that may itself be right).
+                        # Kept as-is: a second shift arriving this soon is
+                        # itself evidence the first one was unstable, and
+                        # the new judgment covers the state the second shift
+                        # actually produced -- not observed to cause a real
+                        # problem in testing (XCXc's nores branch hit this
+                        # exact path with no resulting misbehavior on the
+                        # res=True branch bench_aecmos actually scores).
+                        _judgment_hops = _DELAY_SHIFT_JUDGMENT_HOPS
+                        self._delay_shift_judgment = (
+                            old_delay_before_shift, _pre_shift_erle,
+                            _judgment_hops, _pre_shift_W, _pre_shift_shadow_W)
                     else:
                         self._pending_delay = new_delay
                         self._pending_delay_ttl = 3
 
+            # Reset every hop before the ring write below; only the success
+            # path further down (current_delay>0, ring filled enough, and
+            # live_observer_enabled) overwrites this to a real array --
+            # simpler than the two separate `else: ... = None` branches
+            # this replaces (one per exit path, same assignment).
+            self._observer_far_end = None
             # Write far_end into ring buffer
             w = self._ref_ring_write
             ring_sz = self._ref_ring_size
@@ -1913,6 +2263,32 @@ class AEC:
                         self._ref_ring[read_pos:ring_sz],
                         self._ref_ring[:hop - part1]
                     ])
+
+                # Live observer (residual/tail_observer.py design note): the
+                # same ring, read `self._observer_shift_hops` hops EARLIER
+                # (shorter effective delay) than the main filter's read above
+                # -- covers the span just ahead of today's window instead of
+                # the span today's window already covers. Clamped at 0 (never
+                # negative): a clip whose real delay is shorter than the
+                # shift degrades to "as much shift as the delay allows"
+                # rather than skipping the hop, which would break the
+                # observer's own partition-contiguity assumption. d <= the
+                # already-checked ring fill, and d_obs <= d, so no further
+                # fill check is needed. Gated on the flag: a read-only ring
+                # slice can never change the main filter's behavior either
+                # way, but there is no reason to pay for it when off.
+                if getattr(self.config, 'live_observer_enabled', False):
+                    d_obs = max(0, d - self._observer_shift_hops * hop)
+                    read_pos_obs = (self._ref_ring_write - hop - d_obs) % ring_sz
+                    if read_pos_obs + hop <= ring_sz:
+                        self._observer_far_end = self._ref_ring[
+                            read_pos_obs:read_pos_obs + hop].copy()
+                    else:
+                        part1o = ring_sz - read_pos_obs
+                        self._observer_far_end = np.concatenate([
+                            self._ref_ring[read_pos_obs:ring_sz],
+                            self._ref_ring[:hop - part1o]
+                        ])
 
         # Simple variable mu (Valin 2007 RER-inspired) for frequency-domain modes.
 
@@ -2001,6 +2377,14 @@ class AEC:
                         else:
                             self.shadow_filter._poor_excitation_counter += 1
                         self.shadow_filter._saturated_capture = (self._saturation_level > 0.5)
+                    # Live observer: same mirror (AMEND_12 root cause -- this
+                    # was the missing wiring that left it permanently at 0).
+                    if getattr(self.config, 'live_observer_enabled', False):
+                        if self._render_signal_analyzer.poor_signal_excitation():
+                            self._observer_filter._poor_excitation_counter = 0
+                        else:
+                            self._observer_filter._poor_excitation_counter += 1
+                        self._observer_filter._saturated_capture = (self._saturation_level > 0.5)
 
                 # Push stationary-block flag onto the filter so PBFDKF
                 # skips W update on broadband stationary render. Uses
@@ -2014,6 +2398,8 @@ class AEC:
                 self.filter._block_stationary = _stat_flag
                 if self.shadow_filter is not None:
                     self.shadow_filter._block_stationary = _stat_flag
+                if getattr(self.config, 'live_observer_enabled', False):
+                    self._observer_filter._block_stationary = _stat_flag
 
                 # E15 fix: AEC3 compares E²_refined vs E²_coarse from the SAME
                 # block (subtractor_output). Our prior order ran main first, so
@@ -2401,12 +2787,25 @@ class AEC:
 
             # TransparentMode + FilteringQualityAnalyzer audit ports retired.
 
-            # AEC3 post-filter using OLA + sqrt-Hann (skip for buffered FDAF).
-            # enable_res gates suppression so eval_aec_challenge's no-RES
-            # comparison run still emits the linear residual.
-            if (self.config.enable_res or self.config.return_res_context) and self._freq_near_queue is None:
-                far_power = np.mean(far_end ** 2)
-                # Dynamic over_sub: moderate base, scale with convergence.
+            # AMEND_37: windowed ERLE is a general-purpose signal (Path B's
+            # bad-relock judgment, linear_is_cancelling(), the duty-cycle
+            # ERLE watchdog, delay_acquire_protect_converged -- none of them
+            # RES-specific), so it must update regardless of enable_res.
+            # Previously this whole block, erle_windowed included, lived
+            # ONLY inside the enable_res-gated block below -- with
+            # enable_res=False (eval_aec_challenge's "_nores" comparison
+            # run, used throughout this campaign), _erle_window_near/_err
+            # never updated and self._diag['erle_windowed'] stayed pinned
+            # at its reset value of 0.0 for the entire file. Any of those
+            # consumers reading erle_windowed on a nores run was reading a
+            # frozen 0.0, not a real "no echo cancellation" measurement --
+            # confirmed directly: AMEND_34's bad-relock judgment fired on
+            # the res=True run of a real file and never even evaluated on
+            # the res=False run of the SAME file, same input, same delay
+            # decisions up to that point. Still gated on
+            # _freq_near_queue is None (a different, unrelated queued-mode
+            # concern this fix does not touch).
+            if self._freq_near_queue is None:
                 # Windowed decaying ERLE (TC ≈ 10s) replaces irreversible
                 # cumulative get_erle(): in DT, instant ERLE drops because near
                 # speech raises raw_error_power, and the windowed accumulator
@@ -2422,6 +2821,23 @@ class AEC:
                 erle_windowed = 10.0 * np.log10(
                     (self._erle_window_near + 1e-10)
                     / (self._erle_window_err + 1e-10))
+                # divergence indicator EMA: also general-purpose (external
+                # diagnostic API only -- AecStats.divergence / get_filter_state's
+                # DIVERGED, never read back to gate audio, grepped) so it moves
+                # out of the enable_res gate alongside erle_windowed for the
+                # same reason -- not RES-specific, so it must update regardless
+                # of enable_res too.
+                self._convergence.update_divergence(self.near_power, self.raw_error_power)
+
+            # AEC3 post-filter using OLA + sqrt-Hann (skip for buffered FDAF).
+            # enable_res gates suppression so eval_aec_challenge's no-RES
+            # comparison run still emits the linear residual. Everything
+            # left in this block (dynamic over_sub, DT protection, etc.) is
+            # genuinely RES-only -- erle_windowed and update_divergence are
+            # computed above, unconditionally.
+            if (self.config.enable_res or self.config.return_res_context) and self._freq_near_queue is None:
+                far_power = np.mean(far_end ** 2)
+                # Dynamic over_sub: moderate base, scale with convergence.
                 erle_for_factor = max(self.get_erle_instant(), erle_windowed)
                 # D2: ramp from 0 dB (was 2 dB). With B4 dynamic ERL,
                 # render-based is now useful at low ERLE → smoother blend.
@@ -2546,9 +2962,6 @@ class AEC:
                     is_stationary_dt = False  # EPC error spike is from filter divergence, not speech
 
                 dt_indicator = np.clip(raw_dt, 0.0, 0.8)
-
-                # Divergence indicator EMA (delegated to FilterConvergenceAnalyzer)
-                self._convergence.update_divergence(self.near_power, self.raw_error_power)
 
                 final_output = self._aec3_post(raw_output, near_end, far_end)
 
@@ -3510,7 +3923,10 @@ class AEC:
         # FilterQuality 4-gate AND requires external_delay OR convergence_seen
         # before usable_linear flips True (aec_state.cc:filter_quality.py:58).
         # Without this, the linear branch never engages and we permanently sit
-        # in the conservative nonlinear path (R^2 = X^2 * 0.014^2).
+        # in the conservative nonlinear path (R^2 = X^2 * default_gain^2 = X^2
+        # at today's default_gain=1.0; the 0.014/0.020 cohort-tuned constants
+        # this comment used to cite are historical, see
+        # residual_echo_estimator.py's EchoPathGainConfig docstring).
         #
         from .delay.delay_types import DelayEstimate, DelayQuality
         if self._delay_active and self._current_delay >= 0:
@@ -3827,6 +4243,114 @@ class AEC:
                 _stationary_mask, 0.0, r2_unb
             ).astype(np.float32)
 
+        # Filter-independent per-bin echo evidence (residual/tail_evidence.py,
+        # AecConfig.tail_evidence_*). Learns only on hops this hop's OWN
+        # upstream state judges trustworthy; reads `is_dominant_nearend()`
+        # here before it is advanced for this hop (still holds the PREVIOUS
+        # hop's verdict at this point in process() -- the same one-hop lag
+        # `dt_protect_source == 'dne'` already reads elsewhere, not a new
+        # approximation). Deliberately does NOT read `_dt_protect_active`:
+        # under `dt_protect_source == 'energy'` (today's default) that flag
+        # is the pre-filter energy latch, which is armed on ~100% of
+        # far-only hops on some clips (fid0 W2) -- gating the LEARNING hop on
+        # it would close the gate exactly where the evidence is needed, the
+        # one failure mode the design is required to avoid (plan section
+        # 0.5: this gate must never be the live dt-protect flag). N2 is
+        # similarly one hop stale (the "pick N2" selection below has not run
+        # yet this hop); reusing the persistent EMA arrays directly avoids a
+        # separate stash. Fed into R^2 as `max(r2, evidence)` only -- never
+        # into the filter, delay estimator, or ERLE -- so a learning mistake
+        # costs at most a missed suppression opportunity, never new
+        # near-end loss beyond what R^2 already causes elsewhere.
+        # Shared read-only gate for both the tail-evidence model and the live
+        # observer below: a live-adapting echo estimator must not learn on
+        # double-talk hops, and must not be gated on the live dt-protect flag
+        # (plan section 0.5). Computed once, unconditionally -- both getters
+        # (is_active / usable_linear_estimate / is_dominant_nearend) are
+        # side-effect-free, so paying for this when neither flag is set costs
+        # nothing worth gating on.
+        _trustworthy = bool(
+            self._render_activity.is_active
+            and self._aec3_state.usable_linear_estimate()
+            and not self._aec3_sg.is_dominant_nearend()
+        )
+        if getattr(self.config, 'tail_evidence_enabled', False):
+            _te_lag = int(getattr(self.config, 'tail_evidence_lag_hops', 0))
+            _te_rrh = self._aec3_ree._reverb_render_history
+            if _te_lag < len(_te_rrh):
+                _te_x2 = np.asarray(_te_rrh[_te_lag], dtype=np.float64)
+                _te_n2_prev = (
+                    self._aec3_n2_initial
+                    if self._aec3_n2_counter < self._aec3_cng_n2_initial_duration_hops
+                    else self._aec3_n2
+                )
+                _te_stat = (
+                    _stationary_mask if _stationary_mask is not None
+                    else np.zeros(_te_x2.shape[0], dtype=bool)
+                )
+                _te_learn = np.full(_te_x2.shape[0], _trustworthy, dtype=bool) & ~_te_stat
+                self._tail_evidence.update(_te_x2, error_psd, _te_n2_prev, _te_learn)
+                _te_ev = self._tail_evidence.evidence(
+                    strength=float(getattr(self.config, 'tail_evidence_strength', 1.0)))
+                r2 = np.maximum(r2, _te_ev).astype(np.float32)
+                if getattr(self.config, 'tail_evidence_feed_unbounded', False):
+                    r2_unb = np.maximum(r2_unb, _te_ev).astype(np.float32)
+
+        # Live LF-only early-shifted observer filter (residual/tail_observer.py
+        # design note; AecConfig.live_observer_*). Shares _trustworthy above
+        # with the tail-evidence block for the same reason.
+        if getattr(self.config, 'live_observer_enabled', False):
+            _lo_trustworthy = _trustworthy
+            _lo_mu_scale = 1.0 if _lo_trustworthy else 0.0
+            if self._observer_far_end is not None:
+                # The observer adapts under the live (imperfect) gate above.
+                # Injection guard (AMEND_12/13/15, config.py's live_observer_
+                # corrob_* docstring has the full rationale): trust its
+                # evidence only while ITS OWN LF residual is no worse than
+                # the MAIN filter's, on the SAME hop -- comparing against
+                # the observer's own past state (the two-path scheme tried
+                # first) cannot tell correct cancellation from near-end
+                # contamination, since both lower the observer's own
+                # residual; comparing against a different, independently-
+                # adapted filter's residual on the same input can. Both
+                # `main` here and the `S_main` used in `ev` below are the
+                # SAME selected linear output (_sel_echo_spec / _sel_esw)
+                # that R^2's own s2_linear/error_psd are already built from
+                # a few hundred lines up in this hop -- not unconditionally
+                # self.filter, which would be inconsistent whenever URO
+                # selects the coarse (shadow) output instead.
+                # AMEND_15: injection ALSO requires _lo_trustworthy (same
+                # gate as the observer's own mu_scale above) -- during a
+                # sharp onset transient the EMA margin check alone can
+                # still read corroborated while is_dominant_nearend() has
+                # just flipped true on this very hop; two 300-case FS Rule
+                # A grid-B grazes traced to exactly that window.
+                self._observer_filter.process(
+                    near_end, self._observer_far_end, mu_scale=_lo_mu_scale)
+                _kmax = self._observer_max_bin
+                _e_obs = float(np.sum(
+                    np.abs(self._observer_filter.error_spec[:_kmax]) ** 2))
+                _e_main = float(np.sum(np.abs(_sel_esw[:_kmax]) ** 2))
+                _a = self._observer_err_ema_alpha
+                self._observer_obs_err_ema = (
+                    _a * self._observer_obs_err_ema + (1.0 - _a) * _e_obs)
+                self._observer_main_err_ema = (
+                    _a * self._observer_main_err_ema + (1.0 - _a) * _e_main)
+                _corroborated = (self._observer_obs_err_ema
+                                  <= self._observer_corrob_margin
+                                  * self._observer_main_err_ema)
+                if _corroborated and _lo_trustworthy:
+                    _lo_diff = (np.abs(self._observer_filter.echo_spec
+                                        - _sel_echo_spec) ** 2).astype(np.float32)
+                    _lo_cap = (np.abs(_sel_esw) ** 2).astype(np.float32)
+                    _lo_ev = (np.minimum(_lo_diff, _lo_cap)
+                              * _PSD_SCALE).astype(np.float32)
+                    if _kmax < _lo_ev.shape[0]:
+                        _lo_ev[_kmax:] = 0.0
+                    if _stationary_mask is not None:
+                        _lo_ev = np.where(_stationary_mask, 0.0, _lo_ev).astype(np.float32)
+                    r2 = np.maximum(r2, _lo_ev).astype(np.float32)
+
         # AEC3 contract (echo_remover.cc:452):
         #   nearend_spectrum = UsableLinearEstimate() ? E² : Y²
         # AEC3 echo_remover.cc:495-501 clamp E² = min(E², Y²) when usable_linear.
@@ -3921,11 +4445,42 @@ class AEC:
             else self._aec3_n2
         )
         # DT-gated min-gain floor lift. The near-recent latch is the product
-        # policy; C decides it at the corresponding post-stage site.
-        _ne_recent = getattr(self, '_ne_recent_frames', 0) > 0
+        # policy (default, byte-equal); C decides it at the corresponding
+        # post-stage site.
+        #
+        # dt_protect_source == 'dne' reads SuppressionGain's own
+        # DominantNearendDetector instead of the pre-filter energy rule.
+        # `is_dominant_nearend()` here returns the PREVIOUS hop's verdict --
+        # get_gain() below is what advances it for the next hop (same as
+        # the REE's earlier dominant_nearend read at the top of this
+        # function) -- deliberately one hop late, matching C's equally
+        # one-hop-late `dominant_ne` read; this is NOT "fixed" by reading
+        # ahead. A separate counter (`_dt_protect_frames`) from
+        # `_ne_recent_frames` keeps the energy rule's own state untouched
+        # for its other consumer, dt_aware_recovery_soft.
+        if getattr(self.config, 'dt_protect_source', 'energy') == 'dne':
+            _dne_prev = bool(self._aec3_sg.is_dominant_nearend())
+            # Confirmation delay: require _dne_prev to have read True for
+            # MORE than `_dt_protect_confirm_hops` consecutive hops before
+            # trusting it (0 -> arms on the first True hop, unchanged from
+            # before this field existed). Does not alter DNE's own state.
+            if _dne_prev:
+                self._dne_confirm_counter = getattr(self, '_dne_confirm_counter', 0) + 1
+            else:
+                self._dne_confirm_counter = 0
+            _dne_confirmed = _dne_prev and self._dne_confirm_counter > self._dt_protect_confirm_hops
+            if _dne_confirmed:
+                self._dt_protect_frames = self._dt_protect_extra_hold_hops
+            elif getattr(self, '_dt_protect_frames', 0) > 0:
+                self._dt_protect_frames -= 1
+            else:
+                self._dt_protect_frames = 0
+            _protect = _dne_confirmed or self._dt_protect_frames > 0
+        else:
+            _protect = getattr(self, '_ne_recent_frames', 0) > 0
         self._aec3_sg._dt_protect_active = bool(
             getattr(self.config, 'dt_aware_res_floor_enabled', False)
-            and _ne_recent)
+            and _protect)
         gain = self._aec3_sg.get_gain(
             aec_state=self._aec3_state,
             nearend_spectrum=nearend_pwr,
@@ -4031,9 +4586,9 @@ class AEC:
             # N2 is in int16² PSD scale; CN amplitudes need to live in
             # float-spec scale to match e_out_spec, so divide by _PSD_SCALE
             # before sqrt.
-            _N_float = np.sqrt(
+            _N_float = (np.sqrt(
                 np.maximum(comfort_noise / _PSD_SCALE, 0.0)
-            ).astype(np.float32)
+            ) * self._aec3_cng_window_power_comp).astype(np.float32)
             _cn_re = np.zeros(n_bins, dtype=np.float32)
             _cn_im = np.zeros(n_bins, dtype=np.float32)
             _cn_re[1:-1] = _N_float[1:-1] * self._aec3_sqrt2_sin_lut[_re_idx]
@@ -4247,9 +4802,15 @@ Examples:
         clear_filter_history=args.clear_history,
     )
     # Only override preset RES params if user explicitly specified them
-    # (don't let CLI default -20dB override preset values like -35dB)
+    # (don't let CLI default -20dB override preset values like -35dB).
+    # `min_gain_floor_far_active_db` is the live AecConfig field (the preset
+    # axis documented at --preset above); `res_g_min_db` was a ResFilter-era
+    # name retired with the legacy ResFilter chain (v3.21 cleanup R7,
+    # 26e9882) and is not an AecConfig field, so passing it used to raise
+    # TypeError whenever this branch fired (no --preset, or --res-g-min
+    # explicitly set).
     if not args.preset or args.res_g_min != -20.0:
-        common_kw['res_g_min_db'] = args.res_g_min
+        common_kw['min_gain_floor_far_active_db'] = args.res_g_min
     # Only forward enable_res / enable_cng to AecConfig when the user
     # explicitly set them on the CLI. With BooleanOptionalAction +
     # default=None, args.enable_res / args.cng are None unless

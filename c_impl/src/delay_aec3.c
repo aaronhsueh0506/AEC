@@ -478,10 +478,11 @@ static int da_decimator_same_coefficients(const DaDecimator *a, const DaDecimato
 }
 
 static void da_decimator_decimate_pair(DaDecimator *da, const float *in_a, float *out_a,
-                                       DaDecimator *db, const float *in_b, float *out_b) {
+                                       DaDecimator *db, const float *in_b, float *out_b,
+                                       int same_coefficients) {
     if (da->anti_alias.n_sections != 3 || da->noise_reduction.n_sections != 1 ||
         db->anti_alias.n_sections != 3 || db->noise_reduction.n_sections != 1 ||
-        !da_decimator_same_coefficients(da, db)) {
+        !same_coefficients) {
         da_decimator_decimate(da, in_a, out_a);
         da_decimator_decimate(db, in_b, out_b);
         return;
@@ -541,7 +542,9 @@ static void da_decimator_decimate_pair(DaDecimator *da, const float *in_a, float
 }
 #else
 static void da_decimator_decimate_pair(DaDecimator *da, const float *in_a, float *out_a,
-                                       DaDecimator *db, const float *in_b, float *out_b) {
+                                       DaDecimator *db, const float *in_b, float *out_b,
+                                       int same_coefficients) {
+    (void)same_coefficients;
     da_decimator_decimate(da, in_a, out_a);
     da_decimator_decimate(db, in_b, out_b);
 }
@@ -1151,6 +1154,11 @@ static int da_hist_window_for_rate(int sample_rate) {
 static void da_estimator_init(DaEstimator *e, int sample_rate, int num_filters) {
     da_decimator_init(&e->capture_decimator);
     da_decimator_init(&e->render_decimator);
+#if defined(__ARM_NEON) && defined(__aarch64__) && \
+    !defined(SIMD_KERNELS_FORCE_SCALAR)
+    e->decimators_same_coefficients =
+        da_decimator_same_coefficients(&e->capture_decimator, &e->render_decimator);
+#endif
     da_ring_reset(&e->render_ring);
     da_matched_filter_init(&e->matched_filter, num_filters);
     /* Histogram window = 1 s of inner blocks at the feed rate, the Python
@@ -1210,6 +1218,11 @@ static void da_estimator_reset(DaEstimator *e, int reset_delay_confidence) {
     da_estimator_reset_internal(e, 1, reset_delay_confidence);
     da_decimator_init(&e->capture_decimator);
     da_decimator_init(&e->render_decimator);
+#if defined(__ARM_NEON) && defined(__aarch64__) && \
+    !defined(SIMD_KERNELS_FORCE_SCALAR)
+    e->decimators_same_coefficients =
+        da_decimator_same_coefficients(&e->capture_decimator, &e->render_decimator);
+#endif
     da_ring_reset(&e->render_ring);
     e->pending_count = 0;
 }
@@ -1241,7 +1254,8 @@ static int da_estimator_process_inner_block(DaEstimator *e, const float *render_
     DelayQuality agg_quality = DELAY_QUALITY_COARSE;
 
     da_decimator_decimate_pair(&e->render_decimator, render_block, render_sub,
-                               &e->capture_decimator, capture_block, capture_sub);
+                               &e->capture_decimator, capture_block, capture_sub,
+                               e->decimators_same_coefficients);
     da_ring_push(&e->render_ring, render_sub, DA_SUB_BLOCK_SIZE);
     if (!run_matched_filter) return 0;   /* fed, not analysed (see above) */
     da_matched_filter_update(&e->matched_filter, &e->render_ring, capture_sub,

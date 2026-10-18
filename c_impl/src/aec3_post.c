@@ -143,6 +143,9 @@ void aec3_post_reset(Aec3Post *p) {
         p->coh_see[k] = 1.0e-30f;
     }
     reverb_model_reset(&p->avg_reverb);
+    /* Live observer (A21 Stage 2) corroboration EMAs. */
+    p->observer_obs_err_ema = 0.0;
+    p->observer_main_err_ema = 0.0;
 }
 
 /* PSD = (mag*mag) in f32, then * _PSD_SCALE in f32 (numpy<2 array*pyfloat rule),
@@ -322,10 +325,12 @@ void aec3_post_apply_output(Aec3Post *p,
          * sk_clip_f32(v, 0, +inf) (the source has no upper bound either --
          * same +inf-degenerates-to-floor-only trick as the CNG N2 clamps
          * above), then a single batched sk_fast_sqrt_f32 in place. */
-        for (k = 0; k < nb; ++k)
-            p->nf[k] = p->comfort_noise[k] * inv_psd_scale;
-        sk_clip_f32(p->nf, 0.0f, (float)INFINITY, nb);
-        sk_fast_sqrt_f32(p->nf, p->nf, nb);
+        /* Only [1, nb-1) is ever read back (the injection loop below reads
+         * bin = k+1 for k in [0, n_random)), so narrow all three ops to that
+         * range -- indices 0 and nb-1 are never consumed. */
+        sk_scale_f32(p->nf + 1, p->comfort_noise + 1, inv_psd_scale, n_random);
+        sk_clip_f32(p->nf + 1, 0.0f, (float)INFINITY, n_random);
+        sk_fast_sqrt_f32(p->nf + 1, p->nf + 1, n_random);
         for (k = 0; k < n_random; ++k) {
             uint32_t ix;
             int re_idx, im_idx, bin = k + 1;
@@ -359,10 +364,7 @@ void aec3_post_apply_output(Aec3Post *p,
     assert(c->synth_window_len == bs);
     {
         int win_n = (c->synth_window_len < bs) ? c->synth_window_len : bs;
-        for (k = 0; k < win_n; ++k) {
-            float windowed = p->e_out_full[k] * p->synth_window[k];
-            p->ola_buf[k] = p->ola_buf[k] + windowed;
-        }
+        sk_wola_accumulate_f32(p->ola_buf, p->e_out_full, p->synth_window, win_n);
     }
     for (k = 0; k < hop; ++k) out[k] = p->ola_buf[k];
     memmove(p->ola_buf, p->ola_buf + hop,
@@ -407,6 +409,86 @@ void aec3_post_process(Aec3Post *p,
  * its documented reference source). */
 static float sum_sq_f32_pairwise(const float *a, size_t n) {
     return sk_sum_sq_pairwise_f32(a, n);
+}
+
+/* ── Live observer (A21 Stage 2) injection step ──────────────────────────
+ * Factored out of aec3_post_run's per-hop body (same >20-50 line threshold
+ * this file's other aec3_post_compute_* steps already follow -- see
+ * aec3_post_compute_x2_reverb/_coherence/_comfort_noise above, all smaller
+ * than this one). Runs between Steps 17 and 18, mirroring orchestrator.py's
+ * live-observer block exactly: same insertion point relative to the
+ * stationarity R² zeroing just before it and nearend_pwr just after.
+ * Needs THIS hop's dominant_ne (Step 13)/usable (Step 14) verdicts plus the
+ * run's own in/obj/sc bundles, so -- unlike main/shadow -- it cannot be
+ * driven by the caller; aec3_post_run calls this in place. */
+static void aec3_post_run_observer_step(Aec3Post *p,
+                                        const Aec3PostRunIn *in,
+                                        const Aec3PostRunObj *obj,
+                                        Aec3PostRunScratch *sc,
+                                        int nb, int dominant_ne, int usable,
+                                        const unsigned char *stat_mask) {
+    int k;
+    if (!(p->cfg.observer_enabled && obj->observer_filter && in->observer_far_end))
+        return;
+    int lo_trustworthy = in->render_activity_is_active && usable && !dominant_ne;
+    float lo_mu_scale = lo_trustworthy ? 1.0f : 0.0f;
+    pbfdaf_process(obj->observer_filter, in->near_end, in->observer_far_end, NULL,
+                   lo_mu_scale, sc->observer_out);
+    int kmax = p->cfg.observer_max_bin;
+    if (kmax > nb) kmax = nb;
+    if (kmax < 0) kmax = 0;
+    /* |sel_esw|^2, bounded to [0,kmax): every bin at k>=kmax is
+     * unconditionally discarded before it can reach r2 (the final step
+     * below), so computing it there is dead work -- bit-exact for the
+     * retained range, and the single computation now serves both the
+     * e_main EMA input and the corroborated-branch cap check (no second
+     * pass). */
+    sk_cmag2_np_f32(sc->sel_esw, sc->observer_cap_mag2, kmax);
+    sk_cmag2_np_f32(obj->observer_filter->error_spec, sc->observer_diff_mag2, kmax);
+    float e_obs = aec3_post_pairwise_sum_f32(sc->observer_diff_mag2, (size_t)kmax);
+    float e_main = aec3_post_pairwise_sum_f32(sc->observer_cap_mag2, (size_t)kmax);
+    /* double, matching Python's EMA precision exactly (see
+     * observer_obs_err_ema's doc comment) -- e_obs/e_main themselves stay
+     * float32-precision values (the pairwise sum above already matches
+     * np.sum() on a float32 array bit-for-bit), promoted here only on
+     * entry to the EMA, same as Python's `_e_obs`/`_e_main` (float32-
+     * precision sums cast to Python float). */
+    double ea = p->cfg.observer_err_ema_alpha;
+    p->observer_obs_err_ema =
+        ea * p->observer_obs_err_ema + (1.0 - ea) * (double)e_obs;
+    p->observer_main_err_ema =
+        ea * p->observer_main_err_ema + (1.0 - ea) * (double)e_main;
+    int corroborated = (p->observer_obs_err_ema
+                         <= p->cfg.observer_corrob_margin * p->observer_main_err_ema);
+    if (corroborated && lo_trustworthy) {
+        /* observer.echo_spec - sel_echo: plain complex subtraction (exact),
+         * NOT sk_cadd_f32 with a negated operand -- no such kernel exists,
+         * and this is a one-per-hop glue computation, not a hot loop.
+         * Bounded to [0,kmax) -- same dead-work argument as the cap
+         * computation above. sk_cmag2_np_f32 (scaled-hypot) afterward is
+         * what matches numpy's sqrt-then-square np.abs(c64)**2 bit-for-bit;
+         * re^2+im^2 directly would not. */
+        for (k = 0; k < kmax; ++k) {
+            sc->observer_diff_spec[k].r =
+                obj->observer_filter->echo_spec[k].r - sc->sel_echo[k].r;
+            sc->observer_diff_spec[k].i =
+                obj->observer_filter->echo_spec[k].i - sc->sel_echo[k].i;
+        }
+        sk_cmag2_np_f32(sc->observer_diff_spec, sc->observer_diff_mag2, kmax);
+        /* ev = min(diff, cap) * PSD_SCALE, masked zero where stationary,
+         * then raise r2 to at least ev -- the same 3 kernels
+         * (sk_min_f32/sk_mask_zero_f32/sk_raise_to_f32) this file already
+         * uses elsewhere for the structurally identical nearend_pwr min and
+         * the regular R² stationarity-zeroing step, instead of a hand-
+         * rolled scalar loop duplicating all three. */
+        sk_min_f32(sc->observer_diff_mag2, sc->observer_diff_mag2,
+                  sc->observer_cap_mag2, kmax);
+        sk_scale_f32(sc->observer_diff_mag2, sc->observer_diff_mag2,
+                    (float)PSD_SCALE, kmax);
+        if (stat_mask)
+            sk_mask_zero_f32(sc->observer_diff_mag2, stat_mask, kmax);
+        sk_raise_to_f32(sc->r2, sc->observer_diff_mag2, kmax);
+    }
 }
 
 int aec3_post_run(Aec3Post *p,
@@ -510,16 +592,7 @@ int aec3_post_run(Aec3Post *p,
     aec3_post_compute_psds(p, &mag);
 
     /* render_block_scaled = (far_end * 32768).astype(f32). */
-    for (k = 0; k < hop; ++k)
-        sc->render_block_scaled[k] = (float)(in->far_end[k] * 32768.0f);
-    /* far_pwr = mean(far_end²) (pairwise f32). sk_sq_scale_f32 with
-     * scale=1.0f is bit-exact to x*x (exact IEEE no-op multiply) -- same
-     * pattern as above and suppression_gain.c. */
-    {
-        float *fsq = sc->nearend_pwr;   /* borrow scratch */
-        sk_sq_scale_f32(in->far_end, 1.0f, fsq, hop);
-        (void)fsq;
-    }
+    sk_scale_f32(sc->render_block_scaled, in->far_end, 32768.0f, hop);
 
     /* ── Step 4: convergence flags (3075-3106) ────────────────────────────── */
     {
@@ -598,27 +671,25 @@ int aec3_post_run(Aec3Post *p,
                 float decay_steady = 0.0f;
                 int delay = aec_state_min_direct_path_filter_delay(obj->state);
                 int delay_idx = 0, past_idx = 0;
+                const float *x2d = sc->x2_at_delay, *x2p = sc->x2_past;
                 if (n_part > 0)
                     aec3_post_avg_reverb_slots(n_part, in->partition_idx, delay,
                                                &delay_idx, &past_idx);
                 if (in->X_buf != NULL && n_part > 0) {
                     /* x2 = (np.abs(X)**2).astype(f32) = cmag2_np per bin.
                      * When the filter hands over its |X_buf|² mirror, both
-                     * rows are already those floats -- the mirror is filled
-                     * by the same cmag2_np kernel as the partition enters
-                     * history -- so they are copied rather than re-derived.
+                     * rows are already those floats, so aec3_post_compute_x2_reverb
+                     * (which only reads x2_at_delay/x2_past, never writes them)
+                     * reads straight out of in->x2_cache -- no copy needed.
                      * The fallback stays fissioned into 2 independent
-                     * elementwise calls: disjoint destinations
-                     * (x2_at_delay/x2_past), disjoint nb-contiguous sources
-                     * (Xd/Xp are two different partition-slices of X_buf) --
-                     * no ordering dependency between them. */
+                     * elementwise calls into the scratch pair: disjoint
+                     * destinations (x2_at_delay/x2_past), disjoint
+                     * nb-contiguous sources (Xd/Xp are two different
+                     * partition-slices of X_buf) -- no ordering dependency
+                     * between them. */
                     if (in->x2_cache != NULL) {
-                        memcpy(sc->x2_at_delay,
-                               in->x2_cache + (size_t)delay_idx * nb,
-                               (size_t)nb * sizeof(float));
-                        memcpy(sc->x2_past,
-                               in->x2_cache + (size_t)past_idx * nb,
-                               (size_t)nb * sizeof(float));
+                        x2d = in->x2_cache + (size_t)delay_idx * nb;
+                        x2p = in->x2_cache + (size_t)past_idx * nb;
                     } else {
                         const Complex *Xd = in->X_buf + (size_t)delay_idx * nb;
                         const Complex *Xp = in->X_buf + (size_t)past_idx * nb;
@@ -628,10 +699,10 @@ int aec3_post_run(Aec3Post *p,
                     x2_present = 1;
                 }
                 /* decay_steady = ree._reverb_decay(False): AEC3 per-block power
-                 * multiplier 0.83^(hop_seconds/0.004), applied once per hop. */
-                decay_steady = ree_reverb_decay_value(obj->ree, 0);
-                aec3_post_compute_x2_reverb(p, x2_present, sc->x2_at_delay,
-                                            sc->x2_past, decay_steady);
+                 * multiplier 0.83^(hop_seconds/0.004), resolved once at
+                 * ree_init and never mutated afterward. */
+                decay_steady = obj->ree->reverb_decay_per_hop;
+                aec3_post_compute_x2_reverb(p, x2_present, x2d, x2p, decay_steady);
             }
 
             /* ── Step 10: coherence Γ²(Ŷ,Y) (3259-3279) ──────────────────── */
@@ -644,8 +715,7 @@ int aec3_post_run(Aec3Post *p,
             {
                 /* far_pwr = mean(far_end²), f32 pairwise-sum / n; a plain f32 compare
                  * against numpy's float(np.mean(...)), drift accepted. */
-                float far_pwr = pairwise_sum_f32(sc->nearend_pwr,
-                                                 (size_t)hop) / (float)hop;
+                float far_pwr = sum_sq_f32_pairwise(in->far_end, (size_t)hop) / (float)hop;
                 int active_render = (far_pwr > in->active_render_threshold);
                 p->trace.far_active = active_render;   /* audio-passive trace stash */
                 int x2r_present_state =
@@ -796,6 +866,14 @@ int aec3_post_run(Aec3Post *p,
                                     sk_mask_zero_f32(sc->r2_unb, stat_mask, nb);
                                 }
                             }
+
+                            /* ── Live observer (A21 Stage 2), between Steps
+                             * 17 and 18. See aec3_post_run_observer_step's
+                             * own doc comment above for the full rationale
+                             * and why it cannot be driven by the caller. */
+                            aec3_post_run_observer_step(p, in, obj, sc, nb,
+                                                        dominant_ne, usable,
+                                                        stat_mask);
 
                             /* ── Step 18: nearend_pwr (3484-3488) ──────────── */
                             if (usable) {

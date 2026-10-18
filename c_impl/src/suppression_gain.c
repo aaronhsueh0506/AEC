@@ -341,10 +341,7 @@ static void get_max_gain(SuppressionGain *sg, float *out) {
     int is_ne = ne_state_for_gain_rules(sg);
     float inc = is_ne ? c->max_inc_nearend : c->max_inc_normal;
     float ffi = c->floor_first_increase;
-    int k;
-    /* f32 array * f32 scalar: no matching kernel (sk_sq_scale_f32 squares
-     * first; there is no plain scale-by-scalar kernel), kept as plain C. */
-    for (k = 0; k < c->n_bins; ++k) out[k] = sg->last_gain[k] * inc;
+    sk_scale_f32(out, sg->last_gain, inc, c->n_bins);
     /* max(.,ffi) then min(.,1.0f), low-bound-then-high-bound -- exactly
      * sk_clip_f32's order; ffi (floor_first_increase, e.g. 1e-5) < 1.0f
      * always holds by construction. */
@@ -420,11 +417,34 @@ static void gain_to_no_audible_echo(SuppressionGain *sg, const float *nearend,
                                     float *out) {
     const SuppressionGainConfig *c = &sg->cfg;
     int n = c->n_bins;
-    int is_ne = ne_state_for_gain_rules(sg);
+    int is_ne;
     int k;
     float ne_w = 0.0f;                          /* scalar LF ne_weight */
     const float *enr_tr_tab, *enr_su_tab, *emr_tr_tab;
-    int have_scalar_blend_inputs = c->soft_blend_enabled;
+    int have_scalar_blend_inputs;
+
+    /* Per-bin soft blend (the shipped balanced configuration): the whole
+     * body below reduces to kernel 27, whose scalar twin is that body
+     * transcribed statement-for-statement. The other three combinations
+     * (blend off, or blend on with a single scalar weight) stay on the
+     * general loop -- they are not what any production preset runs. Checked
+     * first so the scalar-blend/tuning-table setup below is skipped
+     * entirely on the default path, where it's never read. */
+    if (c->soft_blend_enabled && c->soft_blend_per_bin) {
+        sk_no_audible_echo_gain_f32(nearend, echo, masker,
+                                    sg->tun.nearend_enr_tr,
+                                    sg->tun.nearend_enr_su,
+                                    sg->tun.nearend_emr_tr,
+                                    sg->tun.normal_enr_tr,
+                                    sg->tun.normal_enr_su,
+                                    sg->tun.normal_emr_tr,
+                                    c->soft_blend_enr_thr,
+                                    c->soft_blend_softness, out, n);
+        return;
+    }
+
+    is_ne = ne_state_for_gain_rules(sg);
+    have_scalar_blend_inputs = c->soft_blend_enabled;
 
     if (have_scalar_blend_inputs) {
         /* ne_lf / echo_lf : f32 pairwise sum over [1:dne_lf_end] */
@@ -448,24 +468,6 @@ static void gain_to_no_audible_echo(SuppressionGain *sg, const float *nearend,
         enr_tr_tab = is_ne ? sg->tun.nearend_enr_tr : sg->tun.normal_enr_tr;
         enr_su_tab = is_ne ? sg->tun.nearend_enr_su : sg->tun.normal_enr_su;
         emr_tr_tab = is_ne ? sg->tun.nearend_emr_tr : sg->tun.normal_emr_tr;
-    }
-
-    /* Per-bin soft blend (the shipped balanced configuration): the whole
-     * body below reduces to kernel 27, whose scalar twin is that body
-     * transcribed statement-for-statement. The other three combinations
-     * (blend off, or blend on with a single scalar weight) stay on the
-     * general loop -- they are not what any production preset runs. */
-    if (c->soft_blend_enabled && c->soft_blend_per_bin) {
-        sk_no_audible_echo_gain_f32(nearend, echo, masker,
-                                    sg->tun.nearend_enr_tr,
-                                    sg->tun.nearend_enr_su,
-                                    sg->tun.nearend_emr_tr,
-                                    sg->tun.normal_enr_tr,
-                                    sg->tun.normal_enr_su,
-                                    sg->tun.normal_emr_tr,
-                                    c->soft_blend_enr_thr,
-                                    c->soft_blend_softness, out, n);
-        return;
     }
 
     for (k = 0; k < n; ++k) {
@@ -517,11 +519,9 @@ static void gain_to_no_audible_echo(SuppressionGain *sg, const float *nearend,
  * AEC3 native fft=128 uses hardcoded bins 0-2 (≤125 Hz); our fft=512 needs
  * 9 bins (0-250 Hz).  lf_clamp_bin = hz_to_bin(250 Hz) = 8 at 16 kHz / 512-pt. */
 static void limit_lf_gains(float *gain, int n, int lf_clamp_bin) {
-    int k;
     if (lf_clamp_bin > 0 && lf_clamp_bin < n) {
         float anchor = gain[lf_clamp_bin];
-        for (k = 0; k < lf_clamp_bin; ++k)
-            if (gain[k] > anchor) gain[k] = anchor;   /* np.minimum */
+        sk_clip_f32(gain, -(float)INFINITY, anchor, lf_clamp_bin);   /* np.minimum */
     }
 }
 
@@ -536,7 +536,7 @@ static void limit_hf_gains(SuppressionGain *sg, float *gain) {
         /* min over gain[lgb:lgb+biq] (f32), then minimum out */
         float mug = gain[lgb];
         for (k = lgb + 1; k < lgb + biq; ++k) if (gain[k] < mug) mug = gain[k];
-        for (k = lgb + 1; k < n; ++k) if (gain[k] > mug) gain[k] = mug;
+        sk_clip_f32(gain + lgb + 1, -(float)INFINITY, mug, n - (lgb + 1));
     }
     if (n >= 2) gain[n - 1] = gain[n - 2];
     /* conservative_hf path: OFF in balanced. */
@@ -657,8 +657,7 @@ const float *suppression_gain_get_gain(
      * dropping it would change that build's semantics. sk_fast_sqrt_f32
      * replicates fast_sqrt verbatim in both build modes, so clamp + kernel
      * reproduces the original loop bit-exactly. */
-    for (int k = 0; k < n; ++k)
-        if (sg->gain[k] < 0.0f) sg->gain[k] = 0.0f;
+    sk_clip_f32(sg->gain, 0.0f, (float)INFINITY, n);
     sk_fast_sqrt_f32(sg->gain, sg->gain, n);
     return sg->gain;
 }

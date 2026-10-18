@@ -44,14 +44,40 @@ import librosa
 
 
 class FastAECMOS:
-    """Reusable AECMOS estimator (single ONNX session)."""
+    """Reusable AECMOS estimator (single ONNX session).
 
-    def __init__(self, model_path):
+    official_segmentation (default True): the Interspeech 2021 / ICASSP 2022
+    blind-test clips are LENGTHENED beyond their scored portion so the AEC
+    under test has time to converge before the segment that is actually
+    judged; the official scoring rule (AECMOS/AECMOS_local/README.md) feeds
+    only that portion to the model, not the clip from its start:
+      FS (far-end singletalk) -- second half of the clip.
+      DT (double-talk)        -- last (L-15) / 2 seconds, L = clip length (s).
+      NE (near-end singletalk)-- the whole clip (no segmentation).
+    The model's own max_len=20s cap (below) then applies AFTER this slice,
+    exactly as in the official evaluation: a clip whose scored segment is
+    itself longer than 20 s is further truncated to that segment's first
+    20 s, not the original clip's first 20 s.
+    False reproduces the pre-2026-09-26 behaviour (always the clip's own
+    first 20 s, every bucket) for direct comparison against scores computed
+    before this fix; every number computed before 2026-09-26's ruling to
+    restore the official rule was under this legacy behaviour and must be
+    read as such, never silently compared against an official-segmentation
+    score as if the methods matched.
+    This file only ever covered the 16 kHz Interspeech 2021 blind set
+    (self.sampling_rate is hard-coded 16000). The 48 kHz ICASSP 2023 set's
+    own fullband model (dft 1536, hidden (4,1,96)) is not present in this
+    checkout; 48 kHz scoring stays unimplemented here, not silently
+    approximated.
+    """
+
+    def __init__(self, model_path, official_segmentation=True):
         self.sampling_rate = 16000
         self.dft_size = 512
         self.hop_fraction = 0.5
         self.hidden_size = (4, 1, 64)
         self.max_len = 20
+        self.official_segmentation = official_segmentation
         # Cap ONNX to 1 thread/instance so N bench workers map 1:1 onto cores
         # (uncapped, each session spawns ~ncores intra-op threads → heavy
         # oversubscription — the reason plain --workers 9 doesn't speed up).
@@ -72,6 +98,24 @@ class FastAECMOS:
         return ((librosa.power_to_db(m, ref=np.max) + 40) / 40).T
 
     def score(self, talk_type, lpb, mic, enh):
+        if self.official_segmentation:
+            n = len(lpb)
+            length_s = n / self.sampling_rate
+            if talk_type == 'st':          # FS: second half of the clip
+                seg_start = n // 2
+            elif talk_type == 'dt':        # DT: last (L-15)/2 seconds
+                if length_s > 15.0:
+                    seg_start_s = (length_s + 15.0) / 2.0
+                    seg_start = int(round(seg_start_s * self.sampling_rate))
+                else:
+                    # Degenerate (clip too short for the official rule to
+                    # define a positive-duration segment): fall back to the
+                    # whole clip rather than producing a negative/empty one.
+                    seg_start = 0
+                seg_start = max(0, min(seg_start, n))
+            else:                           # NE: whole clip, no segmentation
+                seg_start = 0
+            lpb, mic, enh = lpb[seg_start:], mic[seg_start:], enh[seg_start:]
         seg = self.max_len * self.sampling_rate
         if len(lpb) >= seg:
             lpb, mic, enh = lpb[:seg], mic[:seg], enh[:seg]
@@ -146,10 +190,18 @@ def main():
                     help='baseline scores.json to compute Δ against')
     ap.add_argument('--label', default='current',
                     help='label for this run (used in result.md headers)')
+    ap.add_argument('--legacy-score', action='store_true',
+                    help='Use the pre-2026-09-26 scoring window (always the '
+                         "clip's own first 20 s, every bucket) instead of "
+                         'the official per-bucket segmentation (default). '
+                         'For direct comparison against scores computed '
+                         'before the official-segmentation fix only -- '
+                         'never compare a --legacy-score run against a '
+                         'default (official) run as if the methods matched.')
     args = ap.parse_args()
 
     os.makedirs(args.result_dir, exist_ok=True)
-    estimator = FastAECMOS(args.model)
+    estimator = FastAECMOS(args.model, official_segmentation=not args.legacy_score)
 
     cases = []
     for f in sorted(os.listdir(args.output_dir)):
@@ -197,7 +249,8 @@ def main():
             'deg_mean': float(np.mean(deg_vals)),
         }
 
-    out = {'label': args.label, 'summary': summary, 'scores': scores}
+    out = {'label': args.label, 'summary': summary, 'scores': scores,
+           'official_segmentation': estimator.official_segmentation}
     json.dump(out, open(os.path.join(args.result_dir, 'scores.json'), 'w'),
               indent=2)
 
@@ -222,8 +275,19 @@ def main():
     if args.baseline:
         bl = json.load(open(args.baseline))
         bl_scores = bl.get('scores', {})
+        bl_seg = bl.get('official_segmentation', None)
         md.append(f"## Δ vs baseline ({bl.get('label', args.baseline)})")
         md.append('')
+        if bl_seg != estimator.official_segmentation:
+            md.append(
+                f"**SEGMENTATION MISMATCH**: this run used "
+                f"official_segmentation={estimator.official_segmentation}, "
+                f"the baseline used {bl_seg!r} (missing/null means it predates "
+                "this field, i.e. it is a legacy-window score). The deltas "
+                "below compare two different scoring methods and are NOT "
+                "a valid regression check -- rescore the baseline with the "
+                "same --legacy-score setting before trusting this table.")
+            md.append('')
         md.append('| Bucket | n | n_bl | n_common | Δecho | Δdeg | verdict |')
         md.append('|---|---:|---:|---:|---:|---:|---|')
         for b in bucket_order:

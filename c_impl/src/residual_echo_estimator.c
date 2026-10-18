@@ -283,9 +283,15 @@ void ree_estimate(ResidualEchoEstimator *r,
         usable = 0;
     }
 
-    /* diag reset */
-    memset(r->last_r2_reverb, 0, (size_t)N * sizeof(float));
-    memset(r->last_r2_direct, 0, (size_t)N * sizeof(float));
+    /* diag reset -- only needed when neither of this hop's two unconditional
+     * full-array writers below will run: the usable==1 branch (line ~310)
+     * always writes both arrays, and in the usable==0 branch the only writer
+     * (line ~453) is gated by this exact condition. */
+    if (!(usable ||
+          (r->echo_model.model_reverb_in_nonlinear_mode && !transparent_mode))) {
+        memset(r->last_r2_reverb, 0, (size_t)N * sizeof(float));
+        memset(r->last_r2_direct, 0, (size_t)N * sizeof(float));
+    }
 
     if (usable) {
         if (saturated) {
@@ -318,13 +324,13 @@ void ree_estimate(ResidualEchoEstimator *r,
             r2_unbounded[k] = r2_unbounded[k] + reverb;
         }
     } else {
-        float echo_path_gain = ree_echo_path_gain(r, transparent_mode, 1);
         if (saturated) {
             for (k = 0; k < N; ++k) {
                 r2[k] = capture_psd[k];
                 r2_unbounded[k] = capture_psd[k];
             }
         } else {
+            float echo_path_gain = ree_echo_path_gain(r, transparent_mode, 1);
             /* EchoGeneratingPower window walk. x2 lives in per-instance scratch. */
             float *x2 = r->scratch;
             if (r->use_aec3_echo_gen_window) {

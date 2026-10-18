@@ -6,7 +6,8 @@ Single-channel port. Bins indexed 0..n_bins-1.
 
 Rate notes:
   - ``hold_counter`` set to 1000 on each downward jump. AEC3 1000 blocks
-    (~4 s) -> our 400 hops.
+    (~4 s) -> wall-clock ``ms_to_hops(4000, ...)`` at whatever grid is
+    live (not a fixed hop count -- see ``__init__``'s ``_hold_hops``).
 """
 import numpy as np
 

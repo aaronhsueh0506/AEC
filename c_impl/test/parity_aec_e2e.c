@@ -66,6 +66,11 @@
  *   # branch produced it:
  *   python3 ../python/diag/gen_aec_e2e_golden.py /tmp/g.bin balanced --sr 16000 --no-res
  *   /tmp/p_e2e /tmp/g.bin balanced --no-res
+ *   # A21 Stage 2 live observer (default off either side) -- same "pass to
+ *   # BOTH" rule, and composes with --no-res (argv[4] when argv[3] is
+ *   # --no-res):
+ *   python3 ../python/diag/gen_aec_e2e_golden.py /tmp/g.bin balanced --sr 16000 --live-observer
+ *   /tmp/p_e2e /tmp/g.bin balanced --live-observer
  */
 #include "aec.h"
 
@@ -105,7 +110,16 @@ int main(int argc, char **argv) {
     /* Golden produced with --no-res: the AEC3 post block never runs, so the
      * quantities that steer the filter from outside it are what this case
      * checks. `out` is then the linear residual, i.e. equal to raw. */
-    if (argc > 3 && !strcmp(argv[3], "--no-res")) cfg.enable_res = 0;
+    /* Scan every remaining arg rather than hard-coding argv[3]/argv[4]
+     * positions: a fixed-position check silently drops a flag (no error,
+     * no mismatch report -- it just never set the field) if the two are
+     * ever passed in the other order, e.g. `--live-observer --no-res`,
+     * copy-pasted from the generator's own argparse (order-independent)
+     * invocation. */
+    for (int ai = 3; ai < argc; ++ai) {
+        if (!strcmp(argv[ai], "--no-res")) cfg.enable_res = 0;
+        else if (!strcmp(argv[ai], "--live-observer")) cfg.live_observer_enabled = 1;
+    }
     Aec aec;
     if (aec_create(&aec, &cfg) != 0) { fprintf(stderr, "aec_create\n"); return 2; }
     if (aec_hop_size(&aec) != hop) {

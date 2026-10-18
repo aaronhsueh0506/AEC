@@ -166,10 +166,12 @@ def run_ours(mic, ref, sr, fl, enable_res=True, preset=None,
         else:
             delay_est_kw = dict(enable_delay_est=False)
 
-    # Allow CLI override of gain type via env var or config_overrides
-    env_gain_type = os.environ.get('AEC_GAIN_TYPE')
-    if env_gain_type and 'res_gain_type' not in config_overrides:
-        config_overrides['res_gain_type'] = env_gain_type
+    # AEC_GAIN_TYPE / res_gain_type chose between the legacy ResFilterEnr and
+    # ResFilterWiener gain stages; both were retired with the ResFilter chain
+    # (v3.21 cleanup R7, 26e9882) and `res_gain_type` is not an AecConfig
+    # field, so this hook would raise TypeError if AEC_GAIN_TYPE were ever
+    # set. The AEC3 chain (modules/state + modules/residual) has a single
+    # gain algorithm; there is no current equivalent to forward this to.
     # CNG override from global flag
     if _ENABLE_CNG and 'enable_cng' not in config_overrides:
         config_overrides['enable_cng'] = True
@@ -204,6 +206,10 @@ def run_ours(mic, ref, sr, fl, enable_res=True, preset=None,
     _soft_ne_pb_env = os.environ.get('AEC_SOFT_NE_PER_BIN')
     if _soft_ne_pb_env in ('0', '1') and 'soft_nearend_blend_per_bin' not in config_overrides:
         config_overrides['soft_nearend_blend_per_bin'] = (_soft_ne_pb_env == '1')
+    # A21 Stage 2 live observer. AEC_LIVE_OBSERVER=1 → live_observer_enabled=True.
+    _lo_env = os.environ.get('AEC_LIVE_OBSERVER')
+    if _lo_env in ('0', '1') and 'live_observer_enabled' not in config_overrides:
+        config_overrides['live_observer_enabled'] = (_lo_env == '1')
     # erle_coh_gate (v3.22 C'): coherence-based ERLE gate Γ²(Ŷ, Y).
     # AEC_ERLE_COH_GATE=<float>        → enable gate, threshold=<float>
     # AEC_ERLE_COH_GATE_ALPHA=<float>  → override EMA alpha (default 0.05)
@@ -811,7 +817,10 @@ def run_scenarios(base_dir, fl, do_speex, do_aec3, do_aec3_linear, out_dir, pres
 def main():
     parser = argparse.ArgumentParser(description='Evaluate AEC on AEC Challenge dataset')
     parser.add_argument('dataset_dir', help='aec_challenge/ directory')
-    parser.add_argument('--filter', type=int, default=2048, help='Filter length')
+    parser.add_argument('--filter', type=int, default=-1,
+                         help='Filter length in samples (default: -1 = auto, '
+                              'matches the product default: 52ms <44.1kHz / '
+                              '64ms >=44.1kHz, i.e. 832 samples at 16 kHz)')
     parser.add_argument('--speex', action='store_true', help='Also run SpeexDSP')
     parser.add_argument('--aec3', action='store_true', help='Also run WebRTC AEC3')
     parser.add_argument('--aec3-linear', action='store_true', help='Also run WebRTC AEC3 linear-only')

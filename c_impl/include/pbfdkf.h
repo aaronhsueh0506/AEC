@@ -273,7 +273,15 @@ void pbfdaf_copy_weights_from(PBFDAF* dst, const PBFDAF* src);
  * n_partitions*hop_size falls outside the scratch this routine can stage the
  * concatenated IR in). A refusal leaves the filter untouched, so a caller
  * that changed its alignment must not report warm success on -1: the taps
- * still sit at the old alignment. */
+ * still sit at the old alignment.
+ *
+ * Also owns the far-history decision for a RETARD (shift_samples < 0): on a
+ * successful shift it calls pbfdaf_clear_far_history() itself, mirroring
+ * filters.py's Filter.warm_shift_ir (`if s < 0: self.X_buf.fill(0)`), which
+ * makes the same call internally for the same reason -- the held history is
+ * ahead of the realigned stream and would re-expose echo for dozens of hops
+ * if kept. Callers never need (and must not add) their own clear; the
+ * decision lives here once, not once per call site. */
 int pbfdaf_warm_shift_ir(PBFDAF* p, int shift_samples);
 
 /* ── PBFDKF (per-bin H_error Kalman) ────────────────────────────── */

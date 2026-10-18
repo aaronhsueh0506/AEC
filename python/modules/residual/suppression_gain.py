@@ -516,7 +516,8 @@ class SuppressionGain:
                  split_floor_far_active_db: float = -22.0,
                  split_floor_far_silent_db: float = -12.0,
                  split_floor_dt_db: float = -20.0,
-                 split_floor_latch_power: float = 1.0e6) -> None:
+                 split_floor_latch_power: float = 1.0e6,
+                 per_bin_floor_enabled: bool = False) -> None:
         self._n_bins = int(n_bins)
         self._sr = int(sr)
         self._hop_size = int(hop_size)
@@ -543,6 +544,12 @@ class SuppressionGain:
         self._dt_protect_active = False
         self._split_floor_latch_power = float(split_floor_latch_power)
         self._far_active_latched = False
+        # Stage 3 (A21 plan section 六, P4) per-bin floor blend -- see
+        # AecConfig.per_bin_floor_enabled for the full rationale. Variant i
+        # only: reuses the existing soft_nearend_blend_per_bin sigmoid
+        # params (always set below regardless of that feature's own enabled
+        # flag) as the per-bin near/echo weight for the floor blend.
+        self._per_bin_floor_enabled = bool(per_bin_floor_enabled)
         # echo_audibility lives on SuppressorConfig so orchestrator can
         # override use_stationarity_properties.
         self._echo_audibility = self._config.echo_audibility
@@ -805,10 +812,21 @@ class SuppressionGain:
         # Step 3: weighted residual (audibility downweight).
         weighted_residual = np.empty(self._n_bins, dtype=np.float32)
         _weight_echo_for_audibility(self._echo_audibility, residual_echo, weighted_residual, self._sr)
+        # Step 3.5 (Stage 3, A21 plan section 六): per-bin near/echo weight
+        # for the min-gain floor blend, from the SAME inputs (smoothed
+        # nearend + weighted_residual) and the SAME sigmoid params as
+        # _gain_to_no_audible_echo's soft_nearend_blend_per_bin blend below --
+        # computed here, independently of whether that feature is itself
+        # enabled, because the floor and the gain-rule blend are different
+        # consumers of the same per-bin near-dominance signal.
+        ne_wb_floor = None
+        if self._per_bin_floor_enabled:
+            _enr_bin_floor = weighted_residual / (nearend + 1.0)
+            ne_wb_floor = self._sigmoid_blend_weight(_enr_bin_floor).astype(np.float32)
         # Step 4: min gain envelope.
         min_gain = self._get_min_gain(
             weighted_residual, self._last_nearend, self._last_echo,
-            low_noise_render, aec_state.saturated_echo(),
+            low_noise_render, aec_state.saturated_echo(), ne_wb_floor,
         )
         # Step 5: GainToNoAudibleEcho (the heart).
         G_raw = self._gain_to_no_audible_echo(nearend, weighted_residual, comfort_noise)
@@ -993,6 +1011,7 @@ class SuppressionGain:
         last_echo: np.ndarray,
         low_noise_render: bool,
         saturated_echo: bool,
+        ne_wb_floor: Optional[np.ndarray] = None,
     ) -> np.ndarray:
         if saturated_echo:
             return np.zeros(self._n_bins, dtype=np.float32)
@@ -1029,13 +1048,39 @@ class SuppressionGain:
             if self._far_active_latched:
                 # DT (near recently present) lifts the floor toward near-protection;
                 # FS (far-active, no near) keeps the aggressive far_active floor.
-                base_floor = (self._split_floor_dt if self._dt_protect_active
-                              else self._split_floor_far_active_live)
+                if self._dt_protect_active:
+                    base_floor = self._split_floor_dt
+                elif ne_wb_floor is not None:
+                    # Stage 3 variant i: per-bin blend toward the DT floor by
+                    # how near-dominant THIS bin is, instead of the scalar
+                    # hop-level dt_protect_active switch. Echo-dominant bins
+                    # (ne_wb_floor -> 0) keep today's far_active floor
+                    # unchanged -- never deepened by this blend.
+                    base_floor = (
+                        ne_wb_floor * self._split_floor_dt
+                        + (1.0 - ne_wb_floor) * self._split_floor_far_active_live
+                    ).astype(np.float32)
+                else:
+                    base_floor = self._split_floor_far_active_live
             else:
                 base_floor = self._split_floor_far_silent
             np.maximum(min_gain, base_floor, out=min_gain)
             np.minimum(min_gain, 1.0, out=min_gain)
         return min_gain.astype(np.float32)
+
+    def _sigmoid_blend_weight(self, enr):
+        """ENR -> near/echo sigmoid blend weight, shared by every near-end
+        soft-blend consumer in this file (the scalar broadband-LF weight and
+        the per-bin weight below, plus the min-gain-floor blend in
+        get_gain()). -> 1 when nearend dominates (low ENR), -> 0 when echo
+        dominates. Accepts a scalar or an ndarray; the caller casts/takes
+        float() as appropriate.
+        """
+        _sig_arg = np.clip(
+            (enr - self._soft_ne_blend_enr_thr) / self._soft_ne_blend_softness,
+            -50.0, 50.0,
+        )
+        return 1.0 / (1.0 + np.exp(_sig_arg))
 
     def _gain_to_no_audible_echo(
         self, nearend: np.ndarray, echo: np.ndarray, masker: np.ndarray
@@ -1043,17 +1088,12 @@ class SuppressionGain:
         is_ne = self._ne_state_for_gain_rules()
 
         # Compute sigmoid LF-ENR weight if needed by D3.
-        # ne_weight → 1 when nearend dominates (low ENR), → 0 when echo dominates.
         ne_w = 0.0
         if self._soft_ne_blend_enabled:
             ne_lf = float(np.sum(nearend[1:self._dne_lf_end]))
             echo_lf = float(np.sum(echo[1:self._dne_lf_end]))
             enr_lf = echo_lf / (ne_lf + 1.0)
-            _sig_arg = np.clip(
-                (enr_lf - self._soft_ne_blend_enr_thr) / self._soft_ne_blend_softness,
-                -50.0, 50.0,
-            )
-            ne_w = float(1.0 / (1.0 + np.exp(_sig_arg)))
+            ne_w = float(self._sigmoid_blend_weight(enr_lf))
 
         if self._soft_ne_blend_enabled:
             # D3: blend nearend_tuning ↔ normal_tuning via ne_w.
@@ -1062,12 +1102,7 @@ class SuppressionGain:
             # broadband-LF ne_w when off (byte-equal).
             if self._soft_ne_blend_per_bin:
                 _enr_bin = echo / (nearend + 1.0)
-                _sig_bin = np.clip(
-                    (_enr_bin - self._soft_ne_blend_enr_thr)
-                    / self._soft_ne_blend_softness,
-                    -50.0, 50.0,
-                )
-                ne_wb = (1.0 / (1.0 + np.exp(_sig_bin))).astype(np.float32)
+                ne_wb = self._sigmoid_blend_weight(_enr_bin).astype(np.float32)
             else:
                 ne_wb = ne_w
             enr_tr = (ne_wb * self._nearend_enr_tr

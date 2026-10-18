@@ -54,6 +54,19 @@ float  aec3_per_block_growth_to_per_hop(float per_block_multiplier, int hop_samp
 float  aec3_growth_rehop(float retention_at_ref, int ref_hop_samples, int ref_sample_rate,
                          int hop_samples, int sample_rate);
 
+/* ── Double-precision exceptions ─────────────────────────────────────────
+ * UNLIKE every function above (float32, init-only, drift vs Python
+ * accepted), these two must stay double: they derive the live-observer
+ * corroboration gate's EMA alpha / margin, which feeds a discrete per-hop
+ * inject/don't-inject decision that Python evaluates in double throughout
+ * (see Aec3Post.observer_obs_err_ema's own comment in aec3_post.h for why
+ * that must match). A float32 version here would silently reintroduce
+ * that precision-parity bug. Still init-only (one call per instance, at
+ * carve time) -- the double precision is for cross-language bit-parity,
+ * not runtime cost. */
+double aec3_ema_alpha_from_tau_ms(double tau_ms, double hop_ms);
+double aec3_db_to_linear(double db);
+
 /* ── Pre-converted constants (16 kHz, hop=160 reference) ───────────────────
  * Defined by their computing expression so they fold bit-identically to the
  * Python module-level constants. */

@@ -8,6 +8,7 @@
  * Built with -ffp-contract=off so nothing fuses.
  */
 #include "saturation_detector.h"
+#include "aec_simd_kernels.h"
 
 void saturation_detector_init(SaturationDetector *d) {
     d->saturated_echo = 0;
@@ -30,21 +31,8 @@ void saturation_detector_update(SaturationDetector *d,
             (subtractor_s_refined_max_abs > SATDET_SATURATION_THRESHOLD ||
              subtractor_s_coarse_max_abs  > SATDET_SATURATION_THRESHOLD) ? 1 : 0;
     } else {
-        /* max_sample = np.abs(render_block).max() if size>0 else 0.0
-         *   → float32 max-abs reduction, kept in float32. */
-        float max_sample;
-        if (render_block_len > 0) {
-            float max_f = -1.0f;            /* |x| >= 0, so the first sets it */
-            int i;
-            for (i = 0; i < render_block_len; ++i) {
-                float a = render_block[i];
-                float av = a < 0.0f ? -a : a;   /* np.abs (float32) */
-                if (av > max_f) max_f = av;     /* np.max (float32) */
-            }
-            max_sample = max_f;
-        } else {
-            max_sample = 0.0f;
-        }
+        /* max_sample = np.abs(render_block).max() if size>0 else 0.0 */
+        float max_sample = sk_max_abs_f32(render_block, render_block_len);
         /* peak = max_sample * echo_path_gain * _RENDER_MARGIN  (all f32). */
         {
             float peak = max_sample * echo_path_gain * SATDET_RENDER_MARGIN;

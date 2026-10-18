@@ -32,6 +32,8 @@ static void print_usage(const char* prog) {
         "                                 alignment mode (default: matched)\n"
         "  --delay-num-filters <1..5>     MATCHED matched-filter bank size (default 5)\n"
         "  --fixed-delay <samples>        FIXED delay, native-rate samples (>=0)\n"
+        "  --delay-est-period <s>         override AecConfig.delay_est_period_s\n"
+        "                                 (matched-filter duty-cycle period; diagnostic)\n"
         "  --print-mem-size               print the resolved grid/mode/n and the\n"
         "                                 static-pool byte breakdown, then exit\n"
         "                                 without touching any audio\n"
@@ -112,6 +114,7 @@ int main(int argc, char* argv[]) {
     AecDelayMode delay_mode = AEC_DELAY_MATCHED;  int have_delay_mode = 0;
     int delay_num_filters = 0;                    int have_delay_num_filters = 0;
     int fixed_delay_samples = 0;                  int have_fixed_delay = 0;
+    float delay_est_period_s = 0.0f;              int have_delay_est_period = 0;
     int print_mem_size = 0;
 
     for (int i = 4; i < argc; ++i) {
@@ -141,6 +144,8 @@ int main(int argc, char* argv[]) {
             delay_num_filters = atoi(argv[++i]); have_delay_num_filters = 1;
         } else if (!strcmp(arg, "--fixed-delay") && i + 1 < argc) {
             fixed_delay_samples = atoi(argv[++i]); have_fixed_delay = 1;
+        } else if (!strcmp(arg, "--delay-est-period") && i + 1 < argc) {
+            delay_est_period_s = (float)atof(argv[++i]); have_delay_est_period = 1;
         } else if (!strcmp(arg, "--print-mem-size"))
             print_mem_size = 1;
         else if (!strcmp(arg, "--debug-level") && i + 1 < argc)
@@ -218,6 +223,7 @@ int main(int argc, char* argv[]) {
     if (have_delay_mode)         cfg.delay_mode = delay_mode;
     if (have_delay_num_filters)  cfg.delay_num_filters = delay_num_filters;
     if (have_fixed_delay)        cfg.fixed_delay_samples = fixed_delay_samples;
+    if (have_delay_est_period)   cfg.delay_est_period_s = delay_est_period_s;
 
     /* --print-mem-size: answer the static-pool question and exit, before
      * any debug/log setup or Aec construction — no audio is touched.

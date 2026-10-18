@@ -685,6 +685,39 @@ make PROFILE=1 EXTRA_CFLAGS='-DAEC_NOW_US=board_timer_us -include my_timer.h'
 （`AUDIO_PIPELINE_NOW_US`、`FOUR_AEC_NR_RES_NOW_US`），刻意不共用：一個元件的
 時鐘屬於該元件自己的建置契約。
 
+### 6.6c Live observer（實驗性，A21 campaign，2026-10-17）
+
+**預設關閉（`live_observer_enabled = 0`），關閉時輸出逐位元不變。目前只是
+旗標存在、未進任何出貨 preset；是否接受下方的算量成本尚待裁定，不要在
+產品路徑上開啟。**
+
+機制：第三個獨立 PBFDAF 實例（NLMS，跟 `shadow_filter` 同一個 struct），讀
+遠端 ring 比主濾波器的延遲補償讀取早 `live_observer_shift_ms`。每 hop 把
+自己的誤差能量 EMA 跟主濾波器（R² 實際採用的那條選線，不是恆取 main）的
+誤差能量 EMA 比較，只有在觀察器沒有比主濾波器差（corroboration）時才信任
+其證據；證據夾在主濾波器殘留回音功率以內，經 `max(r2, evidence)` 注入
+residual-echo R²（只到 `live_observer_max_hz` 的低頻段），從不碰輸出、
+delay 或任一濾波器的視窗／taps。
+
+| 欄位 | 型別 | 預設 | 允許範圍 | 說明 |
+|---|---|---:|---|---|
+| `live_observer_enabled` | `int` | `0` | 0 / 1 | 總開關。 |
+| `live_observer_shift_ms` | `float` | `24.0` | 0 – 1e9 | 觀察器讀遠端 ring 比主濾波器早多少 ms。 |
+| `live_observer_max_hz` | `float` | `1000.0` | 0 – 1e9 | 證據注入 R² 的頻率上限；高於此頻率的 bin 永遠不受影響。 |
+| `live_observer_mu` | `float` | `0.3` | (0, 2] | 觀察器自己的 NLMS 步進。 |
+| `live_observer_corrob_ms` | `float` | `100.0` | 0 – 1e9 | corroboration EMA 的時間常數。 |
+| `live_observer_corrob_margin_db` | `float` | `0.0` | 必須是有限值 | corroboration 容忍度（dB）；觀察器誤差 EMA 超過主濾波器誤差 EMA 這個容忍倍率就不信任。 |
+
+記憶體增量（`aec_get_mem_size()` 實測，delay_num_filters=5，balanced
+preset）：8 kHz/256 +30,000 B、16 kHz/256（預設）+39,296 B、16 kHz/512
++59,696 B、48 kHz/1024 +143,712 B。算量增量（`bench_rtf --live-observer`
+實測，三格）：+10～15%——比 Python 層量到的數字（+0.83～2.19%）大，原因是
+Python baseline 被解譯器固定開銷稀釋了觀察器真實占比，C 的 baseline 是
+真算法成本，同樣的新增絕對工作量占比反而更高；已查過分接數與
+round-robin TD constraint 兩個降低算量的方向，都確認無效（固定開銷來自
+觀察器每 hop 3 個跟分接數無關的 FFT）。細節見
+`SE/.research/2026-10-16/a21/DIAG_PLAN_AMEND_23.md`／`_24.md`。
+
 ### 6.7 靜態記憶體拆解（`aec_get_mem_breakdown`）
 
 ```c
