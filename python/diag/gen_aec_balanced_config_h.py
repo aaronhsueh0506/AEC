@@ -201,6 +201,9 @@ def _capture_all(sr, frame_size, filter_length=None):
     # NOTE: genuinely rate-varying (scales with frame_size=2*hop_size, see
     # aec3_scale.nl_r2_norm_power) -- see RATE_VARYING_MACROS.
     values['REE_NL_NORM_POWER'] = float(rc['nl_norm_power'])
+    # Dimensionless multiplier on the already-computed direct term -- a fixed
+    # AecConfig constant, not rate-varying (unlike REE_NL_NORM_POWER above).
+    values['REE_NL_R2_CAP_MULTIPLE'] = float(rc['nl_r2_cap_multiple'])
     # NOTE: genuinely rate-varying (derived from the same density scale as
     # REE_MIN_NOISE_FLOOR_POWER) -- see RATE_VARYING_MACROS.
     values['REE_RESIDUAL_NOISE_GATE_POWER'] = float(rc['residual_noise_gate_power'])
@@ -440,6 +443,7 @@ def emit_legacy_block(w, cap):
     w('#define AEC3B_REE_REVERB_TAIL_STRENGTH (%s)\n' % f64(v['REE_REVERB_TAIL_STRENGTH']))
     w('#define AEC3B_REE_NL_R2_ALPHA (%s)\n' % f64(v['REE_NL_R2_ALPHA']))
     w('#define AEC3B_REE_NL_NORM_POWER (%s)\n' % f64(v['REE_NL_NORM_POWER']))
+    w('#define AEC3B_REE_NL_R2_CAP_MULTIPLE (%s)\n' % f64(v['REE_NL_R2_CAP_MULTIPLE']))
     w('#define AEC3B_REE_RESIDUAL_NOISE_GATE_POWER (%s)\n' % f64(v['REE_RESIDUAL_NOISE_GATE_POWER']))
     w('#define AEC3B_REE_REVERB_SMOOTHING_BASE (%s)\n\n' % f64(v['REE_REVERB_SMOOTHING_BASE']))
 

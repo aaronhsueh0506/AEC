@@ -73,7 +73,7 @@ int main(int argc, char **argv) {
     int st_i[10];
     double st_d[4];
     int ree_i[11];
-    double ree_d[13];
+    double ree_d[14];
     double sg_d4[5];
     float sg_ratchet[2];
     int sg_blend_i[2];
@@ -104,7 +104,7 @@ int main(int argc, char **argv) {
     if (!rd(f, st_i, sizeof(int) * 10)) { fprintf(stderr, "st_i\n"); return 2; }
     if (!rd(f, st_d, sizeof(double) * 4)) { fprintf(stderr, "st_d\n"); return 2; }
     if (!rd(f, ree_i, sizeof(int) * 11)) { fprintf(stderr, "ree_i\n"); return 2; }
-    if (!rd(f, ree_d, sizeof(double) * 13)) { fprintf(stderr, "ree_d\n"); return 2; }
+    if (!rd(f, ree_d, sizeof(double) * 14)) { fprintf(stderr, "ree_d\n"); return 2; }
 
     if (!rd(f, sg_d4, sizeof(double) * 5)) { fprintf(stderr, "sg_d4\n"); return 2; }
     if (!rd(f, sg_ratchet, sizeof(sg_ratchet))) { fprintf(stderr, "sg_r\n"); return 2; }
@@ -233,6 +233,7 @@ int main(int argc, char **argv) {
     ree_init(&ree, n_bins, ree_hop, 16000, &em, ree_d[4], ree_d[5], ree_i[2],
              ree_d[6], ree_d[7], ree_i[3], ree_d[8],
              ree_i[4], ree_i[10], ree_i[5], ree_i[6], ree_d[9], ree_d[10],
+             ree_d[13],
              ree_d[11], ree_i[7], ree_i[8], ree_i[9], ree_d[12],
              x2_nf, x2_nf_ctr, rm_st, rt_st, rh_st, drd_st, rrd_st,
              ld, lr, ree_scratch);

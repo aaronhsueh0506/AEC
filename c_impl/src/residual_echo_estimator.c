@@ -45,6 +45,7 @@ void ree_init(ResidualEchoEstimator *r,
               int use_stationarity_properties,
               int use_aec3_echo_gen_window,
               int nl_r2_enabled, float nl_r2_alpha, float nl_norm_power,
+              float nl_r2_cap_multiple,
               float residual_noise_gate_power,
               int noise_floor_hold_hops,
               int use_freq_response, int reverb_use_conservative,
@@ -98,6 +99,7 @@ void ree_init(ResidualEchoEstimator *r,
     r->nl_r2_enabled = nl_r2_enabled ? 1 : 0;
     r->nl_r2_alpha = nl_r2_alpha;
     r->nl_norm_power = nl_norm_power;
+    r->nl_r2_cap_multiple = nl_r2_cap_multiple;
     r->residual_noise_gate_power = residual_noise_gate_power;
     r->noise_floor_hold_hops = noise_floor_hold_hops;
     r->render_pre_window_size = use_aec3_echo_gen_window ? 1 : 0;
@@ -431,9 +433,17 @@ void ree_estimate(ResidualEchoEstimator *r,
                 /* r2_nl = (alpha * x2**2 / norm).astype(f32), all f32. */
                 float alpha = r->nl_r2_alpha;
                 float norm = r->nl_norm_power;
+                float cap_mult = r->nl_r2_cap_multiple;
                 for (k = 0; k < N; ++k) {
                     float x2sq = x2[k] * x2[k];
                     float r2_nl = alpha * x2sq / norm;
+                    if (cap_mult > 0.0f) {
+                        /* np.minimum(r2_nl, r2 * cap_multiple), f32 — caps
+                         * only the tail, at a multiple of the already-
+                         * computed direct term (r2[k] here, pre-nl). */
+                        float cap = r2[k] * cap_mult;
+                        r2_nl = (r2_nl < cap) ? r2_nl : cap;
+                    }
                     r2[k] = r2[k] + r2_nl;
                     r2_unbounded[k] = r2_unbounded[k] + r2_nl;
                 }

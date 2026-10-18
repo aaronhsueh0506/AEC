@@ -148,6 +148,7 @@ def run_case(stem, frames):
                 nl_r2_enabled=1 if self._nl_r2_enabled else 0,
                 nl_r2_alpha=float(self._nl_r2_alpha),
                 nl_norm_power=float(self._nl_norm_power),
+                nl_r2_cap_multiple=float(self._nl_r2_cap_multiple),
                 residual_noise_gate_power=float(self._noise_gate_power),
                 noise_floor_hold_hops=int(self._noise_floor_hold_hops),
                 use_freq_response=1 if frr is not None else 0,
@@ -229,8 +230,12 @@ def run_case(stem, frames):
     ResidualEchoEstimator.estimate = patched_est
     ResidualEchoEstimator.reset = patched_reset
     try:
+        # frame_size=512 is explicit (not the current product default of 256
+        # at 16 kHz) so the real-pipeline cases stay at N_BINS=257 bins,
+        # matching this module's hardcoded N_BINS and the synthetic_saturated
+        # case below -- the file format assumes one n_bins for every case.
         cfg = AecConfig.from_preset(
-            'balanced', sample_rate=16000, filter_length=832,
+            'balanced', sample_rate=16000, frame_size=512, filter_length=832,
             mode=AecMode.PBFDKF, enable_shadow=True,
             enable_res=True, use_kalman=True, enable_delay_est=False)
         np.random.seed(0)
@@ -294,7 +299,8 @@ def build_synthetic_saturated(cfg):
         use_aec3_echo_gen_window=bool(cfg['use_aec3_echo_gen_window']),
         use_aec3_wallclock_reverb_smoothing=True,
         nl_r2_enabled=bool(cfg['nl_r2_enabled']),
-        nl_r2_alpha=cfg['nl_r2_alpha'])
+        nl_r2_alpha=cfg['nl_r2_alpha'],
+        nl_r2_cap_multiple=cfg['nl_r2_cap_multiple'])
     ree._reverb_tail_strength = cfg['reverb_tail_strength']
 
     rng = np.random.RandomState(99)
@@ -397,6 +403,7 @@ def main():
         f.write(struct.pack('<i', cfg['use_freq_response']))
         f.write(struct.pack('<i', cfg['reverb_use_conservative']))
         f.write(struct.pack('<d', cfg['reverb_smoothing_base']))
+        f.write(struct.pack('<d', cfg['nl_r2_cap_multiple']))
 
         f.write(struct.pack('<i', len(case_blobs)))
         for frames, mp in case_blobs:

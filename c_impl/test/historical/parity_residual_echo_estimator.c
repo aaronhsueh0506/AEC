@@ -40,6 +40,7 @@ int main(int argc, char **argv) {
     double stationary_gate_slope, default_gain, tm_gain, reverb_decay;
     double reverb_mild_scale, reverb_tail_strength, nl_r2_alpha, nl_norm_power;
     double residual_noise_gate_power, reverb_smoothing_base;
+    double nl_r2_cap_multiple;
 
     ResidualEchoEstimator ree;
     ReeEchoModelConfig em;
@@ -77,6 +78,7 @@ int main(int argc, char **argv) {
     if (!rdi(f, &use_freq_response)) return 2;
     if (!rdi(f, &reverb_use_conservative)) return 2;
     if (!rdd(f, &reverb_smoothing_base)) return 2;
+    if (!rdd(f, &nl_r2_cap_multiple)) return 2;
 
     if (!rdi(f, &n_cases)) return 2;
 
@@ -125,6 +127,7 @@ int main(int argc, char **argv) {
                  use_aec3_residual_noise_gate, use_stationarity_properties,
                  use_aec3_echo_gen_window,
                  nl_r2_enabled, nl_r2_alpha, nl_norm_power,
+                 nl_r2_cap_multiple,
                  residual_noise_gate_power, noise_floor_hold_hops,
                  use_freq_response, reverb_use_conservative,
                  reverb_smoothing_base,

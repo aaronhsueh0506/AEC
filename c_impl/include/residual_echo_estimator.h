@@ -18,6 +18,10 @@
  *   - nl_r2 = (nl_alpha * x2**2 / norm).astype(f32): x2 is f32, alpha=0.1 and
  *     norm=1.07e7 are python floats in an ARRAY expression → all-float32
  *     (0.1*x2² then /norm in f32), then explicit (float) cast (no-op).
+ *   - nl_r2 is then tail-capped: np.minimum(nl_r2, r2 * nl_r2_cap_multiple),
+ *     all f32 (r2 here is the pre-nl direct term, x2*echo_path_gain, already
+ *     computed above). nl_r2_cap_multiple<=0.0 disables the cap (uncapped,
+ *     prior behaviour).
  *   - reverb tail comes from ReverbModel + ReverbFrequencyResponse C ports.
  *   - decay = aec3_per_block_growth_to_per_hop(0.83f, hop_size, sample_rate):
  *     wall-clock-preserving rescale (accounts for BOTH hop_size AND
@@ -86,6 +90,7 @@ typedef struct {
     int    nl_r2_enabled;           /* True */
     float  nl_r2_alpha;             /* 0.1 */
     float  nl_norm_power;           /* 1.07e7 */
+    float  nl_r2_cap_multiple;      /* 300.0; <=0.0 disables the cap */
     float  residual_noise_gate_power; /* per_bin_psd_threshold(27509.42,hop) */
     int    noise_floor_hold_hops;   /* 50 */
     int    render_pre_window_size;  /* 1 */
@@ -152,6 +157,7 @@ void ree_init(ResidualEchoEstimator *r,
               int use_stationarity_properties,
               int use_aec3_echo_gen_window,
               int nl_r2_enabled, float nl_r2_alpha, float nl_norm_power,
+              float nl_r2_cap_multiple,
               float residual_noise_gate_power,
               int noise_floor_hold_hops,
               int use_freq_response, int reverb_use_conservative,

@@ -169,6 +169,7 @@ def capture_ree_config(ree):
         nl_r2_enabled=int(ree._nl_r2_enabled),
         nl_r2_alpha=float(ree._nl_r2_alpha),
         nl_norm_power=float(ree._nl_norm_power),
+        nl_r2_cap_multiple=float(ree._nl_r2_cap_multiple),
         residual_noise_gate_power=float(ree._noise_gate_power),
         noise_floor_hold_hops=int(ree._noise_floor_hold_hops),
         use_freq_response=int(frr is not None),
@@ -406,7 +407,8 @@ def main():
                rc['default_gain'], rc['tm_gain'], rc['reverb_decay'],
                rc['reverb_mild_scale'], rc['reverb_tail_strength'],
                rc['nl_r2_alpha'], rc['nl_norm_power'],
-               rc['residual_noise_gate_power'], rc['reverb_smoothing_base'])
+               rc['residual_noise_gate_power'], rc['reverb_smoothing_base'],
+               rc['nl_r2_cap_multiple'])
 
         # ── SuppressionGain config ──
         _w_f64(f, sgc['split_floor_far_active'], sgc['split_floor_far_silent'],
