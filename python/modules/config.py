@@ -524,6 +524,15 @@ class AecConfig:
     nl_r2_enabled: bool = True
     nl_r2_alpha: float = 0.1
 
+    # Caps r2_nl at `nl_r2_cap_multiple` x the direct term (x2*echo_path_gain,
+    # computed just above it) instead of the fixed -20dBFS reference above.
+    # The direct term is signal-derived, so this makes the cap scale with
+    # the actual render level instead of being quadratic-unbounded.
+    # 300x: zero output delta on the 5-file FS Rule-A prescreen (bit-exact
+    # vs uncapped on all 10 file/grid pairs) while bounding the observed
+    # worst-case r2_nl ~420x (2.76e18 -> 6.52e15). 0.0 disables the cap.
+    nl_r2_cap_multiple: float = 300.0
+
     # ── v3.22 BUG FIX: ERLE render-activity x2 PSD-scale (revives reverb) ──
     # The render power fed to the ERLE estimators (ComputeAvgRenderReverb's
     # `_x2_reverb_for_erle` = |X_buf|² + avg_reverb, orchestrator ~3091) is in

@@ -495,6 +495,9 @@ class AEC:
                 use_aec3_wallclock_reverb_smoothing=True,
                 nl_r2_enabled=bool(getattr(self.config, "nl_r2_enabled", False)),
                 nl_r2_alpha=float(getattr(self.config, "nl_r2_alpha", 0.1)),
+                nl_r2_cap_multiple=float(
+                    getattr(self.config, "nl_r2_cap_multiple", 0.0)
+                ),
                 use_stationarity_properties=True,
             )
             self._aec3_ree._reverb_tail_strength = float(
@@ -1472,6 +1475,9 @@ class AEC:
             use_aec3_wallclock_reverb_smoothing=True,
             nl_r2_enabled=bool(getattr(self.config, "nl_r2_enabled", False)),
             nl_r2_alpha=float(getattr(self.config, "nl_r2_alpha", 0.1)),
+            nl_r2_cap_multiple=float(
+                getattr(self.config, "nl_r2_cap_multiple", 0.0)
+            ),
             use_stationarity_properties=True,
         )
         self._aec3_ree._reverb_tail_strength = float(

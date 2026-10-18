@@ -140,6 +140,7 @@ shows their public configuration values, not necessarily the internal hop count.
 | | `soft_nearend_blend_per_bin` | **ON** | per-bin frequency-selective near protection |
 | Nonlinear residual | `nl_r2_enabled` | **ON** | Kuech-Kellermann 2nd-order R² (L1) |
 | | `nl_r2_alpha` | 0.1 | |
+| | `nl_r2_cap_multiple` | 300 | caps r2_nl at 300x the direct term; the raw formula is unbounded (fixed -20dBFS reference, not signal-level-relative) and reaches 1e16-1e18 on loud cold-start render |
 | ERLE coordinate fixes | `erle_render_x2_psd_scale` | **ON** | revives reverb model (PSD-scale bug fix) |
 | | `reverb_tail_strength` | 1.0 | reverb-tail R² scale |
 | | `erle_windowed_capture_psd` | **ON** | E1 Y2/E2 sqrt-Hann coordinate consistency |
