@@ -828,6 +828,17 @@ class AEC:
             sample_rate=self.config.sample_rate,
         )
         self._observer_filter._lightweight = True
+        # Amortize the TD overlap-save constraint round-robin across hops,
+        # same knob and same value source as the shadow filter above and
+        # the main filter (__init__'s own `self.filter._constraint_
+        # round_robin = self.config.constraint_round_robin`). Pure
+        # compute-schedule knob (filters.py's PBFDAF.process): constrains
+        # one partition per hop instead of all of them, cycling
+        # `_partition_to_constrain` -- it changes which hop each
+        # partition's non-causal half gets re-zeroed, not whether it ever
+        # does.
+        self._observer_filter._constraint_round_robin = (
+            self.config.constraint_round_robin)
         self._observer_shift_hops = _aec3_scale_dtp.ms_to_hops(
             getattr(self.config, 'live_observer_shift_ms', 24.0),
             self.config.hop_size, self.config.sample_rate)
@@ -1225,6 +1236,14 @@ class AEC:
         self.filter.reset_carried_state()
         if self.shadow_filter:
             self.shadow_filter.reset_carried_state()
+        # Re-arms the observer's round-robin constraint cursor
+        # (_partition_to_constrain) to 0, same as aec_reset()'s
+        # unconditional pbfdaf_reset_carried_state(&a->observer_filter)
+        # when a->has_observer. The observer PBFDAF is constructed
+        # unconditionally in this port (see its construction site), so no
+        # enabled-flag guard is needed here either.
+        if getattr(self, '_observer_filter', None) is not None:
+            self._observer_filter.reset_carried_state()
         self._seed_poor_excitation_counters()
         # Empty the inst-ERLE slope ring, same as _reset_filter_latches: its
         # readers take the last 15 entries, so anything left here would be

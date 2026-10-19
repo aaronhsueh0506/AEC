@@ -36,6 +36,17 @@
  *   post   — derived (full.total_s - linear.total_s); an approximation of
  *            the AEC3 post-filter chain's own cost, not an independently
  *            timed stage.
+ *
+ * `--scene` and any mechanism whose cost depends on whether an adaptive
+ * filter's weight-update path actually runs (e.g. `--live-observer`):
+ * the default `noise` scene is continuous stationary white noise, which
+ * `block_stationary` (pbfdkf.c, the `if (p->block_stationary) { ...; return; }`
+ * early-out before the update math) classifies as stationary on every hop,
+ * so the update path never runs on that scene regardless of which filter is
+ * being measured. A cost number measured on `noise` is therefore a LOWER
+ * BOUND for any such mechanism, not its true cost — use `--scene bursts`
+ * (non-stationary far-end, so the classifier lets updates through) or a
+ * real `--wav` recording instead.
  */
 #include "aec.h"
 #include "wav_io.h"

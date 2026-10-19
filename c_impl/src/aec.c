@@ -1765,15 +1765,14 @@ static int aec_carve(Aec* a, uint8_t* ptr, const AecConfig* cfg,
     }
 
     /* Live observer (A21 Stage 2): third PBFDAF instance, same construction
-     * as the shadow filter above (borrows a->post_fft), EXCEPT:
-     *   - mu is cfg->live_observer_mu, not shadow_mu_nlms;
-     *   - constraint_round_robin is left at pbfdaf_init_static's own
-     *     default (0/off) -- Python's live observer never sets
-     *     `_constraint_round_robin` (orchestrator.py only sets it on
-     *     self.filter / self.shadow_filter), so it stays at the PBFDAF
-     *     class default (False), unlike the shadow filter just above.
-     * poor_excitation_counter is seeded the same as main/shadow (mirrors
-     * _seed_poor_excitation_counters() seeding all three in Python). */
+     * as the shadow filter above (borrows a->post_fft), EXCEPT mu is
+     * cfg->live_observer_mu, not shadow_mu_nlms. constraint_round_robin is
+     * set the same way as the shadow filter just above: amortizes the TD
+     * overlap-save constraint across hops (one partition re-zeroed per hop,
+     * cycling `partition_to_constrain`) instead of re-applying it to every
+     * partition every hop. poor_excitation_counter is seeded the same as
+     * main/shadow (mirrors _seed_poor_excitation_counters() seeding all
+     * three in Python). */
     if (cfg->live_observer_enabled) {
         size_t obs_sz = pbfdaf_get_mem_size(blk, np, hop, 1);
         if (pbfdaf_init_static(&a->observer_filter, ptr, obs_sz, blk, np,
@@ -1787,6 +1786,7 @@ static int aec_carve(Aec* a, uint8_t* ptr, const AecConfig* cfg,
         a->observer_filter.poor_excitation_counter = a->main_filter.base.poor_excitation_counter;
         a->observer_filter.saturated_capture = 0;
         a->observer_filter.lightweight = 1;
+        a->observer_filter.constraint_round_robin = 1;  /* AEC3 round-robin (observer) */
         a->has_observer = 1;
         ptr += obs_sz;
         a->observer_far_hop = (float*)ptr; ptr += ALIGN16((size_t)hop * sizeof(float));
