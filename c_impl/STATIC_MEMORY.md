@@ -80,14 +80,15 @@ build measured on the current host, at the default `delay_mode = MATCHED` /
 
 | Backend | 256 / 128 | 512 / 256 |
 |---|---:|---:|
-| KISS | 385,440 B | 513,968 B |
-| NE10 | 384,832 B | 512,592 B |
+| KISS | 400,480 B | 530,992 B |
+| NE10 | 399,872 B | 529,616 B |
 
-These four figures were re-measured on both backends after the linear filter
-took a per-partition `|X|²` mirror and a far-PSD hold into its own state (and
-gave back the far-power EMA array it no longer maintains), so each moved by
-+5,664 B at 256 / 128 and +5,120 B at 512 / 256. Every difference below is
-unchanged: the growth is per instance, not per delay filter.
+These four figures move with `Aec`/`AecConfig`'s own struct size whenever a
+field is added or removed, so they are re-measured fresh at each revision
+rather than carried forward — do not patch them by hand against a diff;
+re-run `aec_get_mem_size()` (or `make test-delay-num-filters`) and copy its
+output. Every difference below is unchanged across such moves: the growth or
+shrinkage is per instance, not per delay filter.
 
 The delay configuration moves these numbers, because the matched-filter bank,
 the down-sampled render ring and both lag histograms are carved from this same

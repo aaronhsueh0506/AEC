@@ -78,22 +78,30 @@ render/capture（per hop）
    > 不住」的原因。修復是讓 production 只回報 dominant peak（pre-echo 仍
    > 保留供 AEC3 對照與診斷），見 `test_delay_dominant_selection`。
 
-   > **下游保護原型已移除（2026-10-19）。** 上一段提到的 Path B 延遲變更
-   > 暫留原型曾經實作（Python／C／4ch 三端同語意，預設 OFF，關閉時
-   > byte-exact）並在 n=800 案例的經驗反事實上量過：擋下 0 個真實誤鎖、
+   > **下游保護原型已從本 repo 移除（2026-10-19）。** 上一段提到的 Path B
+   > 延遲變更暫留原型曾在本 repo 的 Python／C 兩端實作（語意相同，預設
+   > OFF，關閉時 byte-exact）並在 n=800 案例的經驗反事實上量過：擋下 0 個
+   > 真實誤鎖、
    > 卻新增 3 個假陽性（正常的延遲變更被多等一個窗）。淨負，依裁定移除；
    > 移除前的完整量測、暫留規則三件事與各實測表見 CHANGELOG
    > `### Removed`（2026-10-19）條目，本節不再重複維護那份已移除機制的
-   > 文件。下面這一條是從它的迴歸測試裡**附帶**發現、與機制本身無關、
-   > 但值得保留的 aggregator 根因鏈。
+   > 文件。**範圍僅本 repo**：`Audio_ALG/pipelines/4ch_aec_bf_nr_res` 的
+   > `FourAecNrResConfig` 自己有一組同名、同設計的延遲變更保護欄位
+   > （獨立重實作，不讀本 repo 的 `AecConfig`），本次移除未觸及，該
+   > pipeline 自己的 `tests/test_delay_parity.py` 窗長掃描列仍在——是否
+   > 連動移除屬另一個待裁定的範圍。下面這一條是從它的迴歸測試裡**附帶**
+   > 發現、與機制本身無關、但值得保留的 aggregator 根因鏈。
 
    **衍生發現（AMEND_35/37，2026-10-18）：aggregator 在近似 50/50 的
    dominant-peak tie 上，C／Python 兩個 port 對同一個 multipath 場景給出
    不同的鎖定結果，根因是隨機實現差異，不是 tie-break 邏輯不同。**
-   上面提到的保護原型的迴歸測試（已與機制一起移除）有一列 multipath／
-   新增路徑場景：舊反射留在 2400 樣本、新路徑在 1600 樣本（更早）以增益
+   上面提到的保護原型的迴歸測試（已與機制一起移除）在 16 kHz／fft 512／
+   hop 256、`enable_res=0`／`return_res_context=1` 的設定下有一列
+   multipath／新增路徑場景（2400 hop 觀察窗，新路徑於第 250 個 hop
+   加入）：舊反射留在 2400 樣本、新路徑在 1600 樣本（更早）以增益
    0.5 加入；當舊／新兩條路徑增益相等（g_old=0.5）時，aggregator 的
-   dominant-peak 投票幾乎正好是平手。全速延遲估計改為預設之後
+   dominant-peak 投票幾乎正好是平手（鎖定類別以 ±128 樣本為容忍帶）。
+   全速延遲估計改為預設之後
    （AMEND_35，2026-10-18，`delay_est_period_s` 由 0.5 s 節流改為 0.0 ＝
    不節流），這一列在 C 端兩個已測種子上一次落在舊路徑的鎖定類別、一次
    落在新路徑；而 Python 參照場景（等價的 g_old=0.5 設定）在 20 個種子的
