@@ -83,6 +83,11 @@ typedef struct AecConfig {
 
     /* toggles */
     int    enable_cng;             /* 1 */
+    /* CNG N2 tracker coordinate fix (mirrors python/modules/config.py's
+     * cng_n2_windowed_psd; see aec3_post.h for the mechanism). Default OFF
+     * (0, memset) -- isolated-harness-validated only, NOT yet run through
+     * the 800-case corpus gate this project requires before default-on. */
+    int    cng_n2_windowed_psd;    /* 0 */
     /* DEPRECATED translation-layer mirror of `delay_mode` (below). Kept so
      * pre-delay_mode callers keep compiling and behaving identically; it is
      * NOT a second source of truth. aec_config_resolve_delay() folds it into

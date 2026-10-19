@@ -49,6 +49,7 @@ void aec3_post_config_defaults(Aec3PostConfig *cfg) {
     cfg->erle_render_x2_psd_scale = 1;
     cfg->output_capture_when_linear_unusable = 1;
     cfg->enable_cng = 1;
+    cfg->cng_n2_windowed_psd = 0;   /* default OFF (NOT corpus-validated) */
     cfg->erle_coh_gate_alpha = 0.05f;
     cfg->erle_coh_gate_threshold = 0.5f;
     cfg->cng_y2_alpha = 0.23156652857908377f;
@@ -166,7 +167,14 @@ void aec3_post_compute_psds(Aec3Post *p, const Aec3PostAbs *mag) {
     psd_from_abs(mag->abs_far, nb, p->far_psd);
     psd_from_abs(mag->abs_sel_echo, nb, p->echo_psd);
     psd_from_abs(mag->abs_error, nb, p->error_psd);
-    if (p->cfg.erle_windowed_capture_psd) {
+    /* Shared producer: capture_psd_erle is the windowed capture PSD both
+     * erle_windowed_capture_psd (ERLE Y2/E2 consistency) and
+     * cng_n2_windowed_psd (CNG N2-tracker coordinate fix) read; form it
+     * whenever either flag needs it -- abs_nsw_e1 (the windowed near_spec_win
+     * magnitude) is already computed unconditionally in aec3_post_run's
+     * Step 2, in every mode, so this is just the squaring/scale pass, no
+     * extra FFT either flag pays for alone. */
+    if (p->cfg.erle_windowed_capture_psd || p->cfg.cng_n2_windowed_psd) {
         psd_from_abs(mag->abs_nsw_e1, nb, p->capture_psd_erle);
     }
 }
@@ -221,10 +229,21 @@ void aec3_post_compute_coherence(Aec3Post *p,
 void aec3_post_compute_comfort_noise(Aec3Post *p, int saturated_capture) {
     const Aec3PostConfig *c = &p->cfg;
     int nb = c->n_bins;
+    /* cng_n2_windowed_psd (default OFF, NOT corpus-validated): mirrors
+     * python/modules/orchestrator.py's _cng_input_psd select. AEC3's own
+     * ComfortNoiseGenerator reads its Y2 from the same windowed FFT as E2,
+     * not a rectangular one; near_psd here is rectangular, so the tracker's
+     * target runs ~3 dB high vs that reference coordinate. When set, read
+     * the windowed capture PSD already shared with erle_windowed_capture_psd
+     * (capture_psd_erle, populated above by aec3_post_compute_psds() whenever
+     * either flag is on) instead of near_psd; OFF reproduces the original
+     * near_psd-fed behaviour byte-for-byte. */
+    const float *cng_in = (c->cng_n2_windowed_psd) ? p->capture_psd_erle
+                                                    : p->near_psd;
     if (!p->noise_initialized) {
         /* straight copy -- memcpy is bit-exact by construction (no rounding
          * involved, so no NEON kernel is needed for this one). */
-        memcpy(p->y2_smoothed, p->near_psd, (size_t)nb * sizeof(float));
+        memcpy(p->y2_smoothed, cng_in, (size_t)nb * sizeof(float));
         p->noise_initialized = 1;
     }
     if (!saturated_capture) {
@@ -235,9 +254,9 @@ void aec3_post_compute_comfort_noise(Aec3Post *p, int saturated_capture) {
         float ia = c->cng_n2_initial_alpha;
         float nfloor = c->noise_floor_int16sq;
         int dur = c->cng_n2_initial_duration_hops;
-        /* delta-form EMA: y2_smoothed += y2a*(near_psd-y2_smoothed) --
+        /* delta-form EMA: y2_smoothed += y2a*(cng_in-y2_smoothed) --
          * sk_ema_delta_f32 mirrors the source's separate sub/mul/add. */
-        sk_ema_delta_f32(p->y2_smoothed, p->near_psd, y2a, nb);
+        sk_ema_delta_f32(p->y2_smoothed, cng_in, y2a, nb);
         if (p->n2_counter > c->cng_n2_update_onset_hops) {
             /* data-dependent track/up select on n2 -- sk_n2_track_f32. */
             sk_n2_track_f32(p->n2, p->y2_smoothed, fresh, retain, g_up, nb);
@@ -577,7 +596,8 @@ int aec3_post_run(Aec3Post *p,
      * uncomputed magnitude, so a future reader faults instead of silently
      * consuming the previous hop's scratch. The sibling abs_nsw_e1 pass is
      * deliberately NOT conditional: aec3_post_compute_psds() consumes it
-     * whenever erle_windowed_capture_psd is set, in every mode. */
+     * whenever erle_windowed_capture_psd OR cng_n2_windowed_psd is set, in
+     * every mode. */
     if (!in->context_only)
         sk_cabs_np_f32(sc->ybase, sc->abs_ybase, nb);
     mag.abs_near = sc->abs_near;

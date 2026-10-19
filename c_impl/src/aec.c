@@ -381,8 +381,9 @@ static int aec_validate_config(const AecConfig* cfg_in) {
 #define AEC_CK_RANGE_I(field, lo, hi) \
     do { if (cfg->field < (lo) || cfg->field > (hi)) return 0; } while (0)
 
-    /* toggles (15) — enable_delay_est is checked above, pre-translation. */
+    /* toggles (16) — enable_delay_est is checked above, pre-translation. */
     AEC_CK_BOOL(enable_cng);
+    AEC_CK_BOOL(cng_n2_windowed_psd);
     AEC_CK_BOOL(enable_highpass);
     AEC_CK_BOOL(enable_saturation);
     AEC_CK_BOOL(enable_shadow);
@@ -1836,6 +1837,7 @@ static int aec_carve(Aec* a, uint8_t* ptr, const AecConfig* cfg,
         pcfg.erle_render_x2_psd_scale    = AEC3B_ERLE_RENDER_X2_PSD_SCALE;
         pcfg.output_capture_when_linear_unusable = AEC3B_OUTPUT_CAPTURE_WHEN_LINEAR_UNUSABLE;
         pcfg.enable_cng                  = cfg->enable_cng;
+        pcfg.cng_n2_windowed_psd         = cfg->cng_n2_windowed_psd;
         pcfg.cng_n2_update_onset_hops    = rd->cng_n2_update_onset_hops;
         pcfg.cng_n2_initial_duration_hops = rd->cng_n2_initial_duration_hops;
         pcfg.cng_y2_alpha                = rd->cng_y2_alpha;

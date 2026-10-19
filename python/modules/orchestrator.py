@@ -3963,13 +3963,27 @@ class AEC:
         # ERLE-estimator only). E2 (error_psd) is windowed (_sel_esw); pair it
         # with a windowed Y2 = |near_spec_win|², where near_spec_win =
         # error_spec_windowed + echo_spec (same windowed-capture reconstruction
-        # the selection path uses above). None (default) → ERLE keeps near_psd.
-        _capture_psd_erle = None
-        if getattr(self.config, "erle_windowed_capture_psd", False):
+        # the selection path uses above).
+        # _near_psd_win is the SHARED producer: formed once whenever EITHER
+        # erle_windowed_capture_psd (this ERLE consumer) OR cng_n2_windowed_psd
+        # (the CNG N2-tracker consumer, further below) needs it — same FFT the
+        # selection path already computed, no duplicate work either flag pays
+        # for alone.
+        _near_psd_win = None
+        if (getattr(self.config, "erle_windowed_capture_psd", False)
+                or getattr(self.config, "cng_n2_windowed_psd", False)):
             _near_spec_win = (self.filter.error_spec_windowed
                               + self.filter.echo_spec).astype(np.complex64)
-            _capture_psd_erle = (np.abs(_near_spec_win) ** 2
-                                 * _PSD_SCALE).astype(np.float32)
+            _near_psd_win = (np.abs(_near_spec_win) ** 2
+                             * _PSD_SCALE).astype(np.float32)
+        # ERLE consumer stays gated on erle_windowed_capture_psd ALONE — a
+        # cng_n2_windowed_psd-only run must not also switch ERLE's coordinate.
+        # None (default) → ERLE keeps near_psd.
+        _capture_psd_erle = (
+            _near_psd_win
+            if getattr(self.config, "erle_windowed_capture_psd", False)
+            else None
+        )
         far_pwr = float(np.mean(far_end ** 2))
         # Render block is read by LowNoiseRenderDetector + SaturationDetector
         # using AEC3 absolute thresholds; rescale to int16 amplitude.
@@ -4491,9 +4505,24 @@ class AEC:
         # reshape artifact: real FS output energy is equal/quieter) and breaks
         # the FS_movement>3.5 bar. Kept as a documented CN-floor DT-deg lever for
         # the frontier phase, NOT default behaviour.
+        #
+        # cng_n2_windowed_psd (config.py; default OFF, NOT corpus-validated):
+        # AEC3's ComfortNoiseGenerator itself reads Y2 from the same windowed
+        # FFT as E2, not a rectangular one — this port's near_psd above is
+        # rectangular, so the tracker's target runs ~3 dB high vs that
+        # reference coordinate. When ON, re-point the tracker's own input
+        # (both the first-hop init and the per-hop EMA below) at the shared
+        # windowed capture PSD (_near_psd_win) formed above; OFF reproduces
+        # the original near_psd-fed behaviour byte-for-byte.
+        _cng_input_psd = (
+            _near_psd_win
+            if (getattr(self.config, "cng_n2_windowed_psd", False)
+                and _near_psd_win is not None)
+            else near_psd
+        )
         _saturated_capture = (self._saturation_level > 0.5)
         if not self._aec3_noise_initialized:
-            self._aec3_y2_smoothed = near_psd.copy().astype(np.float32)
+            self._aec3_y2_smoothed = _cng_input_psd.copy().astype(np.float32)
             self._aec3_noise_initialized = True
 
         if not _saturated_capture:
@@ -4502,7 +4531,7 @@ class AEC:
             _y2_alpha = self._aec3_cng_y2_alpha
             self._aec3_y2_smoothed = (
                 self._aec3_y2_smoothed
-                + _y2_alpha * (near_psd - self._aec3_y2_smoothed)
+                + _y2_alpha * (_cng_input_psd - self._aec3_y2_smoothed)
             ).astype(np.float32)
 
             # N2 update after warm-up (cc:167-176). When Y2_smoothed < N2:

@@ -15,7 +15,9 @@
  *        (+ erle_render_x2_psd_scale).
  *   4. coherence Γ²(Ŷ,Y) EMA + ERLE coh-gate mask   (erle_coh_gate, default ON)
  *   5. CNG N2 tracking → comfort_noise: y2_smoothed EMA, n2 track-down/
- *        slow-up, n2_initial transient, noise-floor clamp.
+ *        slow-up, n2_initial transient, noise-floor clamp. Input PSD is
+ *        near_psd by default, or the windowed-capture PSD from stage 2
+ *        when cng_n2_windowed_psd is set (default OFF).
  *   6. output-base select (output_capture_when_linear_unusable, |E|>|Y|
  *        guard), gain apply, CNG injection (LCG sin-table indices + sqrt(2)·
  *        sin LUT, DC/Nyquist zeroed), irfft, sqrt-Hann synth window, OLA.
@@ -89,6 +91,14 @@ typedef struct {
     int    erle_render_x2_psd_scale;         /* 1 */
     int    output_capture_when_linear_unusable; /* 1 */
     int    enable_cng;                       /* 1 */
+    /* CNG N2 tracker coordinate fix (mirrors python/modules/config.py's
+     * cng_n2_windowed_psd). Default OFF (0, NOT corpus-validated). When set,
+     * aec3_post_compute_comfort_noise() reads capture_psd_erle (the windowed
+     * capture PSD already shared with erle_windowed_capture_psd) instead of
+     * near_psd for the y2_smoothed init + per-hop EMA; requires
+     * aec3_post_compute_psds() to have populated capture_psd_erle this hop
+     * (gated on erle_windowed_capture_psd || cng_n2_windowed_psd, below). */
+    int    cng_n2_windowed_psd;              /* 0 */
 
     /* coherence Γ²(Ŷ,Y) EMA */
     float  erle_coh_gate_alpha;               /* 0.05 */
