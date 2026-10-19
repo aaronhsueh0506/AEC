@@ -561,7 +561,6 @@ cfg.enable_cng = 0;          /* 只覆寫你真的要改的 */
 | `delay_backward_quarantine_s` | `float` | `1.0` | 0 – 3600 | 上一項的隔離窗長（秒），在 `aec_create()` 時按解析後的 hop／取樣率換算成 estimation cycle 數（最小 1，所以小於一個 hop 的窗仍會隔離整整一個 cycle；要關閉請用上一列的 enable，不是把這裡設 0）。enable 為 0 時完全無作用。**預設 1.0 秒的依據**（16 kHz／hop 256 = 62 hops）：下限來自誤鎖動態——pre-echo 重鎖只在首次鎖定後 17 個 hop 就發生，窗必須明顯長於它才涵蓋得到誤鎖最具破壞力的那段（62 是 17 的 3.6 倍）；上限來自真實變化的成本——在多路徑測試場景中 estimator 自己產生新候選就要 488–1515 個 hop，多等 62 個 hop 是其中的 4–13%，而且只有在消除能力**沒有**崩掉時才需要等（崩掉就立即放行）。實測（16 kHz／fft 512／hop 256，true 6400 誤鎖 4800）：窗 0.5/1.0/2.0/4.0 s = 31/62/125/250 hops，誤鎖採用點就從 hop 49 精確移到 80/111/174/299——「到期即採用」是唯一的放行機制，沒有永久 veto 的路徑。 |
 | `delay_acquire_warm_transfer` | `int` | `1` | 0 / 1 | 首次擷取到延遲時，把已學到的回音模型平移過去而不是歸零，避免開場一秒左右出現一段明顯回音。建議維持開啟。 |
 | `delay_acquire_inst_erle_db` | `float` | `4.0` | -100 – 100 | 上一項的觸發門檻（dB）：既有模型要夠好才值得平移。 |
-| `delay_acquire_protect_inst_erle` | `int` | `0` | 0 / 1 | 另一種較保守的做法（直接擋掉重新對齊），預設關閉。 |
 
 > `delay_backward_quarantine_*` 的「有上限」指**同一段連續符合條件的
 > backward episode**：候選轉為 forward／無效、confidence 中斷，或

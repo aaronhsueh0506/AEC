@@ -286,21 +286,6 @@ class AecConfig:
     rsa_wallclock_persistence: bool = False
     rsa_mask_hold_ms: float = 96.0
     rsa_poor_excitation_hold_ms: float = 176.0
-    # ── Stage 4b (A21 plan section 七, P6): CNG window power compensation ──
-    # Default OFF, byte-equal when off. Comfort noise is a fresh,
-    # independent-per-hop draw windowed ONLY by the synthesis window before
-    # OLA (no paired analysis window the way the real signal path has one),
-    # so its realized output power is mean(synth_window^2) of its N2
-    # target (periodic sqrt-Hann at 50% overlap: 0.5, i.e. -3dB). Measured
-    # directly (a seeded-N2 A/B harness, not a synthetic far=0 clip, which
-    # does not reliably exercise CNG since gain stays near 1 with nothing
-    # to suppress): -2.36dB grid A, -4.03dB grid B, consistent with the
-    # analytic -3.01dB. When enabled, scales the comfort-noise amplitude by
-    # 1/sqrt(mean(synth_window^2)) before injection so its realized power
-    # matches its N2 target. Affects only the injected CN level (texture/
-    # masking), not SuppressionGain's own ENR/EMR ratios (those read
-    # `comfort_noise` directly, upstream of this compensation).
-    cng_window_power_compensation: bool = False
     # dt-protect ARMING source (which signal flips _dt_protect_active, i.e.
     # which of min_gain_floor_far_active_db / min_gain_floor_dt_db applies).
     # 'energy' (default, byte-equal): today's pre-filter mic-energy-excess
@@ -330,53 +315,17 @@ class AecConfig:
     # delay; it does not separate a sustained (multi-second) false arm from
     # a sustained true one, since both look the same by duration alone.
     dt_protect_confirm_ms: float = 0.0
-    # ── filter-independent per-bin echo evidence (residual/tail_evidence.py) ──
-    # Learns a per-bin lower-bound ratio between error power and a short-lag
-    # render-power accumulator on hops judged trustworthy, and feeds the
-    # result into R^2 as an upper bound only (max), never into the adaptive
-    # filter, delay estimator, or ERLE. Default OFF, byte-equal when off.
-    tail_evidence_enabled: bool = False
-    # Also feed the evidence into the UNBOUNDED R^2 (DominantNearendDetector's
-    # ENR input), not just the bounded one the gain rule uses. Off by default:
-    # raising the unbounded R^2 raises the ENR DNE sees, which changes how
-    # often dt-protect arms when dt_protect_source == 'dne' -- a cross-
-    # mechanism interaction that should be evaluated deliberately, not
-    # inherited silently from turning this flag on.
-    tail_evidence_feed_unbounded: bool = False
-    tail_evidence_strength: float = 1.0
-    # Band limit (Hz): bins at or above this are never given evidence. The
-    # deficit this model targets is low-frequency; mid/high bands already
-    # have adequate linear-filter ERLE on every recording measured so far.
-    tail_evidence_max_hz: float = 1000.0
-    # Which index into ResidualEchoEstimator._reverb_render_history supplies
-    # the per-hop render power (0 = current hop, 1 = one hop ago, ...). This
-    # buffer is the DELAY-ALIGNED render (past relative to the filter's own
-    # read position); it has no realizable index ahead of "now", so 0 is the
-    # closest it can get to a short lag. NOT the same lag the existing
-    # reverb-tail path uses (n_partitions+1, i.e. one filter-span past the
-    # window).
-    tail_evidence_lag_hops: int = 0
-    # AEC3-style per-4ms-block decay for the render-tail accumulator
-    # (0.83 = the existing reverb model's own default decay).
-    tail_evidence_decay_per_4ms: float = 0.83
-    tail_evidence_g_max: float = 10.0
-    # Symmetric log-domain EMA time constant (ms) for the evidence level:
-    # alpha = exp(-hop_ms / tau_ms). This tracks a ROBUST CENTRAL estimate
-    # of the observed ratio, not a lower bound -- see tail_evidence.py's
-    # module docstring for why a min-statistics tracker does not work here.
-    tail_evidence_ema_tau_ms: float = 500.0
-    tail_evidence_warmup_ms: float = 250.0
     # ── live LF-only early-shifted observer filter (residual/tail_observer.py) ──
     # A second, independent NLMS filter (same partition count as the main
     # filter) that reads the far-end ring `live_observer_shift_ms` EARLIER
     # than the main filter's own delay-compensated read, so it covers the
     # span just ahead of today's window instead of the span today's window
-    # already covers. Built after tail_evidence.py's Design A (a scalar per
-    # bin) was found structurally insufficient for a multi-tap echo path --
-    # this observer models a real span of taps instead. It never subtracts
-    # from the output, never touches the delay estimator, ERLE, or the main
-    # filter's own window -- only `max(r2, evidence)`, the same injection
-    # tail_evidence.py uses. The "shift earlier" is the same window
+    # already covers. A scalar per-bin echo-evidence accumulator was found
+    # structurally insufficient for a multi-tap echo path -- this observer
+    # models a real span of taps instead. It never subtracts from the
+    # output, never touches the delay estimator, ERLE, or the main filter's
+    # own window -- only `max(r2, evidence)`. The "shift earlier" is the
+    # same window
     # relocation the rejected main-filter "headroom" change made, applied to
     # this separate, output-less filter instead -- see
     # SE/.research/2026-10-16/a21/DIAG_PLAN_AMEND_6.md and the fable/opus
@@ -631,11 +580,6 @@ class AecConfig:
     # the gate threshold for delay_acquire_warm_transfer below (warm only fires
     # when the filter was genuinely cancelling, peak > this).
     delay_acquire_inst_erle_db: float = 4.0
-    # REJECTED option-A substrate (default-OFF): use the inst-ERLE peak to BLOCK the
-    # first realign entirely. A/B'd on 800-case — echo cost not cleanly gateable
-    # (165 cases fire, 15 >1 dB, corr(delay,cost)≈0). Superseded by warm transfer
-    # (which keeps the realign but preserves cancellation). Kept for reference.
-    delay_acquire_protect_inst_erle: bool = False
 
     # DEFAULT OFF. Backward-jump quarantine on a delay CHANGE (Path B), the
     # sibling of delay_acquire_protect_converged above (which guards only the
@@ -999,49 +943,11 @@ class AecConfig:
                 f"dt_protect_source must be 'energy' or 'dne', got "
                 f"{self.dt_protect_source!r}"
             )
-        # Upper bound mirrors residual_echo_estimator.py's
-        # `_DELAY_BUF_SIZE = 16` (the `_reverb_render_history` deque's
-        # maxlen, not importable here without a circular import). At
-        # lag_hops >= 16 the deque's length (capped at 16) can never reach
-        # it, so `_tail_evidence.update()` is never called and
-        # tail_evidence_enabled=True silently becomes a permanent no-op --
-        # no error, no warning, evidence() always reads zero.
-        if not 0 <= self.tail_evidence_lag_hops < 16:
-            raise ValueError(
-                f"tail_evidence_lag_hops must be in [0, 16), got "
-                f"{self.tail_evidence_lag_hops}"
-            )
-        if not 0.0 < self.tail_evidence_decay_per_4ms < 1.0:
-            # Exclusive upper bound: at exactly 1.0 the per-hop decay factor
-            # is 1.0 too (per_block_growth_to_per_hop(1.0, ...) == 1.0), so
-            # `self.U = (self.U + x2_tail) * self._decay` in tail_evidence.py
-            # stops decaying at all and becomes an unbounded all-time
-            # accumulator instead of the "physical render-tail tracker"
-            # the module's own docstring describes -- not the half-open
-            # (0, 1] this previously accepted.
-            raise ValueError(
-                f"tail_evidence_decay_per_4ms must be in (0, 1), got "
-                f"{self.tail_evidence_decay_per_4ms}"
-            )
-        # Strictly > 0 (not >= 0): tail_evidence.py's _log_g_max =
-        # log10(g_max) is one of a clip pair with _log_g_min (~-6). At
-        # g_max=0.0, log10(0.0) == -inf, which is BELOW _log_g_min, so
-        # np.clip's lower bound ends up greater than its upper bound --
-        # numpy's documented behaviour for that case silently collapses
-        # every clipped value to a constant (the upper bound) regardless
-        # of the real observation, with no error raised.
-        if self.tail_evidence_g_max <= 0:
-            raise ValueError(
-                f"tail_evidence_g_max must be > 0, got "
-                f"{self.tail_evidence_g_max}"
-            )
         # One >= 0 loop for every non-negative-only duration/count/strength
-        # field across dt_protect/tail_evidence/live_observer -- two
-        # standalone checks plus two separate per-group loops, all the same
-        # shape, were added across two review passes; folded into one.
+        # field across dt_protect/live_observer -- two standalone checks
+        # plus two separate per-group loops, all the same shape, were added
+        # across two review passes; folded into one.
         for _name in ('dt_protect_extra_hold_ms', 'dt_protect_confirm_ms',
-                      'tail_evidence_strength', 'tail_evidence_max_hz',
-                      'tail_evidence_ema_tau_ms', 'tail_evidence_warmup_ms',
                       'live_observer_shift_ms', 'live_observer_max_hz',
                       'live_observer_corrob_ms', 'live_observer_inject_dt_energy_max'):
             if getattr(self, _name) < 0:

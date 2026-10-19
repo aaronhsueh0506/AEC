@@ -141,11 +141,9 @@ void aec_config_defaults(AecConfig* cfg, int sr) {
     cfg->kalman_q_high = 1e-3f;
     cfg->kalman_q_low = 1e-6f;
     cfg->delay_acquire_protect_converged = 1;
-    /* Warm tap-transfer (default ON) + its gate threshold; block realign
-     * (option A) default OFF. Mirrors config.py. */
+    /* Warm tap-transfer (default ON) + its gate threshold. Mirrors config.py. */
     cfg->delay_acquire_warm_transfer = 1;
     cfg->delay_acquire_inst_erle_db = 4.0f;
-    cfg->delay_acquire_protect_inst_erle = 0;
     cfg->delay_backward_quarantine_enabled = 0;
     cfg->delay_backward_quarantine_s = 1.0f;
     /* DT-deg recovery stack (default ON, mirrors Python). */
@@ -393,7 +391,6 @@ static int aec_validate_config(const AecConfig* cfg_in) {
     AEC_CK_RANGE_I(spatial_linear_context, 0, AEC_CONTEXT_LINEAR_ONLY);
     AEC_CK_BOOL(delay_acquire_protect_converged);
     AEC_CK_BOOL(delay_acquire_warm_transfer);
-    AEC_CK_BOOL(delay_acquire_protect_inst_erle);
     AEC_CK_BOOL(delay_backward_quarantine_enabled);
     AEC_CK_BOOL(dt_aware_recovery_soft);
     AEC_CK_BOOL(dt_aware_res_floor_enabled);
@@ -2848,10 +2845,6 @@ static void aec_process_core(Aec* a, const float* mic_in, const float* ref_in,
         /* Path A — first acquisition. */
         int already_cancelling = a->cfg.delay_acquire_protect_converged
                                  && (a->last_erle_windowed > 2.5f);
-        /* option-A (default-OFF): also protect via inst-ERLE peak (orch 1387). */
-        if (a->cfg.delay_acquire_protect_inst_erle
-                && aec_erle_ring_max_last15(a) > a->cfg.delay_acquire_inst_erle_db)
-            already_cancelling = 1;
         if (eligible && a->current_delay < 0 && delay_aec3_is_solid(&a->delay)
                 && !already_cancelling) {
             a->current_delay = new_delay;
