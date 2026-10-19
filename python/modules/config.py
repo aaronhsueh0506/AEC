@@ -365,6 +365,30 @@ class AecConfig:
     # reverting this fix. AEC_ERLE_Y2_WIN=0 forces OFF (reproduces old baseline).
     erle_windowed_capture_psd: bool = True
 
+    # ── CNG N2 tracker coordinate fix (windowed capture PSD input) ──
+    # A distinct bug from the one above, in the SAME family: AEC3's
+    # ComfortNoiseGenerator (comfort_noise_generator.cc) estimates its noise
+    # target from Y2 formed via WindowedPaddedFft(kSqrtHanning) — the SAME
+    # windowed FFT the subtractor forms E2 from, not a rectangular one. This
+    # port's N2/N2_initial tracker (below, in _aec3_post) is fed from
+    # near_psd, the RECTANGULAR |near_spec|² — so the tracker's own target
+    # coordinate runs ~3 dB too high relative to AEC3's windowed reference
+    # (confirmed by an isolated seeded-N2 measurement against the windowed
+    # Y2_smoothed quantity erle_windowed_capture_psd already forms above).
+    # The CNG synthesis/injection path's window-loss compensation (the
+    # kSqrt2Sin-style scaling) already assumes its N2 input sits in the
+    # windowed coordinate, so an unwindowed-fed N2 overshoots there too — the
+    # fix belongs upstream, at the tracker's input, not as an output-side
+    # compensation factor. When ON, re-point the tracker (both the
+    # first-hop y2_smoothed init and the per-hop EMA) at the SAME windowed
+    # capture PSD shared with erle_windowed_capture_psd above (no second
+    # FFT — reuses error_spec_windowed + echo_spec unconditionally formed
+    # per hop). DEFAULT OFF: validated only via an isolated seeded-N2 A/B
+    # harness (scratch, not committed), NOT yet run through the 800-case
+    # corpus gate this project requires before a default-on promotion — do
+    # not flip this default without that gate.
+    cng_n2_windowed_psd: bool = False
+
     # ── v3.22 E2: output base = raw capture Y when the linear filter is unusable ─
     # AEC3 (echo_remover.cc:475) forms the output from `UseLinearFilterOutput()
     # ? E : Y` — when the linear filter is NOT usable it applies the suppression
