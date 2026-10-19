@@ -233,11 +233,21 @@ typedef struct AecConfig {
     /* ne_recent gate parameters (mirror AecConfig.ne_recent_*). threshold is
      * float32 (f32/f64 drift across this threshold versus Python is accepted).
      * ne_recent_hold is wall-clock-authored @ 10 ms hop and retimed live in
-     * aec_carve(); ne_recent_sustain is a consecutive-event count (NOT a
-     * duration) and is left unretimed. */
+     * aec_carve(). ne_recent_sustain's name suggests a consecutive-event
+     * count, but its consumer (ne_above in aec_process(), no skip on
+     * non-qualifying hops) makes N consecutive hops unconditionally N hops
+     * of wall-clock time -- a duration, not an event count. It is still
+     * left unretimed: the three shipped grids' current "3 hops" already
+     * cover three different spans (24/48/32 ms), so there is no single
+     * canonical ms this field was ever validated at, and a measured 300-case
+     * farend-singletalk Rule-A battery showed that retiming it the generic
+     * way regresses the 16 kHz/256-hop grid (loosens 3 hops/48 ms to
+     * 2 hops/32 ms). A grid-A-only tightening to 4 hops is the better-
+     * targeted fix and is not applied here (see config.py's field comment
+     * for the fuller writeup). */
     float  ne_recent_threshold;               /* 0.3 */
     int    ne_recent_hold;                    /* 150 hops = 1500 ms @ 10 ms hop */
-    int    ne_recent_sustain;                 /* 3 (event count, not retimed) */
+    int    ne_recent_sustain;                 /* 3 (left unretimed; see comment above) */
 
     /* preset strength axis (the ONLY field mild/balanced/aggressive differ
      * in): SuppressionGain far-active min-gain floor in dB

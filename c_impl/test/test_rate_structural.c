@@ -963,17 +963,23 @@ static void test_top_level_constant_retiming(void) {
         aec_destroy(&aec);
     }
 
-    /* ne_recent_sustain: genuine consecutive-event count, NOT a duration --
-     * confirm it stays the untouched literal 3 at every grid (the negative
-     * space of this test: proving it was correctly left OUT of the
-     * retiming batch, not merely that it wasn't exercised above). */
+    /* ne_recent_sustain: its consumer has no skip condition, so N
+     * consecutive hops is unconditionally N hops of wall-clock time -- a
+     * duration, not a true event count. It still stays the untouched
+     * literal 3 at every grid: the three shipped grids' current "3 hops"
+     * already cover three different spans (24/48/32 ms), a measured
+     * 300-case farend-singletalk Rule-A battery showed that retiming it the
+     * generic (single canonical-ms) way regresses the 16 kHz/256-hop grid,
+     * and a grid-A-only fix needs its own dedicated battery (see
+     * config.py's field comment). Confirms it was correctly left OUT of the
+     * retiming batch above, not merely that it wasn't exercised there. */
     for (int r = 0; r < N_GRIDS; ++r) {
         AecConfig cfg;
         aec_config_from_preset(&cfg, AEC_PRESET_BALANCED, GRIDS[r].sample_rate);
         cfg.fft_size = GRIDS[r].fft_size;
         char what[128];
         snprintf(what, sizeof(what),
-                 "sr=%d fft=%d: ne_recent_sustain stays literal 3 (event count, not retimed)",
+                 "sr=%d fft=%d: ne_recent_sustain stays literal 3 (not retimed; see comment)",
                  GRIDS[r].sample_rate, GRIDS[r].fft_size);
         CHECK(cfg.ne_recent_sustain == 3, what);
     }

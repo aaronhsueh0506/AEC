@@ -86,7 +86,7 @@ pre code{background:none;padding:0}
 <tr><td><code>min_gain_floor_dt_db</code></td><td><b>−20.0</b></td><td><code>[-300,50]</code></td><td>DT 期間改用的較淺地板,比 balanced far-active 地板高 8 dB → 保護近端語音。<b>mild/balanced 相同</b>,aggressive 深化到 −30.0</td></tr>
 <tr><td><code>ne_recent_threshold</code></td><td>0.3</td><td><code>[0,1000]</code></td><td>超過才算「近端剛出現」。只讀 energy DT；遠端單講時通常很低，但 loud residual echo 仍可能誤觸，這也是 DT floor 不能無限制調淺的原因。</td></tr>
 <tr><td><code>ne_recent_hold</code></td><td>150 hops(1500 ms)</td><td><code>[0,1e6]</code></td><td>觸發後 hold 多久。會 retime</td></tr>
-<tr><td><code>ne_recent_sustain</code></td><td>3</td><td><code>[0,1e6]</code></td><td>需連續幾 hop 超門檻才 arm。<b>事件計數,刻意不 retime</b></td></tr>
+<tr><td><code>ne_recent_sustain</code></td><td>3</td><td><code>[0,1e6]</code></td><td>需連續幾 hop 超門檻才 arm。每 hop 必定遞增或歸零,<b>其實是時長、不是真的事件計數</b>;但三個格點目前各自已驗證的「3 hop」對應三種不同時長,換算成單一時長會讓 16kHz/512 格點新增回音誤觸發(已用 300 案驗證),故仍<b>刻意不 retime</b></td></tr>
 <tr><td><code>dt_aware_recovery_soft</code></td><td>1</td><td>0/1</td><td>近端剛出現時走軟性 realign,避免 DT 中把濾波器打掉</td></tr>
 <tr><td colspan="4" style="background:#eef5f0"><b>飽和 / CNG</b></td></tr>
 <tr><td><code>enable_saturation</code></td><td>1</td><td>0/1</td><td>建構 ref/mic 飽和偵測器</td></tr>
