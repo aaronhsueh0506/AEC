@@ -93,10 +93,10 @@ typedef struct {
     int    enable_cng;                       /* 1 */
     /* CNG N2 tracker coordinate fix (mirrors python/modules/config.py's
      * cng_n2_windowed_psd). Default OFF (0, NOT corpus-validated). When set,
-     * aec3_post_compute_comfort_noise() reads capture_psd_erle (the windowed
+     * aec3_post_compute_comfort_noise() reads capture_psd_win (the windowed
      * capture PSD already shared with erle_windowed_capture_psd) instead of
      * near_psd for the y2_smoothed init + per-hop EMA; requires
-     * aec3_post_compute_psds() to have populated capture_psd_erle this hop
+     * aec3_post_compute_psds() to have populated capture_psd_win this hop
      * (gated on erle_windowed_capture_psd || cng_n2_windowed_psd, below). */
     int    cng_n2_windowed_psd;              /* 0 */
 
@@ -200,7 +200,7 @@ typedef struct {
     float   *far_psd;              /* [n_bins] */
     float   *echo_psd;             /* [n_bins] */
     float   *error_psd;            /* [n_bins] */
-    float   *capture_psd_erle;     /* [n_bins] */
+    float   *capture_psd_win;     /* [n_bins] */
     float   *x2_reverb_for_erle;   /* [n_bins] */
     unsigned char *coh_gate_mask;  /* [n_bins] */
     float   *comfort_noise;        /* [n_bins] (== n2 or n2_initial alias copy) */
@@ -246,7 +246,7 @@ void aec3_post_init(Aec3Post *p, const Aec3PostConfig *cfg,
                     float *coh_syy, float *coh_see,
                     float *ola_buf,
                     float *near_psd, float *far_psd, float *echo_psd,
-                    float *error_psd, float *capture_psd_erle,
+                    float *error_psd, float *capture_psd_win,
                     float *x2_reverb_for_erle, unsigned char *coh_gate_mask,
                     float *comfort_noise, float *nf,
                     Complex *e_out_spec, float *e_out_full);
@@ -295,7 +295,7 @@ typedef struct {
  *   out                    : float[hop_size] result (caller-owned).
  *
  * After the call, the driver-derived intermediates live in p->near_psd /
- * far_psd / echo_psd / error_psd / capture_psd_erle / x2_reverb_for_erle /
+ * far_psd / echo_psd / error_psd / capture_psd_win / x2_reverb_for_erle /
  * coh_gate_mask / comfort_noise (for the per-stage parity assertion). */
 void aec3_post_process(Aec3Post *p,
                        const Complex *near_spec,
@@ -319,7 +319,7 @@ void aec3_post_process(Aec3Post *p,
  * calls them in sequence so the driver-only parity test stays byte-equal.
  * ──────────────────────────────────────────────────────────────────────── */
 
-/* Stage 1-2: near/far/echo/error PSDs + capture_psd_erle. */
+/* Stage 1-2: near/far/echo/error PSDs + capture_psd_win. */
 void aec3_post_compute_psds(Aec3Post *p, const Aec3PostAbs *mag);
 
 /* Stage 3: avg-render-reverb → p->x2_reverb_for_erle (only when x2_present). */

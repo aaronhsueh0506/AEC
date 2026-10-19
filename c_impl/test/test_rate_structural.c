@@ -963,16 +963,10 @@ static void test_top_level_constant_retiming(void) {
         aec_destroy(&aec);
     }
 
-    /* ne_recent_sustain: its consumer has no skip condition, so N
-     * consecutive hops is unconditionally N hops of wall-clock time -- a
-     * duration, not a true event count. It still stays the untouched
-     * literal 3 at every grid: the three shipped grids' current "3 hops"
-     * already cover three different spans (24/48/32 ms), a measured
-     * 300-case farend-singletalk Rule-A battery showed that retiming it the
-     * generic (single canonical-ms) way regresses the 16 kHz/256-hop grid,
-     * and a grid-A-only fix needs its own dedicated battery (see
-     * config.py's field comment). Confirms it was correctly left OUT of the
-     * retiming batch above, not merely that it wasn't exercised there. */
+    /* ne_recent_sustain stays the untouched literal 3 at every grid --
+     * deliberately, see config.py's field comment for why. Confirms it was
+     * correctly left OUT of the retiming batch above, not merely that it
+     * wasn't exercised there. */
     for (int r = 0; r < N_GRIDS; ++r) {
         AecConfig cfg;
         aec_config_from_preset(&cfg, AEC_PRESET_BALANCED, GRIDS[r].sample_rate);

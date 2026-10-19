@@ -2025,17 +2025,14 @@ class AEC:
                         # AMEND_34: erle_windowed alone cannot tell
                         # "demonstrated worse" from "the filter has not
                         # produced a real echo estimate at the new alignment
-                        # yet" -- both read ~0 dB either way (confirmed on a
-                        # multipath scene formerly pinned by a now-removed
-                        # delay-change regression test (see CHANGELOG's
-                        # 2026-10-19 Removed entry): a deliberately minimal
-                        # enable_res=False config where
-                        # raw_error_power == near_power EXACTLY, bit for bit,
-                        # for 100+ hops post-shift, because the echo estimate
-                        # is the literal zero vector there -- IEEE754 makes
+                        # yet" -- both read ~0 dB either way. On a multipath
+                        # scene with enable_res=False, raw_error_power ==
+                        # near_power EXACTLY, bit for bit, for 100+ hops
+                        # post-shift, because the echo estimate is the
+                        # literal zero vector there -- IEEE754 makes
                         # near - 0.0 == near exact, not approximate -- so an
-                        # unguarded erle-only check reverted a shift the test
-                        # expects to stick). Require the echo estimate to be
+                        # unguarded erle-only check would revert a shift that
+                        # should stick. Require the echo estimate to be
                         # demonstrably non-zero (raw_error_power measurably
                         # below near_power) before trusting the dB reading at
                         # all; no real estimate yet means no verdict, keep
@@ -2268,10 +2265,8 @@ class AEC:
                         # of this reused that shorter constant and judged
                         # genuine, still-reconverging good relocks as bad
                         # before they'd had their documented recovery time,
-                        # breaking the forward-move and multipath rows of the
-                        # now-removed delay-change regression test that used
-                        # to pin this (see CHANGELOG's 2026-10-19 Removed
-                        # entry). If erle_windowed is more
+                        # on the forward-move and multipath rows this value
+                        # is tuned against. If erle_windowed is more
                         # than 1 dB WORSE than just before the shift by then
                         # (not merely "not yet better" -- a relock that is
                         # simply slow to pay off is not what this guards
@@ -4342,24 +4337,16 @@ class AEC:
                 _stationary_mask, 0.0, r2_unb
             ).astype(np.float32)
 
-        # Read-only gate for the live observer below: a live-adapting echo
-        # estimator must not learn on double-talk hops, and must not be
-        # gated on the live dt-protect flag (plan section 0.5). Computed
-        # once, unconditionally -- all three getters (is_active /
-        # usable_linear_estimate / is_dominant_nearend) are side-effect-free,
-        # so paying for this when the flag is off costs nothing worth
-        # gating on.
-        _trustworthy = bool(
-            self._render_activity.is_active
-            and self._aec3_state.usable_linear_estimate()
-            and not self._aec3_sg.is_dominant_nearend()
-        )
-
         # Live LF-only early-shifted observer filter (residual/tail_observer.py
-        # design note; AecConfig.live_observer_*). Uses _trustworthy above
-        # for the same reason.
+        # design note; AecConfig.live_observer_*). Read-only gate: a live-
+        # adapting echo estimator must not learn on double-talk hops, and
+        # must not be gated on the live dt-protect flag (plan section 0.5).
         if getattr(self.config, 'live_observer_enabled', False):
-            _lo_trustworthy = _trustworthy
+            _lo_trustworthy = bool(
+                self._render_activity.is_active
+                and self._aec3_state.usable_linear_estimate()
+                and not self._aec3_sg.is_dominant_nearend()
+            )
             _lo_mu_scale = 1.0 if _lo_trustworthy else 0.0
             # Diagnostic-only (no effect on r2/control flow): exposes the
             # lagged DNE verdict _lo_trustworthy folds in, so a trace can
@@ -4465,18 +4452,15 @@ class AEC:
         # the FS_movement>3.5 bar. Kept as a documented CN-floor DT-deg lever for
         # the frontier phase, NOT default behaviour.
         #
-        # cng_n2_windowed_psd (config.py; default OFF, NOT corpus-validated):
-        # AEC3's ComfortNoiseGenerator itself reads Y2 from the same windowed
-        # FFT as E2, not a rectangular one — this port's near_psd above is
-        # rectangular, so the tracker's target runs ~3 dB high vs that
-        # reference coordinate. When ON, re-point the tracker's own input
-        # (both the first-hop init and the per-hop EMA below) at the shared
-        # windowed capture PSD (_near_psd_win) formed above; OFF reproduces
-        # the original near_psd-fed behaviour byte-for-byte.
+        # cng_n2_windowed_psd (default OFF, NOT corpus-validated): see
+        # config.py's field comment for why. When ON, re-point the tracker's
+        # own input (both the first-hop init and the per-hop EMA below) at
+        # the shared windowed capture PSD (_near_psd_win, always formed
+        # above when this flag is on); OFF reproduces the original
+        # near_psd-fed behaviour byte-for-byte.
         _cng_input_psd = (
             _near_psd_win
-            if (getattr(self.config, "cng_n2_windowed_psd", False)
-                and _near_psd_win is not None)
+            if getattr(self.config, "cng_n2_windowed_psd", False)
             else near_psd
         )
         _saturated_capture = (self._saturation_level > 0.5)

@@ -75,7 +75,7 @@ void aec3_post_init(Aec3Post *p, const Aec3PostConfig *cfg,
                     float *coh_syy, float *coh_see,
                     float *ola_buf,
                     float *near_psd, float *far_psd, float *echo_psd,
-                    float *error_psd, float *capture_psd_erle,
+                    float *error_psd, float *capture_psd_win,
                     float *x2_reverb_for_erle, unsigned char *coh_gate_mask,
                     float *comfort_noise, float *nf,
                     Complex *e_out_spec, float *e_out_full) {
@@ -107,7 +107,7 @@ void aec3_post_init(Aec3Post *p, const Aec3PostConfig *cfg,
     p->far_psd = far_psd;
     p->echo_psd = echo_psd;
     p->error_psd = error_psd;
-    p->capture_psd_erle = capture_psd_erle;
+    p->capture_psd_win = capture_psd_win;
     p->x2_reverb_for_erle = x2_reverb_for_erle;
     p->coh_gate_mask = coh_gate_mask;
     p->comfort_noise = comfort_noise;
@@ -160,14 +160,14 @@ static void psd_from_abs(const float *mag, int n, float *out) {
     sk_sq_scale_f32(mag, (float)PSD_SCALE, out, n);
 }
 
-/* ── stage 1-2: PSDs (+ capture_psd_erle) ────────────────────────────── */
+/* ── stage 1-2: PSDs (+ capture_psd_win) ────────────────────────────── */
 void aec3_post_compute_psds(Aec3Post *p, const Aec3PostAbs *mag) {
     int nb = p->cfg.n_bins;
     psd_from_abs(mag->abs_near, nb, p->near_psd);
     psd_from_abs(mag->abs_far, nb, p->far_psd);
     psd_from_abs(mag->abs_sel_echo, nb, p->echo_psd);
     psd_from_abs(mag->abs_error, nb, p->error_psd);
-    /* Shared producer: capture_psd_erle is the windowed capture PSD both
+    /* Shared producer: capture_psd_win is the windowed capture PSD both
      * erle_windowed_capture_psd (ERLE Y2/E2 consistency) and
      * cng_n2_windowed_psd (CNG N2-tracker coordinate fix) read; form it
      * whenever either flag needs it -- abs_nsw_e1 (the windowed near_spec_win
@@ -175,7 +175,7 @@ void aec3_post_compute_psds(Aec3Post *p, const Aec3PostAbs *mag) {
      * Step 2, in every mode, so this is just the squaring/scale pass, no
      * extra FFT either flag pays for alone. */
     if (p->cfg.erle_windowed_capture_psd || p->cfg.cng_n2_windowed_psd) {
-        psd_from_abs(mag->abs_nsw_e1, nb, p->capture_psd_erle);
+        psd_from_abs(mag->abs_nsw_e1, nb, p->capture_psd_win);
     }
 }
 
@@ -235,10 +235,10 @@ void aec3_post_compute_comfort_noise(Aec3Post *p, int saturated_capture) {
      * not a rectangular one; near_psd here is rectangular, so the tracker's
      * target runs ~3 dB high vs that reference coordinate. When set, read
      * the windowed capture PSD already shared with erle_windowed_capture_psd
-     * (capture_psd_erle, populated above by aec3_post_compute_psds() whenever
+     * (capture_psd_win, populated above by aec3_post_compute_psds() whenever
      * either flag is on) instead of near_psd; OFF reproduces the original
      * near_psd-fed behaviour byte-for-byte. */
-    const float *cng_in = (c->cng_n2_windowed_psd) ? p->capture_psd_erle
+    const float *cng_in = (c->cng_n2_windowed_psd) ? p->capture_psd_win
                                                     : p->near_psd;
     if (!p->noise_initialized) {
         /* straight copy -- memcpy is bit-exact by construction (no rounding
@@ -751,7 +751,7 @@ int aec3_post_run(Aec3Post *p,
                                  sc->render_block_scaled, hop,
                                  in->filter_taps_full, in->filter_taps_full_len,
                                  x2r_present_state ? p->x2_reverb_for_erle : NULL,
-                                 c->erle_windowed_capture_psd ? p->capture_psd_erle : NULL,
+                                 c->erle_windowed_capture_psd ? p->capture_psd_win : NULL,
                                  in->erle_coh_gate_enabled ? p->coh_gate_mask : NULL);
             }
 

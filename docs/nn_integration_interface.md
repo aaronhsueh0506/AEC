@@ -126,8 +126,8 @@ such an adoption (a prototype was measured and removed 2026-10-19 — see
 CHANGELOG `### Removed`), so a consumer must not treat a post-`CHANGED`
 `LOCKED` as proof the alignment is correct — flush far feature rings on
 `generation` movement regardless. A consumer that owns its own estimator can
-ask the engine the same "is this lane still cancelling" question the guard
-uses, via the read-only `aec_linear_is_cancelling(const Aec*)` (`aec.h`);
+ask the engine the same "is this lane still cancelling" question the engine
+asks of itself, via the read-only `aec_linear_is_cancelling(const Aec*)` (`aec.h`);
 it returns 0 when the ERLE machinery has not run, i.e. absence of evidence,
 never a claim that the filter is broken.
 

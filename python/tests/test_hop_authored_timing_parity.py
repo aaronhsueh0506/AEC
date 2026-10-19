@@ -17,14 +17,8 @@ Fix: retimed via ``aec3_scale.ms_to_hops``/``aec3_scale.growth_rehop`` in
 ``AecConfig.__post_init__`` (hop-count fields) and
 ``EchoPathChangeDetector.__init__`` (EPV_FAST_TC/EPV_SLOW_TC, now real
 constructor parameters -- ``hop_size``/``sample_rate`` were previously not
-parameters at all). ``ne_recent_sustain`` is NOT a genuine event count --
-its consumer (``_ne_above``) has no skip condition, so N consecutive hops
-is unconditionally N hops of wall-clock time -- but it is still left
-unretimed: the three shipped grids' current "3 hops" already cover three
-different spans (24/48/32 ms), so there is no single canonical ms this
-field was ever validated at, and a measured 300-case farend-singletalk
-Rule-A battery showed that retiming it the generic way regresses the
-16k/512 grid. See config.py's field comment for the fuller writeup.
+parameters at all). ``ne_recent_sustain`` is deliberately left unretimed --
+see config.py's field comment for why.
 
 Run:
     python3 -m pytest python/tests/test_hop_authored_timing_parity.py
@@ -159,13 +153,9 @@ class TopLevelConstantRetimingTests(unittest.TestCase):
         self.assertEqual(det_explicit._epv_slow_tc, det_implicit._epv_slow_tc)
 
     def test_ne_recent_sustain_is_not_retimed(self) -> None:
-        """Negative-space check: ne_recent_sustain's consumer has no skip
-        condition, so it IS a duration in disguise (not a genuine event
-        count) -- but it stays the literal 3 at every grid anyway, because
-        the three shipped grids' current "3 hops" already cover three
-        different spans (24/48/32 ms) and a measured 300-case Rule-A
-        battery showed that routing it through the generic canonical-ms
-        retime regresses the 16k/512 grid. See config.py's field comment."""
+        """Negative-space check: ne_recent_sustain stays the literal 3 at
+        every grid, deliberately left unretimed. See config.py's field
+        comment for why."""
         for sr, fs in GRIDS:
             cfg = self._cfg(sr, fs)
             self.assertEqual(
