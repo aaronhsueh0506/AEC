@@ -178,15 +178,13 @@ typedef struct AecConfig {
     int    delay_acquire_protect_converged;   /* 1 */
     /* Warm tap-transfer on first delay acquisition (default ON): shift the
      * learned IR by the acquired delay instead of zeroing, so the cold-start
-     * cancellation survives the realign. Gated on inst-ERLE peak > _inst_erle_db
-     * AND delay < tap reach. _protect_inst_erle selects the alternative (block
-     * the realign), default OFF. */
+     * cancellation survives the realign. Gated on inst-ERLE peak >
+     * _inst_erle_db AND delay < tap reach. */
     int    delay_acquire_warm_transfer;       /* 1 */
     float  delay_acquire_inst_erle_db;        /* 4.0 */
-    int    delay_acquire_protect_inst_erle;   /* 0 */
     /* Backward-jump quarantine on a delay CHANGE (Path B). Sibling of
      * delay_acquire_protect_converged above -- which guards the FIRST
-     * acquisition only and is untouched by these two fields. DEFAULT OFF, so
+     * acquisition only and is untouched by that field. DEFAULT OFF, so
      * the shipped path is byte-identical to a build without the mechanism.
      *
      * WHAT IS QUARANTINED, and nothing else: a candidate strictly EARLIER

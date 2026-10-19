@@ -551,22 +551,6 @@ class AEC:
                 0.5 * (1.0 - np.cos(2.0 * np.pi * _idx / float(bs)))
             ).astype(np.float32)
             self._aec3_ola_buf = np.zeros(bs, dtype=np.float32)
-            # Stage 4b (A21 plan section 七, P6): comfort noise is drawn
-            # fresh (independent) each hop and windowed ONLY by this
-            # synthesis window before OLA -- unlike the real signal path,
-            # it has no paired analysis window to cancel the loss. For
-            # independent per-hop content the OLA's realized power scales
-            # by mean(window^2) relative to the N2 level it was specified
-            # at (periodic sqrt-Hann at 50% overlap: mean(Hann)=0.5, i.e.
-            # -3dB -- measured directly via a seeded-N2 A/B harness,
-            # tools/a21_s4b_cng_window_power_measure.py: -2.36/-4.03dB
-            # grid A/B, consistent with the analytic -3.01dB). Default OFF,
-            # byte-equal when off (factor 1.0).
-            if getattr(self.config, 'cng_window_power_compensation', False):
-                self._aec3_cng_window_power_comp = float(
-                    1.0 / np.sqrt(np.mean(self._aec3_synth_window ** 2)))
-            else:
-                self._aec3_cng_window_power_comp = 1.0
             # Strict port of AEC3 ComfortNoiseGenerator
             # (comfort_noise_generator.cc:131-218).
             #   Y2_smoothed — per-bin Y² EMA (α=0.1 per AEC3 block, cc:162-164)
@@ -778,34 +762,6 @@ class AEC:
         self._dt_protect_confirm_hops = _aec3_scale_dtp.ms_to_hops(
             getattr(self.config, 'dt_protect_confirm_ms', 0.0),
             self.config.hop_size, self.config.sample_rate)
-
-        # Filter-independent per-bin echo evidence (residual/tail_evidence.py).
-        # Constructed unconditionally (cheap, a few small arrays) so toggling
-        # the flag mid-life via a config replace() does not need a
-        # re-construction path; the update/injection call sites below are
-        # what's actually gated on tail_evidence_enabled.
-        from .residual.tail_evidence import TailEvidenceModel as _TailEvidenceModel
-        _te_n_bins = int(self.filter.n_freqs)
-        _te_bin_hz = self.config.sample_rate / float(self.config.frame_size)
-        _te_max_bin = int(np.ceil(
-            getattr(self.config, 'tail_evidence_max_hz', 1000.0) / _te_bin_hz))
-        _te_hop_ms = 1000.0 * self.config.hop_size / self.config.sample_rate
-        _te_decay = _aec3_scale_dtp.per_block_growth_to_per_hop(
-            getattr(self.config, 'tail_evidence_decay_per_4ms', 0.83),
-            self.config.hop_size, self.config.sample_rate)
-        _te_warmup_hops = max(1, _aec3_scale_dtp.ms_to_hops(
-            getattr(self.config, 'tail_evidence_warmup_ms', 250.0),
-            self.config.hop_size, self.config.sample_rate))
-        _te_tau_ms = max(1e-6, getattr(self.config, 'tail_evidence_ema_tau_ms', 500.0))
-        _te_ema_alpha = _aec3_scale_dtp.ema_alpha_from_tau_ms(_te_tau_ms, _te_hop_ms)
-        self._tail_evidence = _TailEvidenceModel(
-            n_bins=_te_n_bins,
-            decay_per_hop=np.full(_te_n_bins, _te_decay, dtype=np.float64),
-            max_bin=_te_max_bin,
-            g_max=float(getattr(self.config, 'tail_evidence_g_max', 10.0)),
-            ema_alpha=_te_ema_alpha,
-            warmup_hops=_te_warmup_hops,
-        )
 
         # Live LF-only early-shifted observer filter (residual/tail_observer.py
         # docstring has the full design note). A second, independent PBFDAF
@@ -1343,8 +1299,6 @@ class AEC:
             if hasattr(self, _attr):
                 delattr(self, _attr)
         # _conv_counter is owned by self._convergence (reset above)
-        if getattr(self, '_tail_evidence', None) is not None:
-            self._tail_evidence.reset()
         if getattr(self, '_observer_filter', None) is not None:
             self._observer_filter.reset()
             self._observer_far_end = None
@@ -1579,17 +1533,6 @@ class AEC:
             self._observer_obs_err_ema = 0.0
             self._observer_main_err_ema = 0.0
 
-        # _tail_evidence's U/_log_g/_n_obs are fed error_psd -- filter-
-        # output-derived state, the same category this function's own
-        # contract (see its docstring) says must be cleared here or a
-        # stale, pre-recovery g (echo/render ratio learned under the
-        # alignment/echo level this recovery just invalidated) leaks into
-        # R^2 via evidence() for about one EMA time-constant after the
-        # reset. Mirrors the observer's own reset two lines up, which
-        # already gets this right.
-        if getattr(self, '_tail_evidence', None) is not None:
-            self._tail_evidence.reset()
-
         # Filter convergence
         self._convergence.reset()
 
@@ -1774,12 +1717,6 @@ class AEC:
             self._observer_filter.far_buffer.fill(0)
             self._observer_obs_err_ema = 0.0
             self._observer_main_err_ema = 0.0
-        # Same rationale as _reset_filter_derived_state's matching clear:
-        # _tail_evidence's learned state is filter-output-derived and would
-        # otherwise leak a pre-realign g into R^2 for about one EMA time-
-        # constant after this call.
-        if getattr(self, '_tail_evidence', None) is not None:
-            self._tail_evidence.reset()
 
         # mark_diverged directly, not _maybe_mark_diverged: the per-source
         # divergence census this engine keeps is about ITS OWN recovery paths,
@@ -2139,15 +2076,6 @@ class AEC:
                 _already_cancelling = (
                     bool(getattr(self.config, 'delay_acquire_protect_converged', False))
                     and float(self._diag.get('erle_windowed', 0.0)) > 2.5)  # dB
-                if getattr(self.config, 'delay_acquire_protect_inst_erle', False):
-                    # EXPERIMENT (default-OFF): erle_windowed lags ~0 at no-PA cold
-                    # start; use the recent inst-ERLE peak (last ~15 frames of the
-                    # 500 ms slope ring) so a filter already cancelling via tap-reach
-                    # is not wiped by the first-acquisition realign.
-                    _recent = list(self._erle_slope_buf)[-15:]
-                    _peak = max(_recent) if _recent else 0.0
-                    _already_cancelling = _already_cancelling or (
-                        _peak > float(getattr(self.config, 'delay_acquire_inst_erle_db', 4.0)))
                 if (_delay_eligible
                         and self._current_delay < 0
                         and self.delay_est.is_solid
@@ -4422,62 +4350,22 @@ class AEC:
                 _stationary_mask, 0.0, r2_unb
             ).astype(np.float32)
 
-        # Filter-independent per-bin echo evidence (residual/tail_evidence.py,
-        # AecConfig.tail_evidence_*). Learns only on hops this hop's OWN
-        # upstream state judges trustworthy; reads `is_dominant_nearend()`
-        # here before it is advanced for this hop (still holds the PREVIOUS
-        # hop's verdict at this point in process() -- the same one-hop lag
-        # `dt_protect_source == 'dne'` already reads elsewhere, not a new
-        # approximation). Deliberately does NOT read `_dt_protect_active`:
-        # under `dt_protect_source == 'energy'` (today's default) that flag
-        # is the pre-filter energy latch, which is armed on ~100% of
-        # far-only hops on some clips (fid0 W2) -- gating the LEARNING hop on
-        # it would close the gate exactly where the evidence is needed, the
-        # one failure mode the design is required to avoid (plan section
-        # 0.5: this gate must never be the live dt-protect flag). N2 is
-        # similarly one hop stale (the "pick N2" selection below has not run
-        # yet this hop); reusing the persistent EMA arrays directly avoids a
-        # separate stash. Fed into R^2 as `max(r2, evidence)` only -- never
-        # into the filter, delay estimator, or ERLE -- so a learning mistake
-        # costs at most a missed suppression opportunity, never new
-        # near-end loss beyond what R^2 already causes elsewhere.
-        # Shared read-only gate for both the tail-evidence model and the live
-        # observer below: a live-adapting echo estimator must not learn on
-        # double-talk hops, and must not be gated on the live dt-protect flag
-        # (plan section 0.5). Computed once, unconditionally -- both getters
-        # (is_active / usable_linear_estimate / is_dominant_nearend) are
-        # side-effect-free, so paying for this when neither flag is set costs
-        # nothing worth gating on.
+        # Read-only gate for the live observer below: a live-adapting echo
+        # estimator must not learn on double-talk hops, and must not be
+        # gated on the live dt-protect flag (plan section 0.5). Computed
+        # once, unconditionally -- all three getters (is_active /
+        # usable_linear_estimate / is_dominant_nearend) are side-effect-free,
+        # so paying for this when the flag is off costs nothing worth
+        # gating on.
         _trustworthy = bool(
             self._render_activity.is_active
             and self._aec3_state.usable_linear_estimate()
             and not self._aec3_sg.is_dominant_nearend()
         )
-        if getattr(self.config, 'tail_evidence_enabled', False):
-            _te_lag = int(getattr(self.config, 'tail_evidence_lag_hops', 0))
-            _te_rrh = self._aec3_ree._reverb_render_history
-            if _te_lag < len(_te_rrh):
-                _te_x2 = np.asarray(_te_rrh[_te_lag], dtype=np.float64)
-                _te_n2_prev = (
-                    self._aec3_n2_initial
-                    if self._aec3_n2_counter < self._aec3_cng_n2_initial_duration_hops
-                    else self._aec3_n2
-                )
-                _te_stat = (
-                    _stationary_mask if _stationary_mask is not None
-                    else np.zeros(_te_x2.shape[0], dtype=bool)
-                )
-                _te_learn = np.full(_te_x2.shape[0], _trustworthy, dtype=bool) & ~_te_stat
-                self._tail_evidence.update(_te_x2, error_psd, _te_n2_prev, _te_learn)
-                _te_ev = self._tail_evidence.evidence(
-                    strength=float(getattr(self.config, 'tail_evidence_strength', 1.0)))
-                r2 = np.maximum(r2, _te_ev).astype(np.float32)
-                if getattr(self.config, 'tail_evidence_feed_unbounded', False):
-                    r2_unb = np.maximum(r2_unb, _te_ev).astype(np.float32)
 
         # Live LF-only early-shifted observer filter (residual/tail_observer.py
-        # design note; AecConfig.live_observer_*). Shares _trustworthy above
-        # with the tail-evidence block for the same reason.
+        # design note; AecConfig.live_observer_*). Uses _trustworthy above
+        # for the same reason.
         if getattr(self.config, 'live_observer_enabled', False):
             _lo_trustworthy = _trustworthy
             _lo_mu_scale = 1.0 if _lo_trustworthy else 0.0
@@ -4795,9 +4683,9 @@ class AEC:
             # N2 is in int16² PSD scale; CN amplitudes need to live in
             # float-spec scale to match e_out_spec, so divide by _PSD_SCALE
             # before sqrt.
-            _N_float = (np.sqrt(
+            _N_float = np.sqrt(
                 np.maximum(comfort_noise / _PSD_SCALE, 0.0)
-            ) * self._aec3_cng_window_power_comp).astype(np.float32)
+            ).astype(np.float32)
             _cn_re = np.zeros(n_bins, dtype=np.float32)
             _cn_im = np.zeros(n_bins, dtype=np.float32)
             _cn_re[1:-1] = _N_float[1:-1] * self._aec3_sqrt2_sin_lut[_re_idx]
