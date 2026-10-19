@@ -133,8 +133,11 @@ class FilterConvergenceAnalyzer:
     # touching _conv_counter when far is inactive / warmup is unfinished /
     # near_power is negligible, so non-qualifying hops are SKIPPED rather than
     # resetting it. Only a qualifying-but-failing hop resets. The realised span
-    # is therefore far-end-duty dependent, which makes this a consecutive-
-    # evidence count, matching config.py's ne_recent_sustain=3 precedent.
+    # is therefore far-end-duty dependent, which makes this a genuine
+    # consecutive-evidence count -- unlike config.py's ne_recent_sustain,
+    # whose counter (_ne_above) has no skip condition and so is NOT a true
+    # event count either (it stays unretimed for other reasons; see its
+    # own field comment).
     CONV_FRAMES = 10
     # Dimensionless linear power ratio (-2 dB) -- grid-invariant.
     DIV_ERLE_LIN = 0.63

@@ -148,8 +148,9 @@ void aec_config_defaults(AecConfig* cfg, int sr) {
     cfg->min_gain_floor_dt_db = -20.0f;
     cfg->ne_recent_threshold = 0.3f;   /* float32 */
     cfg->ne_recent_hold = 150;
-    /* ne_recent_sustain: an event count (consecutive near-end-active hops
-     * required to ARM the hold above, not a duration), left unretimed. */
+    /* ne_recent_sustain: consecutive near-end-active hops required to ARM
+     * the hold above. Left unretimed at every grid -- see aec.h's field
+     * comment for why. */
     cfg->ne_recent_sustain = 3;
     cfg->min_gain_floor_far_active_db = -28.0f;   /* balanced */
     cfg->filter_misadjustment_stable_frames = 30;

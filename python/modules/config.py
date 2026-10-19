@@ -591,8 +591,31 @@ class AecConfig:
     # 150 hops = 1500 ms @ legacy hop=160/sample_rate=16000 (10 ms) grid,
     # zero rate conversion; retimed live in __post_init__ below.
     ne_recent_hold: int = 150
-    # Genuine consecutive-event count (near-end-active hops required to ARM
-    # the hold above), NOT a duration -- intentionally left unretimed.
+    # Consecutive-above-threshold hop count required to ARM the hold above.
+    # Unlike a genuine event count (e.g. FilterConvergenceAnalyzer's
+    # _conv_counter, which SKIPS non-qualifying hops instead of resetting),
+    # the counter this drives (_ne_above, in process() below) increments or
+    # resets to 0 on EVERY hop with no skip condition, so N consecutive hops
+    # IS unconditionally N hops of wall-clock time -- the "genuine event
+    # count" framing this field used to carry is wrong.
+    #
+    # Even so, left as the literal 3 at every grid, deliberately: the three
+    # shipped grids' CURRENT "3 hops" already cover three different
+    # wall-clock spans -- 24 ms @ 16 kHz/128-hop (default), 48 ms @
+    # 16 kHz/256-hop, 32 ms @ 48 kHz/512-hop -- so there is no single
+    # canonical-ms value this field was ever actually validated at; unlike
+    # ne_recent_hold, "retime it to a canonical ms" is the wrong model here.
+    # Routing it through that generic retime anyway (canonical = 3 hops *
+    # 10 ms = 30 ms) tightens the default grid to 4 hops, which the
+    # duration argument above says it should, but it also LOOSENS the
+    # 16 kHz/256-hop grid from 3 hops (48 ms) to 2 (32 ms) -- a 300-case
+    # farend-singletalk Rule-A battery measured that this loosening produces
+    # real new echo-leak regressions there (confirmed directly, not
+    # inferred). A grid-A-only tightening to 4 hops, leaving the other two
+    # grids' already-validated "3 hops" untouched, is the better-targeted
+    # fix, but it is a different, narrower change than this generic retime
+    # path and needs its own dedicated battery before shipping -- not
+    # applied here.
     ne_recent_sustain: int = 3
     # Master switch for DT-aware soft recovery. When True, the delay/EPC
     # recovery triggers (Path A first-acquisition, Path B re-lock, EPV,
@@ -762,10 +785,10 @@ class AecConfig:
             self._canonical_ms_epc_hangover, self.hop_size, self.sample_rate)
         self.ne_recent_hold = _aec3_scale.ms_to_hops(
             self._canonical_ms_ne_recent_hold, self.hop_size, self.sample_rate)
-        # ne_recent_sustain is a genuine consecutive-event count (NOT a
-        # duration -- see orchestrator.py's ``_ne_recent_frames`` gate) and
-        # is intentionally left unretimed; also out of scope for this pass
-        # (not part of the audited constant batch).
+        # ne_recent_sustain: left as the literal 3 at every grid -- see its
+        # field comment above for why (duration in disguise, but a generic
+        # canonical-ms retime regresses the already-validated 16 kHz/256-hop
+        # grid; a grid-A-only fix is recommended, not applied here).
         self.filter_misadjustment_stable_frames = _aec3_scale.ms_to_hops(
             self._canonical_ms_filter_misadjustment_stable_frames,
             self.hop_size, self.sample_rate)
