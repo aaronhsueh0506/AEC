@@ -9,12 +9,13 @@ Python reference implementation + C implementation.
 **Release**: v4.0.0rc1 — Python `aec.py` `__version__ = "4.0.0rc1"`.
 **Not ship-ready.** The AEC3 Tier-2 audit and top-level timing retiming still
 change production output and remain unreviewed. The 800-case bench (balanced,
-current 16 kHz default grid, `--cng`) was rerun 2026-10-19 under the official
-per-bucket AECMOS segmentation — see "ours, official segmentation" below —
-but **only for ours**: AEC3/Speex have not been rerun under that same method
-and grid, so the AEC3-relative ship bars this doc used to claim (FS_movement
-echo > 3.5, "beats AEC3 on every deg axis") are **not re-verified** and should
-not be read as still holding. Native 48 kHz carries smoke and spot-check
+current 16 kHz default grid, `--cng`, no pre-alignment) was rerun 2026-10-19
+at commit `02df7cd` under the official per-bucket AECMOS segmentation for all
+three engines — see "ours vs AEC3 vs Speex, official segmentation" below.
+FS_movement echo (3.733) still clears the 3.5 bar; "beats AEC3 on every deg
+axis" holds on DT/NE (ours ahead by 0.45–0.56) but not strictly on FS, where
+the two are within 0.008 of each other and both within 0.009 of the AECMOS
+ceiling (5.0) — a tie at the ceiling, not a loss. Native 48 kHz carries smoke and spot-check
 evidence, which is sufficient for dataset generation; 48 kHz never gets an
 AECMOS number, so its release verdict stays parity/structural.
 See `[4.0.0]` "Known limitations" in [CHANGELOG.md](CHANGELOG.md); do not tag
@@ -30,7 +31,13 @@ stack (`dt_aware_recovery_soft` + `dt_aware_res_floor`,
 `min_gain_floor_dt_db = −20`). Four Pareto presets — `mild` / `balanced` /
 `aggressive` / `no_floor` — share a two-field strength axis (aggressive also
 deepens the DT floor; see "Presets" below); **`balanced` is production** and
-historically met all four ship bars (re-verification pending, see above). See
+historically met all four ship bars **under legacy scoring on the 512/256
+grid** (see "Status snapshot" below); those bar thresholds were calibrated
+under that method+grid and have not been recalibrated for the current
+official-segmentation/256-128 measurement, so a direct pass/fail restatement
+against the old numeric bars is not meaningful — the AEC3/Speex comparison
+under the current method+grid is now in "Status snapshot" and should be read
+on its own terms (AEC3-relative, not against the legacy bars). See
 `[3.23.0]` in the changelog for that release's evidence.
 
 **Float32 campaign** (2026-07-15, on top of 3.23.0): all production C is now
@@ -97,23 +104,37 @@ a scoring-window change and a grid change, not a regression:
   pre-align reference while keeping all four ship bars **under this legacy
   measurement**.
 
-**ours, official per-bucket segmentation, 16 kHz 256/128 grid (current
-default)** — `balanced / fl=832 (52 ms) / --cng`, full AEC Challenge 2021
-blind corpus, no pre-alignment, 2026-10-19. This is the first 800-case run
-scored with the official AECMOS segmentation (`bench_aecmos.py`'s default
-since 2026-09-26); no prior baseline exists under this exact method+grid, so
-there is no Δ to report yet — this run **is** the new baseline. Saved at
-`../.research/2026-10-19/aec800/scores.json` (sibling to this repo, the
-campaign's research-data convention). AEC3/Speex comparison under the
-same method+grid has not been run:
+**ours vs AEC3 vs Speex, official per-bucket segmentation, 16 kHz 256/128
+grid (current default)** — `balanced / fl=832 (52 ms) / --cng`, full AEC
+Challenge 2021 blind corpus, no pre-alignment, all three engines self-align
+online (ours via `EchoPathDelayEstimator`; AEC3 via `RenderDelayController`;
+Speex internally), scored 2026-10-19 at commit `02df7cd`. This supersedes
+the ours-only run at `e567ccf` published here earlier the same day: that
+commit is 19 commits behind `02df7cd` and the gap includes real default-path
+changes (a nonlinear-path L1-term cap, a mid-ramp DT-floor-inversion fix +
+preset-table consolidation, plus a `/simplify`+`/code-review` pass), not
+measurement noise — confirmed via a bit-exact probe stem before the full
+rerun, and via `git diff --stat` showing `bench_aecmos.py`/the single-preset
+eval path unchanged over that range. Saved at
+`../.research/2026-10-19/aec800_vs_ref/{scores_ours,scores_aec3,scores_speex}/scores.json`
+(sibling to this repo, the campaign's research-data convention):
 
-| Bucket | n | **ours** echo / deg |
-|---|---|---|
-| FS_static   | 169 | 3.804 / 4.986 |
-| FS_movement | 131 | 3.707 / 4.999 |
-| DT_static   | 186 | 3.984 / 3.375 |
-| DT_movement | 114 | 3.644 / 3.361 |
-| NE          | 200 | 4.998 / 3.986 |
+| Bucket | n | **ours** echo / deg | AEC3 echo / deg | Speex echo / deg |
+|---|---|---|---|---|
+| FS_static   | 169 | 3.758 / 4.991 | 4.037 / 4.999 | 2.963 / 5.000 |
+| FS_movement | 131 | 3.733 / 4.999 | 4.046 / 4.999 | 2.806 / 5.000 |
+| DT_static   | 186 | 4.037 / 3.418 | 4.281 / 2.967 | 3.145 / 3.923 |
+| DT_movement | 114 | 3.838 / 3.385 | 4.150 / 2.931 | 2.916 / 3.874 |
+| NE          | 200 | 4.998 / 3.969 | 4.999 / 3.410 | 4.998 / 4.128 |
+
+Same qualitative story as the legacy-scoring table above, now under the
+official segmentation: **echo cancellation AEC3 > ours > Speex** (ours trails
+AEC3 by 0.24–0.31, leads Speex by 0.80–0.93); **near-end preservation (deg)
+Speex > ours > AEC3** on DT/NE (ours beats AEC3 by 0.45–0.56), with FS deg a
+near-ceiling tie across all three engines (within 0.009 of 5.0). Caveat:
+Speex ran at its script-hardcoded `fl=2048` taps (no `--speex-fl` flag
+exists), not the 832-tap/52 ms grid ours and AEC3 use — same-corpus and
+same-method, but not a tail-length-matched comparison.
 
 ### Presets — a strength axis, four operating points
 
