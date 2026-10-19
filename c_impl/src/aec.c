@@ -144,8 +144,6 @@ void aec_config_defaults(AecConfig* cfg, int sr) {
     /* Warm tap-transfer (default ON) + its gate threshold. Mirrors config.py. */
     cfg->delay_acquire_warm_transfer = 1;
     cfg->delay_acquire_inst_erle_db = 4.0f;
-    cfg->delay_backward_quarantine_enabled = 0;
-    cfg->delay_backward_quarantine_s = 1.0f;
     /* DT-deg recovery stack (default ON, mirrors Python). */
     cfg->dt_aware_recovery_soft = 1;
     cfg->dt_aware_res_floor_enabled = 1;
@@ -381,7 +379,7 @@ static int aec_validate_config(const AecConfig* cfg_in) {
 #define AEC_CK_RANGE_I(field, lo, hi) \
     do { if (cfg->field < (lo) || cfg->field > (hi)) return 0; } while (0)
 
-    /* toggles (16) — enable_delay_est is checked above, pre-translation. */
+    /* toggles (15) — enable_delay_est is checked above, pre-translation. */
     AEC_CK_BOOL(enable_cng);
     AEC_CK_BOOL(cng_n2_windowed_psd);
     AEC_CK_BOOL(enable_highpass);
@@ -393,7 +391,6 @@ static int aec_validate_config(const AecConfig* cfg_in) {
     AEC_CK_RANGE_I(spatial_linear_context, 0, AEC_CONTEXT_LINEAR_ONLY);
     AEC_CK_BOOL(delay_acquire_protect_converged);
     AEC_CK_BOOL(delay_acquire_warm_transfer);
-    AEC_CK_BOOL(delay_backward_quarantine_enabled);
     AEC_CK_BOOL(dt_aware_recovery_soft);
     AEC_CK_BOOL(dt_aware_res_floor_enabled);
     /* spatial_linear_context's (levels 1 and 2) whole premise is that
@@ -417,7 +414,6 @@ static int aec_validate_config(const AecConfig* cfg_in) {
     AEC_CK_RANGE_F(delay_buffer_ms,             0.0f,120000.0f);
     AEC_CK_RANGE_F(delay_est_init_s,            0.0f,  3600.0f);
     AEC_CK_RANGE_F(delay_est_period_s,          0.0f,  3600.0f);
-    AEC_CK_RANGE_F(delay_backward_quarantine_s, 0.0f,  3600.0f);
     /* When enable_highpass is set, this field is fed straight into hpf_init()
      * (aec_carve), which returns NULL -- dropping the HPF with no error -- when
      * audio_common's hpf_params_valid() (hpf.c) rejects the (cutoff_hz,
@@ -1602,23 +1598,6 @@ static int aec_carve(Aec* a, uint8_t* ptr, const AecConfig* cfg,
     a->cfg.filter_misadjustment_hangover_frames = aec_legacy10ms_hops(
         (float)cfg->filter_misadjustment_hangover_frames * 10.0f, hop, cfg->sample_rate);
 
-    /* Backward-jump quarantine window: seconds -> estimation cycles ONCE,
-     * here, against the resolved grid -- same rule as delay_est_init_s /
-     * delay_est_period_s, which Path A converts with this identical
-     * hop_s expression. Floor of 1: a window shorter than one cycle must
-     * still quarantine for exactly one cycle, never collapse into "off"
-     * (off is delay_backward_quarantine_enabled == 0 and nothing else).
-     * The window lives in a->delay_quarantine_hops rather than being written
-     * back into a->cfg, because a->cfg's copy stays in the SECONDS unit the
-     * caller supplied -- unlike the retimes above, whose fields are already
-     * hop-denominated. */
-    {
-        float q_hop_s = (float)hop / (float)cfg->sample_rate;
-        int q_hops = (int)lrintf(cfg->delay_backward_quarantine_s / q_hop_s);
-        a->delay_quarantine_hops = q_hops < 1 ? 1 : q_hops;
-        a->delay_quarantine_left = -1;   /* disarmed */
-    }
-
     /* inst-ERLE slope ring cap = Python _slope_n = max(2, int(0.5*sr/hop)),
      * clamped to the static array size. (orchestrator.py:649) */
     {
@@ -2298,8 +2277,9 @@ int aec_apply_external_realign(Aec* a, int delta_samples) {
      * cancelling" on a filter that is cancelling perfectly well, and fall to
      * the reset branch below for nothing. That is exactly why
      * aec_linear_is_cancelling ORs the windowed reading in; this call site
-     * needs it for the same reason Path A's backward quarantine does. Both
-     * thresholds are unchanged. The shift must also fit the tap span in BOTH
+     * needs the OR for the same reason: a ring-only reading would misread a
+     * merely-quiet far stretch as "not cancelling". Both thresholds are
+     * unchanged. The shift must also fit the tap span in BOTH
      * directions or the learned response would be pushed off the filter.
      * (Note the ring-only reading used to be all there is when the AEC3 post
      * chain never ran -- enable_res=0 AND return_res_context=0 left
@@ -2359,9 +2339,6 @@ void aec_reset(Aec* a) {
         a->current_delay = a->has_delay ? -1 : a->cfg.fixed_delay_samples;
         a->pending_delay = -1; a->has_pending = 0;
         a->pending_delay_ttl = 0;
-        /* A reset abandons the alignment the quarantine was protecting, so a
-         * countdown armed against it must not survive into the next lock. */
-        a->delay_quarantine_left = -1;
         /* AMEND_35: a fresh instance has no basis for a prior rejection or a
          * pending judgment on an alignment that no longer exists -- mirrors
          * orchestrator.py's reset() clearing _delay_reject_values /
@@ -2911,41 +2888,12 @@ static void aec_process_core(Aec* a, const float* mic_in, const float* ref_in,
 
         float conf = delay_aec3_confidence(&a->delay);
 
-        /* Backward-jump quarantine for Path B. The rule it implements, its
-         * evidence test and the defect it replaces are documented once, on
-         * delay_backward_quarantine_enabled in aec.h. What only this site
-         * knows:
-         *   - it is evaluated BEFORE Path B and repeats every one of Path B's
-         *     own admission terms, so the window can only ever be spent on a
-         *     candidate Path B would otherwise have accepted this cycle;
-         *   - `left < 0` is unarmed and `left == 0` is expiry: the countdown
-         *     is armed once, on the first refusal, and ticks unconditionally
-         *     while armed, so the total veto stays bounded however the
-         *     candidate jitters.
-         * Mirrors orchestrator.py's _change_blocked. */
-        int change_blocked = 0;
-        if (a->cfg.delay_backward_quarantine_enabled
-                && eligible && a->current_delay >= 0 && conf >= 0.5f
-                && new_delay < a->current_delay
-                && a->current_delay - new_delay > 32
-                && aec_linear_is_cancelling(a)) {
-            if (a->delay_quarantine_left < 0)
-                a->delay_quarantine_left = a->delay_quarantine_hops;
-            if (a->delay_quarantine_left > 0) {
-                a->delay_quarantine_left--;
-                change_blocked = 1;
-            }
-        } else {
-            a->delay_quarantine_left = -1;
-        }
-
         /* Path B — delay shift. AMEND_35 adds the reject-list veto: a
          * candidate already confirmed bad by the judgment below does not
          * get a second attempt (mirrors orchestrator.py's identical
          * extension to this same gate). */
         if (eligible && a->current_delay >= 0 && conf >= 0.5f
                 && abs(new_delay - a->current_delay) > 32
-                && !change_blocked
                 && !aec_delay_value_rejected(a, new_delay)) {
             if (a->has_pending && abs(new_delay - a->pending_delay) < 16) {
                 int old_current_delay = a->current_delay;

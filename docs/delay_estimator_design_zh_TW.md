@@ -67,8 +67,9 @@ render/capture（per hop）
    ——每一個確認窗看到的都是同一個自洽的錯答案。
    能分辨的判別器是線性 filter 自己的健康度：誤鎖當下 PBFDKF 在既有
    對齊上仍在消除回音，而**真正的回音路徑變化會先讓消除能力崩掉**。
-   這就是 `delay_backward_quarantine_enabled` / `_s`（預設 OFF，見
-   `c_user_manual_zh_TW.md` §6.4）的依據。
+   這個現象一度被當成「需要在下游擋住」的目標，設計了一版 Path B 延遲
+   變更保護原型（新候選比現行延遲更早、且線性 filter 仍在消除回音時
+   暫留一個有界窗再採用）。
 
    > **⚠ 已由根因修復取代（2026-08-21）。** 上面的分析與量測都成立，但當時
    > 把它當成「需要在下游擋住」的現象，實際上它是**選擇接縫本身的缺陷**：
@@ -76,93 +77,55 @@ render/capture（per hop）
    > 那個錯值天生自洽、confidence 天生是 1.0——這也正是「連續 K 次確認擋
    > 不住」的原因。修復是讓 production 只回報 dominant peak（pre-echo 仍
    > 保留供 AEC3 對照與診斷），見 `test_delay_dominant_selection`。
-   > backward quarantine **維持預設 OFF**，它是候選變動的有界暫留機制，
-   > **不是** pre-echo 誤選的解藥；上面那段「依據」應讀作歷史脈絡。
 
-   **機制（三件事，缺一不可）**
+   > **下游保護原型已移除（2026-10-19）。** 上一段提到的 Path B 延遲變更
+   > 暫留原型曾經實作（Python／C／4ch 三端同語意，預設 OFF，關閉時
+   > byte-exact）並在 n=800 案例的經驗反事實上量過：擋下 0 個真實誤鎖、
+   > 卻新增 3 個假陽性（正常的延遲變更被多等一個窗）。淨負，依裁定移除；
+   > 移除前的完整量測、暫留規則三件事與各實測表見 CHANGELOG
+   > `### Removed`（2026-10-19）條目，本節不再重複維護那份已移除機制的
+   > 文件。下面這一條是從它的迴歸測試裡**附帶**發現、與機制本身無關、
+   > 但值得保留的 aggregator 根因鏈。
 
-   1. **只隔離可疑方向**：候選必須比現行延遲**更早**才會被隔離。
-      pre-echo 誤歸因只會產生「更早」的答案，所以往後跳（延遲變大）
-      完全不歸這個機制管，首次取得對齊也不管（那是 Path A 的
-      `delay_acquire_protect_converged`）。
-   2. **仍在消除才隔離**：判別式 `aec_linear_is_cancelling()` 同時看
-      windowed ERLE（門檻 2.5 dB，與 Path A 同一個）與近期 inst-ERLE
-      峰值（門檻 `delay_acquire_inst_erle_db`）。
-      **兩個讀數缺一不可**：誤鎖發生在首次鎖定後僅 17 個 hop，windowed
-      ERLE 還在它自己文件記載的落後窗內（決策 hop 上量到 1.660 dB／
-      C 端 1.804 dB，都低於 2.5 dB），只有 inst-ERLE 峰值（7.269 dB）
-      看得見；反過來，遠端叢發之間 inst ring 會老化清空，這時只剩
-      windowed 撐住（Python 端的 backward-move 場景就是這一半的釘子：
-      解除隔離的那個 hop 上 inst 峰值已降到 −0.934 dB，windowed 還有
-      3.728 dB）。
-   3. **有時間上限**：第一次拒絕就上膛，之後每個 estimation cycle 扣一
-      格，扣到 0 就**採用**。上限夾住的是**同一段連續符合條件的
-      backward episode**：只要每個 cycle 仍有符合條件的更早候選，倒數就
-      無條件往下走，候選值在這個類別內怎麼抖動都不會重新上膛（「按候選
-      重新上膛」會讓漂移的候選永遠續命，那正是要設計掉的失效模式）。
-      反過來，只要某個 cycle 不符合條件——消除能力崩掉、候選改為往後跳
-      或不再通過 Path B 的門檻——就**立即**解除本次隔離並放行，之後若再
-      出現 backward episode 會重新計時。
-
-   **沒有「佔優」提前放行**：estimator 對外只有
-   `delay_aec3_confidence()` 的 0／0.5／1.0 三級，那是 histogram 一致性、
-   不帶品質資訊（誤鎖候選一樣到 REFINED），而 Path B 本來就已經在閘它。
-   所以「候選一直被提出」本身就是唯一可用的持續性證據，窗長就是在量它。
-
-   **誠實範圍：它只延後、不治癒。** 誤鎖被推遲一個窗之後仍會被採用。
-   真正的修復要在 estimator（matched filter 的 winner／pre-echo 判定）
-   本身做，不在本機制範圍內。
-
-   **實測表 A — pre-echo 誤鎖延後量**（16 kHz／fft 512／hop 256，
-   true 6400，OFF 於 hop 49 採用 4800）：
-
-   | 窗長 | = hops | 誤鎖採用 hop（lib/aec） | 4ch core |
-   |---|---|---|---|
-   | OFF | — | 49 | 50 |
-   | 0.5 s | 31 | 80 | 81 |
-   | 1.0 s（預設） | 62 | 111 | 112 |
-   | 2.0 s | 125 | 174 | 175 |
-   | 4.0 s | 250 | 299 | — |
-
-   採用點精確等於「未隔離的 hop ＋ 窗長」，兩端實作皆然：到期是唯一的
-   放行機制，不存在永久 veto 的路徑。
-
-   **實測表 B — multipath／新增路徑重鎖（C，old 2400 持續存在、
-   new 1600 於 hop 250 以 0.5 增益加入，1600 hops）**：
-
-   | g_old | OFF 重鎖 hop | ON 重鎖 hop | 差 |
-   |---|---|---|---|
-   | 0.2 | 498 | 498 | 0 |
-   | 0.3 | 488 | 488 | 0 |
-   | 0.4 | 495 | 557 | +62 |
-   | 0.5 | 1515 | 1577 | +62 |
-
-   四列全部重鎖，最壞情況正好一個窗。差 0 的兩列是消除能力已崩、
-   立即放行的情形。Python 端同型場景（620 hops）為
-   310/323/394/510 → 310/385/456/572，同樣四列全通、最壞 +62。
-
-   **預設 1.0 s 的取捨**：下限來自誤鎖動態（重鎖只落後首次鎖定 17 個
-   hop，窗要明顯長過它，62 是 3.6 倍）；上限來自真實變化的成本（表 B
-   中 estimator 自己就要 488–1515 hop 才產生新候選，多等 62 hop 是其中
-   的 4–13%，而且只在消除**沒有**崩掉時才需要等）。
-
-   迴歸測試：`c_impl/test/test_delay_backward_quarantine.c`、
-   `python/tests/test_delay_backward_quarantine.py`（兩者都先用 OFF 釘住
-   本缺陷，再驗 ON 只把它延後一個窗、multipath 四列全重鎖、往後跳完全
-   不受影響）；4ch 端在
-   `Audio_ALG/pipelines/4ch_aec_bf_nr_res/tests/test_delay_parity.py`
-   逐 hop 比對 C 與 Python 兩個實作（含窗長掃描），表 A 的 4ch 欄即由
-   該測試釘住。
-
-   **為什麼方向與上限都不可省（判別式的性質，不是選項）**：一個不看
-   方向、也不設上限的判別式——「只要還在消除，就拒絕所有不同候選」——在
-   multipath／新增路徑場景會無限期否決真正的新路徑，因為存活的舊反射
-   本來就會把 ERLE 撐住（同一組場景實測：舊/新增益 0.4/0.5 到 hop 850
-   仍不重鎖、0.5/0.5 永不重鎖）。表 B 是現行判別式在同一組場景的行為：
-   四列全部重鎖，最壞只慢一個窗。
-   在 4ch 端還多一條性質：判別必須由 estimator 自己那一條 lane
-   （`capture_proxy_channel`）決定，若改成「任一 lane 仍在消除就算數」，
-   任一支 mic 的舊反射都能擋掉整組更新。
+   **衍生發現（AMEND_35/37，2026-10-18）：aggregator 在近似 50/50 的
+   dominant-peak tie 上，C／Python 兩個 port 對同一個 multipath 場景給出
+   不同的鎖定結果，根因是隨機實現差異，不是 tie-break 邏輯不同。**
+   上面提到的保護原型的迴歸測試（已與機制一起移除）有一列 multipath／
+   新增路徑場景：舊反射留在 2400 樣本、新路徑在 1600 樣本（更早）以增益
+   0.5 加入；當舊／新兩條路徑增益相等（g_old=0.5）時，aggregator 的
+   dominant-peak 投票幾乎正好是平手。全速延遲估計改為預設之後
+   （AMEND_35，2026-10-18，`delay_est_period_s` 由 0.5 s 節流改為 0.0 ＝
+   不節流），這一列在 C 端兩個已測種子上一次落在舊路徑的鎖定類別、一次
+   落在新路徑；而 Python 參照場景（等價的 g_old=0.5 設定）在 20 個種子的
+   掃描中**每個種子都落在新路徑**，沒有任何實現敏感性。根因鏈（四步排除，
+   非假設）：
+   (1) 還原舊的 0.5 s 節流預設仍穩定落在新路徑（22/22），排除「只是還沒
+   收斂」；
+   (2) 還原舊節流但把觀察窗拉長到 6000 hop 仍落在新路徑，排除「再等久
+   一點就會變」；
+   (3) C 端 `delay_aec3_accumulate_ex` 的內迴圈已用 `DA_AEC3_BLOCK_SIZE=64`
+   分桶，與 `lag_aggregator.py` 的內部 block 節奏完全一致，排除「C／
+   Python 呼叫頻率對不上」；
+   (4) 翻轉 C 測試自己的 `far_noise()` 種子（32-bit xorshift，均勻分布
+   [-0.35, 0.35]，固定種子 `0x5EED1234`）、其餘條件不變，鎖定結果就從
+   舊路徑的類別換成新路徑的類別——證實這真的是一個平手，由那一次雜訊
+   實現的具體樣本決定，不是必然的偏向。
+   接著比對兩個 port 的 tie-break 規則本身：C 的 `da_argmax_i`／
+   `da_argmax_incremental_update`（`delay_aec3.c`）與 Python
+   `lag_aggregator.py` 的 `np.argmax`-based `_HighestPeakAggregator`
+   用的是**同一條** tie-break 規則（bin index 最小者勝，且兩邊的
+   bin-to-lag 映射方向一致遞增）；pre-echo 直方圖（C 的 `da_pre_echo_*`
+   對 Python 的 `PreEchoLagAggregator`／`detect_pre_echo`）在兩邊都已
+   確認是惰性的——從未影響任一邊實際回報的主延遲，不可能是兩個 port
+   落點不同的來源。所以兩邊落點不同，**不是** tie-break 邏輯有差異，而是
+   C 測試自己的 `far_noise()`（xorshift、均勻分布）與 Python 場景的
+   `np.random.default_rng(7)`（Gaussian ×0.1）是兩個獨立種子、不同分布
+   的隨機實現，各自對同一個真正接近 50/50 的動態平手取樣——在 g_old=0.5
+   這一列上落點不同，正是兩個這樣的獨立實現該有的行為，不是 port 之間的
+   缺口。這個發現與上面移除的保護原型本身無關（是在比較「有無保護原型」
+   的過程中附帶發現的 aggregator 性質），移除原型不影響這個發現的有效性；
+   若未來要動 `delay_est_period_s` 的預設或 aggregator 的 tie-break 規則，
+   這條平手案例與其根因鏈仍是需要重新驗證的基準。
 
 ## 3. `num_filters=5` 的出處（溯源結論）
 

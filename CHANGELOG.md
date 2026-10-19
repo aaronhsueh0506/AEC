@@ -41,6 +41,128 @@ when verdict requires it.
 
 ---
 
+## [Unreleased] — 2026-10-19 — remove the Path-B backward-jump delay-change guard (measured net-negative; ABI: `sizeof(AecConfig)` −8 B, `sizeof(Aec)` −16 B)
+
+### Removed
+
+1. **`delay_backward_quarantine_enabled` / `delay_backward_quarantine_s`
+   (Python/C `AecConfig`) and the Path-B delay-change guard they gated.**
+   Introduced 2026-08-17 (see that entry further below for the original
+   design and the pre-echo mis-lock it targeted). The mechanism held a
+   delay-change candidate strictly EARLIER than the delay already in force,
+   offered while the linear filter was still demonstrably cancelling
+   (`aec_linear_is_cancelling()`), for a bounded window (default 1.0 s,
+   converted to estimation cycles at construction), then accepted it
+   regardless — delaying a sustained pre-echo mis-lock by one window,
+   never curing it. Default OFF on both ports, so the shipped default path
+   was always byte-identical to a build without the mechanism.
+
+   **Measured net-negative, per the approved measurement this removal acts
+   on: on an n=800 empirical counterfactual, the guard caught 0 bad relocks
+   while creating 3** (genuine delay changes held back one window that
+   should not have been). Removed on that evidence, with user approval, per
+   this project's policy of only shipping guards with a demonstrated
+   benefit.
+
+   Removed: Python `AecConfig.delay_backward_quarantine_{enabled,s}`
+   (`modules/config.py`); the construction-time `_delay_quarantine_hops`/
+   `_delay_quarantine_left` counters, the `aec_reset()`-path clear, and the
+   Path-B `_change_blocked` gate block in `modules/orchestrator.py`; C
+   `AecConfig::delay_backward_quarantine_{enabled,s}` and
+   `Aec::delay_quarantine_{left,hops}` (`c_impl/include/aec.h`); the
+   matching default-init lines, the two `aec_validate_config` checks (its
+   "toggles" tally drops from 16 to 15; the "scalar tunables" float tally
+   was already stale at 23 against its own "22" label before this change
+   and is accurate again at 22 after it — not touched, since no edit was
+   needed), the `aec_carve()` seconds-to-cycles conversion block, the
+   `aec_reset()` clear, and the Path-B `change_blocked` gate block in
+   `aec_process_core` (`c_impl/src/aec.c`). Two now-dangling docstring
+   mentions of the removed mechanism (`aec_apply_external_realign`'s and
+   `aec_linear_is_cancelling`'s doc comments, both ports) are reworded, not
+   deleted, since both functions keep other live callers. Deleted the two
+   permanent regression tests that existed solely for this mechanism:
+   `c_impl/test/test_delay_backward_quarantine.c` and
+   `python/tests/test_delay_backward_quarantine.py` (7 tests; pytest's
+   collected total drops from 312 to 305 with this removal and nothing
+   else). Docs updated to match: `docs/aec_methods.md`,
+   `docs/c_user_manual_zh_TW.md` §6.4/§9.4 (rows removed) and all of its
+   `aec_get_mem_size()` byte tables (re-measured fresh against this
+   revision, not patched from the old numbers — see the ABI note below),
+   `docs/delay_estimator_design_zh_TW.md` §2 (mechanism write-up trimmed to
+   the still-valid phenomenon description; see the preserved finding
+   below), `docs/delay_estimator_productization_plan_zh_TW.md`,
+   `docs/nn_integration_interface.md`, and
+   `docs/html/{aec,aec_detail,aec_c_api,aec_c_api_params}.html`.
+
+   **Preserved finding (not about this mechanism, discovered incidentally
+   while comparing guarded-vs-unguarded builds in the now-deleted C test's
+   multipath/path-addition scene).** At `g_old=0.5` (surviving old
+   reflection and new, earlier path at equal gain) the matched-filter
+   aggregator's dominant-peak vote is a near-exact 50/50 tie. Under the
+   full-rate delay-estimation default (2026-10-18, `delay_est_period_s`
+   0.5→0.0), the C test's two tried seeds split one each way while the
+   Python reference scene's 20-seed sweep landed on the newer path on
+   every seed. Root-caused, not assumed: C's `da_argmax_i`/
+   `da_argmax_incremental_update` (`delay_aec3.c`) and Python's
+   `np.argmax`-based `_HighestPeakAggregator` (`lag_aggregator.py`) use the
+   IDENTICAL tie-break rule (lowest bin index wins, same ascending
+   bin-to-lag mapping); the pre-echo histogram on both sides is confirmed
+   inert (never feeds the primary reported delay), so it cannot be the
+   source. The asymmetry is two independently-seeded, differently
+   distributed stochastic realizations (C: 32-bit xorshift, uniform
+   [-0.35, 0.35], fixed seed `0x5EED1234`; Python:
+   `np.random.default_rng(7)`, Gaussian ×0.1) of the same genuine
+   near-50/50 dynamical tie — landing differently at `g_old=0.5` is exactly
+   what two such realizations are expected to do, not evidence of a port
+   gap. Full root-cause chain (the four-step exclusion that established
+   this) preserved in `docs/delay_estimator_design_zh_TW.md` §2, since the
+   test file that incidentally surfaced it is gone.
+
+### Testing
+
+Both backends build clean with `WERROR=1` (no new warnings). `make
+test-output-hash`: 30/30 on both `BACKEND=kiss` and `BACKEND=ne10`, matching
+this revision's golden exactly — the default path (`delay_backward_
+quarantine_enabled` was already 0 on it) is bit-for-bit unaffected.
+`pytest python/tests`: 305 passed, 0 failed (was 312 passed, 0 failed
+before this change; the difference is exactly the 7 deleted tests).
+`test-config-validation` (404), `test-external-realign`,
+`test-process-context` (130), `test-duty-census` (17),
+`test-delay-num-filters` (169), `test-runtime-preset` (66),
+`test-rate-structural` (382), `test-reset-parity` (6), `test-zero-heap` and
+`test-aec-res` (264) all still pass on both backends after the removal.
+The A21 live-observer fid0 golden
+(`SE/.research/2026-10-16/a21/tools/a21_c_port_fid0_e2e_golden.py` +
+`parity_aec_e2e.c`, observer off and on) still PASSes after this change,
+and the per-hop golden `.bin` files it produces are byte-identical before
+and after this removal — the Path-B guard sat structurally adjacent to the
+bad-relock soft-revert and live-observer code, so this was checked
+explicitly rather than assumed from the output-hash gate alone (which only
+exercises the default path).
+
+**ABI note.** `sizeof(AecConfig)`: 228 → 220 B (−8 B: one `int` + one
+`float`). `sizeof(Aec)`: 6448 → 6432 B (−16 B: the embedded `AecConfig`
+member accounts for 8 of it, the two removed `int` state fields the other
+8). Every `AecConfig` field from `dt_aware_recovery_soft` onward shifts 8 B
+earlier than before; every `Aec` field after the removed
+`delay_quarantine_left`/`_hops` pair (i.e. from the AMEND_35 judgment
+fields onward) shifts 16 B earlier. `aec_get_mem_size()` drops by exactly
+16 B at every grid, every `delay_num_filters`, every mode (`MATCHED`,
+`FIXED` at every `fixed_delay_samples`, `EXTERNAL_ALIGNED`) — confirmed by
+`make test-delay-num-filters` on both backends — because `estimator_bytes`
+and `ring_bytes` (`aec_get_mem_breakdown()`) are untouched by this change;
+only the struct's own footprint moved. Fresh absolute figures for every
+grid/mode/n this project ships replace the old ones in
+`docs/c_user_manual_zh_TW.md` §4 and in `docs/html/aec.html` /
+`aec_c_api.html`; none of the previously recorded constants (the old
+`sizeof(AecConfig)` = 204 B figure in particular) were still accurate on
+this revision even before this change — this repo's struct layout had
+already grown a `cng_n2_windowed_psd` field and live-observer/soft-revert
+state since those numbers were last measured, so they were re-derived from
+scratch rather than patched.
+
+---
+
 ## [Unreleased] — 2026-10-09 — standalone RES stage (`aec_res.h`), output-hash and NEON-twin gates
 
 ### Added

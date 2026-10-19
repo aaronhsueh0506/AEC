@@ -314,16 +314,6 @@ class AEC:
                     fast_par_threshold=40.0,
                 )
                 self._current_delay = -1  # -1 = not yet estimated
-            # Backward-jump quarantine window: SECONDS -> estimation cycles
-            # once, here, against the resolved hop/sample rate — the same
-            # conversion C does in aec_carve(). Floor of 1: a sub-hop window
-            # still quarantines for exactly one cycle, never collapses into
-            # "off" (off is delay_backward_quarantine_enabled and nothing
-            # else). -1 = disarmed, the only state that may re-arm.
-            self._delay_quarantine_hops = max(1, int(round(
-                float(getattr(self.config, 'delay_backward_quarantine_s', 1.0))
-                / (self.config.hop_size / self.config.sample_rate))))
-            self._delay_quarantine_left = -1
             # Reference ring buffer for delay compensation
             self._ref_ring = np.zeros(buffer_samp, dtype=np.float32)
             self._ref_ring_write = 0
@@ -1223,10 +1213,6 @@ class AEC:
             self._ref_ring.fill(0)
             self._ref_ring_write = 0
             self._ref_ring_filled = 0
-            # A reset abandons the alignment the quarantine was protecting,
-            # so a countdown armed against it must not survive into the next
-            # lock. Mirrors aec_reset() in aec.c.
-            self._delay_quarantine_left = -1
         self._epc_det.reset()
         self._convergence.reset()
         self._erle_window_near = 1e-10
@@ -1760,7 +1746,7 @@ class AEC:
         RETARDED.
 
         When the filter is demonstrably cancelling (``linear_is_cancelling()``,
-        the same two-reading test the backward-delay quarantine uses — NOT the
+        which ORs windowed ERLE with the recent inst-ERLE peak — NOT the
         inst-ERLE ring alone, which ages out across a stretch of far silence
         and would send a perfectly good filter down the reset path) and the
         shift fits the tap span, the learned IR is shifted by delta and the
@@ -2039,9 +2025,11 @@ class AEC:
                         # AMEND_34: erle_windowed alone cannot tell
                         # "demonstrated worse" from "the filter has not
                         # produced a real echo estimate at the new alignment
-                        # yet" -- both read ~0 dB either way (confirmed on
-                        # test_delay_backward_quarantine's multipath scene: a
-                        # deliberately minimal enable_res=False config where
+                        # yet" -- both read ~0 dB either way (confirmed on a
+                        # multipath scene formerly pinned by a now-removed
+                        # delay-change regression test (see CHANGELOG's
+                        # 2026-10-19 Removed entry): a deliberately minimal
+                        # enable_res=False config where
                         # raw_error_power == near_power EXACTLY, bit for bit,
                         # for 100+ hops post-shift, because the echo estimate
                         # is the literal zero vector there -- IEEE754 makes
@@ -2171,35 +2159,6 @@ class AEC:
                             del self._pending_delay
                         del self._pending_delay_ttl
 
-                # Backward-jump quarantine for Path B. The rule it implements,
-                # its evidence test and the defect it replaces are documented
-                # once, on delay_backward_quarantine_enabled in config.py.
-                # What only this site knows:
-                #   - it is evaluated BEFORE Path B and repeats every one of
-                #     Path B's own admission terms, so the window can only
-                #     ever be spent on a candidate Path B would otherwise
-                #     have accepted this cycle;
-                #   - a negative countdown is unarmed and 0 is expiry: it is
-                #     armed once, on the first refusal, and ticks
-                #     unconditionally while armed, so the total veto stays
-                #     bounded however the candidate jitters.
-                _change_blocked = False
-                if (bool(getattr(self.config,
-                                 'delay_backward_quarantine_enabled', False))
-                        and _delay_eligible
-                        and self._current_delay >= 0
-                        and self.delay_est.confidence >= 0.5
-                        and new_delay < self._current_delay
-                        and self._current_delay - new_delay > 32
-                        and self.linear_is_cancelling()):
-                    if self._delay_quarantine_left < 0:
-                        self._delay_quarantine_left = self._delay_quarantine_hops
-                    if self._delay_quarantine_left > 0:
-                        self._delay_quarantine_left -= 1
-                        _change_blocked = True
-                else:
-                    self._delay_quarantine_left = -1
-
                 # Path B: delay shift. Independent of Path A — fires only
                 # when current_delay is already set and a meaningful shift
                 # is detected. Medium confidence (≥ 0.5) + consecutive-
@@ -2209,7 +2168,6 @@ class AEC:
                         and self._current_delay >= 0
                         and self.delay_est.confidence >= 0.5
                         and abs(new_delay - self._current_delay) > 32
-                        and not _change_blocked
                         and not any(abs(new_delay - _rv) < 16 for _rv in
                                     getattr(self, '_delay_reject_values', ()))):
                     if (hasattr(self, '_pending_delay')
@@ -2310,8 +2268,10 @@ class AEC:
                         # of this reused that shorter constant and judged
                         # genuine, still-reconverging good relocks as bad
                         # before they'd had their documented recovery time,
-                        # breaking test_delay_backward_quarantine's forward-
-                        # -move and multipath rows). If erle_windowed is more
+                        # breaking the forward-move and multipath rows of the
+                        # now-removed delay-change regression test that used
+                        # to pin this (see CHANGELOG's 2026-10-19 Removed
+                        # entry). If erle_windowed is more
                         # than 1 dB WORSE than just before the shift by then
                         # (not merely "not yet better" -- a relock that is
                         # simply slow to pay off is not what this guards
@@ -3653,8 +3613,7 @@ class AEC:
     def linear_is_cancelling(self) -> bool:
         """Is this instance's linear filter demonstrably cancelling right now?
 
-        The single definition of "cancelling" behind the backward-jump
-        quarantine (``delay_backward_quarantine_enabled``) and behind
+        The single definition of "cancelling" behind
         ``apply_external_realign``'s warm-transfer gate, public so that a
         wrapper owning its own shared delay estimator
         (``pipelines/4ch_aec_bf_nr_res/pipeline.py``) asks the SAME question

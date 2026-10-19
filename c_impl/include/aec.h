@@ -187,45 +187,6 @@ typedef struct AecConfig {
      * _inst_erle_db AND delay < tap reach. */
     int    delay_acquire_warm_transfer;       /* 1 */
     float  delay_acquire_inst_erle_db;        /* 4.0 */
-    /* Backward-jump quarantine on a delay CHANGE (Path B). Sibling of
-     * delay_acquire_protect_converged above -- which guards the FIRST
-     * acquisition only and is untouched by that field. DEFAULT OFF, so
-     * the shipped path is byte-identical to a build without the mechanism.
-     *
-     * WHAT IS QUARANTINED, and nothing else: a candidate strictly EARLIER
-     * than the delay already in force (new_delay < current_delay -- the
-     * backward / pre-echo direction) offered while the linear filter is still
-     * demonstrably cancelling at the applied alignment
-     * (aec_linear_is_cancelling()). FORWARD jumps -- a LARGER delay, which
-     * pre-echo mis-attribution cannot produce -- are never quarantined, and
-     * neither is the first acquisition.
-     *
-     * TIME-BOUNDED, never a veto. The countdown is armed on the first refusal
-     * and spends one tick per estimation cycle; after
-     * delay_backward_quarantine_s worth of cycles the candidate is ACCEPTED.
-     * The window is converted to cycles once, in aec_carve(), against the
-     * RESOLVED hop and sample rate (minimum 1, so a sub-hop window still
-     * quarantines for exactly one cycle instead of silently disabling the
-     * mechanism). Two ways out early:
-     *   (a) cancellation collapses -- common for a hard path replacement,
-     *       but not guaranteed for multipath/path-addition changes -- and the
-     *       candidate is accepted on that cycle;
-     *   (b) nothing else. The estimator publishes no dominance signal beyond
-     *       persistence: delay_aec3_confidence() is histogram consistency
-     *       quantised to 0 / 0.5 / 1.0 and carries no quality information
-     *       (the pre-echo candidate reaches REFINED too), and Path B already
-     *       gates on it. "The candidate kept being offered" IS the
-     *       persistence evidence, and the window is what measures it.
-     *
-     * So a mis-lock is DELAYED by at most the window, never cured. Curing it
-     * is estimator work, out of scope for this guard.
-     *
-     * Why a bound: refusing ALL differing candidates while cancelling, with
-     * no bound, vetoes a genuine new path indefinitely in multipath /
-     * path-addition scenes, where the surviving old reflection keeps ERLE up.
-     * Candidate direction + a bound avoid that. */
-    int    delay_backward_quarantine_enabled; /* 0 */
-    float  delay_backward_quarantine_s;       /* 1.0 */
 
     /* DT-deg recovery stack (default ON, mirrors Python). The
      * energy-based held near-end gate (_ne_recent_frames) arms two levers
@@ -437,18 +398,6 @@ typedef struct Aec {
                             * FIXED:   cfg.fixed_delay_samples, always.
                             * EXTERNAL_ALIGNED: 0 (nothing to apply). */
     int    pending_delay;  int has_pending; int pending_delay_ttl;
-    /* Backward-jump quarantine (cfg.delay_backward_quarantine_*).
-     * _left: estimation cycles still to spend before a refused EARLIER
-     *        candidate is accepted anyway. -1 = DISARMED, which is the only
-     *        state that may re-arm; 0 = armed and EXPIRED, i.e. this cycle
-     *        accepts. Disarming happens on any cycle the guard is not
-     *        engaged (no backward candidate, cancellation collapsed, or the
-     *        feature is off), which is also what disarms it after an
-     *        acceptance -- once current_delay moves the candidate is no
-     *        longer a backward jump.
-     * _hops: the window in cycles, derived once in aec_carve(); >= 1. */
-    int    delay_quarantine_left;
-    int    delay_quarantine_hops;
     /* AMEND_35: C mirror of orchestrator.py's AMEND_34 bad-relock judgment.
      * The matched-filter aggregator (shared design, both languages) accepts
      * whichever lag correlates best with no check that it actually cancels
@@ -914,8 +863,8 @@ void aec_reset(Aec* a);
  * far stream advances (delay grew, including the first acquisition from raw
  * far where old_alignment is 0), negative when it retards.
  *
- * When the filter is demonstrably cancelling (aec_linear_is_cancelling(), the
- * same two-reading test the backward-delay quarantine uses -- NOT the
+ * When the filter is demonstrably cancelling (aec_linear_is_cancelling(),
+ * which ORs windowed ERLE with the recent inst-ERLE peak -- NOT the
  * inst-ERLE ring alone, which ages out across a stretch of far silence and
  * would send a perfectly good filter down the reset path) and the shift fits
  * the tap span, the learned IR is shifted by delta and cancellation survives
@@ -1077,9 +1026,9 @@ long aec_far_fft_real_compute_count(const Aec* a);
 /* Read-only: is this instance's linear filter demonstrably cancelling right
  * now? 1 = yes.
  *
- * The single definition of "cancelling" behind the backward-jump quarantine
- * (delay_backward_quarantine_enabled), exported so that a wrapper owning its
- * own shared delay estimator (pipelines/4ch_aec_bf_nr_res) asks the SAME question
+ * The single definition of "cancelling" this engine uses, exported so that
+ * a wrapper owning its own shared delay estimator
+ * (pipelines/4ch_aec_bf_nr_res) asks the SAME question
  * of its lanes that this engine asks of itself, thresholds included, instead
  * of restating them. Reads two figures the engine already maintains -- last
  * hop's windowed ERLE against 2.5 dB, and the recent inst-ERLE peak against

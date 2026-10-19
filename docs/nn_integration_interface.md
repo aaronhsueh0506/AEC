@@ -121,9 +121,9 @@ belongs to the integrator. Regression coverage: `test/test_linear_context.c`
 A second `MATCHED`-only failure mode is visible at this seam only through
 `generation`: the estimator can acquire correctly and then re-lock to an
 EARLIER, wrong delay (pre-echo mis-attribution), which arrives as a normal
-`CHANGED` hop. `AecConfig::delay_backward_quarantine_enabled` (default 0,
-`c_user_manual_zh_TW.md` §6.4) delays such an adoption by a bounded window
-but does not prevent it, so a consumer must not treat a post-`CHANGED`
+`CHANGED` hop. The library has no built-in mechanism that delays or prevents
+such an adoption (a prototype was measured and removed 2026-10-19 — see
+CHANGELOG `### Removed`), so a consumer must not treat a post-`CHANGED`
 `LOCKED` as proof the alignment is correct — flush far feature rings on
 `generation` movement regardless. A consumer that owns its own estimator can
 ask the engine the same "is this lane still cancelling" question the guard

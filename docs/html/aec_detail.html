@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>AEC C library 細節(quarantine、runtime 強度、耗時與 debug)</title>
+<title>AEC C library 細節(記憶體拆解、runtime 強度、耗時與 debug)</title>
 <style>
 body{font-family:-apple-system,"PingFang TC","Noto Sans TC",sans-serif;margin:0;padding:0 1rem 3rem;line-height:1.55;color:#1a1a1a;max-width:70rem;margin-left:auto;margin-right:auto}
 nav{padding:.6rem 0;border-bottom:2px solid #2a6;margin-bottom:1rem;font-size:.95rem}
@@ -24,13 +24,12 @@ pre code{background:none;padding:0}
 </head>
 <body>
 <nav><a href="../../../Audio_ALG/docs/html/index.html">index</a><a href="aec.html">aec</a><a href="aec_detail.html"><b>aec 細節</b></a><a href="../../../NR/docs/html/nr.html">nr</a><a href="../../../audio_common/docs/html/audio_common.html">audio_common</a><a href="aec_c_api.html">AEC API</a><a href="aec_res.html">AEC RES 級</a><a href="../../../NR/docs/html/nr_c_api.html">NR API</a><a href="../../../audio_common/docs/html/audio_common_c_api.html">audio_common API</a><a href="../../../Audio_ALG/docs/html/integration_example.html">串接範例</a></nav>
-<h1>AEC C library 細節 — delay quarantine、記憶體拆解、執行期強度、耗時與 debug</h1>
+<h1>AEC C library 細節 — 記憶體拆解、執行期強度、耗時與 debug</h1>
 
 <h2>概要</h2>
-<p>本頁收 <a href="aec.html">aec</a> 的「API 用法」中會把單頁撐過 30 KB 的細節:backward-jump quarantine 與記憶體拆解、<code>aec_set_preset()</code> 的 ramp 語意與量測注意事項、逐階段耗時與 debug 狀態。呼叫順序、delay mode 表、process 進入點、seam 契約、block diagram、泳道圖、I/O 表、State 表、延遲與檔案清單仍留在原頁。</p>
+<p>本頁收 <a href="aec.html">aec</a> 的「API 用法」中會把單頁撐過 30 KB 的細節:記憶體拆解、<code>aec_set_preset()</code> 的 ramp 語意與量測注意事項、逐階段耗時與 debug 狀態。呼叫順序、delay mode 表、process 進入點、seam 契約、block diagram、泳道圖、I/O 表、State 表、延遲與檔案清單仍留在原頁。</p>
 
-<h2>Delay backward-jump quarantine 與記憶體拆解</h2>
-<p class="small"><b>Backward-jump quarantine</b>(<code>cfg.delay_backward_quarantine_enabled</code>,<b>預設 0</b>=關閉,關閉時輸出逐位元不變;<code>_s</code> 預設 1.0 秒,於 <code>aec_carve()</code> 依 resolved hop 換算成 estimation cycle 數、下限 1):僅作用於 <code>MATCHED</code> 的 Path B(鎖定後的延遲變更)。只隔離「比現行延遲**更早**、且線性 filter 在目前對齊上仍明顯在消除回音」的候選——判別式是新公開的唯讀 <code>aec_linear_is_cancelling(const Aec*)</code>(windowed ERLE &gt; 2.5 dB **或** 近期 inst-ERLE 峰值 &gt; <code>delay_acquire_inst_erle_db</code>;兩個讀數未被填過時為 0 ⇒ fail-open),多實例的呼叫端(4 聲道 wrapper)用同一支函式問同一個問題。往後跳的候選與首次擷取完全不受影響;隔離**有上限**,窗到期即採用,消除能力崩掉則立即放行——所以它**只延後、不治癒** pre-echo 誤鎖。實測(16k/fft 512/hop 256,true 6400 誤鎖 4800):窗 0.5/1.0/2.0/4.0 s = 31/62/125/250 hops,誤鎖採用點由 hop 49 移到 80/111/174/299;multipath 新增路徑四種增益全部重鎖、最壞慢一個窗。</p>
+<h2>記憶體拆解</h2>
 <p class="small">拆解成 estimator/ring 兩個具名子集用 <code>aec_get_mem_breakdown(&amp;cfg, &amp;out)</code>(<code>AecMemBreakdown{total_bytes, estimator_bytes, ring_bytes}</code>;<code>total_bytes</code> 就是 <code>aec_get_mem_size()</code> 本身,不是另一套算式)。四格點 × n=1..5 與 <code>FIXED</code> 多個 delay 值的完整實測表見 <code>lib/aec/docs/c_user_manual_zh_TW.md</code> §4/§6.7。</p>
 <h2>執行期改強度(aec_set_preset)的細節</h2>
 <p class="small"><code>ramp_ms == 0</code> 下一個 hop 套用(<b>不是錯誤</b>),落點與「用該 preset 從頭建一個新實例」持有的 float 完全相同;<code>&gt; 0</code> 以 dB 線性走過去、每 hop 一步、<b>精確落在</b>目標(非漸近),上限 60 s。mild ↔ aggressive 是 18 dB 落差且地板是硬 clamp、下游無平滑,所以 ramp 有其必要。ramp 途中再呼叫會從<b>當前 live 值</b>重新起走;<code>aec_reset()</code> 保留目標、丟棄 ramp 進度。回 0,或 −1(NULL / 超出 enum 的 preset / 超出範圍的 ramp_ms)且<b>什麼都不寫</b>——與 <code>aec_config_from_preset()</code> 遇到不認得的值退回 balanced 相反,setter <b>直接拒絕</b>。在兩個 hop 之間呼叫、與 process 序列化;<b>非 thread-safe</b>。</p>

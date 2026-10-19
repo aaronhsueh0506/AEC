@@ -23,13 +23,14 @@
 - 目前本地 `H=2 + N_RELEASE=16` 不符合 release gate，不可隨 A 線一起推送。
 - 先完成 Python/C raw-delay trace parity，再設計 PBFDKF-aware safe-window controller。
 
-> **已落地的部分：backward-jump quarantine**（`AecConfig::
-> delay_backward_quarantine_enabled` / `_s`，預設 OFF，Python/C/4ch 三端
-> 同語意）。它把「先鎖對、再被更早的 pre-echo 候選搶走」延後一個有界的
-> 窗，**不是**上面這條 B 線的替代品：誤鎖只是被推遲、到期仍會被採用，
-> 真正的 winner-prefix 修復與 safe-window controller 仍未動。預設 OFF ⇒
-> A 線的 byte-exact 前提不受影響。機制與實測見
-> `delay_estimator_design_zh_TW.md` §2。
+> **曾經落地、現已移除的部分：Path B 延遲變更保護原型**（預設 OFF，
+> Python/C/4ch 三端同語意）。它曾把「先鎖對、再被更早的 pre-echo 候選
+> 搶走」延後一個有界的窗，**不是**上面這條 B 線的替代品：誤鎖只是被
+> 推遲、到期仍會被採用，真正的 winner-prefix 修復與 safe-window
+> controller 從未動過。n=800 案例的經驗反事實量測顯示它擋下 0 個真實
+> 誤鎖、卻新增 3 個假陽性，2026-10-19 依裁定移除（見 CHANGELOG
+> `### Removed`）；移除前後 A 線的 byte-exact 前提都不受影響（預設即
+> OFF）。現象與衍生發現見 `delay_estimator_design_zh_TW.md` §2。
 
 ## 1. 分支與 baseline 管理
 
