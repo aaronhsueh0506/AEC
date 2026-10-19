@@ -41,7 +41,7 @@ when verdict requires it.
 
 ---
 
-## [Unreleased] — 2026-10-19 — remove the Path-B backward-jump delay-change guard (measured net-negative; ABI: `sizeof(AecConfig)` −8 B, `sizeof(Aec)` −16 B)
+## [Unreleased] — 2026-10-19 — remove the Path-B backward-jump delay-change guard (measured net-negative; ABI: `sizeof(AecConfig)` −8 B, `aec_get_mem_size()` −16 B, raw `sizeof(Aec)` −8 B — see the ABI note below for why those last two differ)
 
 ### Removed
 
@@ -57,12 +57,10 @@ when verdict requires it.
    never curing it. Default OFF on both ports, so the shipped default path
    was always byte-identical to a build without the mechanism.
 
-   **Measured net-negative, per the approved measurement this removal acts
-   on: on an n=800 empirical counterfactual, the guard caught 0 bad relocks
-   while creating 3** (genuine delay changes held back one window that
-   should not have been). Removed on that evidence, with user approval, per
-   this project's policy of only shipping guards with a demonstrated
-   benefit.
+   **Measured net-negative: on an n=800 empirical counterfactual, the guard
+   caught 0 bad relocks while creating 3** (genuine delay changes held back
+   one window that should not have been). A guard with no demonstrated
+   benefit and a measured cost does not ship.
 
    Removed: Python `AecConfig.delay_backward_quarantine_{enabled,s}`
    (`modules/config.py`); the construction-time `_delay_quarantine_hops`/
@@ -101,8 +99,11 @@ when verdict requires it.
    aggregator's dominant-peak vote is a near-exact 50/50 tie. Under the
    full-rate delay-estimation default (2026-10-18, `delay_est_period_s`
    0.5→0.0), the C test's two tried seeds split one each way while the
-   Python reference scene's 20-seed sweep landed on the newer path on
-   every seed. Root-caused, not assumed: C's `da_argmax_i`/
+   Python reference scene's 20-seed sweep (per the now-deleted comment
+   this is carried from -- the sweep itself left no reproducible script
+   or test artifact in this repo; re-verify before relying on it again)
+   landed on the newer path on every seed. Root-caused, not assumed: C's
+   `da_argmax_i`/
    `da_argmax_incremental_update` (`delay_aec3.c`) and Python's
    `np.argmax`-based `_HighestPeakAggregator` (`lag_aggregator.py`) use the
    IDENTICAL tie-break rule (lowest bin index wins, same ascending
@@ -141,17 +142,22 @@ explicitly rather than assumed from the output-hash gate alone (which only
 exercises the default path).
 
 **ABI note.** `sizeof(AecConfig)`: 228 → 220 B (−8 B: one `int` + one
-`float`). `sizeof(Aec)`: 6448 → 6432 B (−16 B: the embedded `AecConfig`
-member accounts for 8 of it, the two removed `int` state fields the other
-8). Every `AecConfig` field from `dt_aware_recovery_soft` onward shifts 8 B
-earlier than before; every `Aec` field after the removed
-`delay_quarantine_left`/`_hops` pair (i.e. from the AMEND_35 judgment
-fields onward) shifts 16 B earlier. `aec_get_mem_size()` drops by exactly
-16 B at every grid, every `delay_num_filters`, every mode (`MATCHED`,
-`FIXED` at every `fixed_delay_samples`, `EXTERNAL_ALIGNED`) — confirmed by
-`make test-delay-num-filters` on both backends — because `estimator_bytes`
-and `ring_bytes` (`aec_get_mem_breakdown()`) are untouched by this change;
-only the struct's own footprint moved. Fresh absolute figures for every
+`float`). Raw `sizeof(Aec)`: 6440 → 6432 B (−8 B, confirmed by compiling
+both endpoints directly — NOT −16 B; a `cng_n2_windowed_psd`-sized
+`Aec3PostConfig` field landed on an alignment boundary and grew the
+embedded `Aec3Post post` member by +8 B, which cancels half of this
+removal's own −16 B). Net effect by field position: fields between the
+embedded `AecConfig cfg` member and the old `delay_quarantine_left`/`_hops`
+location shift 8 B earlier; fields between that old location and `post`
+shift 16 B earlier; fields after `post` shift only 8 B earlier (the
+`Aec3Post` growth cancels the other 8). `aec_get_mem_size()` still drops by
+exactly 16 B at every grid, every `delay_num_filters`, every mode
+(`MATCHED`, `FIXED` at every `fixed_delay_samples`, `EXTERNAL_ALIGNED`) —
+confirmed by `make test-delay-num-filters` on both backends — because that
+figure is `ALIGN16(sizeof(Aec))`: 6440 rounds up to 6448 pre-change, 6432
+is already a multiple of 16 post-change, so the *aligned* total drops 16 B
+even though the *raw* struct only drops 8. `estimator_bytes` and
+`ring_bytes` (`aec_get_mem_breakdown()`) are untouched by this change. Fresh absolute figures for every
 grid/mode/n this project ships replace the old ones in
 `docs/c_user_manual_zh_TW.md` §4 and in `docs/html/aec.html` /
 `aec_c_api.html`; none of the previously recorded constants (the old
@@ -160,6 +166,82 @@ this revision even before this change — this repo's struct layout had
 already grown a `cng_n2_windowed_psd` field and live-observer/soft-revert
 state since those numbers were last measured, so they were re-derived from
 scratch rather than patched.
+
+---
+
+## [Unreleased] — 2026-10-19 — feed the CNG N2 tracker a windowed capture PSD (new default-OFF flag)
+
+AEC3's ComfortNoiseGenerator estimates its noise target from Y2 formed via
+`WindowedPaddedFft(kSqrtHanning)` — the same windowed FFT the subtractor
+forms E2 from, not a rectangular one. This port's N2/N2_initial tracker was
+fed from `near_psd`, the rectangular `|near_spec|^2`, so its target
+coordinate ran ~3 dB high relative to AEC3's windowed reference. This is a
+distinct, upstream bug from the deleted `cng_window_power_compensation`
+flag below, which patched the symptom on the CNG *output* side even though
+the window-loss compensation in the synthesis/injection path (the
+`kSqrt2Sin`-style scaling) is already correct; the real fix belongs at the
+tracker's input.
+
+Adds `cng_n2_windowed_psd` (default OFF, Python + C, mirrored), which
+re-points the N2/N2_initial tracker (first-hop init + per-hop EMA) at the
+windowed capture PSD already shared with `erle_windowed_capture_psd` —
+reusing the magnitude `aec3_post_run`'s Step 2 already computes
+unconditionally each hop, so no second FFT. The ERLE consumer stays gated
+on `erle_windowed_capture_psd` alone.
+
+Isolated seeded-N2 A/B harness (scratch, not committed): the tracker's own
+absolute level shifts by −2.73/−2.39 dB (grid A/B) when the flag goes ON,
+closely matching an independent single-hop-free witness of the
+rectangular-vs-windowed PSD ratio (−3.00/−3.02 dB, averaged over 50 hops).
+Flags-off bit-exact confirmed two ways: C's existing test suite
+(`test_output_hash` 30/30, `test_aec_res` 264/264, `test_config_validation`
+404/404, `test_reset_parity` 6/6, `test_zero_heap`) unchanged, and a
+byte-exact Python A/B run of `fileid_0` against the pre-change code. Quick
+sanity (NOT a full validation pass): fid0 standard metrics finite/stable
+both ways; 14/15 FS Rule A clips pass, the one flagged traced to a
+near-floor CN-level transition (sub −44 dBFS) — the exact, in-scope
+mechanism this flag changes, not a new echo-leak path.
+
+**NOT corpus-validated and NOT a promotion candidate**: CN level affects
+AECMOS deg/echo scores and this project's 800-case gate is required before
+any default-on decision, which is explicitly out of scope here.
+
+---
+
+## [Unreleased] — 2026-10-19 — delete three default-off mechanisms that never became viable
+
+**`tail_evidence`** (`tail_evidence_enabled`/`tail_evidence_feed_unbounded`
+and the other `tail_evidence_*` fields, `python/modules/residual/
+tail_evidence.py`): superseded by `live_observer_enabled`, which closes
+55%+ of the achievable ceiling against `tail_evidence`'s 24-30%. No test or
+cross-repo references.
+
+**`cng_window_power_compensation`**: built on a misdiagnosis. The
+comfort-noise synthesis window's OLA power loss is already compensated by
+`kSqrt2Sin`, matching AEC3's own design (see the unchanged comment on
+`_aec3_sqrt2_sin_lut`). The dB gap this flag chased is explained by the N2
+tracker's min-statistics bias and this port's near-PSD/Y2 coordinate
+offset (see `cng_n2_windowed_psd` above) — neither of which this flag
+corrected; turning it on overshot by about +3 dB. No C port, no
+measurement script in committed main, no test references.
+
+**`delay_acquire_protect_inst_erle`**: a more conservative alternative to
+the kept, default-ON `delay_acquire_warm_transfer` (block realign outright
+during delay acquisition instead of warm-transferring the taps). Never
+became competitive on the 800-case battery and has been inert in both
+languages. `delay_acquire_warm_transfer` and `delay_acquire_inst_erle_db`
+are untouched and remain live production code.
+
+All three were already OFF by default (zero production behavior change).
+Verified: C `test-output-hash` digest and its checked-in golden are both
+unchanged; full `c_impl` test-* suite and `make selftest` stay green; 312
+pytest cases pass before and after; and a direct before/after balanced
+16 kHz end-to-end golden (`python/diag/gen_aec_e2e_golden.py`, 4200 hops)
+is byte-for-byte identical, confirming the Python orchestrator changes
+are bit-exact. Removing `delay_acquire_protect_inst_erle` shifts every
+`AecConfig` field after it; `Audio_ALG` embeds this struct by value and
+needs a recompile when its `lib/aec` pin advances past this commit (no
+functional reference to the field was found there).
 
 ---
 

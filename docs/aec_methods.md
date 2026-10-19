@@ -136,6 +136,7 @@ shows their public configuration values, not necessarily the internal hop count.
 | | `mu` / `delta` | 0.3 / 1e-8 | step size / regularization |
 | Residual / CNG | `enable_res` | **ON** | post-filter master gate (§3.7) |
 | | `enable_cng` | OFF (preset **ON**) | comfort noise (§3.5) |
+| | `cng_n2_windowed_psd` | 0.0 (**OFF**) | feeds the N2 tracker a windowed capture PSD instead of a rectangular one, fixing a ~3 dB high bias vs AEC3's reference coordinate; NOT corpus-validated, not a promotion candidate (see CHANGELOG 2026-10-19) |
 | | `comfort_noise_floor_dbfs` | −96.034 | |
 | | `enable_td_constraint` | **ON** | |
 | C′ ERLE coherence gate | `erle_coh_gate_enabled` | **ON** | Γ²(Ŷ,Y) per-bin ERLE freeze |

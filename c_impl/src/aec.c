@@ -1750,7 +1750,11 @@ static int aec_carve(Aec* a, uint8_t* ptr, const AecConfig* cfg,
      * cycling `partition_to_constrain`) instead of re-applying it to every
      * partition every hop. poor_excitation_counter is seeded the same as
      * main/shadow (mirrors _seed_poor_excitation_counters() seeding all
-     * three in Python). */
+     * three in Python). NOT (yet) mirrored from main/shadow, on both ports:
+     * the soft-realign warm IR-shift, the RenderSignalAnalyzer narrowband mu
+     * mask, and the AMEND_35 bad-relock tap snapshot/restore -- a consistent
+     * gap across languages, not a port divergence, but real missing
+     * coverage for the observer lane specifically. */
     if (cfg->live_observer_enabled) {
         size_t obs_sz = pbfdaf_get_mem_size(blk, np, hop, 1);
         if (pbfdaf_init_static(&a->observer_filter, ptr, obs_sz, blk, np,

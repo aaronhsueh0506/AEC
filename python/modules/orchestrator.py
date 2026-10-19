@@ -1186,10 +1186,9 @@ class AEC:
         # (_partition_to_constrain) to 0, same as aec_reset()'s
         # unconditional pbfdaf_reset_carried_state(&a->observer_filter)
         # when a->has_observer. The observer PBFDAF is constructed
-        # unconditionally in this port (see its construction site), so no
-        # enabled-flag guard is needed here either.
-        if getattr(self, '_observer_filter', None) is not None:
-            self._observer_filter.reset_carried_state()
+        # unconditionally in __init__ (see its construction site) before
+        # reset() can ever be reached, so no guard is needed here either.
+        self._observer_filter.reset_carried_state()
         self._seed_poor_excitation_counters()
         # Empty the inst-ERLE slope ring, same as _reset_filter_latches: its
         # readers take the last 15 entries, so anything left here would be
@@ -3924,7 +3923,7 @@ class AEC:
         # selection path already computed, no duplicate work either flag pays
         # for alone.
         _near_psd_win = None
-        if (getattr(self.config, "erle_windowed_capture_psd", False)
+        if (getattr(self.config, "erle_windowed_capture_psd", True)
                 or getattr(self.config, "cng_n2_windowed_psd", False)):
             _near_spec_win = (self.filter.error_spec_windowed
                               + self.filter.echo_spec).astype(np.complex64)
@@ -3935,7 +3934,7 @@ class AEC:
         # None (default) → ERLE keeps near_psd.
         _capture_psd_erle = (
             _near_psd_win
-            if getattr(self.config, "erle_windowed_capture_psd", False)
+            if getattr(self.config, "erle_windowed_capture_psd", True)
             else None
         )
         far_pwr = float(np.mean(far_end ** 2))
