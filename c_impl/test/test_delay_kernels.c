@@ -255,7 +255,8 @@ static int run_decimator_pair_sweep(void) {
                 ina[i] = (b % 11 == 3) ? ((i & 1) ? sa : -sa) : (b % 13 == 5) ? 0.0f : rnd_f(sa);
                 inb[i] = (b % 17 == 4) ? 0.0f : rnd_f(sb);
             }
-            da_decimator_decimate_pair(&pa, ina, oa, &pb, inb, ob);
+            da_decimator_decimate_pair(&pa, ina, oa, &pb, inb, ob,
+                                        da_decimator_same_coefficients(&pa, &pb));
             da_decimator_decimate_generic(&ga, ina, ra);
             da_decimator_decimate_generic(&gb, inb, rb);
             pblocks++;
