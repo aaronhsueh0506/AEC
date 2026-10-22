@@ -27,7 +27,7 @@ per-bin H_error Kalman update + leakage refresh in lockstep:
     * error_psd[n_bins], R[n_bins] (float32)   (NON-FFT → bit-exact)
     * partition_idx, call_counter, initial_state_active, init_render_hops
 
-The C parity test (parity_pbfdkf.c) constructs a PBFDKF with the captured
+A C parity harness constructs a PBFDKF with the captured
 config, then per hop: sets the external inputs, calls pbfdkf_process, and
 asserts the non-FFT state bit-exact + the FFT-derived arrays within rtol<1e-4
 (atol 1e-6). Covers startup (gated), convergence, far-inactive, block-

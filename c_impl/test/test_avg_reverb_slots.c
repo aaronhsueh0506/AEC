@@ -2,7 +2,7 @@
  * the one just older must be distinct from the newest partition for every ring
  * size, write position and delay, including delays at and beyond the ring
  * length. */
-#include "aec3_post.h"
+#include "aec_post.h"
 
 #include <stdio.h>
 
@@ -25,7 +25,7 @@ int main(void) {
                 int di = -1, pi = -1;
                 int newest = (pidx + n_part - 1) % n_part;
                 int d = delay < 0 ? 0 : (delay > n_part - 2 ? n_part - 2 : delay);
-                aec3_post_avg_reverb_slots(n_part, pidx, delay, &di, &pi);
+                aec_post_avg_reverb_slots(n_part, pidx, delay, &di, &pi);
                 CHECK(di == step_back(n_part, newest, d),
                       "delay slot n=%d pidx=%d delay=%d got %d", n_part, pidx, delay, di);
                 CHECK(pi == step_back(n_part, newest, d + 1),
@@ -37,12 +37,12 @@ int main(void) {
     }
     {
         int di = -1, pi = -1;
-        aec3_post_avg_reverb_slots(7, 1, 6, &di, &pi);   /* delay = n_part - 1 */
+        aec_post_avg_reverb_slots(7, 1, 6, &di, &pi);   /* delay = n_part - 1 */
         CHECK(pi != 0, "n=7 newest=0 delay=6: past slot must not be the newest, got %d", pi);
     }
     {
         int di = -1, pi = -1;
-        aec3_post_avg_reverb_slots(1, 5, 3, &di, &pi);   /* single-slot ring */
+        aec_post_avg_reverb_slots(1, 5, 3, &di, &pi);   /* single-slot ring */
         CHECK(di == 0 && pi == 0, "n=1 slots %d %d", di, pi);
     }
     if (fails) { printf("test_avg_reverb_slots: %d failure(s)\n", fails); return 1; }

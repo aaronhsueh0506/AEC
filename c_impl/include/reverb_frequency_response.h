@@ -1,6 +1,6 @@
 /* reverb_frequency_response.h — C port of
  * python/modules/residual/reverb_frequency_response.py
- * (strict line port of AEC3 reverb_frequency_response.cc:74-106).
+ * (strict line port of the reference reverb frequency response).
  *
  * Builds a per-bin reverb tail frequency response from the per-partition |W|²
  * filter frequency response:
@@ -17,7 +17,8 @@
  *  - frequency_response is float32 (n_partitions x n_freqs); rows are float32.
  *  - The two energy reductions are numpy `np.sum` over a float32 slice, which
  *    uses PAIRWISE summation accumulated in float32 (NOT naive left-to-right).
- *    Replicated bit-exactly by f32_pairwise_sum().
+ *    Replicated bit-exactly by sk_pairwise_sum_tailfold_b_f32
+ *    (utility/simd_aec.h).
  *  - average_decay is a DOUBLE (float64), matching Python: `_average_decay`
  *    is a plain python float, and `average_decay = tail_energy /
  *    direct_energy` plus the EMA update (`_average_decay += smoothing *
@@ -46,7 +47,7 @@ typedef struct {
     int    use_conservative;   /* point-wise max with raw_tail */
     double smoothing_base;     /* 0.2, or wall-clock-rescaled value. Double,
                                  * not float: the caller's config constant
-                                 * (AEC3B_REE_REVERB_SMOOTHING_BASE) is a
+                                 * (AECB_REE_REVERB_SMOOTHING_BASE) is a
                                  * full-precision double literal, and
                                  * Python keeps `_smoothing_base` as a plain
                                  * (float64) python float forever -- never
@@ -65,10 +66,6 @@ void reverb_freq_resp_init(ReverbFrequencyResponse *r, float *tail_storage,
                            double smoothing_base);
 
 void reverb_freq_resp_reset(ReverbFrequencyResponse *r);
-
-/* Numpy-1.26-bit-exact pairwise sum of a float32 array (block <=128, unrolled
- * by 8, recursive split). Exposed for the parity test. Returns a float. */
-float f32_pairwise_sum(const float *a, size_t n);
 
 /* update (cc:74-106).
  *   frequency_response : flat row-major (n_partitions x n_freqs) float32.

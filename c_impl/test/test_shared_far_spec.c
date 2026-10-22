@@ -30,20 +30,26 @@
  *      is the counter a multi-lane caller (4aec_nr_res.c) uses to prove
  *      its own total per-hop far-FFT count actually dropped after
  *      switching lanes 1-3 over to share lane 0's spectrum.
+ *   5. The hop and call counters (frame_count, shadow_frame_count,
+ *      render_call_count, capture_call_count) saturate at LONG_MAX, and a
+ *      shadow hop count past INT_MAX still reads as past the shadow warm-up
+ *      gate where the detectors narrow it to int.
  *
  * Build (standalone, from c_impl/ — mirrors test_process_context.c's
  * documented recipe):
- *   make -C ../../audio_common BACKEND=ne10 lib
+ *   make -C ../../audiolib/common BACKEND=ne10 lib
  *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=gnu99 -Iinclude -Iexample \
- *       -I../../audio_common/include \
+ *       -I../../audiolib/common/include \
+ *       -I../../audiolib/common \
  *       test/test_shared_far_spec.c $(find src -name '*.c') \
- *       $(make -s -C ../../audio_common BACKEND=ne10 print-lib-path) -lm \
+ *       $(make -s -C ../../audiolib/common BACKEND=ne10 print-lib-path) -lm \
  *       -o bin/test_shared_far_spec
  * Run:
  *   ./bin/test_shared_far_spec
  */
 #include "aec.h"
 #include <math.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -331,6 +337,116 @@ static void test_far_fft_counter_reflects_actual_computation(void) {
     aec_destroy(&borrowing);
 }
 
+
+static void test_far_fft_counter_saturation(void) {
+    Aec a;
+    memset(&a, 0, sizeof(a));
+    a.main_filter.base.far_fft_real_compute_count = 7;
+    a.shadow_filter.far_fft_real_compute_count = 11;
+    a.observer_filter.far_fft_real_compute_count = 13;
+    a.has_shadow = a.has_observer = 1;
+    CHECK(aec_far_fft_real_compute_count(&a) == 31, "counter sum: ordinary values");
+    a.main_filter.base.far_fft_real_compute_count = LONG_MAX - 3;
+    a.shadow_filter.far_fft_real_compute_count = 2;
+    a.observer_filter.far_fft_real_compute_count = 2;
+    CHECK(aec_far_fft_real_compute_count(&a) == LONG_MAX, "counter sum: observer addition saturates");
+    a.shadow_filter.far_fft_real_compute_count = LONG_MAX;
+    CHECK(aec_far_fft_real_compute_count(&a) == LONG_MAX, "counter sum: shadow addition saturates");
+    a.has_shadow = a.has_observer = 0;
+    CHECK(aec_far_fft_real_compute_count(&a) == LONG_MAX - 3, "counter sum: disabled filters ignored");
+
+    AecConfig cfg;
+    context_only_config(&cfg, 16000, 0, 0);
+    if (aec_create(&a, &cfg) != 0) { CHECK(0, "counter saturation: create"); return; }
+    float zero[4096] = {0};
+    a.main_filter.base.far_fft_real_compute_count = LONG_MAX - 1;
+    aec_process_context(&a, zero, zero);
+    CHECK(a.main_filter.base.far_fft_real_compute_count == LONG_MAX, "counter increment reaches LONG_MAX");
+    aec_process_context(&a, zero, zero);
+    CHECK(a.main_filter.base.far_fft_real_compute_count == LONG_MAX, "counter increment stays at LONG_MAX");
+    aec_reset(&a);
+    CHECK(aec_far_fft_real_compute_count(&a) == 0, "saturated counter resets to zero");
+    aec_destroy(&a);
+}
+
+/* Hop and call counters hold at LONG_MAX instead of overflowing signed long (32 bits on
+ * ILP32). Seeding one hop below the limit and running past it proves the clamp on the
+ * real increment sites; each field must also return to zero on reset. */
+static void test_hop_counter_saturation(void) {
+    AecConfig cfg;
+    aec_config_from_preset(&cfg, AEC_PRESET_BALANCED, 16000);
+    cfg.enable_shadow = 1;
+    Aec a;
+    if (aec_create(&a, &cfg) != 0) { CHECK(0, "hop counter saturation: create"); return; }
+    CHECK(a.has_shadow, "hop counter saturation: instance has a shadow filter");
+    int hop = aec_hop_size(&a);
+    float ref[4096] = {0}, mic[4096] = {0}, out[4096];
+    if (hop <= 0 || hop > 4096) { aec_destroy(&a); return; }
+
+    a.frame_count = LONG_MAX - 1;
+    a.shadow_frame_count = LONG_MAX - 1;
+    a.render_call_count = LONG_MAX - 1;
+    a.capture_call_count = LONG_MAX - 1;
+    for (int i = 0; i < 3; ++i) {
+        aec_analyze_render(&a, ref);
+        aec_process_capture(&a, mic, out);
+    }
+    CHECK(a.frame_count == LONG_MAX, "frame_count stops at LONG_MAX");
+    CHECK(a.shadow_frame_count == LONG_MAX, "shadow_frame_count stops at LONG_MAX");
+    CHECK(a.render_call_count == LONG_MAX, "render_call_count stops at LONG_MAX");
+    CHECK(a.capture_call_count == LONG_MAX, "capture_call_count stops at LONG_MAX");
+    aec_reset(&a);
+    CHECK(a.frame_count == 0 && a.shadow_frame_count == 0 && a.render_call_count == 0 &&
+          a.capture_call_count == 0, "saturated hop counters reset to zero");
+    aec_destroy(&a);
+}
+
+/* The detectors take the shadow hop count as int. A count past INT_MAX must still read as
+ * "past the warm-up gate": run two identical instances, one seeded far above the gate but
+ * inside int range and one seeded past INT_MAX, and require identical state and output.
+ * Narrowing modulo 2^32 would make the second count negative, so its shadow double-talk
+ * and copy decisions would stay closed and the two would diverge. */
+static void test_shadow_count_past_int_max(void) {
+    if (sizeof(long) <= sizeof(int)) {
+        CHECK(1, "shadow count past INT_MAX: not representable when long is 32 bits (skipped)");
+        return;
+    }
+    AecConfig cfg;
+    aec_config_from_preset(&cfg, AEC_PRESET_BALANCED, 16000);
+    cfg.enable_shadow = 1;
+    Aec lo, hi;
+    if (aec_create(&lo, &cfg) != 0 || aec_create(&hi, &cfg) != 0) {
+        CHECK(0, "shadow count past INT_MAX: create");
+        return;
+    }
+    int hop = aec_hop_size(&lo);
+    if (hop <= 0 || hop > 4096) { aec_destroy(&lo); aec_destroy(&hi); return; }
+    lo.shadow_frame_count = 100000;
+    /* Built through unsigned so a 32-bit long does not trip -Woverflow on this unreachable arm. */
+    hi.shadow_frame_count = (long)((unsigned long)INT_MAX + 5ul);
+
+    float mic[4096], ref[4096], out_lo[4096], out_hi[4096];
+    g_rng_state = 0x5AD0F00Du;
+    int same = 1, moved = 0;
+    for (int i = 0; i < 80; ++i) {
+        for (int s = 0; s < hop; ++s) {
+            ref[s] = rng_uniform(0.3f);
+            mic[s] = rng_uniform(0.05f) + 0.5f * ref[s];
+        }
+        aec_process(&lo, mic, ref, out_lo);
+        aec_process(&hi, mic, ref, out_hi);
+        if (memcmp(out_lo, out_hi, (size_t)hop * sizeof(float)) != 0) same = 0;
+        if (lo.dt_analyzer.shadow_advantage != 1.0f) moved = 1;
+    }
+    CHECK(moved, "shadow count past INT_MAX: control instance exercised the shadow double-talk update");
+    CHECK(same, "shadow count past INT_MAX: output identical to an in-range count above the gate");
+    CHECK(memcmp(&lo.dt_analyzer.shadow_advantage, &hi.dt_analyzer.shadow_advantage, sizeof(float)) == 0 &&
+          memcmp(&lo.dt_analyzer.dt_from_shadow, &hi.dt_analyzer.dt_from_shadow, sizeof(float)) == 0,
+          "shadow count past INT_MAX: shadow double-talk state identical");
+    aec_destroy(&lo);
+    aec_destroy(&hi);
+}
+
 int main(void) {
     /* Three officially-contracted grids x shadow on/off. */
     test_borrow_matches_compute(16000, 0, 1);    /* 16k/256 default */
@@ -343,6 +459,9 @@ int main(void) {
     test_wrong_shared_spec_changes_result();
     test_reset_after_shared_far_is_clean();
     test_far_fft_counter_reflects_actual_computation();
+    test_far_fft_counter_saturation();
+    test_hop_counter_saturation();
+    test_shadow_count_past_int_max();
 
     printf("\n%d passed, %d failed\n", g_pass, g_fail);
     if (g_fail == 0) printf("PASS\n");

@@ -4,7 +4,7 @@ This is the INTEGRATION/orchestration golden. Rather than synthesise inputs, it
 hooks the REAL balanced pipeline: it monkeypatches ``AecState.update`` (and
 ``handle_echo_path_change``) on a real doubletalk case, dumps every ``update()``
 input + every public-query output AFTER each update, and writes a raw LE binary.
-The C parity test (parity_aec_state.c) rebuilds a fresh AecState from the same
+A C parity harness rebuilds a fresh AecState from the same
 AecStateConfig, replays the SAME inputs frame-by-frame, and asserts every output
 bit-exact across the full case (startup -> first-converged transition -> evolved
 ERLE/ERL/quality).

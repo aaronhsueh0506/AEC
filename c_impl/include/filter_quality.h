@@ -1,6 +1,6 @@
 /* filter_quality.h — byte-equal C port of
  * python/modules/state/filter_quality.py
- * (AEC3 AecState::FilteringQualityAnalyzer, the 4-gate AND driving
+ * (AecState::FilteringQualityAnalyzer, the 4-gate AND driving
  *  UsableLinearEstimate / linear_filter_usable()).
  *
  * PURE INTEGER COUNTERS + bool gates — no float math at all, so "byte-equal"
@@ -17,7 +17,7 @@
  *   _STARTUP_HOPS = int(0.4 * 100) = 40
  *   _RESET_HOPS   = int(0.2 * 100) = 20
  *
- * Reset semantics (must match AEC3 exactly):
+ * Reset semantics (must match the reference exactly):
  *   - filter_update_blocks_since_start is NOT reset on reset().
  *   - convergence_seen LATCHES (never reset).
  *   - convergence_hops_counter is a diagnostic-only counter (no gate consumes
@@ -38,18 +38,18 @@ typedef struct {
     int filter_update_blocks_since_start;
     int convergence_seen;                     /* bool, latches */
     int convergence_hops_counter;             /* diagnostic only */
-    int startup_hops;   /* live-computed, was frozen FQ_STARTUP_HOPS=40 */
-    int reset_hops;     /* live-computed, was frozen FQ_RESET_HOPS=20 */
+    int startup_hops;   /* derived from the live grid; 40 hops at 16 kHz/160 */
+    int reset_hops;     /* derived from the live grid; 20 hops at 16 kHz/160 */
 } FilteringQualityAnalyzer;
 
 /* use_linear_filter mirrors the Python ctor kwarg (default True -> pass 1).
  * hop_size/sample_rate drive the live startup_hops/reset_hops computation
- * (AEC3 ~400/200 ms; was frozen at hop=160/sr=16000). */
+ * (~400/200 ms: 40/20 hops at hop=160/sr=16000). */
 void fq_init(FilteringQualityAnalyzer *m, int use_linear_filter,
             int hop_size, int sample_rate);
 
 /* reset(): clears overall_usable + blocks_since_reset. blocks_since_start and
- * convergence_seen are deliberately NOT reset (AEC3 parity). */
+ * convergence_seen are deliberately NOT reset (reference parity). */
 void fq_reset(FilteringQualityAnalyzer *m);
 
 /* Per-hop update.
@@ -66,11 +66,5 @@ void fq_update(FilteringQualityAnalyzer *m,
 
 /* overall_usable && use_linear_filter */
 int fq_linear_filter_usable(const FilteringQualityAnalyzer *m);
-
-/* diagnostic accessors (trace_hf_chain reads; no audio path) */
-int fq_startup_blocks(const FilteringQualityAnalyzer *m);
-int fq_reset_blocks(const FilteringQualityAnalyzer *m);
-int fq_gate1_pass(const FilteringQualityAnalyzer *m);
-int fq_gate2_pass(const FilteringQualityAnalyzer *m);
 
 #endif /* FILTER_QUALITY_H */

@@ -37,7 +37,7 @@ is long enough to exercise the n2_initial transient release + the per-hop EMA.
 A reset marker is emitted whenever ``_reset_aec3_post`` fired before a hop so the
 C side re-inits its driver state (OLA / CNG / coherence / avg-reverb / form).
 
-Layout (LE), all sizes in elements; see parity_aec3_post.c for the reader.
+Layout (LE), all sizes in elements.
 
 Run: python3 python/diag/gen_aec3_post_golden.py /tmp/aec3_post_golden.bin
 """

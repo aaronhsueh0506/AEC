@@ -1,11 +1,10 @@
 /* aec_debug.c — see aec_debug.h.
  *
- * Implementation kept tiny on purpose: stderr fprintf, no ring buffer, no
- * async I/O. Maintenance > perf for debug code.
+ * Implementation kept tiny on purpose: fprintf to the trace stream, no ring
+ * buffer, no async I/O. Maintenance > perf for debug code.
  *
  * With AEC_NO_STDIO, this is the only stdio translation unit
- * in the library (fprintf/vfprintf/fputc, plus the lazily-resolved stderr in
- * aec_debug_logf) — every symbol it defines has a static-inline no-op
+ * in the library (fprintf) — every symbol it defines has a static-inline no-op
  * replacement in aec_debug.h under AEC_NO_STDIO, so this whole file compiles
  * to nothing (not even an empty translation unit warning risk: no code, no
  * declarations) when that macro is set. Belt and braces with the Makefile,
@@ -15,20 +14,15 @@
 #ifndef AEC_NO_STDIO
 #include "aec_debug.h"
 #include <stdio.h>
-#include <stdarg.h>
 
 static int   g_level         = 0;
-static FILE* g_fp            = NULL;   /* lazily resolved to stderr */
+static FILE* g_fp            = NULL;
 static int   g_frame_idx     = 0;
-static int   g_hop           = 0;
-static int   g_sr            = 16000;
 static FILE* g_trace_fp      = NULL;   /* NULL → trace off */
 static int   g_trace_header  = 0;      /* header written for current stream */
 
 void aec_debug_set_level(int level) { g_level = level; }
 void aec_debug_set_log(FILE* fp)    { g_fp = fp; }
-int  aec_debug_level(void)          { return g_level; }
-
 void aec_debug_set_trace(FILE* fp)  { g_trace_fp = fp; g_trace_header = 0; }
 int  aec_debug_trace_active(void)   { return g_trace_fp != NULL; }
 
@@ -50,21 +44,8 @@ void aec_debug_trace_row(const AecDebugTraceRow* row) {
 }
 
 void aec_debug_set_frame(int frame_idx, int hop, int sample_rate) {
+    (void)hop; (void)sample_rate;
     g_frame_idx = frame_idx;
-    g_hop       = hop;
-    g_sr        = (sample_rate > 0) ? sample_rate : 16000;
 }
 
-void aec_debug_logf(const char* module, const char* fmt, ...) {
-    FILE* fp = (g_fp != NULL) ? g_fp : stderr;
-    float t = (float)(g_frame_idx * g_hop) / (float)g_sr;
-    fprintf(fp, "[AEC][t=%6.3fs][f=%5d][%s] ", t, g_frame_idx, module);
-
-    va_list ap;
-    va_start(ap, fmt);
-    vfprintf(fp, fmt, ap);
-    va_end(ap);
-
-    fputc('\n', fp);
-}
 #endif /* AEC_NO_STDIO */

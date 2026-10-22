@@ -1,7 +1,7 @@
 /* test_process_context.c — context-only processing regression test.
  *
  * aec_process() was split into a shared aec_process_core() (steps 1-17,
- * 19-20: linear filter + AEC3 post/RES block + power EMAs + convergence
+ * 19-20: linear filter + post-filter/RES block + power EMAs + convergence
  * detection) and two thin wrappers: aec_process() (core + emit) and
  * aec_process_context() (core only). This test proves three things a
  * byte-equal WAV render alone cannot:
@@ -10,17 +10,17 @@
  *      advance identical state and differ only by the final copy into `out`.
  *      Verified by comparing an interleaved instance against one driven by
  *      aec_process() throughout, bit-for-bit, on every hop where both
- *      produced output. This also guards the removal of the custom output
- *      limiter -- any re-introduced stage that only one entry point advances
- *      makes the two diverge and fails here.
+ *      produced output. This also guards against any stage (e.g. an output
+ *      limiter) that only one entry point advances: it makes the two
+ *      diverge and fails here.
  *   2. EVERY AecResContext field aec_process()'s caller could read --
  *      including linear_hop, far_spec, res_gain, and saturation_level, not
- *      just the subset this test originally covered -- is BYTE-IDENTICAL to
+ *      just a subset -- is BYTE-IDENTICAL to
  *      what aec_process_context() produces on two separately-constructed,
  *      identically-configured, identically-fed instances, across the three
  *      officially-contracted grids x shadow on/off x spatial_linear_context
  *      on/off (the exact config the 4ch wrapper uses is
- *      spatial_linear_context=1 -- untested before this pass) -- proving the
+ *      spatial_linear_context=1) -- proving the
  *      context-only entry point loses nothing the context exposes, it only
  *      skips the emit side effect. Every populated field is also
  *      checked finite (no NaN/Inf), not just equal to its sibling.
@@ -29,11 +29,12 @@
  *
  * Build (standalone, from c_impl/ — mirrors test_lifecycle.c's documented
  * recipe):
- *   make -C ../../audio_common BACKEND=kiss lib
+ *   make -C ../../audiolib/common lib
  *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=gnu99 -Iinclude -Iexample \
- *       -I../../audio_common/include \
+ *       -I../../audiolib/common/include \
+ *       -I../../audiolib/common \
  *       test/test_process_context.c $(find src -name '*.c') \
- *       $(make -s -C ../../audio_common BACKEND=kiss print-lib-path) -lm \
+ *       $(make -s -C ../../audiolib/common print-lib-path) -lm \
  *       -o bin/test_process_context
  * Run:
  *   ./bin/test_process_context
@@ -95,18 +96,18 @@ static float rng_uniform(float amp) {
 
 /* The two entry points may be MIXED FREELY on one instance.
  *
- * Since the custom output limiter was removed, aec_process() and
- * aec_process_context() differ only by the final copy into `out` -- they
- * advance identical state. So an instance whose hops alternate between the
+ * aec_process() and aec_process_context() differ only by the final copy
+ * into `out` (there is no output-stage limiter) -- they advance identical
+ * state. So an instance whose hops alternate between the
  * two must produce, on the hops where it did call aec_process(), output
  * bit-identical to an instance that called aec_process() every hop.
  *
- * This replaces the old "context-only never touches limiter state" test and
- * is strictly stronger: re-introducing ANY stateful stage that only one of
+ * This is stronger than a "context-only never touches limiter state" check:
+ * re-introducing ANY stateful stage that only one of
  * the two entry points advances makes the interleaved instance's state
  * diverge from the reference, so this fails. The burst assertion below keeps
  * it from passing vacuously -- it proves the signal actually reaches the
- * regime (output peak above mic peak) the removed limiter would have
+ * regime (output peak above mic peak) an output limiter would have
  * altered. */
 static void test_entry_points_may_be_freely_interleaved(void) {
     AecConfig cfg;

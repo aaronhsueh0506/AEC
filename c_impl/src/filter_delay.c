@@ -3,7 +3,7 @@
  * contract. Built with -ffp-contract=off for consistency with the rest of the
  * port (no float ops here, so it is a no-op for this TU). */
 #include "filter_delay.h"
-#include "aec3_scale.h"
+#include "aec_scale.h"
 
 #include <stddef.h>  /* NULL */
 
@@ -25,10 +25,10 @@ void filter_delay_init(FilterDelay *fd, int *delays_storage,
     }
 
     fd->delay_headroom_blocks = blocks;
-    /* AEC3 2 s (= 500 blocks) filter-adaptation threshold, computed live from
+    /* 2 s (= 500 blocks) filter-adaptation threshold, computed live from
      * the grid. */
     fd->filter_adaptation_threshold_hops =
-        aec3_ms_to_hops(2000.0f, hop_size, sample_rate);
+        aec_ms_to_hops(2000.0f, hop_size, sample_rate);
     fd->num_channels = num_capture_channels;
     fd->filter_delays_blocks = delays_storage;
     for (c = 0; c < num_capture_channels; ++c) {
@@ -85,10 +85,6 @@ int filter_delay_update(FilterDelay *fd, const int *analyzer, int analyzer_len,
     }
 
     return 0;
-}
-
-int filter_delay_external_reported(const FilterDelay *fd) {
-    return fd->external_delay.reported ? 1 : 0;
 }
 
 int filter_delay_min_direct_path(const FilterDelay *fd) {

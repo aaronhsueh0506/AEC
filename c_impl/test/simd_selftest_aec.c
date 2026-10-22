@@ -1,50 +1,10 @@
-/*
- * simd_selftest_aec.c - bitwise correctness + microbenchmark harness for
- * AEC/c_impl/include/aec_simd_kernels.h.
- *
- * AEC-only counterpart of audio_common/test/simd_selftest.c: same harness
- * pattern (LCG + special-value pool input generation, memcmp-based
- * bit-exactness checks, CLOCK_MONOTONIC microbench), scoped to the kernels
- * that moved into aec_simd_kernels.h (the numpy |z|/|z|**2 magnitude family,
- * the PBFDAF/PBFDKF per-bin filter-weight updates, the AEC3-post
- * coherence/CNG per-bin trackers, and the four numpy-pairwise-sum float32
- * reduction trees). The generic-kernel tests (min/clip/gain-apply/
- * complex-add/sq-scale/EMA/fast_sqrt) stay in audio_common's own
- * simd_selftest.c.
- *
- * For every sk_<name> kernel, runs sk_<name>() (NEON when available, else
- * scalar) and sk_<name>_scalar() on IDENTICAL copies of randomly-generated
- * input (mixed LCG bit patterns + a curated special-value pool, NaN
- * excluded) across a matrix of n values and trials, and memcmp's the full
- * output (plus accumulator/state buffers where relevant) bit-for-bit. Any
- * mismatch prints the kernel/n/trial/index and the two bit patterns, then
- * exit(1)s immediately -- there is no tolerance here, this is the
- * bit-exactness gate itself.
- *
- * After correctness, runs a small microbenchmark per kernel (n=257,
- * ~200k reps, CLOCK_MONOTONIC) and prints a one-line summary.
- *
- * Review finding F10 (SIMD NaN semantics) adds a dedicated NaN corpus after
- * the finite-corpus tests above (see "NaN corpus (review F10)" section):
- * qNaN/sNaN/-NaN/+-Inf patterns in re-only/im-only/interleaved-every-3rd/
- * Inf-mixed-with-NaN combinations, at lengths spanning every kernel's NEON
- * lane-count boundary. The cabs_np/cmag2_np family (the kernels
- * sk__cabs_np_neon4's fix targets) is checked STRICT (exit(1) on mismatch,
- * same discipline as the finite corpus); every other kernel in the file is
- * checked via `check_bits_classify()`.
- *
- * That second group is a classified pass/fail gate, not a report-only
- * check: `check_bits_classify()` (see its own header comment
- * below) sorts every scalar-vs-NEON element divergence into one of
- * three buckets -- bit-exact / both-NaN (payload unspecified, in contract) /
- * HARD FAIL (a genuine finite-vs-NaN divergence or an unexplained finite
- * bit mismatch) -- tallies each bucket per kernel, prints a summary table,
- * and main()'s exit code is now nonzero iff ANY kernel has a HARD FAIL. The
- * pre-existing 60-mismatch baseline for this file (across cmac_np/
- * wupdate_nlms/the four pairwise-sum kernels) classifies as 100% both-NaN --
- * see the classifier's own comment for why that is in contract, not a bug.
+/* Shared AEC kernel correctness and microbenchmark harness (utility/simd_aec.h).
+ * Finite scalar/SIMD results and mutated state must match byte-for-byte.
+ * The NaN corpus also checks classification; payload differences are allowed
+ * only where check_bits_classify documents that contract. All hard mismatches
+ * produce a nonzero exit. Generic kernels have their own audiolib self-test.
  */
-#include "aec_simd_kernels.h"
+#include "utility/simd_aec.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -141,24 +101,17 @@ static void fill_complex(Complex *a, int n) {
 /* ═══════════════════════ int32 input generation (kernels 24-26) ═══════════
  * hold_counters is int32 -- separate generator from gen_float()'s bit-LCG
  * (an int32 has no NaN/Inf concept, so no exclusion logic is needed there),
- * but same 25%-special-pool / 75%-raw-bits shape for consistency. Formerly
- * (pre-overflow-fix) the raw-bits path steered clear of INT32_MIN because
- * kernel 25 (then `sk_dec1_s32`) unconditionally subtracted 1 from every
- * element, and INT32_MIN-1 is signed-integer-overflow UB in C -- confirmed
- * live by UBSan ("signed integer overflow: -2147483648 - 1 cannot be
- * represented in type 'int'"). Kernel 25 went through TWO fixed contracts:
- * first `sk_dec1_floor0_s32` (decrement only while >0, floored at 0), later
- * corrected to today's `sk_dec1_floorintmin_s32` (decrement only while
- * >INT_MIN, floored at INT_MIN -- the floor-at-0 form was found to desync
- * test/historical/parity_erl_estimator.c's bit-exact golden, see that kernel's header
- * comment in aec_simd_kernels.h for the full argument). Under EITHER fixed
- * contract INT32_MIN is perfectly safe as an input (it's <=0 and also
- * ==INT_MIN, so both kernels leave it unchanged, never subtract from it) --
- * so INT32_MIN stays INCLUDED in both the special pool below and the
- * raw-bits path (no remapping), exercising the exact corner the fix
- * targets; INT32_MIN+1 is also in the special pool below specifically to
- * exercise the one lane where floor-at-INT_MIN's speculative decrement
- * actually fires the hop before hitting the floor. */
+ * but same 25%-special-pool / 75%-raw-bits shape for consistency. Kernel 25
+ * (sk_dec1_floorintmin_s32) decrements only while the element is > INT_MIN:
+ * an unconditional `-= 1` on INT32_MIN is signed-integer-overflow UB in C,
+ * and flooring at 0 instead would desync the raw value from Python's
+ * unbounded counter (see that kernel's header comment in utility/simd_aec.h
+ * for the full argument). INT32_MIN is a safe input (it equals INT_MIN, so
+ * the kernel leaves it unchanged and never subtracts from it), so it stays
+ * INCLUDED in both the special pool below and the raw-bits path (no
+ * remapping), exercising exactly that corner; INT32_MIN+1 is also in the
+ * special pool specifically to exercise the one lane where the NEON
+ * speculative decrement fires the hop before hitting the floor. */
 #define SPECIAL_INT_POOL_COUNT 10
 static int32_t special_int_pool[SPECIAL_INT_POOL_COUNT];
 
@@ -166,7 +119,7 @@ static void init_special_int_pool(void) {
     special_int_pool[0] = 0;
     special_int_pool[1] = 1;
     special_int_pool[2] = -1;
-    special_int_pool[3] = 400;    /* ERL_HOLD_HOPS */
+    special_int_pool[3] = 400;    /* typical hold_hops */
     special_int_pool[4] = -400;
     special_int_pool[5] = 2;
     special_int_pool[6] = -2;
@@ -214,16 +167,16 @@ static void fill_bench_complex(Complex *a, int n) {
     for (i = 0; i < n; ++i) { a[i].r = gen_bench_float(); a[i].i = gen_bench_float(); }
 }
 
-/* ═══════════════════════════ NaN corpus (review F10) ═══════════════════════
+/* ═══════════════════════════ NaN corpus ════════════════════════════════════
  * Dedicated NaN-carrying input generation, separate from gen_float()'s
  * special_pool (which deliberately EXCLUDES NaN, see that comment above) --
  * NaN inputs are the entire point of this section. Two uses:
  *
  *   1. The cabs_np/cmag2_np family (kernels 1/2/3/5, sharing the
- *      sk__cabs_np_neon4 helper this finding fixed): full pattern x length
+ *      sk__cabs_np_neon4 helper): full pattern x length
  *      sweep, STRICT bitwise memcmp (check_bits_or_die, same zero-tolerance
- *      discipline as the finite corpus above) -- this is the actual
- *      regression gate for the F10 fix.
+ *      discipline as the finite corpus above) -- this is the gate that the
+ *      compare/select NaN contract of that helper holds.
  *   2. Every other kernel in the file ("W-updates/EMA etc. process arbitrary
  *      floats too"): one NaN-sprinkled run per kernel, checked with
  *      check_bits_classify (classifies each divergence as bit-exact /
@@ -241,7 +194,7 @@ static float nan_pool[NAN_POOL_COUNT];
 
 static void init_nan_pool(void) {
     nan_pool[0] = bits_to_float(0x7fc12345u); /* qNaN, custom payload (the
-                                                * reviewer's repro pattern) */
+                                                * repro pattern) */
     nan_pool[1] = bits_to_float(0x7fc00000u); /* qNaN, default payload */
     nan_pool[2] = bits_to_float(0x7fa00001u); /* sNaN */
     nan_pool[3] = bits_to_float(0xffc00000u); /* -NaN */
@@ -425,9 +378,9 @@ static void check_ints_or_die(const char *kernel, int n, int trial,
  *   2. both-NaN   -- bits differ, but BOTH values are NaN (checked via
  *      f32_is_nan(), an exponent-all-1s/mantissa-nonzero test, NOT `v != v`
  *      -- see that function's comment for why). This is IN CONTRACT: per
- *      aec_simd_kernels.h's and simd_kernels.h's header comments, the
+ *      utility/simd_aec.h's and simd_kernels.h's header comments, the
  *      documented per-lane contract for the arithmetic kernels here
- *      (cmac_np/wupdate_nlms/wupdate_kf/ema_delta/n2_track/
+ *      (wupdate_nlms/wupdate_kf/ema_delta/n2_track/
  *      n2_initial_track/mask_zero, and the four pairwise-sum-family
  *      reductions) is "NaN in -> NaN out, PAYLOAD UNSPECIFIED". A
  *      multi-NaN-operand fmaf/add/pairwise-sum-tree is free to tie-break
@@ -441,20 +394,20 @@ static void check_ints_or_die(const char *kernel, int n, int trial,
  *      fatal.
  *   3. HARD FAIL  -- anything else: exactly one side is NaN and the other
  *      finite/Inf (a genuine finite-vs-NaN divergence -- the class of bug
- *      the F10 cabs_np/cmag2_np fix targeted, just not yet found in one of
- *      these kernels), or both sides are finite/Inf with different bits (an
+ *      the cabs_np/cmag2_np compare/select form exists to avoid, should it
+ *      appear in one of these kernels), or both sides are finite/Inf with different bits (an
  *      ordinary bit-exactness regression that happens to have been found via
  *      the NaN corpus rather than the finite one). This is the actual
  *      contract violation this gate exists to catch -- main() returns
  *      nonzero iff any kernel's HARD FAIL count is nonzero.
  *
- * Empirically, the pre-existing 60-mismatch baseline for this file (spread
- * across cmac_np_f32, wupdate_nlms_f32, and the pairwise_sum/sum_sq_pairwise/
- * pairwise_sum_tailfold family) classifies as 100% both-NaN, 0% HARD FAIL:
- * every one of the 60 old "NAN-SWEEP-MISMATCH" lines carried two differing
+ * Empirically, the 60-mismatch baseline for this file (spread
+ * across the removed cmac_np_f32, wupdate_nlms_f32, and the pairwise_sum/
+ * sum_sq_pairwise/pairwise_sum_tailfold family) classifies as 100% both-NaN, 0% HARD FAIL:
+ * every one of those 60 "NAN-SWEEP-MISMATCH" lines carried two differing
  * NaN bit patterns (e.g. simd=0x7fc12345 vs scalar=0x7fc00000), never a
- * NaN-vs-finite pair. No kernel needed fixing; this gate now proves that
- * fact mechanically on every run instead of asserting it in a comment. */
+ * NaN-vs-finite pair. This gate proves that fact mechanically on every
+ * run instead of asserting it in a comment. */
 
 typedef struct {
     char name[64];
@@ -463,22 +416,19 @@ typedef struct {
     long fail;
 } kernel_tally_t;
 
-/* Kernel tally table bumped 24 -> 40. The pre-existing NaN corpus already
- * registers 16 distinct tallied names (cmac_np_f32_nan, wupdate_nlms_f32_nan,
- * wupdate_kf_f32_nan, the 4 pairwise-sum_*_nan kernels,
- * coherence_ema_gate_f32_nan's 5 sub-buffers, ema_delta_f32_nan,
- * n2_track_f32_nan, n2_initial_track_f32_nan, mask_zero_f32_nan); the new
- * edge-case matrix below registers the same 16 kernels again under a
- * "_edge" suffix (its own classify calls, a separate tally row per name) --
- * 32 total, so 24 silently overflowed (FATAL: kernel tally table full) the
- * first time this file was run after adding the edge matrix. 40 leaves
- * headroom for future additions. */
+/* One tally row per distinct kernel name. The NaN corpus registers 15 names
+ * (wupdate_nlms_f32_nan, wupdate_kf_f32_nan, the 4
+ * pairwise-sum_*_nan kernels, coherence_ema_gate_f32_nan's 5 sub-buffers,
+ * ema_delta_f32_nan, n2_track_f32_nan, n2_initial_track_f32_nan,
+ * mask_zero_f32_nan) and the edge-case matrix registers the same 15 again
+ * under a "_edge" suffix, so the table must hold at least 30 rows; running
+ * out is a FATAL ("kernel tally table full"), not a silent drop. */
 #define MAX_TALLY_KERNELS 128
 static kernel_tally_t g_tally[MAX_TALLY_KERNELS];
 static int g_tally_count = 0;
 static int g_hard_fail_count = 0;
 /* Legacy running total (both-NaN + HARD FAIL combined) kept only so the
- * pre-existing per-kernel "(soft mismatches so far: N)" progress prints
+ * per-kernel "(soft mismatches so far: N)" progress prints
  * keep working unchanged; the real gate is g_hard_fail_count. */
 static int g_nan_soft_mismatch_count = 0;
 
@@ -513,9 +463,8 @@ static kernel_tally_t *get_tally(const char *name) {
 }
 
 /* Classifies + tallies every element of a float buffer pair (see the header
- * comment above for the three-way bit-exact/both-NaN/HARD-FAIL split). Same
- * call signature as the old check_bits_soft it replaces, so every existing
- * call site is an in-place rename. Only a HARD FAIL affects main()'s exit
+ * comment above for the three-way bit-exact/both-NaN/HARD-FAIL split).
+ * Only a HARD FAIL affects main()'s exit
  * code; both-NaN divergences are printed (for auditability) but excluded
  * from the gate. */
 static void check_bits_classify(const char *kernel, int n, int trial,
@@ -637,29 +586,6 @@ static void test_cmag2_np_acc(void) {
 }
 
 
-/* ═══════════════════════════ correctness: kernel 5 ═══════════════════════ */
-
-static void test_ema_cmag2(void) {
-    Complex z[SK_TEST_MAX_N];
-    float state_init[SK_TEST_MAX_N], state_scalar[SK_TEST_MAX_N], state_simd[SK_TEST_MAX_N];
-    int ni, t;
-    const float alpha = 0.9f, beta = 0.1f;
-    for (ni = 0; ni < N_LIST_COUNT; ++ni) {
-        int n = N_LIST[ni];
-        for (t = 0; t < TRIALS; ++t) {
-            fill_complex(z, n);
-            fill_floats(state_init, n);
-            memcpy(state_scalar, state_init, (size_t)n * sizeof(float));
-            memcpy(state_simd, state_init, (size_t)n * sizeof(float));
-            sk_ema_cmag2_f32_scalar(state_scalar, z, alpha, beta, n);
-            sk_ema_cmag2_f32(state_simd, z, alpha, beta, n);
-            check_bits_or_die("ema_cmag2_f32", n, t, state_simd, state_scalar, n);
-        }
-    }
-    printf("PASS ema_cmag2_f32\n");
-}
-
-
 /* ═══════════════════════ correctness: ring cmac ═══════════════════════════ */
 
 static void test_cmac_np_ring(void) {
@@ -679,8 +605,8 @@ static void test_cmac_np_ring(void) {
                 for (c = 0; c < n_part; ++c) {
                     memcpy(acc_scalar, acc_init, (size_t)K * sizeof(Complex));
                     memcpy(acc_simd, acc_init, (size_t)K * sizeof(Complex));
-                    sk_cmac_np_ring_f32_scalar(acc_scalar, W, X, c, n_part, K);
-                    sk_cmac_np_ring_f32(acc_simd, W, X, c, n_part, K);
+                    sk_cmac_fma_ring_f32_scalar(acc_scalar, W, X, c, n_part, K);
+                    sk_cmac_fma_ring_f32(acc_simd, W, X, c, n_part, K);
                     check_bits_classify("cmac_np_ring_f32", K, t, (const float *)acc_simd,
                                         (const float *)acc_scalar, 2 * K);
                 }
@@ -688,35 +614,6 @@ static void test_cmac_np_ring(void) {
         }
     }
     printf("PASS cmac_np_ring_f32\n");
-}
-
-/* ═══════════════════════════ correctness: kernel 6 ═══════════════════════ */
-
-static void test_cmac_np(void) {
-    Complex w[SK_TEST_MAX_N], x[SK_TEST_MAX_N];
-    Complex acc_init[SK_TEST_MAX_N], acc_scalar[SK_TEST_MAX_N], acc_simd[SK_TEST_MAX_N];
-    int ni, t;
-    for (ni = 0; ni < N_LIST_COUNT; ++ni) {
-        int n = N_LIST[ni];
-        for (t = 0; t < TRIALS; ++t) {
-            fill_complex(w, n);
-            fill_complex(x, n);
-            fill_complex(acc_init, n);
-            memcpy(acc_scalar, acc_init, (size_t)n * sizeof(Complex));
-            memcpy(acc_simd, acc_init, (size_t)n * sizeof(Complex));
-            /* Classified, not strict: the finite corpus's special pool
-             * includes +-Inf, and this kernel's contract documents NaN
-             * OUTPUT payloads as unspecified (multi-operand fma/reduction
-             * tie-breaks) -- an Inf-fed lane can legitimately produce NaN
-             * with a codegen-dependent payload (reproduced under UBSan
-             * instrumentation). Same convention as the NaN sweep and the
-             * B05 edge matrix for this kernel family. */
-            sk_cmac_np_f32_scalar(acc_scalar, w, x, n);
-            sk_cmac_np_f32(acc_simd, w, x, n);
-            check_bits_classify("cmac_np_f32", n, t, (const float *)acc_simd, (const float *)acc_scalar, 2 * n);
-        }
-    }
-    printf("PASS cmac_np_f32\n");
 }
 
 
@@ -903,7 +800,7 @@ static void test_pairwise_sum_tailfold_b(void) {
 
 /* ═══════════ alignment + canary edge-case matrix ══════════════════════════
  * This edge-case matrix is layered on top of every per-kernel
- * correctness test above (same design as audio_common/test/simd_selftest.c's
+ * correctness test above (same design as audiolib/common/test/simd_selftest.c's
  * equivalent section -- see that file's header comment for the full
  * rationale; summarized here for this file's kernels):
  *
@@ -920,7 +817,7 @@ static void test_pairwise_sum_tailfold_b(void) {
  *     input-offset-only, output-offset-only, both-different (via
  *     edge_offsets_for_form, shared with the common-file section, same
  *     derangement argument). Kernels with more than one read-only input
- *     (cmac_np's x, wupdate_nlms/kf's err/mu/mu_scale, coherence_ema_gate's
+ *     (wupdate_nlms/kf's err/mu/mu_scale, coherence_ema_gate's
  *     near_spec/abs_echo/abs_near/sye_im/syy/see) keep every non-primary
  *     array fixed at offset 0 -- the finding's own wording is binary
  *     ("input offset only, output offset only, both"), documented per
@@ -1036,7 +933,7 @@ static void edge_check_canary_b(const char *label, const unsigned char *arena, i
 
 /* int32 counterpart (hold_counters, kernels 24/25/26): 0xDEADC0DE is not a
  * value any of these kernels' arithmetic would plausibly produce (nowhere
- * near ERL_HOLD_HOPS=400 or any of the special_int_pool values), same
+ * near hold_hops=400 or any of the special_int_pool values), same
  * unambiguous-leak-detector intent as the float/byte canary patterns above. */
 #define EDGE_INT_CANARY ((int)0xDEADC0DEu)
 
@@ -1173,90 +1070,6 @@ static void test_cmag2_np_acc_edge(void) {
     printf("PASS cmag2_np_acc_f32_edge (n=0..17+existing x offset 1..15 x 3 forms, canary-guarded)\n");
 }
 
-static void test_ema_cmag2_edge(void) {
-    Complex *z_arena = (Complex *)edge_aligned_alloc((size_t)EDGE_ARENA_LEN * sizeof(Complex));
-    float *state_scalar_arena = (float *)edge_aligned_alloc((size_t)EDGE_ARENA_LEN * sizeof(float));
-    float *state_simd_arena = (float *)edge_aligned_alloc((size_t)EDGE_ARENA_LEN * sizeof(float));
-    const float alpha = 0.9f, beta = 0.1f;
-    int ni, form, o;
-    for (ni = 0; ni < N_LIST_COUNT; ++ni) {
-        int n = N_LIST[ni];
-        for (form = 0; form < EDGE_FORM_COUNT; ++form) {
-            for (o = 1; o <= EDGE_OFFSET_MAX; ++o) {
-                int in_off, out_off;
-                edge_offsets_for_form(form, o, &in_off, &out_off);
-
-                edge_fill_canary_c(z_arena, EDGE_ARENA_LEN);
-                edge_fill_canary_f(state_scalar_arena, EDGE_ARENA_LEN);
-                edge_fill_canary_f(state_simd_arena, EDGE_ARENA_LEN);
-                fill_complex(z_arena + in_off, n);
-                fill_floats(state_scalar_arena + out_off, n);
-                memcpy(state_simd_arena + out_off, state_scalar_arena + out_off, (size_t)n * sizeof(float));
-
-                sk_ema_cmag2_f32_scalar(state_scalar_arena + out_off, z_arena + in_off, alpha, beta, n);
-                sk_ema_cmag2_f32(state_simd_arena + out_off, z_arena + in_off, alpha, beta, n);
-
-                check_bits_or_die("ema_cmag2_f32_edge", n, form * 100 + o,
-                                   state_simd_arena + out_off, state_scalar_arena + out_off, n);
-                edge_check_canary_c("ema_cmag2_f32_edge:z", z_arena, EDGE_ARENA_LEN, in_off, n);
-                edge_check_canary_f("ema_cmag2_f32_edge:state_scalar", state_scalar_arena, EDGE_ARENA_LEN, out_off, n);
-                edge_check_canary_f("ema_cmag2_f32_edge:state_simd", state_simd_arena, EDGE_ARENA_LEN, out_off, n);
-            }
-        }
-    }
-    free(z_arena); free(state_scalar_arena); free(state_simd_arena);
-    printf("PASS ema_cmag2_f32_edge (n=0..17+existing x offset 1..15 x 3 forms, canary-guarded)\n");
-}
-
-static void test_cmac_np_edge(void) {
-    Complex *w_arena = (Complex *)edge_aligned_alloc((size_t)EDGE_ARENA_LEN * sizeof(Complex));
-    Complex *x_arena = (Complex *)edge_aligned_alloc((size_t)EDGE_ARENA_LEN * sizeof(Complex));
-    Complex *acc_scalar_arena = (Complex *)edge_aligned_alloc((size_t)EDGE_ARENA_LEN * sizeof(Complex));
-    Complex *acc_simd_arena = (Complex *)edge_aligned_alloc((size_t)EDGE_ARENA_LEN * sizeof(Complex));
-    int ni, form, o;
-    for (ni = 0; ni < N_LIST_COUNT; ++ni) {
-        int n = N_LIST[ni];
-        for (form = 0; form < EDGE_FORM_COUNT; ++form) {
-            for (o = 1; o <= EDGE_OFFSET_MAX; ++o) {
-                int in_off, out_off;
-                edge_offsets_for_form(form, o, &in_off, &out_off);
-
-                edge_fill_canary_c(w_arena, EDGE_ARENA_LEN);
-                edge_fill_canary_c(x_arena, EDGE_ARENA_LEN);
-                edge_fill_canary_c(acc_scalar_arena, EDGE_ARENA_LEN);
-                edge_fill_canary_c(acc_simd_arena, EDGE_ARENA_LEN);
-                fill_complex(w_arena + in_off, n);
-                fill_complex(x_arena, n); /* fixed at offset 0, see section header */
-                fill_complex(acc_scalar_arena + out_off, n);
-                memcpy(acc_simd_arena + out_off, acc_scalar_arena + out_off, (size_t)n * sizeof(Complex));
-
-                sk_cmac_np_f32_scalar(acc_scalar_arena + out_off, w_arena + in_off, x_arena, n);
-                sk_cmac_np_f32(acc_simd_arena + out_off, w_arena + in_off, x_arena, n);
-
-                /* classified, not strict: cmac_np is one of the header's
-                 * documented "NaN in -> NaN out, PAYLOAD UNSPECIFIED"
-                 * kernels (multi-operand fmaf accumulation) -- matches the
-                 * strict-vs-classified split the pre-existing NaN corpus
-                 * already draws for this file's kernels (see this section's
-                 * header comment). Empirically found necessary under UBSan:
-                 * the extreme-value special pool (+-Inf) can legitimately
-                 * produce a NaN from finite/Inf operands via this kernel's
-                 * arithmetic, and different codegen can select a different
-                 * (still valid, still in-contract) NaN payload for it. */
-                check_bits_classify("cmac_np_f32_edge", n, form * 100 + o,
-                                     (const float *)(acc_simd_arena + out_off),
-                                     (const float *)(acc_scalar_arena + out_off), 2 * n);
-                edge_check_canary_c("cmac_np_f32_edge:w", w_arena, EDGE_ARENA_LEN, in_off, n);
-                edge_check_canary_c("cmac_np_f32_edge:x", x_arena, EDGE_ARENA_LEN, 0, n);
-                edge_check_canary_c("cmac_np_f32_edge:acc_scalar", acc_scalar_arena, EDGE_ARENA_LEN, out_off, n);
-                edge_check_canary_c("cmac_np_f32_edge:acc_simd", acc_simd_arena, EDGE_ARENA_LEN, out_off, n);
-            }
-        }
-    }
-    free(w_arena); free(x_arena); free(acc_scalar_arena); free(acc_simd_arena);
-    printf("PASS cmac_np_f32_edge (n=0..17+existing x offset 1..15 x 3 forms, canary-guarded)\n");
-}
-
 static void test_wupdate_nlms_edge(void) {
     Complex *X_arena = (Complex *)edge_aligned_alloc((size_t)EDGE_ARENA_LEN * sizeof(Complex));
     Complex *err_arena = (Complex *)edge_aligned_alloc((size_t)EDGE_ARENA_LEN * sizeof(Complex));
@@ -1285,10 +1098,13 @@ static void test_wupdate_nlms_edge(void) {
                 sk_wupdate_nlms_f32_scalar(W_scalar_arena + out_off, X_arena + in_off, err_arena, mu_eff_arena, n);
                 sk_wupdate_nlms_f32(W_simd_arena + out_off, X_arena + in_off, err_arena, mu_eff_arena, n);
 
-                /* classified, not strict -- see cmac_np_f32_edge's comment
-                 * above; wupdate_nlms is the same documented "payload
-                 * unspecified" class (grad = err*conj(X), a multi-operand
-                 * fmaf term). */
+                /* classified, not strict: wupdate_nlms is one of the
+                 * header's documented "NaN in -> NaN out, PAYLOAD
+                 * UNSPECIFIED" kernels (grad = err*conj(X), a multi-operand
+                 * fmaf term). The extreme-value special pool (+-Inf) can
+                 * legitimately produce a NaN, and different codegen can
+                 * select a different, still in-contract NaN payload
+                 * (found under UBSan). */
                 check_bits_classify("wupdate_nlms_f32_edge", n, form * 100 + o,
                                      (const float *)(W_simd_arena + out_off),
                                      (const float *)(W_scalar_arena + out_off), 2 * n);
@@ -1335,9 +1151,9 @@ static void test_wupdate_kf_edge(void) {
                 sk_wupdate_kf_f32_scalar(W_scalar_arena + out_off, X_arena + in_off, err_arena, mu_arena, mu_scale_arena, n);
                 sk_wupdate_kf_f32(W_simd_arena + out_off, X_arena + in_off, err_arena, mu_arena, mu_scale_arena, n);
 
-                /* classified, not strict -- see cmac_np_f32_edge's comment
-                 * above. Empirically confirmed necessary: reproduced under
-                 * UBSan at n=128 (this file's own pre-existing finite-corpus
+                /* classified, not strict -- see wupdate_nlms_f32_edge's
+                 * comment above. Empirically confirmed necessary: reproduced under
+                 * UBSan at n=128 (this file's own finite-corpus
                  * test_wupdate_kf() hits the identical class of divergence,
                  * unrelated to this new matrix). */
                 check_bits_classify("wupdate_kf_f32_edge", n, form * 100 + o,
@@ -1525,7 +1341,7 @@ static void test_coherence_ema_gate_edge(void) {
                  * pr=er*nr+ei*ni / pi=ei*nr-er*ni can legitimately produce a
                  * NaN from finite/Inf operands (e.g. (+Inf)*(-Inf) +
                  * (+Inf)*(+Inf) = -Inf+Inf = NaN) -- matches the
-                 * pre-existing test_coherence_ema_gate_nan()'s own choice of
+                 * test_coherence_ema_gate_nan()'s own choice of
                  * check_bits_classify/check_mask_classify for this kernel
                  * above, for the same reason. */
                 check_bits_classify("coherence_ema_gate_f32_edge:sye_re", n, form * 100 + o,
@@ -1594,7 +1410,7 @@ static void test_ema_delta_edge(void) {
                 /* classified, not strict -- ema_delta is a documented
                  * "payload unspecified" kernel (x-state can be Inf-Inf=NaN
                  * for opposite-signed Inf operands drawn from the special
-                 * pool). See cmac_np_f32_edge's comment above. */
+                 * pool). See wupdate_nlms_f32_edge's comment above. */
                 check_bits_classify("ema_delta_f32_edge", n, form * 100 + o,
                                      state_simd_arena + out_off, state_scalar_arena + out_off, n);
                 edge_check_canary_f("ema_delta_f32_edge:x", x_arena, EDGE_ARENA_LEN, in_off, n);
@@ -1635,7 +1451,7 @@ static void test_n2_track_edge(void) {
                 /* classified, not strict -- n2_track is a documented
                  * "payload unspecified" kernel (the "track" branch's
                  * fresh*y2s+retain*n2 can be Inf-Inf=NaN when selected).
-                 * See cmac_np_f32_edge's comment above. */
+                 * See wupdate_nlms_f32_edge's comment above. */
                 check_bits_classify("n2_track_f32_edge", n, form * 100 + o,
                                      n2_simd_arena + out_off, n2_scalar_arena + out_off, n);
                 edge_check_canary_f("n2_track_f32_edge:y2s", y2s_arena, EDGE_ARENA_LEN, in_off, n);
@@ -1674,7 +1490,7 @@ static void test_n2_initial_track_edge(void) {
                 /* classified, not strict -- n2_initial_track is a
                  * documented "payload unspecified" kernel (the "slow"
                  * branch's old+alpha*(n2-old) can be Inf-Inf=NaN when
-                 * selected). See cmac_np_f32_edge's comment above. */
+                 * selected). See wupdate_nlms_f32_edge's comment above. */
                 check_bits_classify("n2_initial_track_f32_edge", n, form * 100 + o,
                                      n2i_simd_arena + out_off, n2i_scalar_arena + out_off, n);
                 edge_check_canary_f("n2_initial_track_f32_edge:n2", n2_arena, EDGE_ARENA_LEN, in_off, n);
@@ -1693,7 +1509,7 @@ static void test_mask_zero_edge(void) {
     unsigned char *mask_arena = (unsigned char *)edge_aligned_alloc((size_t)EDGE_ARENA_LEN);
     int ni, o;
     /* sk_mask_zero_f32 is the AEC header's other documented alias form
-     * (kernel 20's "in-place" doc comment in aec_simd_kernels.h) -- unlike
+     * (kernel 20's "in-place" doc comment in utility/simd_aec.h) -- unlike
      * sk_capply_gain_f32's OPTIONAL out==z aliasing, this kernel has no
      * separate output parameter at all: x is unconditionally both the read
      * source and the write destination on every single call, by signature.
@@ -2090,49 +1906,6 @@ static void bench_cmag2_np_acc(void) {
 }
 
 
-static void bench_ema_cmag2(void) {
-    Complex z[BENCH_N]; float state[BENCH_N];
-    fill_bench_complex(z, BENCH_N);
-    fill_bench_floats(state, BENCH_N);
-    {
-        double t0, t1; int r;
-        t0 = now_ns();
-        for (r = 0; r < BENCH_REPS; ++r) { sk_ema_cmag2_f32_scalar(state, z, 0.9f, 0.1f, BENCH_N); g_bench_sink += state[0]; }
-        t1 = now_ns();
-        {
-            double ns_scalar = (t1 - t0) / BENCH_REPS;
-            double t2 = now_ns();
-            for (r = 0; r < BENCH_REPS; ++r) { sk_ema_cmag2_f32(state, z, 0.9f, 0.1f, BENCH_N); g_bench_sink += state[0]; }
-            {
-                double t3 = now_ns();
-                report_bench("ema_cmag2_f32", ns_scalar, (t3 - t2) / BENCH_REPS);
-            }
-        }
-    }
-}
-
-
-static void bench_cmac_np(void) {
-    Complex w[BENCH_N], x[BENCH_N], acc[BENCH_N];
-    fill_bench_complex(w, BENCH_N);
-    fill_bench_complex(x, BENCH_N);
-    fill_bench_complex(acc, BENCH_N);
-    {
-        double t0, t1; int r;
-        t0 = now_ns();
-        for (r = 0; r < BENCH_REPS; ++r) { sk_cmac_np_f32_scalar(acc, w, x, BENCH_N); g_bench_sink += acc[0].r; }
-        t1 = now_ns();
-        {
-            double ns_scalar = (t1 - t0) / BENCH_REPS;
-            double t2 = now_ns();
-            for (r = 0; r < BENCH_REPS; ++r) { sk_cmac_np_f32(acc, w, x, BENCH_N); g_bench_sink += acc[0].r; }
-            {
-                double t3 = now_ns();
-                report_bench("cmac_np_f32", ns_scalar, (t3 - t2) / BENCH_REPS);
-            }
-        }
-    }
-}
 
 
 static void bench_wupdate_nlms(void) {
@@ -2472,8 +2245,8 @@ static void test_erl_bin_update(void) {
     int hold_init[SK_TEST_MAX_N], hold_scalar[SK_TEST_MAX_N], hold_simd[SK_TEST_MAX_N];
     float x2[SK_TEST_MAX_N], y2[SK_TEST_MAX_N];
     int ni, t;
-    const float x2_min = 44015068.0f;   /* ERL_AEC3_X2_MIN */
-    const int hold_hops = 400;          /* ERL_HOLD_HOPS */
+    const float x2_min = 44015068.0f;   /* ERL_X2_MIN */
+    const int hold_hops = 400;          /* typical hold counter arm value */
     const float min_erl = 0.01f;        /* ERL_MIN_ERL */
     for (ni = 0; ni < N_LIST_COUNT; ++ni) {
         int n = N_LIST[ni];
@@ -2578,10 +2351,9 @@ static void test_no_audible_echo_gain(void) {
 }
 
 /* ═══════════════════════ NaN corpus: cabs/cmag2 family (STRICT) ═══════════
- * The actual F10 regression gate: sk__cabs_np_neon4 must bit-match
- * sk__cabs_np_elem across every NaN pattern x length combination. Any
- * mismatch here means the fix regressed or is incomplete -- hard exit(1),
- * same as the finite corpus. */
+ * sk__cabs_np_neon4 must bit-match sk__cabs_np_elem across every NaN
+ * pattern x length combination. Any mismatch here means the compare/select
+ * NaN contract is broken -- hard exit(1), same as the finite corpus. */
 
 static void test_cabs_np_nan(void) {
     Complex z[SK_TEST_MAX_N];
@@ -2640,54 +2412,14 @@ static void test_cmag2_np_acc_nan(void) {
     printf("PASS cmag2_np_acc_f32_nan\n");
 }
 
-static void test_ema_cmag2_nan(void) {
-    Complex z[SK_TEST_MAX_N];
-    float state_init[SK_TEST_MAX_N], state_scalar[SK_TEST_MAX_N], state_simd[SK_TEST_MAX_N];
-    int pi, ni;
-    const float alpha = 0.9f, beta = 0.1f;
-    for (pi = 0; pi < NAN_PATTERN_COUNT; ++pi) {
-        for (ni = 0; ni < NAN_N_LIST_COUNT; ++ni) {
-            int n = NAN_N_LIST[ni];
-            char name[64];
-            snprintf(name, sizeof name, "ema_cmag2_f32_nan:%s", NAN_PATTERN_NAMES[pi]);
-            fill_complex_nan(z, n, NAN_PATTERNS[pi]);
-            fill_floats(state_init, n);
-            memcpy(state_scalar, state_init, (size_t)n * sizeof(float));
-            memcpy(state_simd, state_init, (size_t)n * sizeof(float));
-            sk_ema_cmag2_f32_scalar(state_scalar, z, alpha, beta, n);
-            sk_ema_cmag2_f32(state_simd, z, alpha, beta, n);
-            check_bits_or_die(name, n, pi, state_simd, state_scalar, n);
-        }
-    }
-    printf("PASS ema_cmag2_f32_nan\n");
-}
-
 /* ═══════════════ NaN corpus: every other kernel (CLASSIFIED) ═════════
- * Not part of the original F10 fix's own regression gate -- these kernels
+ * Separate from the strict cabs/cmag2 gate above -- these kernels
  * don't use sk__cabs_np_neon4 and already avoid
- * vmaxq_f32/vminq_f32/vabsq_f32 (see header). Run per the review's "every
- * kernel in this file" instruction; check_bits_classify()
+ * vmaxq_f32/vminq_f32/vabsq_f32 (see header). Every kernel in the file runs
+ * here; check_bits_classify()
  * sorts each divergence into bit-exact / both-NaN (in contract) / HARD FAIL,
  * and a HARD FAIL here now actually fails the build (see main()) instead of
  * only being printed for a human to notice. */
-
-static void test_cmac_np_nan(void) {
-    Complex w[SK_TEST_MAX_N], x[SK_TEST_MAX_N];
-    Complex acc_init[SK_TEST_MAX_N], acc_scalar[SK_TEST_MAX_N], acc_simd[SK_TEST_MAX_N];
-    int ni;
-    for (ni = 0; ni < NAN_N_LIST_COUNT; ++ni) {
-        int n = NAN_N_LIST[ni];
-        fill_complex_nan_sprinkle(w, n);
-        fill_complex_nan_sprinkle(x, n);
-        fill_complex(acc_init, n);
-        memcpy(acc_scalar, acc_init, (size_t)n * sizeof(Complex));
-        memcpy(acc_simd, acc_init, (size_t)n * sizeof(Complex));
-        sk_cmac_np_f32_scalar(acc_scalar, w, x, n);
-        sk_cmac_np_f32(acc_simd, w, x, n);
-        check_bits_classify("cmac_np_f32_nan", n, 0, (const float *)acc_simd, (const float *)acc_scalar, 2 * n);
-    }
-    printf("PASS cmac_np_f32_nan (soft mismatches so far: %d)\n", g_nan_soft_mismatch_count);
-}
 
 static void test_wupdate_nlms_nan(void) {
     Complex X[SK_TEST_MAX_N], err[SK_TEST_MAX_N];
@@ -3590,6 +3322,7 @@ static void test_stationary_mask_large(void) {
     if (!f || !m_ref || !m_s || !m_v || !h) { fprintf(stderr, "alloc failed\n"); exit(1); }
     for (ni = 0; ni < n_big; ++ni) {
         int n = N_BIG[ni];
+        size_t len = n > 0 ? (size_t)n : 0u;   /* a provably non-negative memset size */
         for (pass = 0; pass < 3; ++pass) {
             int cr, cs, cv, cv0;
             for (k = 0; k < n; ++k) {
@@ -3601,15 +3334,15 @@ static void test_stationary_mask_large(void) {
                     h[k] = 0;
                 }
             }
-            memset(m_ref, 0xAB, (size_t)n); memset(m_s, 0xAB, (size_t)n); memset(m_v, 0xAB, (size_t)n);
+            memset(m_ref, 0xAB, len); memset(m_s, 0xAB, len); memset(m_v, 0xAB, len);
             cr = ref_stationary_loop(f, h, m_ref, n);
             cs = sk_stationary_mask_u8_scalar(f, h, m_s, n);
             cv = sk_stationary_mask_u8(f, h, m_v, n);
             cv0 = sk_stationary_mask_u8(f, h, NULL, n);
             g_total_checks += n + 3;
             if (pass < 2 && cr != n) { fprintf(stderr, "reference count %d != n=%d\n", cr, n); exit(1); }
-            if (cr != cs || cr != cv || cr != cv0 || memcmp(m_ref, m_s, (size_t)n) != 0 ||
-                memcmp(m_ref, m_v, (size_t)n) != 0) {
+            if (cr != cs || cr != cv || cr != cv0 || memcmp(m_ref, m_s, len) != 0 ||
+                memcmp(m_ref, m_v, len) != 0) {
                 fprintf(stderr,
                     "MISMATCH kernel=stationary_mask_u8_large n=%d pass=%d count ref/scalar/simd/simd-null %d/%d/%d/%d\n",
                     n, pass, cr, cs, cv, cv0);
@@ -3638,6 +3371,250 @@ static void bench_max_abs(void) {
                              g_bench_sink += sk_max_abs_f32(x, BENCH_N));
 }
 
+/* Inline AEC blocks: every lane boundary, real grid, canonical flag pattern,
+ * threshold tie, non-finite predicate, and writable-array canary. */
+static void check_inline_bytes(const char *name, int n, int trial,
+                       const void *a, const void *b, size_t bytes) {
+    g_total_checks += (long)bytes;
+    if (memcmp(a, b, bytes)) {
+        fprintf(stderr, "MISMATCH kernel=%s n=%d trial=%d\n", name, n, trial);
+        ++g_hard_fail_count;
+    }
+}
+
+/* Fixed answers exercise the vector body and scalar tail independently of
+ * the twin implementation, including threshold ties and ordered NaN tests. */
+static void test_inline_aec_oracles(void) {
+    enum { N = 10 };
+    for (int mode = 0; mode < 2; ++mode) {
+        {
+            const float initial[N] = {1,2,4,8,16,32,64,128,256,512};
+            const float error[N] = {0,2,4,6,NAN,3,0,0,1,0};
+            const float coarse[N] = {0,1,4,7,1,NAN,1,-1,1,1};
+            const float erl[N] = {1,2,4,0,-1,8,2,4,8,2};
+            const float expected[3][N] = {
+                {1.5f,3,5,8.5f,17,36,64.5f,130,258,512.5f},
+                {1.5f,2.5f,5,8.5f,16.5f,34,64.5f,129,258,512.5f},
+                {1.25f,3,5,8,15.5f,36,64.5f,130,258,512.5f}
+            };
+            for (int t = 0; t < 3; ++t) {
+                float h[N];
+                int want_count = t == 1 ? 0 : 4;
+                memcpy(h, initial, sizeof h);
+                int count = mode
+                    ? sk_h_error_refresh_f32(h,error,coarse,erl,0.25f,0.5f,
+                                              t == 2 ? 0.0f : 2.0f,t == 1,N)
+                    : sk_h_error_refresh_f32_scalar(h,error,coarse,erl,0.25f,0.5f,
+                                                     t == 2 ? 0.0f : 2.0f,t == 1,N);
+                check_bits_classify("h_error_fixed",N,mode,h,expected[t],N);
+                check_inline_bytes("h_error_fixed_count",N,mode,
+                                   &count,&want_count,sizeof count);
+            }
+        }
+        {
+            float ya[N] = {1,2,4,8,16,32,64,128,256,512};
+            float ea[N] = {2,4,8,16,32,64,128,256,512,1024};
+            const float y[N] = {2,4,8,16,32,64,128,256,512,1024};
+            const float e[N] = {1,2,4,8,16,32,64,128,256,512};
+            const float x[N] = {0,1,2,0.5f,NAN,INFINITY,-INFINITY,1,2,0};
+            unsigned char low[N] = {0,1,0,1,0,0,0,0,1,0};
+            const unsigned char want_low[N] = {1,1,0,1,0,0,1,0,1,1};
+            const float expected[N] = {3,6,12,24,48,96,192,384,768,1536};
+            if (mode) sk_erle_accumulate_f32(ya,ea,low,x,y,e,1.0f,N);
+            else sk_erle_accumulate_f32_scalar(ya,ea,low,x,y,e,1.0f,N);
+            check_bits_classify("erle_accumulate_y_fixed",N,mode,ya,expected,N);
+            check_bits_classify("erle_accumulate_e_fixed",N,mode,ea,expected,N);
+            check_inline_bytes("erle_accumulate_low_fixed",N,mode,
+                               low,want_low,sizeof low);
+        }
+        {
+            float onset[N] = {8,8,4,2,16,NAN,8,8,8,8};
+            const float during[N] = {1,5,4,3,1,1,NAN,1,1,1};
+            int32_t hold[N] = {4,3,2,1,0,-1,3,10,2,1};
+            unsigned char coming[N] = {0,0,0,0,0,0,0,1,1,0};
+            const float want_onset[N] = {8,5,4,2,8,NAN,8,8,4,4};
+            const int32_t want_hold[N] = {3,2,1,0,0,0,2,9,1,0};
+            const unsigned char want_coming[N] = {0,0,0,1,1,1,0,1,1,1};
+            if (mode) sk_erle_release_f32(onset,during,hold,coming,2,0.5f,N);
+            else sk_erle_release_f32_scalar(onset,during,hold,coming,2,0.5f,N);
+            check_bits_classify("erle_release_fixed",N,mode,onset,want_onset,N);
+            check_inline_bytes("erle_release_hold_fixed",N,mode,
+                               hold,want_hold,sizeof hold);
+            check_inline_bytes("erle_release_coming_fixed",N,mode,
+                               coming,want_coming,sizeof coming);
+        }
+        {
+            const float psd[N+2] = {1,4,1,2,8,2,NAN,8,1,4,1,0};
+            int64_t counters[N];
+            const int64_t expected[N] = {
+                INT64_C(1099511627777),0,0,INT64_C(1099511627780),0,0,
+                INT64_C(1099511627783),0,INT64_C(1099511627785),0
+            };
+            for (int k = 0; k < N; ++k) counters[k] = INT64_C(1099511627776)+k;
+            if (mode) sk_peak_counters_i64(counters,psd,3.0f,N);
+            else sk_peak_counters_i64_scalar(counters,psd,3.0f,N);
+            check_inline_bytes("peak_counters_fixed",N,mode,
+                               counters,expected,sizeof counters);
+            float ties[N+2];
+            const int64_t zero[N] = {0};
+            for (int k = 0; k < N+2; ++k) ties[k] = 1.0f;
+            if (mode) sk_peak_counters_i64(counters,ties,1.0f,N);
+            else sk_peak_counters_i64_scalar(counters,ties,1.0f,N);
+            check_inline_bytes("peak_counters_tie_fixed",N,mode,
+                               counters,zero,sizeof counters);
+        }
+        {
+            const float noise[N] = {1,1,2,2,0,-1,NAN,INFINITY,1,1};
+            const float acc[N] = {7,8,15,16,0,1e-28f,0,INFINITY,-1,NAN};
+            unsigned char flags[N];
+            const unsigned char expected[N] = {1,0,1,0,1,0,1,0,1,0};
+            if (mode) sk_stationarity_flags_u8(flags,acc,noise,2,4.0f,N);
+            else sk_stationarity_flags_u8_scalar(flags,acc,noise,2,4.0f,N);
+            check_inline_bytes("stationarity_flags_fixed",N,mode,
+                               flags,expected,sizeof flags);
+        }
+    }
+    /* Move the sole unset flag through EVERY lane, including the last bin. */
+    const int sizes[] = {3,8,9,16,17,129,257,513};
+    for (unsigned ni = 0; ni < sizeof sizes/sizeof sizes[0]; ++ni) {
+        int n = sizes[ni];
+        for (int missing = -1; missing < n; ++missing) {
+            for (int mode = 0; mode < 2; ++mode) {
+                unsigned char flags[513], want_flags[513];
+                int32_t hang[513], want_hang[513];
+                for (int k = 0; k < n; ++k) {
+                    flags[k] = k != missing;
+                    hang[k] = k % 5;
+                    want_hang[k] = missing < 0 ? (k % 5 > 0 ? k % 5-1 : 0)
+                                                : (k == missing ? 12 : k % 5);
+                    int center = k == 0 ? 1 : k == n-1 ? n-2 : k;
+                    want_flags[k] = missing < 0 || abs(center-missing) > 1;
+                }
+                if (mode) sk_stationarity_hangover_i32(flags,hang,12,n);
+                else sk_stationarity_hangover_i32_scalar(flags,hang,12,n);
+                check_inline_bytes("hangover_every_lane",n,missing,hang,
+                                   want_hang,(size_t)n*sizeof *hang);
+                if (mode) sk_stationarity_smooth_u8(flags,n);
+                else sk_stationarity_smooth_u8_scalar(flags,n);
+                check_inline_bytes("smooth_every_lane",n,missing,flags,
+                                   want_flags,(size_t)n);
+            }
+        }
+    }
+    printf("PASS inline AEC fixed oracles (5 kernels, scalar/vector/tail; every unset-flag position)\n");
+}
+
+static void test_inline_aec_blocks(void) {
+    enum { CAP = 530 };
+    float x[CAP], y[CAP], e[CAP], z[CAP];
+    float a[CAP], b[CAP], c[CAP], d[CAP];
+    int32_t ha[CAP], hb[CAP];
+    int64_t ca[CAP], cb[CAP];
+    unsigned char fa[CAP], fb[CAP], ga[CAP], gb[CAP];
+    const int grids[] = {129, 257, 513};
+    const float pool[] = {0.0f, -0.0f, 1e-30f, 1e-31f, -1.0f, 0.8f,
+                          0.8000001f, 1.0f, 1.0000001f, 2.0f, 4.0f,
+                          INFINITY, -INFINITY, NAN};
+    for (int ni = 0; ni < 39; ++ni) {
+        int n = ni < 36 ? ni : grids[ni - 36];
+        for (int t = 0; t < 64; ++t) {
+            int off = 1 + t % 4;
+            for (int k = 0; k < CAP; ++k) {
+                x[k] = pool[lcg_next() % (sizeof pool / sizeof pool[0])];
+                y[k] = pool[lcg_next() % (sizeof pool / sizeof pool[0])];
+                e[k] = pool[lcg_next() % (sizeof pool / sizeof pool[0])];
+                z[k] = pool[lcg_next() % (sizeof pool / sizeof pool[0])];
+                a[k] = b[k] = 0.25f + (float)(k % 17);
+                c[k] = d[k] = 0.5f + (float)(k % 11);
+                fa[k] = fb[k] = (unsigned char)((k + t) % 2);
+                ga[k] = gb[k] = (unsigned char)((k + t) % 3 != 0);
+                ha[k] = hb[k] = (int32_t)((k + t) % 15) - 2;
+                ca[k] = cb[k] = ((int64_t)1 << 40) + k;
+            }
+            /* Equal/error-above/error-below, floor off/on, and override. */
+            for (int k = 0; k < n; ++k)
+                if (t % 3 == 0) x[off + k] = y[off + k];
+            int da = sk_h_error_refresh_f32(a + off, x + off, y + off, z + off,
+                                            0.01f, 0.2f, t % 2 ? 0.1f : 0.0f, t % 4 == 0, n);
+            int db = sk_h_error_refresh_f32_scalar(b + off, x + off, y + off, z + off,
+                                                   0.01f, 0.2f, t % 2 ? 0.1f : 0.0f, t % 4 == 0, n);
+            check_inline_bytes("h_error_count", n, t, &da, &db, sizeof da);
+            check_bits_classify("h_error_refresh", n, t, a, b, CAP);
+            sk_erle_accumulate_f32(a + off, c + off, fa + off,
+                                    x + off, y + off, e + off, 1.0f, n);
+            sk_erle_accumulate_f32_scalar(b + off, d + off, fb + off,
+                                           x + off, y + off, e + off, 1.0f, n);
+            check_bits_classify("erle_accumulate_y", n, t, a, b, CAP);
+            check_bits_classify("erle_accumulate_e", n, t, c, d, CAP);
+            check_inline_bytes("erle_accumulate_low", n, t, fa, fb, sizeof fa);
+            sk_erle_release_f32(a + off, z + off, ha + off, ga + off, t % 8, 0.97f, n);
+            sk_erle_release_f32_scalar(b + off, z + off, hb + off, gb + off, t % 8, 0.97f, n);
+            check_bits_classify("erle_release", n, t, a, b, CAP);
+            check_inline_bytes("erle_release_hold", n, t, ha, hb, sizeof ha);
+            check_inline_bytes("erle_release_coming", n, t, ga, gb, sizeof ga);
+            sk_peak_counters_i64(ca + off, x + off, 3.0f, n);
+            sk_peak_counters_i64_scalar(cb + off, x + off, 3.0f, n);
+            check_inline_bytes("peak_counters", n, t, ca, cb, sizeof ca);
+            /* Exercise global all-stationary, isolated unset flags at every
+             * vector lane, and decrement-to-zero hangover transitions. */
+            for (int k = 0; k < n; ++k) {
+                fa[off + k] = fb[off + k] = 1;
+                ha[off + k] = hb[off + k] = (k + t) % 5;
+            }
+            if (n && t % 2) fa[off + t % n] = fb[off + t % n] = 0;
+            sk_stationarity_hangover_i32(fa + off, ha + off, 12, n);
+            sk_stationarity_hangover_i32_scalar(fb + off, hb + off, 12, n);
+            check_inline_bytes("stationarity_hangover", n, t, ha, hb, sizeof ha);
+            for (int k = 0; k < n; ++k) {
+                int32_t expected = (k + t) % 5;
+                if (t % 2 && k == t % n) expected = 12;
+                if (!(t % 2) && expected > 0) --expected;
+                check_inline_bytes("hangover_oracle", n, t, ha + off + k, &expected, sizeof expected);
+            }
+            sk_stationarity_smooth_u8(fa + off, n);
+            sk_stationarity_smooth_u8_scalar(fb + off, n);
+            check_inline_bytes("stationarity_smooth", n, t, fa, fb, sizeof fa);
+            for (int k = 0; k < n; ++k) {
+                int center = k == 0 ? 1 : k == n - 1 ? n - 2 : k;
+                unsigned char expected = n >= 3;
+                if (n >= 3 && t % 2 && abs(center - t % n) <= 1) expected = 0;
+                check_inline_bytes("smooth_oracle", n, t, fa + off + k, &expected, sizeof expected);
+            }
+            sk_stationarity_flags_u8(fa + off, x + off, y + off, 5, 10.0f, n);
+            sk_stationarity_flags_u8_scalar(fb + off, x + off, y + off, 5, 10.0f, n);
+            check_inline_bytes("stationarity_flags", n, t, fa, fb, sizeof fa);
+            /* Flat runs cross both vector blocks and their previous-sample
+             * boundary. Other trials include strict threshold ties and NaN. */
+            if (t % 4 == 0)
+                for (int k = 0; k < n; ++k) x[off + k] = t % 8 ? 1.1f : 1.0f;
+            long ac, ap, bc, bp;
+            sk_saturation_counts_f32(x + off, (size_t)n, 1.0f, 0.8f, &ac, &ap);
+            sk_saturation_counts_f32_scalar(x + off, (size_t)n, 1.0f, 0.8f, &bc, &bp);
+            check_inline_bytes("saturation_clips", n, t, &ac, &bc, sizeof ac);
+            check_inline_bytes("saturation_consecutive", n, t, &ap, &bp, sizeof ap);
+            if (t % 4 == 0 && (ac != (t % 8 ? n : 0) || ap != (n > 0 ? n - 1 : 0))) {
+                fprintf(stderr, "MISMATCH saturation plateau n=%d t=%d\n", n, t);
+                exit(1);
+            }
+            ++g_total_checks;
+            for (int k = 0; k < CAP; ++k) {
+                if (k >= off && k < off + n) continue;
+                check_scalar_bits_or_die("inline_canary_h", n, t, a[k], 0.25f + (float)(k % 17));
+                check_scalar_bits_or_die("inline_canary_e", n, t, c[k], 0.5f + (float)(k % 11));
+                int32_t hguard = (k + t) % 15 - 2;
+                int64_t cguard = ((int64_t)1 << 40) + k;
+                unsigned char fguard = (unsigned char)((k + t) % 2);
+                unsigned char gguard = (unsigned char)((k + t) % 3 != 0);
+                check_inline_bytes("inline_canary_hold", n, t, ha + k, &hguard, sizeof hguard);
+                check_inline_bytes("inline_canary_count", n, t, ca + k, &cguard, sizeof cguard);
+                check_inline_bytes("inline_canary_flags", n, t, fa + k, &fguard, sizeof fguard);
+                check_inline_bytes("inline_canary_coming", n, t, ga + k, &gguard, sizeof gguard);
+            }
+        }
+    }
+    printf("PASS inline AEC blocks (8 kernels, n=0..35/129/257/513, 64 trials, offsets 1..4, canaries)\n");
+}
+
 /* ═══════════════════════════════════ main ══════════════════════════════════ */
 
 int main(void) {
@@ -3648,8 +3625,6 @@ int main(void) {
     test_cabs_np();
     test_cmag2_np();
     test_cmag2_np_acc();
-    test_ema_cmag2();
-    test_cmac_np();
     test_cmac_np_ring();
     test_wupdate_nlms();
     test_wupdate_kf();
@@ -3672,13 +3647,13 @@ int main(void) {
     test_raise_to();
     test_stationary_mask();
     test_stationary_mask_large();
+    test_inline_aec_oracles();
+    test_inline_aec_blocks();
 
     printf("\n--- NaN corpus ---\n");
     test_cabs_np_nan();
     test_cmag2_np_nan();
     test_cmag2_np_acc_nan();
-    test_ema_cmag2_nan();
-    test_cmac_np_nan();
     test_wupdate_nlms_nan();
     test_wupdate_kf_nan();
     test_pairwise_sum_nan();
@@ -3707,8 +3682,6 @@ int main(void) {
     test_cabs_np_edge();
     test_cmag2_np_edge();
     test_cmag2_np_acc_edge();
-    test_ema_cmag2_edge();
-    test_cmac_np_edge();
     test_wupdate_nlms_edge();
     test_wupdate_kf_edge();
     test_pairwise_sum_edge();
@@ -3736,8 +3709,6 @@ int main(void) {
     bench_cabs_np();
     bench_cmag2_np();
     bench_cmag2_np_acc();
-    bench_ema_cmag2();
-    bench_cmac_np();
     bench_wupdate_nlms();
     bench_wupdate_kf();
     bench_pairwise_sum();

@@ -20,11 +20,11 @@
  *
  * Build (standalone, from c_impl/ — mirrors test_config_validation.c's
  * documented recipe):
- *   make -C ../../audio_common BACKEND=kiss lib
+ *   make -C ../../audiolib/common lib
  *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=gnu99 -Iinclude -Iexample \
- *       -I../../audio_common/include \
+ *       -I../../audiolib/common/include -I../../audiolib/common \
  *       test/test_lifecycle.c $(find src -name '*.c') \
- *       $(make -s -C ../../audio_common BACKEND=kiss print-lib-path) -lm \
+ *       $(make -s -C ../../audiolib/common print-lib-path) -lm \
  *       -o bin/test_lifecycle
  * Run:
  *   ./bin/test_lifecycle
@@ -32,6 +32,7 @@
  *   leaks --atExit -- ./bin/test_lifecycle
  */
 #include "aec.h"
+#include "aec_pool_test_util.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -127,8 +128,8 @@ static void test_double_destroy_static(void) {
     CHECK(sz > 0, "double-destroy (static-pool path): aec_get_mem_size() > 0");
     if (sz == 0) return;
 
-    void* pool = malloc(sz);
-    CHECK(pool != NULL, "double-destroy (static-pool path): malloc pool");
+    void* pool = aec_test_pool_alloc(sz);
+    CHECK(pool != NULL, "double-destroy (static-pool path): aligned pool");
     if (!pool) return;
 
     Aec* a = aec_init(pool, sz, &cfg);

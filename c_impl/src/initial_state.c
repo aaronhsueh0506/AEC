@@ -8,19 +8,19 @@
  * (int)((float)seconds * HOPS_PER_SECOND). All run-time state is integer/bool.
  */
 #include "initial_state.h"
-#include "aec3_scale.h"
+#include "aec_scale.h"
 
 void initial_state_init(InitialState *s, int conservative_initial_phase,
                         float initial_state_seconds,
                         int hop_size, int sample_rate) {
     s->conservative = conservative_initial_phase ? 1 : 0;
-    /* Was `(int)(initial_state_seconds * INITIAL_STATE_HOPS_PER_SECOND)` with
-     * HOPS_PER_SECOND frozen at 100 (hop=160/sr=16000); computed live via
-     * aec3_ms_to_hops so the window stays initial_state_seconds at any grid. */
-    s->initial_state_hops = aec3_ms_to_hops(
+    /* Computed via aec_ms_to_hops rather than a fixed 100 hops per second
+     * (hop=160/sr=16000) so the window stays initial_state_seconds at any
+     * grid. */
+    s->initial_state_hops = aec_ms_to_hops(
         initial_state_seconds * 1000.0f, hop_size, sample_rate);
-    /* AEC3 5 s conservative threshold. */
-    s->conservative_hops = aec3_ms_to_hops(5000.0f, hop_size, sample_rate);
+    /* 5 s conservative threshold. */
+    s->conservative_hops = aec_ms_to_hops(5000.0f, hop_size, sample_rate);
     s->cap_hops = (s->conservative_hops > s->initial_state_hops)
                       ? s->conservative_hops : s->initial_state_hops;
     s->active_threshold_hops =
@@ -56,10 +56,6 @@ void initial_state_update(InitialState *s, int active_render, int saturated_capt
     s->initial_state =
         (s->strong_not_saturated_render_blocks < s->active_threshold_hops) ? 1 : 0;
     s->transition_triggered = (!s->initial_state) && prev_initial ? 1 : 0;
-}
-
-int initial_state_initial_state_active(const InitialState *s) {
-    return s->initial_state;
 }
 
 int initial_state_transition_triggered(const InitialState *s) {

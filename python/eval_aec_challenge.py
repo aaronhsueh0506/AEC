@@ -22,6 +22,7 @@ from contextlib import redirect_stdout
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from aec import AEC, AecConfig, AecMode
+from preset_arg import PRESET_METAVAR, PRESET_NAMES, parse_preset_arg
 
 _ENABLE_CNG = False  # global CNG flag, set by --cng CLI arg
 _CASES_LIST = None   # Tier-1 subset stem set; None = full 800-case rendering
@@ -825,8 +826,10 @@ def main():
     parser.add_argument('--aec3', action='store_true', help='Also run WebRTC AEC3')
     parser.add_argument('--aec3-linear', action='store_true', help='Also run WebRTC AEC3 linear-only')
     parser.add_argument('--old-aec', action='store_true', help='Also run WebRTC old AEC (AEC2)')
-    parser.add_argument('--preset', choices=['mild', 'balanced', 'aggressive'],
-                        default=None, help='AEC preset (default: no preset)')
+    parser.add_argument('--preset', type=parse_preset_arg, choices=PRESET_NAMES,
+                        metavar=PRESET_METAVAR, default=None,
+                        help='AEC preset: 0=mild, 1=balanced, 2=aggressive, 3=no_floor, or the '
+                             'name (default: no preset)')
     parser.add_argument('--all-presets', action='store_true',
                         help='Run all 3 presets and compare')
     parser.add_argument('--parallel', action='store_true',
@@ -879,12 +882,8 @@ def main():
 
     from aec import AecPreset
     if args.all_presets:
-        # NO_FLOOR is deliberately excluded: it sits off the comparable
-        # Pareto axis (AecConfig.from_preset's docstring) the same way
-        # --preset's own choices= list already excludes it, so iterating
-        # the raw enum here would silently add a 4th, much-more-expensive,
-        # not-directly-comparable render to every existing --all-presets
-        # caller (e.g. a full 800-case sweep) without them asking for it.
+        # Sweep the three comparable floor-enabled operating points.
+        # NO_FLOOR is available explicitly through --preset 3 or no_floor.
         for p in (AecPreset.MILD, AecPreset.BALANCED, AecPreset.AGGRESSIVE):
             preset_dir = os.path.join(out_dir, p.value)
             os.makedirs(preset_dir, exist_ok=True)

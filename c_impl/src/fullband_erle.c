@@ -2,34 +2,18 @@
  *
  * PRECISION: float32 (drift versus Python accepted). The per-bin inputs
  * x2/y2/e2 are float32 arrays; the pairwise sum over them stays float32
- * (fb_erle_pairwise_sum). Every scalar accumulator / ratio / log2 / EMA /
- * max-min / quality op is float32 end-to-end, matching the arrays' precision
+ * (sk_pairwise_sum_tailfold_b_f32). Every scalar accumulator / ratio / log2 /
+ * EMA / max-min / quality op is float32 end-to-end, matching the arrays' precision
  * (the _fast_log2 helper wraps log2f). Built with -ffp-contract=off so each
  * float op rounds separately.
  */
 #include "fullband_erle.h"
 
-#include "aec3_scale.h"   /* aec3_per_bin_psd_threshold */
-#include "aec_simd_kernels.h"
+#include "aec_scale.h"   /* aec_per_bin_psd_threshold */
+#include "utility/simd_aec.h"
 
 #include <limits.h>   /* INT_MIN */
 #include <math.h>
-
-/* numpy 1.26 pairwise_sum over float32 (verbatim copy of the verified routine
- * in reverb_frequency_response.c):
- *   n < 8     -> sequential
- *   n <= 128  -> 8 partial accumulators (stride 8), balanced-tree combine, then
- *                the (n % 8) tail sequentially
- *   n > 128   -> split at n2 = (n/2) rounded DOWN to a multiple of 8, recurse,
- *                add the two halves.
- * Every op is a float32 add (no float64 widening).
- * Body delegates to simd_kernels.h's sk_pairwise_sum_tailfold_b_f32 (this
- * tree is byte-identical, modulo whitespace, to filter_analyzer.c's
- * fa_f32_pairwise_sum — that kernel's `_scalar` twin's verbatim source);
- * local symbol/signature kept so call sites are unchanged. */
-float fb_erle_pairwise_sum(const float *a, size_t n) {
-    return sk_pairwise_sum_tailfold_b_f32(a, n);
-}
 
 /* _fast_log2(x) = log2f(x) — float32 in, float32 out (single-precision log2
  * to match the rest of the float32 pipeline). */
@@ -150,33 +134,33 @@ void fb_erle_init(FullBandErleEstimator *s, int n_freqs,
                         float min_erle, float max_erle_l, int hop_size,
                         int sample_rate) {
     s->n_freqs = n_freqs;
-    /* AEC3 fullband EMAs (quality 0.07, erle_time_domain 0.05) are
+    /* Reference fullband EMAs (quality 0.07, erle_time_domain 0.05) are
      * per-4ms-block, and fire once per FBERLE_POINTS_TO_ACCUMULATE(=6)-hop
      * accumulation window (see fb_erle_update()), not every hop. Both our
-     * accumulation window (6 hops) and AEC3's reference update period (6
+     * accumulation window (6 hops) and the reference update period (6
      * native 4ms blocks = 24ms) carry the same factor of 6, so it cancels:
-     * pass plain hop_size against aec3_per_block_ema_alpha_to_per_hop's
+     * pass plain hop_size against aec_per_block_ema_alpha_to_per_hop's
      * fixed single-native-block (4ms) denominator, NOT
      * FBERLE_POINTS_TO_ACCUMULATE*hop_size (which would compare 6 real hops
      * against only 1 native block and inflate the exponent 6x). */
-    s->td_alpha = aec3_per_block_ema_alpha_to_per_hop(
+    s->td_alpha = aec_per_block_ema_alpha_to_per_hop(
         0.05f, hop_size, sample_rate);
-    s->quality_alpha = aec3_per_block_ema_alpha_to_per_hop(
+    s->quality_alpha = aec_per_block_ema_alpha_to_per_hop(
         0.07f, hop_size, sample_rate);
-    /* FBERLE_MAXMIN_FORGET is AEC3's own literal per-event forget *step*
+    /* FBERLE_MAXMIN_FORGET is the reference's own literal per-event forget *step*
      * (additive, not a retention alpha) on the same 6-point-gated cadence
      * as quality_alpha/td_alpha above -- the wall-clock-preserving rescale
-     * is the linear aec3_per_block_rate_to_per_hop (same hop_size-cancels-
+     * is the linear aec_per_block_rate_to_per_hop (same hop_size-cancels-
      * the-6x reasoning), not the EMA formula. */
-    float maxmin_forget = aec3_per_block_rate_to_per_hop(
+    float maxmin_forget = aec_per_block_rate_to_per_hop(
         FBERLE_MAXMIN_FORGET, hop_size, sample_rate);
-    /* AEC3 kBlocksToHoldErle=100 blocks (~400 ms), rescaled live to the hop
+    /* ERLE hold of 100 blocks (~400 ms), rescaled live to the hop
      * and sample rate. */
-    s->blocks_to_hold_erle = aec3_ms_to_hops(400.0f, hop_size, sample_rate);
-    /* The helper (aec3_scale.h/.c) is float32-typed and out of scope for this
+    s->blocks_to_hold_erle = aec_ms_to_hops(400.0f, hop_size, sample_rate);
+    /* The helper (aec_scale.h/.c) is float32-typed and out of scope for this
      * conversion; its result is stored directly here. */
     s->x2_band_energy_threshold =
-        aec3_per_bin_psd_threshold(FBERLE_X2_BAND_ENERGY_THRESHOLD, hop_size, 160);
+        aec_per_bin_psd_threshold(FBERLE_X2_BAND_ENERGY_THRESHOLD, hop_size, 160);
     s->min_erle_log2 = fast_log2(min_erle + FBERLE_EPSILON);
     s->max_erle_lf_log2 = fast_log2(max_erle_l + FBERLE_EPSILON);
     s->hold_counter_inst_erle = 0;
@@ -199,10 +183,10 @@ void fb_erle_update(FullBandErleEstimator *s,
                           int converged_filter) {
     if (converged_filter) {
         /* x2_sum = pairwise f32 sum, consumed directly as float32. */
-        float x2_sum = fb_erle_pairwise_sum(x2, (size_t)s->n_freqs);
+        float x2_sum = sk_pairwise_sum_tailfold_b_f32(x2, (size_t)s->n_freqs);
         if (x2_sum > s->x2_band_energy_threshold * (float)s->n_freqs) {
-            float y2_sum = fb_erle_pairwise_sum(y2, (size_t)s->n_freqs);
-            float e2_sum = fb_erle_pairwise_sum(e2, (size_t)s->n_freqs);
+            float y2_sum = sk_pairwise_sum_tailfold_b_f32(y2, (size_t)s->n_freqs);
+            float e2_sum = sk_pairwise_sum_tailfold_b_f32(e2, (size_t)s->n_freqs);
             if (inst_update(&s->inst, y2_sum, e2_sum)) {
                 s->hold_counter_inst_erle = s->blocks_to_hold_erle;
                 s->erle_time_domain_log2 +=
@@ -223,9 +207,8 @@ void fb_erle_update(FullBandErleEstimator *s,
      * fire on every subsequent hop too -- inst_reset_accumulators() would
      * re-fire every hop instead of once, discarding any partial
      * accumulation inst_update() makes on those hops (this field's raw value
-     * is also compared bit-exact by test/historical/parity_fullband_erle.c:
-     * `s.hold_counter_inst_erle != exp_hold`, which mirrors the module's Python
-     * reference's own unbounded `_hold_counter_inst_erle`). Flooring at
+     * must also track the module's Python reference's own unbounded
+     * `_hold_counter_inst_erle`). Flooring at
      * INT_MIN instead preserves BOTH the one-shot edge-trigger semantics and
      * bit-exactness for every practically reachable hop count (at 10 ms hops
      * INT_MIN is ~248 days of continuous uptime away), while removing the UB

@@ -1,60 +1,23 @@
 /* linear_filter_output.c — C port of
- * AEC._aec3_select_linear_filter_output (orchestrator.py:2894-2999).
+ * the orchestrator's linear-filter output selector (python/modules/orchestrator.py).
  * See linear_filter_output.h for the parity contract.
  */
 #include "linear_filter_output.h"
 
-#include "aec_simd_kernels.h"
+#include "utility/simd_aec.h"
 
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
 
-/* ---------------------------------------------------------------------------
- * pairwise float32 sum matching numpy's reduction tree shape: an
- * 8-accumulator unrolled leaf for n<=128 (numpy NPY_PW_BLOCKSIZE), then a
- * recursive split at n/2 rounded down to a multiple of 8.
- * Used for the e2/y2/s2 = np.sum(<arr> ** 2) block energies.
- * Body delegates to simd_kernels.h's sk_pairwise_sum_tailfold_f32 (the same
- * kernel pbfdkf.c's twin uses). */
-static float pairwise_sum_f32(const float *a, int n) {
-    return sk_pairwise_sum_tailfold_f32(a, (size_t)n);
-}
-
-/* np.sum(arr ** 2): square and pairwise-sum, both float32. */
+/* np.sum(arr ** 2): square and pairwise-sum (numpy's reduction tree), both
+ * float32. Used for the e2/y2/s2 block energies. */
 static float sum_sq_f32(const float *a, int n, float *scratch) {
     for (int i = 0; i < n; ++i) {
         float v = a[i];
         scratch[i] = v * v;
     }
-    return pairwise_sum_f32(scratch, n);
-}
-
-int linear_filter_select_init(LinearFilterSelect *s,
-                              int hop, int block_size, int fft_size,
-                              int n_freqs) {
-    memset(s, 0, sizeof(*s));
-    s->hop        = hop;
-    s->block_size = block_size;
-    s->fft_size   = fft_size;
-    s->n_freqs    = n_freqs;
-
-    s->prev_output_time = (float *)malloc((size_t)hop * sizeof(float));
-    s->e_form           = (float *)malloc((size_t)hop * sizeof(float));
-    s->block_win        = (float *)malloc((size_t)block_size * sizeof(float));
-    s->sel_esw          = (Complex *)malloc((size_t)n_freqs * sizeof(Complex));
-    /* De-stacked per-hop scratch (see LinearFilterSelect struct comment). */
-    s->scr_sq           = (float *)malloc((size_t)hop * sizeof(float));
-    s->scr_sref         = (float *)malloc((size_t)hop * sizeof(float));
-    s->scr_scoa         = (float *)malloc((size_t)hop * sizeof(float));
-    s->scr_tin          = (float *)malloc((size_t)fft_size * sizeof(float));
-    if (!s->prev_output_time || !s->e_form || !s->block_win || !s->sel_esw ||
-        !s->scr_sq || !s->scr_sref || !s->scr_scoa || !s->scr_tin) {
-        linear_filter_select_free(s);
-        return -1;
-    }
-    linear_filter_select_reset(s);
-    return 0;
+    return sk_pairwise_sum_tailfold_f32(scratch, (size_t)n);
 }
 
 void linear_filter_select_reset(LinearFilterSelect *s) {
@@ -63,18 +26,6 @@ void linear_filter_select_reset(LinearFilterSelect *s) {
     s->refined_last_selected = 1;
     if (s->prev_output_time)
         memset(s->prev_output_time, 0, (size_t)s->hop * sizeof(float));
-}
-
-void linear_filter_select_free(LinearFilterSelect *s) {
-    if (!s) return;
-    free(s->prev_output_time); s->prev_output_time = NULL;
-    free(s->e_form);           s->e_form = NULL;
-    free(s->block_win);        s->block_win = NULL;
-    free(s->sel_esw);          s->sel_esw = NULL;
-    free(s->scr_sq);           s->scr_sq = NULL;
-    free(s->scr_sref);         s->scr_sref = NULL;
-    free(s->scr_scoa);         s->scr_scoa = NULL;
-    free(s->scr_tin);          s->scr_tin = NULL;
 }
 
 void linear_filter_select(LinearFilterSelect *s,
@@ -139,12 +90,12 @@ void linear_filter_select(LinearFilterSelect *s,
          * energy than the capture it was subtracted from, is not a
          * cancellation at all -- it is the filter adding signal. Handing the
          * capture through instead makes capture the steady-state fallback,
-         * matching AEC3's echo_remover.cc:475 (Y_fft = UseLinearFilterOutput()
+         * matching the reference remover's (Y_fft = UseLinearFilterOutput()
          * ? E : Y) one stage later. During the 30-sample transition the
          * mixture of old residual and capture is not a strict bound.
          *
          * Related but NOT the same test as the post chain's own over-output
-         * guard (the output-selection step in aec3_post.c): that one compares
+         * guard (the output-selection step in aec_post.c): that one compares
          * the sqrt-Hann weighted two-hop block in the frequency domain, this one the
          * current unwindowed hop. Neither subsumes the other.
          *
@@ -198,14 +149,21 @@ void linear_filter_select(LinearFilterSelect *s,
         }
 
         /* _near_spec_win = error_spec_windowed + echo_spec (complex64)
-         * selected_echo_spec = _near_spec_win - selected_esw (complex64) */
-        for (int k = 0; k < K; ++k) {
-            float nr = error_spec_windowed[k].r + echo_spec[k].r;
-            float ni = error_spec_windowed[k].i + echo_spec[k].i;
-            out_sel_esw[k]  = s->sel_esw[k];
-            out_sel_echo[k].r = nr - s->sel_esw[k].r;
-            out_sel_echo[k].i = ni - s->sel_esw[k].i;
-        }
+         * selected_echo_spec = _near_spec_win - selected_esw (complex64)
+         *
+         * Routed through sk_cadd_f32/sk_csub_f32 instead of a hand-rolled
+         * per-k loop: out_sel_echo holds _near_spec_win after the add (same
+         * two per-component float adds, same rounding, as an open-coded
+         * per-component loop would give), then sk_csub_f32 subtracts
+         * s->sel_esw from it IN PLACE (out == a, which sk_csub_f32 supports
+         * by loading a 4-lane block in full before it is stored, never
+         * revisiting an earlier index) -- the identical two separately-
+         * rounded operations in the identical order, just via kernel calls.
+         * out_sel_esw is copied from s->sel_esw with memcpy, an exact bit
+         * copy matching the loop's plain struct assignment. */
+        sk_cadd_f32(out_sel_echo, error_spec_windowed, echo_spec, K);
+        memcpy(out_sel_esw, s->sel_esw, (size_t)K * sizeof(Complex));
+        sk_csub_f32(out_sel_echo, out_sel_echo, s->sel_esw, K);
 
         /* UPDATE STATE: _form_prev_output_time = e_form; latches = use_refined */
         memcpy(s->prev_output_time, s->e_form, (size_t)hop * sizeof(float));

@@ -74,11 +74,12 @@
  * proves the same selector protects the public seam.
  *
  * Build (standalone, from c_impl/ — mirrors test_process_context.c):
- *   make -C ../../audio_common BACKEND=kiss lib
+ *   make -C ../../audiolib/common lib
  *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=gnu99 -Iinclude -Iexample \
- *       -I../../audio_common/include \
+ *       -I../../audiolib/common/include \
+ *       -I../../audiolib/common \
  *       test/test_linear_context.c $(find src -name '*.c') \
- *       $(make -s -C ../../audio_common BACKEND=kiss print-lib-path) -lm \
+ *       $(make -s -C ../../audiolib/common print-lib-path) -lm \
  *       -o bin/test_linear_context
  * Run:  ./bin/test_linear_context
  * Also wired into the Makefile: `make test-linear-context`.

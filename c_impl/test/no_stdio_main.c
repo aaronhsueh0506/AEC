@@ -3,7 +3,7 @@
  * Deliberately does NOT itself use stdio (no <stdio.h>, no printf/fprintf
  * anywhere in this file) so that `nm` run over the linked executable can
  * only attribute any stdio symbol it finds to libaec.a (built with
- * NO_STDIO=1), the audio_common archive it is linked against, or the
+ * NO_STDIO=1), the audiolib archive it is linked against, or the
  * platform CRT — never to this harness. The only observable output is the
  * process exit code: exercise one real hop through the engine
  * (aec_create -> aec_process -> aec_destroy) and report success/failure
@@ -16,7 +16,7 @@
  *   3  -> the standalone RES stage (aec_res.h) failed to initialise
  *
  * Build/run: see the `audit-no-stdio` Makefile target (../Makefile), which
- * compiles this against a NO_STDIO=1 libaec.a + the resolved audio_common
+ * compiles this against a NO_STDIO=1 libaec.a + the resolved audiolib
  * archive, `nm`s the result, and runs it.
  */
 #include "aec.h"

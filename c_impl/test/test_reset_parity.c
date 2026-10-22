@@ -17,18 +17,19 @@
  *
  * Covered per run: the three product grids (16k/256, 16k/512, 48k/1024) x
  * both consumption modes (full cascade, and the enable_res=0 +
- * return_res_context=1 seam an external RES drives). The FFT backend is
+ * return_res_context=1 seam an external RES drives). The kernel set is
  * whatever the build selected, so `make test-reset-parity` and
- * `make BACKEND=kiss test-reset-parity` are two distinct runs of the gate.
+ * `make SIMD=0 test-reset-parity` are two distinct runs of the gate.
  * The caller-pool path needs no separate case here: test_static_aec.c
  * already pins aec_init byte-equal to aec_create on a real recording.
  *
  * Build (standalone, from c_impl/ -- mirrors test_process_context.c's recipe):
- *   make -C ../../audio_common BACKEND=kiss lib
+ *   make -C ../../audiolib/common lib
  *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=gnu99 -Iinclude \
- *       -I../../audio_common/include \
+ *       -I../../audiolib/common/include \
+ *       -I../../audiolib/common \
  *       test/test_reset_parity.c $(find src -name '*.c') \
- *       $(make -s -C ../../audio_common BACKEND=kiss print-lib-path) -lm \
+ *       $(make -s -C ../../audiolib/common print-lib-path) -lm \
  *       -o bin/test_reset_parity
  */
 #include "aec.h"

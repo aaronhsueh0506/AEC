@@ -31,13 +31,13 @@ pre code{background:none;padding:0}
 <a href="../../../Audio_ALG/docs/html/index.html">index</a>
 <a href="aec.html">aec</a>
 <a href="../../../NR/docs/html/nr.html">nr</a>
-<a href="../../../audio_common/docs/html/audio_common.html">audio_common</a>
+<a href="../../../audiolib/common/docs/html/audio_common.html">audiolib</a>
 <span class="sep">|</span>
 <a href="aec_c_api.html">AEC API</a>
 <a href="aec_c_api_params.html"><b>AEC 參數</b></a>
 <a href="aec_res.html">AEC RES 級</a>
 <a href="../../../NR/docs/html/nr_c_api.html">NR API</a>
-<a href="../../../audio_common/docs/html/audio_common_c_api.html">audio_common API</a>
+<a href="../../../audiolib/common/docs/html/audio_common_c_api.html">audiolib API</a>
 <a href="../../../Audio_ALG/docs/html/integration_example.html">串接範例</a>
 </nav>
 
@@ -60,16 +60,16 @@ pre code{background:none;padding:0}
 <tr><td><code>enable_highpass</code></td><td><b>1</b></td><td>0 或 1</td><td><b>只作用於 mic 路徑</b>。關掉時 <code>highpass_cutoff_hz</code> 完全惰性,連 pool 都不佔</td></tr>
 <tr><td><code>highpass_cutoff_hz</code></td><td><b>80.0</b></td><td>啟用時:finite、<code>&gt;0</code>、<b><code>&lt; 0.45 × sample_rate</code></b>(16k → 上限 7200 Hz)</td><td>切掉 mic 的 DC／rumble。調高(如 150 Hz)→ 風噪、桌面震動更乾淨,但男聲基頻可能被削</td></tr>
 </table></div>
-<div class="note"><b>far(ref)路徑沒有 HPF,連實例都不存在</b>——整個 lib 只有一個 <code>hp_mic</code>。這是刻意的設定,不要試圖用 config 打開 far HPF。若 ref 需要 HPF,請在餵進 AEC <b>之前</b>用 audio_common 的 <code>hpf.h</code> 自己做,但先確認你真的需要。</div>
+<div class="note"><b>far(ref)路徑沒有 HPF,連實例都不存在</b>——整個 lib 只有一個 <code>hp_mic</code>。這是刻意的設定,不要試圖用 config 打開 far HPF。若 ref 需要 HPF,請在餵進 AEC <b>之前</b>用 audiolib 的 <code>hpf.h</code> 自己做,但先確認你真的需要。</div>
 
 <h3>8.3 輸入電平 / gain</h3>
-<p><b>AEC 的 <code>AecConfig</code> 沒有任何 gain 欄位</b>。輸入電平調整屬於 AEC <b>之前</b>的前級,由 audio_common 或 pipeline 層負責:</p>
+<p><b>AEC 的 <code>AecConfig</code> 沒有任何 gain 欄位</b>。輸入電平調整屬於 AEC <b>之前</b>的前級,由 audiolib 或 pipeline 層負責:</p>
 <div class="tblwrap"><table>
 <tr><th>模組</th><th>位置</th><th>特性</th></tr>
-<tr><td><code>AudioPreGain</code></td><td><code>audio_common/include/audio_pre_gain.h</code></td><td>mono、<b>振幅</b> dB(<code>10^(db/20)</code>)、<b>不做 clipping</b>、有 runtime <code>audio_pre_gain_set_db()</code></td></tr>
+<tr><td><code>AudioPreGain</code></td><td><code>audiolib/common/include/audio_pre_gain.h</code></td><td>mono、<b>振幅</b> dB(<code>10^(db/20)</code>)、<b>不做 clipping</b>、有 runtime <code>audio_pre_gain_set_db()</code></td></tr>
 <tr><td><code>FixGain</code></td><td><code>Audio_ALG/pipelines/third_party/gain/fix_gain.h</code></td><td>多聲道、per-channel gain + 選配 clip、<b>沒有 retune 路徑</b>(改值要重建 instance)</td></tr>
 </table></div>
-<div class="warn">電平會直接改變 AEC 行為:<code>saturation_threshold</code>(預設 0.95)判定 clipping、<code>saturation_softclip_ref</code>(預設 1)會對參考訊號做 soft-clip 以貼近實際被 clip 的喇叭輸出。<b>把 pre-gain 調到讓 ref 常態接近滿刻度,會讓線性模型失準、ERLE 下降。</b>詳見 <a href="../../../audio_common/docs/html/audio_common_c_api.html">audio_common API</a>。</div>
+<div class="warn">電平會直接改變 AEC 行為:<code>saturation_threshold</code>(預設 0.95)判定 clipping、<code>saturation_softclip_ref</code>(預設 1)會對參考訊號做 soft-clip 以貼近實際被 clip 的喇叭輸出。<b>把 pre-gain 調到讓 ref 常態接近滿刻度,會讓線性模型失準、ERLE 下降。</b>詳見 <a href="../../../audiolib/common/docs/html/audio_common_c_api.html">audiolib API</a>。</div>
 
 <h3>8.4 其餘欄位分組速查</h3>
 <div class="tblwrap"><table>

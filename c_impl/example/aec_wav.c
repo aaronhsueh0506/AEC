@@ -3,7 +3,8 @@
  * Notes:
  *   - balanced reverb 0.85/1.6 is set in aec_config_from_preset.
  *   - CNG is OFF by default; --cng enables it.
- *   - --preset mild/balanced/aggressive are all parsed.
+ *   - --preset takes the AecPreset value 0/1/2/3 or the name
+ *     mild/balanced/aggressive/no_floor.
  *   - The hop size is derived from sample_rate by aec (no fixed [160]).
  *
  * Plus --debug-level for log infra.
@@ -19,7 +20,7 @@ static void print_usage(const char* prog) {
     fprintf(stderr,
         "Usage: %s <mic.wav> <ref.wav> <out.wav> [options]\n\n"
         "Options:\n"
-        "  --preset {mild|balanced|aggressive}   default: balanced\n"
+        "  --preset {0|1|2|3|mild|balanced|aggressive|no_floor}   default: balanced (1)\n"
         "  --cng                          Enable comfort noise\n"
         "  --no-cng                       Explicitly disable CNG\n"
         "  --no-delay-est                 EXTERNAL_ALIGNED mode: no online delay\n"
@@ -82,9 +83,10 @@ static void print_config_rejected(const char* who, int sr,
 }
 
 static int parse_preset(const char* s, AecPreset* out) {
-    if (!strcmp(s, "mild"))     { *out = AEC_PRESET_MILD;     return 0; }
-    if (!strcmp(s, "balanced"))   { *out = AEC_PRESET_BALANCED;   return 0; }
-    if (!strcmp(s, "aggressive")) { *out = AEC_PRESET_AGGRESSIVE; return 0; }
+    if (!strcmp(s, "0") || !strcmp(s, "mild"))       { *out = AEC_PRESET_MILD;       return 0; }
+    if (!strcmp(s, "1") || !strcmp(s, "balanced"))   { *out = AEC_PRESET_BALANCED;   return 0; }
+    if (!strcmp(s, "2") || !strcmp(s, "aggressive")) { *out = AEC_PRESET_AGGRESSIVE; return 0; }
+    if (!strcmp(s, "3") || !strcmp(s, "no_floor"))   { *out = AEC_PRESET_NO_FLOOR;   return 0; }
     return -1;
 }
 
@@ -122,7 +124,7 @@ int main(int argc, char* argv[]) {
         if (!strcmp(arg, "--preset") && i + 1 < argc) {
             if (parse_preset(argv[++i], &preset) != 0) {
                 fprintf(stderr, "ERROR: unknown preset '%s'. "
-                                "Valid: mild|balanced|aggressive\n", argv[i]);
+                                "Valid: 0|1|2|mild|balanced|aggressive\n", argv[i]);
                 return 2;
             }
         } else if (!strcmp(arg, "--cng"))           explicit_cng = 1;
@@ -312,7 +314,8 @@ int main(int argc, char* argv[]) {
             "delay_mode=%s num_filters=%d fixed_delay_samples=%d\n",
             frame_idx, hop, sr,
             preset == AEC_PRESET_MILD ? "mild" :
-            preset == AEC_PRESET_BALANCED ? "balanced" : "aggressive",
+            preset == AEC_PRESET_BALANCED ? "balanced" :
+            preset == AEC_PRESET_AGGRESSIVE ? "aggressive" : "no_floor",
             cfg.enable_cng, cfg.enable_delay_est,
             delay_mode_name(cfg.delay_mode), cfg.delay_num_filters,
             cfg.fixed_delay_samples);

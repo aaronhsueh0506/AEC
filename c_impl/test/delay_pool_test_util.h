@@ -1,7 +1,7 @@
-/* delay_pool_test_util.h — one pool-first DelayAec3 construction for the
+/* delay_pool_test_util.h — one pool-first DelayAec construction for the
  * test/tool harnesses that need a bare estimator (no Aec around it).
  *
- * DelayAec3 owns no arrays of its own: every instance needs a caller block
+ * DelayAec owns no arrays of its own: every instance needs a caller block
  * sized for its exact (sample_rate, hop, num_filters) triple. That makes the
  * construction sequence four steps that must stay in this order --
  * get_mem_size -> aligned alloc -> pre-dirty -> init -- and five harnesses
@@ -25,21 +25,21 @@
 #ifndef DELAY_POOL_TEST_UTIL_H
 #define DELAY_POOL_TEST_UTIL_H
 
-#include "delay_aec3.h"
+#include "delay_aec.h"
 #include <stdlib.h>
 #include <string.h>
 
-/* Build one DelayAec3 on a freshly allocated, 16-byte-aligned, pre-dirtied
+/* Build one DelayAec on a freshly allocated, 16-byte-aligned, pre-dirtied
  * pool. Returns the pool -- which the caller owns and must free() once the
  * estimator is done -- or NULL, with *why set to a static reason string.
  * `why` may be NULL if the caller only needs the success/failure split. */
-static inline void* delay_pool_init(DelayAec3* d, int sample_rate, int hop,
+static inline void* delay_pool_init(DelayAec* d, int sample_rate, int hop,
                                     int num_filters, const char** why) {
-    size_t need = delay_aec3_get_mem_size(sample_rate, hop, num_filters);
+    size_t need = delay_aec_get_mem_size(sample_rate, hop, num_filters);
     void* pool = NULL;
     if (why) *why = NULL;
     if (need == 0) {
-        if (why) *why = "delay_aec3_get_mem_size returned 0";
+        if (why) *why = "delay_aec_get_mem_size returned 0";
         return NULL;
     }
     if (posix_memalign(&pool, 16, need) != 0 || !pool) {
@@ -47,8 +47,8 @@ static inline void* delay_pool_init(DelayAec3* d, int sample_rate, int hop,
         return NULL;
     }
     memset(pool, 0xA5, need);
-    if (delay_aec3_init(d, pool, need, sample_rate, hop, num_filters) != 0) {
-        if (why) *why = "delay_aec3_init failed";
+    if (delay_aec_init(d, pool, need, sample_rate, hop, num_filters) != 0) {
+        if (why) *why = "delay_aec_init failed";
         free(pool);
         return NULL;
     }

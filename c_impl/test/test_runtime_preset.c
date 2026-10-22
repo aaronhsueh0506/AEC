@@ -412,6 +412,113 @@ static void run_half_hop_rounding_parity(void) {
     aec_destroy(&a);
 }
 
+/* ── 8: NO_FLOOR runtime switching (reverses the Python orchestrator's
+ * construction-time-only rejection -- C never had that guard, since C never
+ * had a 4th enum value until now; see suppression_gain.h's comment on
+ * suppression_gain_set_split_floor_enabled()). The gate STEPS immediately
+ * (no ramp -- a boolean has no continuous path to walk), exactly like the
+ * DT floor. ─────────────────────────────────────────────────────────────── */
+
+static void run_no_floor_switch(void) {
+    Aec live, fresh_nf, fresh_bal;
+
+    /* INTO NO_FLOOR: the gate steps off on the same call that retargets it,
+     * landing field-for-field on a freshly constructed NO_FLOOR instance --
+     * the same "ramp_ms==0 matches construction" property test 1 proves for
+     * the dB floors, now proven for the boolean gate too. */
+    CHECK(open_aec(&live, AEC_PRESET_BALANCED, 0) == 0,
+          "no_floor: created (balanced)");
+    CHECK(open_aec(&fresh_nf, AEC_PRESET_NO_FLOOR, 0) == 0,
+          "no_floor: reference NO_FLOOR instance created");
+    CHECK(live.a3_sg.cfg.split_floor_enabled == 1,
+          "no_floor: balanced starts with the gate enabled");
+    CHECK(aec_set_preset(&live, AEC_PRESET_NO_FLOOR, 0.0f) == 0,
+          "no_floor: retarget INTO NO_FLOOR accepted");
+    CHECK(live.a3_sg.cfg.split_floor_enabled == 0,
+          "no_floor: the gate steps off immediately (no ramp -- a boolean "
+          "has no continuous path)");
+    CHECK(live.a3_sg.cfg.split_floor_enabled ==
+              fresh_nf.a3_sg.cfg.split_floor_enabled,
+          "no_floor: lands field-for-field on a freshly constructed "
+          "NO_FLOOR instance's gate");
+    CHECK(live.cfg.min_gain_split_floor_enabled == 0,
+          "no_floor: mirrored into AecConfig");
+
+    /* AWAY FROM NO_FLOOR: the gate steps back on AND the far-active/dt
+     * scalars are written through the existing setters -- the hazard
+     * where a caller flips only
+     * the boolean and forgets the scalar, or vice versa, does not reproduce
+     * here because aec_set_preset() always writes all three together. */
+    CHECK(open_aec(&fresh_bal, AEC_PRESET_BALANCED, 0) == 0,
+          "no_floor: reference BALANCED instance created");
+    CHECK(aec_set_preset(&live, AEC_PRESET_BALANCED, 0.0f) == 0,
+          "no_floor: retarget AWAY FROM NO_FLOOR accepted");
+    CHECK(live.a3_sg.cfg.split_floor_enabled == 1,
+          "no_floor: the gate steps back on immediately");
+    CHECK(live.a3_sg.cfg.split_floor_far_active ==
+              fresh_bal.a3_sg.cfg.split_floor_far_active &&
+              live.a3_sg.split_floor_far_active_live ==
+              fresh_bal.a3_sg.split_floor_far_active_live,
+          "no_floor: the far-active floor also lands on balanced's target "
+          "exactly -- not left behind at NO_FLOOR's inert value");
+    CHECK(live.a3_sg.cfg.split_floor_dt == fresh_bal.a3_sg.cfg.split_floor_dt,
+          "no_floor: the dt floor also lands on balanced's target exactly");
+    CHECK(live.cfg.min_gain_split_floor_enabled == 1,
+          "no_floor: mirrored back into AecConfig");
+
+    aec_destroy(&live);
+    aec_destroy(&fresh_nf);
+    aec_destroy(&fresh_bal);
+}
+
+/* ── 9: round trip BALANCED -> NO_FLOOR -> AGGRESSIVE, each step matching a
+ * freshly constructed instance of the target preset field-for-field. This
+ * is the proof that the setter covers the flip-only-one-field hazard,
+ * rather than merely lacking a guard. ────────── */
+
+static void run_no_floor_round_trip(void) {
+    Aec a, fresh;
+    int hop;
+
+    CHECK(open_aec(&a, AEC_PRESET_BALANCED, 0) == 0, "round-trip: created");
+    hop = aec_hop_size(&a);
+    run_hops(&a, hop, 0, 8);   /* a few real hops so the gain path has state */
+
+    CHECK(aec_set_preset(&a, AEC_PRESET_NO_FLOOR, 0.0f) == 0,
+          "round-trip: BALANCED -> NO_FLOOR accepted");
+    CHECK(open_aec(&fresh, AEC_PRESET_NO_FLOOR, 0) == 0,
+          "round-trip: fresh NO_FLOOR reference created");
+    CHECK(a.a3_sg.cfg.split_floor_enabled ==
+              fresh.a3_sg.cfg.split_floor_enabled,
+          "round-trip: leg 1 gate matches a fresh NO_FLOOR instance");
+    aec_destroy(&fresh);
+    run_hops(&a, hop, 8, 8);
+
+    CHECK(aec_set_preset(&a, AEC_PRESET_AGGRESSIVE, 0.0f) == 0,
+          "round-trip: NO_FLOOR -> AGGRESSIVE accepted");
+    CHECK(open_aec(&fresh, AEC_PRESET_AGGRESSIVE, 0) == 0,
+          "round-trip: fresh AGGRESSIVE reference created");
+    CHECK(a.a3_sg.cfg.split_floor_enabled ==
+              fresh.a3_sg.cfg.split_floor_enabled &&
+              a.a3_sg.cfg.split_floor_far_active ==
+              fresh.a3_sg.cfg.split_floor_far_active &&
+              a.a3_sg.cfg.split_floor_dt == fresh.a3_sg.cfg.split_floor_dt,
+          "round-trip: leg 2 gate AND both scalars match a fresh AGGRESSIVE "
+          "instance -- the gate re-arming does not leave either scalar "
+          "behind at NO_FLOOR's inert value");
+    aec_destroy(&fresh);
+    run_hops(&a, hop, 16, 8);
+    aec_destroy(&a);
+}
+
+/* NOTE: AecRes-side NO_FLOOR + aec_res_reset() coverage (the r->sg_cfg
+ * mirror that aec_res_reset()'s rebuild() re-inits split_floor_enabled
+ * from) lives in test_aec_res.c, not here -- AecRes is opaque in aec.h/
+ * aec_res.h (its full definition is private to src/aec_res.c), and
+ * test_aec_res.c already includes that source file for exactly this kind
+ * of internal-state assertion. See its "NO_FLOOR" block next to the
+ * existing preset/reset coverage. */
+
 /* ── mutation: the exact-landing branch must be load-bearing ─────────────── */
 
 static void run_landing_is_load_bearing(void) {
@@ -441,6 +548,8 @@ int main(void) {
     run_reset_and_isolation();
     run_rejection_is_total();
     run_spatial_lane_is_inert();
+    run_no_floor_switch();
+    run_no_floor_round_trip();
     run_landing_is_load_bearing();
     printf("\n%d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;

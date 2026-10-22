@@ -2,10 +2,10 @@
  *
  * Proves that AEC makes no malloc/calloc/realloc/free calls across:
  *   aec_init -> N hops aec_process -> aec_reset -> N hops -> aec_destroy
- * for 50 lifecycles on both FFT backends. The platform-specific allocator
- * hook lives in audio_common/test/zero_heap_hook.c. Run with
- * `make BACKEND=kiss|ne10 test-zero-heap`; -fno-builtin is required so the
- * hook sanity allocation cannot be optimized away.
+ * for 50 lifecycles. The platform-specific allocator hook lives in
+ * audiolib/common/test/zero_heap_hook.c. Run with `make test-zero-heap`;
+ * -fno-builtin is required so the hook sanity allocation cannot be optimized
+ * away.
  */
 #include "aec.h"
 #include "aec_res.h"
@@ -28,7 +28,7 @@ static float lcg_sample(void) {
  * change, comfort-noise fill. Inputs are fixed buffers owned by the caller. */
 static int run_res_cycle(void* mem, size_t bytes, const AecConfig* cfg) {
     static Complex spec[1024];
-    static float r2[1024], cn[1024], gr[1024], render[1024];
+    static float r2[1024], cn[1024], render[1024];
     uint32_t rng = 1u;
     AecResInput in;
     AecRes* res = aec_res_init(mem, bytes, cfg);
@@ -37,7 +37,7 @@ static int run_res_cycle(void* mem, size_t bytes, const AecConfig* cfg) {
     n = aec_res_n_bins(res);
     for (k = 0; k < n; ++k) {
         spec[k].r = lcg_sample(); spec[k].i = lcg_sample();
-        r2[k] = 1e4f * (1.0f + lcg_sample()); cn[k] = 1e2f; gr[k] = 0.5f;
+        r2[k] = 1e4f * (1.0f + lcg_sample()); cn[k] = 1e2f;
     }
     for (k = 0; k < aec_res_hop_size(res); ++k) render[k] = lcg_sample();
     in.error_spec = spec; in.near_spec = spec; in.r2 = r2; in.comfort_noise = cn;

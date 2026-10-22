@@ -132,7 +132,7 @@ def capture_config(self):
         aud_lf_end_bin=int(min(hz_to_bin(ea.lf_band_end_hz, N, sr), N)),
         aud_mf_end_bin=int(min(hz_to_bin(ea.mf_band_end_hz, N, sr), N)),
         # LF-gain clamp anchor bin: _limit_lf_gains hardcodes hz_to_bin(250).
-        # Production C sets scfg.lf_clamp_bin = AEC3B_SG_LF_CLAMP_BIN (=8); the
+        # Production C sets scfg.lf_clamp_bin = AECB_SG_LF_CLAMP_BIN (=8); the
         # parity test must replay the same value (was an un-set cfg field ->
         # garbage clamped a wide LF range and corrupted the gain).
         lf_clamp_bin=int(hz_to_bin(250.0, N, sr)),

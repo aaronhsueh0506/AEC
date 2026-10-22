@@ -19,7 +19,7 @@ fires (i.e. self._last_shadow_output_time is not None — skipped on frame 1):
     * selected_esw[n_freqs]   (complex64)
     * selected_echo_spec[n_freqs] (complex64)
 
-The C parity_linear_filter_select.c constructs a LinearFilterSelect (init →
+A C harness constructs a LinearFilterSelect (init →
 _form_prev_output_time=None, _form_last_selection=True), then per captured hop
 calls linear_filter_select with the stored inputs and asserts both complex
 spectra match bit-for-bit. State (_form_prev_output_time, _form_last_selection,

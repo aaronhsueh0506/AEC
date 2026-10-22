@@ -8,16 +8,16 @@
 # that established pattern rather than introducing a second, differently-
 # shaped mechanism for "run this one test under UBSan").
 #
-# Unlike simd_selftest_aec (header-only, no audio_common archive link
+# Unlike simd_selftest_aec (header-only, no audiolib archive link
 # needed), test_counter_saturation.c exercises the full Aec type (its
 # aec.c/pbfdkf.c counter paths), so this script compiles EVERY src/*.c TU
 # (this repo's own code) under -fsanitize=undefined together with the test
-# file, and links against audio_common's ordinary (non-sanitized) archive --
+# file, and links against audiolib's ordinary (non-sanitized) archive --
 # the code under test is this repo's own, and linking a
 # sanitizer-instrumented TU against plain object code is well-supported
 # (UBSan is a per-TU instrumentation, not an ABI change); it just means
-# audio_common's own internals aren't independently checked here (that is
-# audio_common's own test's job, not this repo's).
+# audiolib's own internals aren't independently checked here (that is
+# audiolib's own test's job, not this repo's).
 #
 # Compiles+runs the SAME test source with -fsanitize=undefined
 # -fno-sanitize-recover=all (host UBSan works fine here, same as
@@ -35,14 +35,14 @@
 #
 # Scratch isolation: everything this run touches lives under one mktemp -d
 # SCRATCH, so it cannot race a concurrent real build in this repo's own bin/
-# or in audio_common's default obj/bin trees (reached via the `make ... lib` /
+# or in audiolib's default obj/bin trees (reached via the `make ... lib` /
 # `make ... print-lib-path` calls) -- a developer's own terminal, AEC's/NR's
-# own build pulling in audio_common, CI, or a second concurrent invocation of
+# own build pulling in audiolib, CI, or a second concurrent invocation of
 # this same script with a different --use-standard-math setting. The scratch
 # is removed by a single trap covering normal exit and both signals -- the
-# same isolation discipline audio_common's own
+# same isolation discipline audiolib's own
 # scripts/test_build_isolation.sh applies to its own scratch builds.
-# OBJ_ROOT/BIN_ROOT are audio_common's OWN placement knobs and are passed
+# OBJ_ROOT/BIN_ROOT are audiolib's OWN placement knobs and are passed
 # with IDENTICAL values to both the `lib` build
 # call and the `print-lib-path` query call below, so the two invocations can
 # never resolve to different paths -- the same query/build-divergence
@@ -81,18 +81,18 @@ BIN="$BIN_DIR/test_counter_saturation_ubsan"
 AC_OBJ_ROOT="$SCRATCH/ac_obj"
 AC_BIN_ROOT="$SCRATCH/ac_bin"
 
-# Same AC_DIR auto-detection the Makefile itself uses (audio_common sitting
+# Same COMMON_DIR auto-detection the Makefile itself uses (audiolib sitting
 # next to this repo, or nested deeper e.g. an integration-repo submodule
-# checkout) -- kept in sync with the Makefile's own AC_DIR line rather than
+# checkout) -- kept in sync with the Makefile's own COMMON_DIR line rather than
 # hardcoding one layout.
-AC_DIR=${AC_DIR:-}
-if [ -z "$AC_DIR" ]; then
-    if [ -d ../../audio_common ]; then
-        AC_DIR=../../audio_common
-    elif [ -d ../../../../audio_common ]; then
-        AC_DIR=../../../../audio_common
+COMMON_DIR=${COMMON_DIR:-}
+if [ -z "$COMMON_DIR" ]; then
+    if [ -d ../../audiolib/common ]; then
+        COMMON_DIR=../../audiolib/common
+    elif [ -d ../../../../audiolib/common ]; then
+        COMMON_DIR=../../../../audiolib/common
     else
-        echo "FATAL: could not auto-detect audio_common (set AC_DIR=...)" >&2
+        echo "FATAL: could not auto-detect audiolib (set COMMON_DIR=...)" >&2
         exit 1
     fi
 fi
@@ -125,18 +125,18 @@ esac
 
 mkdir -p "$BIN_DIR"
 
-echo "--- audio_common lib build (BACKEND=kiss, ordinary/non-sanitized, scratch OBJ_ROOT/BIN_ROOT) ---"
-"${MAKE:-make}" -s -C "$AC_DIR" BACKEND=kiss CC="$CC" OBJ_ROOT="$AC_OBJ_ROOT" BIN_ROOT="$AC_BIN_ROOT" lib
-AC_LIB="$("${MAKE:-make}" -s -C "$AC_DIR" BACKEND=kiss CC="$CC" OBJ_ROOT="$AC_OBJ_ROOT" BIN_ROOT="$AC_BIN_ROOT" print-lib-path)"
-test -n "$AC_LIB" || { echo "FATAL: could not resolve audio_common archive path" >&2; exit 1; }
+echo "--- audiolib lib build (BACKEND=ne10, ordinary/non-sanitized, scratch OBJ_ROOT/BIN_ROOT) ---"
+"${MAKE:-make}" -s -C "$COMMON_DIR" BACKEND=ne10 CC="$CC" OBJ_ROOT="$AC_OBJ_ROOT" BIN_ROOT="$AC_BIN_ROOT" lib
+COMMON_LIB="$("${MAKE:-make}" -s -C "$COMMON_DIR" BACKEND=ne10 CC="$CC" OBJ_ROOT="$AC_OBJ_ROOT" BIN_ROOT="$AC_BIN_ROOT" print-lib-path)"
+test -n "$COMMON_LIB" || { echo "FATAL: could not resolve audiolib archive path" >&2; exit 1; }
 
-echo "--- AEC test_counter_saturation UBSan build (AC_DIR=$AC_DIR EXTRA_CFLAGS=$EXTRA_CFLAGS) ---"
+echo "--- AEC test_counter_saturation UBSan build (COMMON_DIR=$COMMON_DIR EXTRA_CFLAGS=$EXTRA_CFLAGS) ---"
 # shellcheck disable=SC2046
-"$CC" -Wall -Wextra -O2 -std=gnu99 -I./include -I./example -I"$AC_DIR/include" \
+"$CC" -Wall -Wextra -O2 -std=gnu99 -I./include -I./example -I"$COMMON_DIR/include" -I"$COMMON_DIR" \
     -ffp-contract=off -fno-math-errno $EXTRA_CFLAGS \
     -fsanitize=undefined -fno-sanitize-recover=all \
     -o "$BIN" test/test_counter_saturation.c $(find src -name '*.c') \
-    "$AC_LIB" -lm
+    "$COMMON_LIB" -lm
 
 echo "--- AEC test_counter_saturation UBSan run (must be invoked from c_impl/, matching the"
 echo "    test's own wav/aec_record fixture path convention -- this script already cd's there) ---"

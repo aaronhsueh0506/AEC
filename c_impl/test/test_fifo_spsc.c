@@ -52,22 +52,23 @@
  *
  * Build (standalone, from c_impl/ — mirrors test_lifecycle.c's documented
  * recipe, plus -pthread for the two worker threads):
- *   make -C ../../audio_common BACKEND=kiss lib
+ *   make -C ../../audiolib/common lib
  *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=gnu99 -pthread \
- *       -Iinclude -Iexample -I../../audio_common/include \
+ *       -Iinclude -Iexample -I../../audiolib/common/include -I../../audiolib/common \
  *       test/test_fifo_spsc.c $(find src -name '*.c') \
- *       $(make -s -C ../../audio_common BACKEND=kiss print-lib-path) -lm \
+ *       $(make -s -C ../../audiolib/common print-lib-path) -lm \
  *       -o bin/test_fifo_spsc
  * Run:
  *   ./bin/test_fifo_spsc
- *   ./bin/test_fifo_spsc --singlethread /tmp/out.bin
+ *   ./bin/test_fifo_spsc --singlethread bin/out.bin
  *
  * ThreadSanitizer (same recipe, add -fsanitize=thread to BOTH compile and
  * link, -O1 recommended so TSan's stack traces stay readable):
  *   gcc -Wall -Wextra -O1 -ffp-contract=off -std=gnu99 -pthread \
- *       -fsanitize=thread -Iinclude -Iexample -I../../audio_common/include \
+ *       -fsanitize=thread -Iinclude -Iexample -I../../audiolib/common/include \
+ *       -I../../audiolib/common \
  *       test/test_fifo_spsc.c $(find src -name '*.c') \
- *       $(make -s -C ../../audio_common BACKEND=kiss print-lib-path) -lm -fsanitize=thread \
+ *       $(make -s -C ../../audiolib/common print-lib-path) -lm -fsanitize=thread \
  *       -o bin/test_fifo_spsc_tsan
  *   ./bin/test_fifo_spsc_tsan
  */
@@ -335,7 +336,7 @@ static void run_stress_test(void) {
 
     /* Explicit large stack (16 MiB), not the platform default (512 KiB on
      * macOS pthreads): aec_process()'s call chain runs through the entire
-     * AEC3 post-filter stack (FFTs, ResidualEchoEstimator, SuppressionGain,
+     * post-filter stack (FFTs, ResidualEchoEstimator, SuppressionGain,
      * ...), and instrumented builds (ThreadSanitizer in particular) inflate
      * per-frame stack usage well past what the default budget survives with
      * plain, uninstrumented builds — a stack overflow there is an artifact

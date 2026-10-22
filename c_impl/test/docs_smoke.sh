@@ -18,15 +18,14 @@
 #   This script greps out everything between the markers, strips the ```c
 #   fence lines, drops it into a generated main() that supplies the small
 #   helpers the doc snippet assumes exist (read_block/write_block), compiles
-#   it against the real AEC sources + the shared audio_common archive (the
+#   it against the real AEC sources + the shared audiolib archive (the
 #   same gcc invocation documented in STATIC_MEMORY.md's "Verification"
 #   section), and runs the result on ~1 second of silence.
 #
 # This is a documentation regression check, not part of `make`/CI wiring —
 # no Makefile is touched or required. Run it by hand:
 #
-#   cd c_impl/test && ./docs_smoke.sh              # BACKEND=ne10 (default)
-#   cd c_impl/test && BACKEND=kiss ./docs_smoke.sh  # portable reference path
+#   cd c_impl/test && ./docs_smoke.sh
 #
 # (or from anywhere: /path/to/c_impl/test/docs_smoke.sh — paths are resolved
 # relative to this script's own location, not $PWD).
@@ -37,11 +36,11 @@
 
 set -euo pipefail
 
-BACKEND="${BACKEND:-ne10}"
+BACKEND=ne10
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 C_IMPL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-AC_DIR="$(cd "$C_IMPL_DIR/../../audio_common" && pwd)"
+COMMON_DIR="$(cd "$C_IMPL_DIR/../../audiolib/common" && pwd)"
 DOC="$C_IMPL_DIR/STATIC_MEMORY.md"
 
 if [ ! -f "$DOC" ]; then
@@ -112,26 +111,23 @@ cat >> "$WORK/docs_smoke_main.c" <<'FOOTER_EOF'
 }
 FOOTER_EOF
 
-echo "== docs_smoke: building audio_common (BACKEND=$BACKEND) =="
-make -C "$AC_DIR" BACKEND="$BACKEND" lib
+echo "== docs_smoke: building audiolib (BACKEND=$BACKEND) =="
+make -C "$COMMON_DIR" BACKEND="$BACKEND" lib
 
-# Resolve the exact archive path for THIS build (audio_common's bin/ is
+# Resolve the exact archive path for THIS build (audiolib's bin/ is
 # keyed bin/<backend>-<config-hash>/, not a flat
 # bin/$BACKEND/ -- print-lib-path is queried with the SAME BACKEND= this
-# script's own `make -C "$AC_DIR" BACKEND="$BACKEND" lib` line just used, so
+# script's own `make -C "$COMMON_DIR" BACKEND="$BACKEND" lib` line just used, so
 # the two can never point at different configs).
-AC_LIB_PATH="$(make -s -C "$AC_DIR" BACKEND="$BACKEND" print-lib-path)"
+COMMON_LIB_PATH="$(make -s -C "$COMMON_DIR" BACKEND="$BACKEND" print-lib-path)"
 
 echo "== docs_smoke: compiling extracted sample against aec.h + libaudio_common ($BACKEND) =="
-# Compile as C with the C driver, then LINK with the C++ driver for ne10:
-# the NE10 archive carries one C++ TU, and the C++
-# driver supplies the correct C++ runtime itself (libc++ on macOS/clang,
-# libstdc++ on GNU/Linux gcc) -- no hardcoded -lc++ (a macOS-ism that fails
-# to link on GNU/Linux), mirroring the Makefiles' own LINK=$(CXX) pattern.
-LINK_DRV=gcc
-if [ "$BACKEND" = "ne10" ]; then
-    LINK_DRV=c++
-fi
+# Compile as C with the C driver, then LINK with the C++ driver: the NE10
+# archive carries one C++ TU, and the C++ driver supplies the correct C++
+# runtime itself (libc++ on macOS/clang, libstdc++ on GNU/Linux gcc) -- no
+# hardcoded -lc++ (a macOS-ism that fails to link on GNU/Linux), mirroring the
+# Makefiles' own LINK=$(CXX) pattern.
+LINK_DRV=c++
 
 SOURCES=("$WORK/docs_smoke_main.c")
 while IFS= read -r -d '' src; do
@@ -143,13 +139,13 @@ i=0
 for src in "${SOURCES[@]}"; do
     obj="$WORK/docs_smoke_obj_$i.o"
     gcc -O2 -ffp-contract=off -fno-math-errno -std=gnu99 \
-        -I"$C_IMPL_DIR/include" -I"$C_IMPL_DIR/example" -I"$AC_DIR/include" \
+        -I"$C_IMPL_DIR/include" -I"$C_IMPL_DIR/example" -I"$COMMON_DIR/include" -I"$COMMON_DIR" \
         -c "$src" -o "$obj"
     OBJ_LIST+=("$obj")
     i=$((i + 1))
 done
 
-"$LINK_DRV" "${OBJ_LIST[@]}" "$AC_LIB_PATH" -lm -o "$WORK/docs_smoke_bin"
+"$LINK_DRV" "${OBJ_LIST[@]}" "$COMMON_LIB_PATH" -lm -o "$WORK/docs_smoke_bin"
 
 echo "== docs_smoke: running (BACKEND=$BACKEND) =="
 "$WORK/docs_smoke_bin"

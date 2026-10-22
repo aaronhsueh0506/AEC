@@ -59,6 +59,7 @@ sys.path.insert(0, _MODEL_DIR)
 
 import eval_aec_challenge as eac  # run_ours, compute_erle, compute_sdr
 from bench_aecmos import FastAECMOS
+from preset_arg import PRESET_METAVAR, PRESET_NAMES, parse_preset_arg
 
 # ---------------------------------------------------------------------------
 # Run-provenance metadata: a run's scores.json is
@@ -247,7 +248,9 @@ def main():
     ap.add_argument('--manifest', default=os.path.join(_REPO, 'eval', 'manifest_90case.json'))
     ap.add_argument('--dataset-dir', default=os.path.join(_REPO, 'wav', 'aec_challenge_blind'))
     ap.add_argument('--filter', type=int, default=832, help='Filter length (832 = 52ms @16kHz)')
-    ap.add_argument('--preset', choices=['mild', 'balanced', 'aggressive'], default='balanced')
+    ap.add_argument('--preset', type=parse_preset_arg, choices=PRESET_NAMES,
+                    metavar=PRESET_METAVAR, default='balanced',
+                    help='0=mild, 1=balanced (default), 2=aggressive, 3=no_floor; names accepted')
     ap.add_argument('--cng', action='store_true', help='Enable comfort noise generation')
     ap.add_argument('--parallel', action='store_true', help='Render cases in parallel')
     ap.add_argument('--workers', type=int, default=4)

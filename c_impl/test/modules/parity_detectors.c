@@ -23,8 +23,8 @@ int main(int argc, char* argv[]) {
     /* DoubleTalkAnalyzer config defaults must match Python AecConfig BALANCED:
      *   shadow_dtd_offset=1.5  shadow_dtd_advantage_scale=3.0  */
     RenderActivity     ra;
-    /* render_activity_update()'s former fixed-size stack scratch is now
-     * caller-owned (pool-carved in production); this standalone harness
+    /* render_activity_update()'s scratch is caller-owned (pool-carved in
+     * production, never a fixed-size stack array); this standalone harness
      * mallocs its own copy sized ceil(hop/8), matching detectors.c's
      * PAIR_BLOCK=8. */
     int ra_scratch_len = (hop + 7) / 8;
@@ -65,13 +65,11 @@ int main(int argc, char* argv[]) {
 
         /* Tolerances:
          *  Every float-valued field is compared in a float32 ULP band.
-         *  detectors.c is float32 by design and the fp64 bit-exact parity
-         *  target is retired (see the note at the top of that file), so the
+         *  detectors.c is float32 by design (see the note at the top of that
+         *  file), so the
          *  divergence/dt_from_shadow/shadow_advantage fields cannot be
          *  compared with exact equality -- they are fp32 in C and fp64 in
-         *  Python. This harness originally asserted exact equality on those
-         *  three, which is why it could never pass and ended up shelved with
-         *  no Makefile target. The band is tight enough to stay a real gate:
+         *  Python. The band is tight enough to stay a real gate:
          *  the SHADOW_FRAME_GATE 50-vs-20 divergence this test exists to
          *  catch shows up as 0.0 vs ~0.059, ~7 orders of magnitude outside it.
          *  Booleans and counters remain exact.
@@ -84,7 +82,7 @@ int main(int argc, char* argv[]) {
              (ulps) * F32_ULP * (fabs((double)(py)) + 1e-30))
         /* EMA-ACCUMULATED fields use a RELATIVE band, not a ULP count.
          * Since the retiming landed, the EMA coefficient itself differs
-         * between the ports -- C's aec3_growth_rehop is float32 powf, Python's
+         * between the ports -- C's aec_growth_rehop is float32 powf, Python's
          * growth_rehop is float64 -- so the two sides run slightly different
          * recursions. The gap therefore GROWS with the length of a decay run
          * (~N * 1 coefficient-ULP over N steps), which a fixed ULP count

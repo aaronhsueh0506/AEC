@@ -1,5 +1,5 @@
 /* initial_state.h — C port of python/modules/state/initial_state.py
- * (which mirrors AEC3 aec_state.cc, InitialState).
+ * (the reference InitialState).
  *
  * AecState::InitialState — cold-start state machine. Tracks whether the filter
  * is still in the initial-state regime; transitions out once enough
@@ -35,7 +35,7 @@ typedef struct {
 
 /* conservative_initial_phase: 0/1 ; initial_state_seconds: config float (default 2.5) ;
  * hop_size/sample_rate: live grid, inputs to the initial_state_hops/
- * conservative_hops computation via aec3_ms_to_hops() rather than assuming
+ * conservative_hops computation via aec_ms_to_hops() rather than assuming
  * hop=160/sr=16000 (HOPS_PER_SECOND=100). */
 void initial_state_init(InitialState *s, int conservative_initial_phase,
                         float initial_state_seconds,
@@ -46,7 +46,6 @@ void initial_state_reset(InitialState *s);
 /* update(active_render, saturated_capture) — both bool (0/1). */
 void initial_state_update(InitialState *s, int active_render, int saturated_capture);
 
-int initial_state_initial_state_active(const InitialState *s);
 int initial_state_transition_triggered(const InitialState *s);
 
 #endif /* INITIAL_STATE_H */

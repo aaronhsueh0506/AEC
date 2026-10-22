@@ -1,7 +1,7 @@
 /* subband_erle.h — C port of python/modules/state/subband_erle.py.
  *
  * SubbandErleEstimator: per-bin ERLE (echo-return-loss-enhancement) estimator
- * with onset compensation. Single-channel port (AEC3 SubbandErleEstimator).
+ * with onset compensation. Single-channel port of the reference subband ERLE estimator.
  *
  * update(x2,y2,e2,converged_filter,coh_gate_mask):
  *   - gated accumulation of y2/e2 over kPointsToAccumulate(=6) points (only
@@ -25,8 +25,8 @@
  *     _hold_counters                                      : int32 (257,)
  *     _x2_band_energy_threshold                           : float32 scalar
  *       (its SOURCE constant SE_X2_BAND_ENERGY_THRESHOLD is only ever an
- *       argument to the shared aec3_per_bin_psd_threshold() helper
- *       (aec3_scale.h/.c, float32-typed); the float32 result is stored
+ *       argument to the shared aec_per_bin_psd_threshold() helper
+ *       (aec_scale.h/.c, float32-typed); the float32 result is stored
  *       directly in subband_erle_init())
  *   All per-bin ERLE arithmetic is float32 end-to-end (alpha, min_erle,
  *   max_erle[k], 1e-30f, 10.0f are float32 scalars combined with the float32
@@ -51,8 +51,8 @@
  * grid) -- see the struct fields. */
 #define SE_POINTS_TO_ACCUMULATE   6
 #define SE_UNBOUNDED_ERLE_MAX     100000.0f
-/* AEC3 kX2BandEnergyThreshold source value (scaled per hop in init). Passed
- * to the shared aec3_per_bin_psd_threshold() helper (aec3_scale.h/.c, itself
+/* Reference X2 band-energy threshold source value (scaled per hop in init). Passed
+ * to the shared aec_per_bin_psd_threshold() helper (aec_scale.h/.c, itself
  * float32-typed and outside this conversion's file set). */
 #define SE_X2_BAND_ENERGY_THRESHOLD 44015068.0f
 
@@ -117,6 +117,5 @@ void subband_erle_update(SubbandErle *s,
  * onset_compensated && use_onset_detection, else the plain erle array. */
 const float *subband_erle_erle(const SubbandErle *s, int onset_compensated);
 const float *subband_erle_erle_unbounded(const SubbandErle *s);
-const float *subband_erle_erle_during_onsets(const SubbandErle *s);
 
 #endif /* SUBBAND_ERLE_H */

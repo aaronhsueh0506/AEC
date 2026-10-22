@@ -2,26 +2,9 @@
  * See the header for the parity contract. Build with -ffp-contract=off. */
 #include "reverb_frequency_response.h"
 
-#include "aec_simd_kernels.h"
+#include "utility/simd_aec.h"
 
 #include <string.h>
-
-/* numpy 1.26 pairwise_sum over float32, accumulated in float32. Mirrors
- * numpy/core/src/umath/loops_utils.h.src @pairwise_sum@:
- *   n < 8     -> sequential
- *   n <= 128  -> 8 partial accumulators, combine as a balanced tree, then add
- *                the (n % 8) tail sequentially
- *   n > 128   -> split at n2 = (n/2) rounded down to a multiple of 8, recurse,
- *                add the two halves.
- * Every operation is a float32 add (no float64 widening).
- * Body delegates to simd_kernels.h's sk_pairwise_sum_tailfold_b_f32 (this
- * tree is byte-identical, modulo whitespace, to filter_analyzer.c's
- * fa_f32_pairwise_sum — that kernel's `_scalar` twin's verbatim source);
- * local symbol/signature kept so call sites (here and in erl_estimator.c /
- * suppression_gain.c, which declare the same extern symbol) are unchanged. */
-float f32_pairwise_sum(const float *a, size_t n) {
-    return sk_pairwise_sum_tailfold_b_f32(a, n);
-}
 
 void reverb_freq_resp_init(ReverbFrequencyResponse *r, float *tail_storage,
                            int n_freqs, int use_conservative,
@@ -71,12 +54,12 @@ void reverb_freq_resp_update(ReverbFrequencyResponse *r,
      * float32->float64) before dividing. The division and the EMA state
      * below run in float64 throughout, matching Python's plain-float
      * `_average_decay` -- NOT narrowed to float32 until the tail multiply. */
-    direct_energy_f = f32_pairwise_sum(direct + 1, (size_t)(N - 1));
+    direct_energy_f = sk_pairwise_sum_tailfold_b_f32(direct + 1, (size_t)(N - 1));
     direct_energy = (double)direct_energy_f;
     if (direct_energy == 0.0) {
         average_decay = 0.0;
     } else {
-        tail_energy_f = f32_pairwise_sum(tail_row + 1, (size_t)(N - 1));
+        tail_energy_f = sk_pairwise_sum_tailfold_b_f32(tail_row + 1, (size_t)(N - 1));
         average_decay = (double)tail_energy_f / direct_energy;
     }
 
@@ -102,8 +85,8 @@ void reverb_freq_resp_update(ReverbFrequencyResponse *r,
         sk_raise_to_f32(tail, tail_row, N);
     }
 
-    /* Neighbour-max smoothing (k=1..N-2), ascending in-place — AEC3 cc:101-105.
-     * AEC3 runs ascending so tail[k-1] is the ALREADY-RAISED value from
+    /* Neighbour-max smoothing (k=1..N-2), ascending in-place.
+     * The reference runs ascending so tail[k-1] is the ALREADY-RAISED value from
      * iteration k-1; a strong peak propagates rightward as a >=0.5/bin skirt.
      * Mirrors Python: `tail[k] = max(tail[k], 0.5*(tail[k-1]+tail[k+1]))`. */
     if (N >= 3) {

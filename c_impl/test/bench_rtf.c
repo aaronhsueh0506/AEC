@@ -1,7 +1,7 @@
 /* bench_rtf.c — per-module real-time-factor (RTF) benchmark harness.
  *
  * Standalone, zero-host-dependency timing harness: measures wall-clock cost
- * of aec_process() over a long synthetic (or --wav) input, with and without the AEC3 post-filter (enable_res), so
+ * of aec_process() over a long synthetic (or --wav) input, with and without the post-filter (enable_res), so
  * the post-filter's own cost can be isolated as a derived third line.
  *
  * No Python, no corpus, no network required by default — a deterministic
@@ -9,13 +9,13 @@
  * for spot-checking against a real recording but is not needed for routine
  * profiling.
  *
- * Build: `make bench` from c_impl/ (respects BACKEND=kiss|ne10 and
- * EXTRA_CFLAGS, same as bin/aec_wav). Cross-compiles the same way any other
+ * Build: `make bench` from c_impl/ (respects SIMD and EXTRA_CFLAGS, same as
+ * bin/aec_wav). Cross-compiles the same way any other
  * c_impl target does (set CC / EXTRA_CFLAGS for the target toolchain).
  *
  * Usage:
  *   ./bin/bench_rtf [--seconds N] [--repeat M]
- *                    [--preset mild|balanced|aggressive]
+ *                    [--preset 0|1|2|mild|balanced|aggressive]
  *                    [--sr HZ] [--fft N] [--stage full|linear|both]
  *                    [--scene noise|bursts]
  *                    [--wav mic.wav ref.wav]
@@ -34,7 +34,7 @@
  *            same config aec_wav's `--preset <p> --cng` path builds).
  *   linear — identical config with enable_res=0 (linear-filter-only path).
  *   post   — derived (full.total_s - linear.total_s); an approximation of
- *            the AEC3 post-filter chain's own cost, not an independently
+ *            the post-filter chain's own cost, not an independently
  *            timed stage.
  *
  * `--scene` and any mechanism whose cost depends on whether an adaptive
@@ -167,7 +167,7 @@ static void print_usage(const char* prog) {
         "Options:\n"
         "  --seconds N                          synthetic input length (default 60)\n"
         "  --repeat M                            passes per stage, report min and median (default 1)\n"
-        "  --preset {mild|balanced|aggressive}   default: balanced\n"
+        "  --preset {0|1|2|3|mild|balanced|aggressive|no_floor}   default: balanced (1)\n"
         "  --sr HZ                               sample rate of the synthetic input (default 16000)\n"
         "  --fft N                               FFT size (default: the preset's)\n"
         "  --stage {full|linear|both}            stages to run (default: both)\n"
@@ -178,9 +178,10 @@ static void print_usage(const char* prog) {
 }
 
 static int parse_preset(const char* s, AecPreset* out) {
-    if (!strcmp(s, "mild"))       { *out = AEC_PRESET_MILD;       return 0; }
-    if (!strcmp(s, "balanced"))   { *out = AEC_PRESET_BALANCED;   return 0; }
-    if (!strcmp(s, "aggressive")) { *out = AEC_PRESET_AGGRESSIVE; return 0; }
+    if (!strcmp(s, "0") || !strcmp(s, "mild"))       { *out = AEC_PRESET_MILD;       return 0; }
+    if (!strcmp(s, "1") || !strcmp(s, "balanced"))   { *out = AEC_PRESET_BALANCED;   return 0; }
+    if (!strcmp(s, "2") || !strcmp(s, "aggressive")) { *out = AEC_PRESET_AGGRESSIVE; return 0; }
+    if (!strcmp(s, "3") || !strcmp(s, "no_floor"))   { *out = AEC_PRESET_NO_FLOOR;   return 0; }
     return -1;
 }
 
@@ -188,6 +189,7 @@ static const char* preset_name(AecPreset p) {
     switch (p) {
         case AEC_PRESET_MILD:       return "mild";
         case AEC_PRESET_AGGRESSIVE: return "aggressive";
+        case AEC_PRESET_NO_FLOOR:   return "no_floor";
         default:                    return "balanced";
     }
 }
@@ -296,7 +298,7 @@ int main(int argc, char** argv) {
     int use_wav = 0;
     const char* mic_path = NULL;
     const char* ref_path = NULL;
-    int live_observer = 0;   /* A21 Stage 2: real (not Python-level) RTF cost */
+    int live_observer = 0;   /* real (not Python-level) RTF cost */
 
     for (int i = 1; i < argc; ++i) {
         const char* arg = argv[i];
@@ -306,7 +308,7 @@ int main(int argc, char** argv) {
             repeat = atoi(argv[++i]);
         } else if (!strcmp(arg, "--preset") && i + 1 < argc) {
             if (parse_preset(argv[++i], &preset) != 0) {
-                fprintf(stderr, "ERROR: unknown preset '%s'. Valid: mild|balanced|aggressive\n", argv[i]);
+                fprintf(stderr, "ERROR: unknown preset '%s'. Valid: 0|1|2|3|mild|balanced|aggressive|no_floor\n", argv[i]);
                 return 2;
             }
         } else if (!strcmp(arg, "--sr") && i + 1 < argc) {

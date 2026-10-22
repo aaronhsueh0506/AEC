@@ -41,6 +41,535 @@ when verdict requires it.
 
 ---
 
+## [Unreleased] — 2026-10-23 — Forwarding wrappers removed; 32-bit ARM test builds clean
+
+- The one-line wrappers over the shared pairwise-sum and magnitude kernels are gone and their callers
+  use the kernels directly (output bit-identical): `cabs_np()`, `f32_pairwise_sum()`,
+  `fb_erle_pairwise_sum()`, `fa_f32_pairwise_sum()` and `aec_post_pairwise_sum_f32()` are no longer
+  exported. `ck_field_size_reps()` moved to `audiolib/common/utility/mem_align.h`. With
+  `-mfpu=neon` / `-mfpu=neon-vfpv4` and gcc 12, `make selftest` builds under `WERROR=1` and runs under
+  qemu-arm, `test_shared_far_spec.c` no longer overflows a 32-bit `long` constant, and the printed
+  standalone build recipes of the tests and `docs_smoke.sh` carry the `-I` they need.
+
+## [Unreleased] — 2026-10-23 — Unused internals removed; the AEC pool is smaller
+
+### Removed
+- `PBFDAF.scr_e2` (one `n_freqs` float array per filter, read by nothing) and its carve. With the
+  `is_static` fields below, `aec_get_mem_size()` of the default balanced configuration drops by
+  1,120 B at 16 kHz/256, 2,144 B at 16 kHz/512 and 4,192 B at 48 kHz/1024 (observer off; 1,648 /
+  3,184 / 6,256 B with it on). Callers that keep a descriptor must query the size again.
+- The heap constructors `pbfdaf_init()` / `pbfdkf_init()` and the heap branch of
+  `pbfdaf_free()` / `pbfdkf_free()` (now only dropping the borrowed shared-FFT reference), with the
+  `PBFDAF`/`PBFDKF` `is_static` fields. `test_config_validation` keeps proving the `sample_rate`,
+  `hop` and NULL guards through `pbfdaf_init_static()` / `pbfdkf_init_static()`, and now also checks
+  that every refusal leaves the instance and the pool untouched (404 -> 405 checks).
+- The `FilterPlateauDetector` struct and `filter_plateau_*()` (no production caller; the Python
+  class is unchanged) and the `test-counter-saturation` section that only exercised them
+  (12,081 -> 6,344 checks; every other counter check is kept).
+- `test/support/reverb_decay_estimator.{c,h}` (not built, not called) and
+  `python/diag/gen_reverb_decay_estimator_golden.py`.
+
+## [Unreleased] — 2026-10-23 — Frozen-digest regression checks are no longer shipped
+
+### Removed
+- `make test-output-hash` and its sources (`test/test_output_hash.c`, `test/golden/output_hash.txt`),
+  `test/golden/sg_config.txt`, and the delay-chain replay pair `test/parity_delay.c` /
+  `test/gen_delay_c_golden.c` with its generator `python/diag/gen_delay_golden.py`. They compared the
+  C output with digests of earlier C output; the context-level invariance of the linear outputs stays
+  in `make test-process-context`.
+- `make test-aec-res` no longer takes a golden argument: the configuration digest check and the
+  comparisons with transcriptions of the former pipeline RES stage and comfort-noise loops are gone
+  (the lane-equal configuration, API contract and stage-detail checks remain; 225 checks).
+- `make test-spectral-reuse` lost its before-API build branch and the `ARM_REUSE_DUMP` dump.
+- `pyc_parity_aec.sh --diff` / `pyc_parity.py --diff` (comparison of two saved result files).
+- `test/support/sha256.h`, which only the removed digest checks used.
+
+## [Unreleased] — 2026-10-22 — Matched filter runs on NEON for 32-bit ARM with fused FMA
+
+- `delay_aec.c`: when `__arm__ && __ARM_NEON && __ARM_FEATURE_FMA` (for example
+  `-mfpu=neon-vfpv4`) the dot, NLMS update and fused update-plus-next-dot kernels use
+  NEON with the same four-accumulator tree as AArch64 (`vaddvq_f32` is replaced by two
+  `vpadd` steps giving `(l0+l1)+(l2+l3)`). Results are bit-identical to AArch64 NEON for
+  finite, non-subnormal inputs; ARMv7 NEON flushes subnormals to zero and returns the
+  default NaN.
+- Cores without fused FMA (`-mfpu=neon`, `neon-fp16`, `vfpv4`) keep the scalar path;
+  `-DDA_DISABLE_ARM32_NEON` forces it.
+- New target `make test-delay-matched-neon` (bit-exact against a portable `fmaf` model).
+- AArch64 builds are unchanged (identical object code).
+
+## [Unreleased] — 2026-10-22 — Hop and call counters saturate
+
+### Fixed
+- `frame_count`, `shadow_frame_count`, `render_call_count` and `capture_call_count`
+  hold at `LONG_MAX` instead of overflowing signed long on ARM32, like the far-FFT
+  counters. Public types and every count below the limit are unchanged.
+- The shadow hop count is handed to the shadow double-talk update and the shadow-copy
+  decision as `int`. A count past `INT_MAX` (reachable only where `long` is 64 bits)
+  is now passed as `INT_MAX` rather than narrowed modulo 2^32, which made it negative
+  and re-closed the warm-up gate. Results are identical for every count up to `INT_MAX`.
+- `test_shared_far_spec` covers all four counters at the limit and their reset, and
+  compares an instance seeded past `INT_MAX` with one seeded inside int range.
+
+### Documented
+- ARM32 builds should pass `EXTRA_CFLAGS=-mfpu=neon-vfpv4` (`-mfpu=neon-fp-armv8`
+  on AArch32 ARMv8), not plain `-mfpu=neon`: without hardware FMA each explicit
+  `fmaf()` becomes a libm call. ARMv7 Advanced SIMD flushes subnormals and returns
+  the default NaN, so `SIMD=1` and `SIMD=0` can differ on ARM32 for such values (NE10
+  NEON FFT only).
+
+## [Unreleased] — 2026-10-22 — Render analyzer uses the shared max-abs kernel
+
+### Changed
+- `rsa_max_abs()` / `rsa_max_abs_scan()` in `render_signal_analyzer.c` now call
+  `sk_max_abs_f32()` / `sk_max_abs_f32_scalar()`. The two implementations agreed on
+  every NaN-free input; the only difference is a NaN at `render_block[0]`, which no
+  longer blocks the strong-peak latch (NaN never raises the maximum, at any index).
+  A non-finite render sample is outside the input contract and already corrupts the
+  filter state in the same hop.
+
+## [Unreleased] — 2026-10-22 — ARM32 heap alignment
+
+### Fixed
+- `aec_create()` requests a 16-byte aligned arena explicitly. ILP32 `malloc()`
+  may guarantee only 8-byte alignment, while the shared static carve requires
+  16 bytes. Allocation ownership and `free()` remain unchanged.
+- GCC builds keep the scalar delay dot loop within a signed-safe grouped bound
+  and reject invalid render-detector lengths before reading its local buffer.
+  Valid hops and floating-point operation order are unchanged.
+- Far-FFT instrumentation increments and aggregate sums saturate at `LONG_MAX`
+  instead of overflowing signed long on ARM32. The public type and normal
+  counts are unchanged; `test_shared_far_spec` covers the limit and reset.
+- The static-AEC test retains its input audio through its leak-check loop.
+- Caller-pool tests request 16-byte alignment explicitly. The heap allocator
+  regression forces an 8-byte-only malloc base, checks allocation rejection
+  before state writes, and checks balanced release across the three product grids.
+- The spectrum-reuse regression also checks normal heap arena alignment. Pool
+  sizes and structure layouts must be queried with the consuming target ABI.
+
+## [Unreleased] — 2026-10-21 — Shared AEC header and current documentation
+
+### Changed
+- AEC C consumers include `utility/simd_aec.h` directly; the empty
+  `aec_simd_kernels.h` compatibility forwarder is retired. Shared kernels
+  remain owned by Audio_ALG's function map rather than duplicated in AEC's map.
+- Fixed the standalone UBSan self-test and counter-saturation probes' missing common-root include path.
+- Trimmed redundant C comments while retaining numeric order, NaN, aliasing,
+  counter and buffer-lifetime contracts. C tokens and expanded translation
+  units are unchanged apart from the explicit include-path redirect.
+- Current timing-inventory consumers cite verified function and symbol anchors
+  after the stage extraction. All 80 historical provenance fields, verdicts
+  and effective-value fields are unchanged. CLI help now documents preset 3.
+- Persisted AIAEC preset contracts and NR benchmark strength records keep
+  their string names. Benchmark comparison also accepts stored numeric values.
+
+- Removed the unused private `cmag2_c` helper after confirming it has no callers; retained test-only scalar wrappers.
+
+
+## [Unreleased] — 2026-10-21 — Ordered C/Python AEC stages
+
+### Changed
+- Split the C process core and pool constructor into 34 private helpers;
+  split Python construction, per-hop processing and residual orchestration
+  into 57 private helpers. Public APIs, arithmetic and stage order, filter
+  ownership, queue/reset behavior and the pool byte layout are unchanged.
+- The Python engine CLI accepts preset values `0/1/2/3` and the corresponding
+  `mild/balanced/aggressive/no_floor` names through the shared parser.
+  Persisted dataset presets remain strings; frozen materialization stays
+  `balanced` with the same signal grid and feature gates.
+- The combined Python signal identity is now `9fa7a2de...245e5` (previously
+  `419f473e...ff8fa`). The AST canonicalizer and `canon-ast-1` schema are
+  unchanged. No corpus migration was added: there is no local ledger at the
+  previous identity needing rescue, and retired hashes remain refused.
+  The separate released-checkpoint inference pointer advances to this build;
+  its earlier, unmeasured history remains explicitly documented.
+
+### Validation
+- All 24 frozen C output digests and 6 context-invariance checks pass in both SIMD modes. The new memory-layout
+  test covers 72 allocation combinations, including exact pool usage,
+  undersized rejection and tail canaries. Streaming stack bounds and the
+  independent stack-canary peak fall by 48 bytes; construction grows by
+  48 bytes while the overall maximum falls by 48 bytes.
+- Python renders 8,636 real-audio hops across nine 16/48-kHz frozen,
+  full-suppression/CNG and observer profiles with byte-identical materialized
+  error, formed output, echo, context and state traces. Eight controlled
+  public-process recovery scenarios reach all 57 helpers and also retain
+  exact output/state/alias identity. The same comparator rejects a one-bit
+  mutation at the materialization getter. Existing Python tests, 22 new
+  CLI/diagnostic contract tests and the C/Python map guards pass.
+- Four paired Python timing runs over nine real profiles have median
+  after/before ratios 0.9704–0.9942; paired C full-path ratios are
+  0.9746–1.0177 across the three supported grids. No material slowdown is
+  observed; small timing differences are not promised speedups.
+- Full live AIAEC validation: 727 passed, 2 skipped, 3020 warnings in 730.42s.
+  Detailed evidence is under
+  `SE_verify_20261019/scratch/codex_f_python_20261021/` and
+  `SE_verify_20261019/scratch/codex_f_c_20261021/`.
+
+## [Unreleased] — 2026-10-21 — Shared periodic sqrt-Hann window
+
+### Changed
+- The adaptive filter builds its periodic sqrt-Hann through audiolib's
+  `audio_window.h`; the causal constraint window and filter state are unchanged.
+  The original and shared float32 tables are bit-identical at every supported
+  grid. The `Audio_ALG/lib/aec` working-tree copy is mirrored byte-for-byte.
+
+## [Unreleased] — 2026-10-20 — NO_FLOOR preset (`AEC_PRESET_NO_FLOOR` / preset `3`): C-side ABI landed
+
+Additive only: `MILD`/`BALANCED`/`AGGRESSIVE` are byte-for-byte unchanged. Verified three ways: (1)
+`test/golden/sg_config.txt` and `test/golden/output_hash.txt` unmodified on disk and both still pass
+against the checked-in digests; (2) 19 `test-*` targets re-run under both `SIMD=0` and `SIMD=1`, all
+green in canonical `SE/AEC` (`test-cli-delay-flags`/`test-static-aec`/`test-parity-e2e` were run once,
+default build only -- not `SIMD`-parameterized in a way distinct from it); (3) a direct `pyc_aec_run` E2E check --
+mild/balanced/aggressive x the three product grids (16k/256, 16k/512, 48k/1024), `.out.f32`/`.raw.f32`
+sha256 before vs after this change, byte-identical on all 18 files, in both this repo and
+`Audio_ALG/lib/aec`. `AecConfig` grows by one `int` field (`sizeof` 220 B -> 224 B), appended at the
+struct's end per the existing `delay_mode`/`live_observer_*` ABI-stability convention, so every field
+before it keeps its byte offset.
+
+
+The `Audio_ALG/lib/aec` mirror has the same source but lacks the gitignored local
+`wav/aec_challenge_blind/` fixture: 17/19 targets pass there; `test-static-aec` and
+`test-parity-e2e` stop at the pinned-input checks (`TEST_STATIC_MIC not found` /
+`pinned input check failed`). The canonical checkout retains that fixture and
+passes both targets. The `NO_FLOOR` replay likewise passed the canonical 16 kHz
+and 48 kHz goldens inside `TOL_E2E` / `TOL_E2E_48K`; the mirror was verified
+byte-identical but cannot replay that absent fixture.
+
+### Changed
+
+- Extracted eight AEC inline SIMD blocks into `audiolib/common/utility/simd_aec.h`
+  with explicit scalar twins: H-error leakage, ERLE accumulation/release,
+  render peak counters, stationarity hangover/smoothing/thresholds, and
+  saturation counts. Local wrappers and per-bin arithmetic order are unchanged.
+  The AEC selftest covers lane tails, 129/257/513 bins, state thresholds,
+  non-finite predicates and write canaries. Both SIMD modes retain all 30 output
+  digests; scalar and NEON mutation checks independently reject broken paths.
+- Removed 159 stale historical-probe links from the C/Python map after the
+  already-retired probe files were confirmed absent; current correspondence
+  rows and live test links remain intact.
+
+### Added
+
+- **`AEC_PRESET_NO_FLOOR = 3`** (`c_impl/include/aec.h`), mirroring Python's `AecPreset.NO_FLOOR`
+  (`"no_floor"`), which already supports this preset at construction time only (`config.py` /
+  `orchestrator.py`, landed in an earlier merge, `02df7cd`). `AecConfig` gains `int
+  min_gain_split_floor_enabled` (default `1`, filled by both `aec_config_defaults()` — so a caller
+  that never goes through a preset at all still gets the floor enabled, instead of the `memset`
+  default of `0` — and `aec_config_from_preset()`). `aec_build_sg_config()` (the single construction
+  function shared by `Aec`'s own path and `AecRes`'s, via `aec_res.c`'s `resolve()`) now reads
+  `cfg->min_gain_split_floor_enabled` instead of the previous hardcoded `scfg.split_floor_enabled =
+  1;` — one edit site wires construction-time `NO_FLOOR` into both call paths.
+- **`suppression_gain_set_split_floor_enabled(SuppressionGain*, int)`** (`suppression_gain.h`/`.c`):
+  steps immediately, no ramp (a boolean has no continuous path to ramp along — same discipline as
+  the existing `suppression_gain_set_split_floor_dt_db()`). Gates all three floor variants in
+  `get_min_gain` together (far-active, far-silent/pure-NE, DT-lifted). Does **not** reset
+  `_far_active_latched`: a latch that could not arm while disabled resumes from wherever it was, not
+  from scratch — this is the one behavioral nuance a runtime `NO_FLOOR` round trip does not erase.
+- **`aec_preset_split_floor_enabled(AecPreset, int*)`**: public lookup for the gate alone, mirroring
+  `aec_preset_floor_db()` / `aec_preset_dt_floor_db()`'s contract, so a caller that owns a
+  `SuppressionGain` outside any `Aec` (the 4-channel core's shared post-stage suppressor) can read
+  the gate without the two dB lookups. (The 4-channel pipeline's own consumption of this is a
+  separate, later change — not made here.)
+- **`aec_set_preset()` / `aec_res_set_preset()` now accept `AEC_PRESET_NO_FLOOR` at runtime, with no
+  accept/reject guard.** C never had a rejection guard for this in the first place (it never had a
+  4th enum value before this change); switching is simply allowed. Going INTO `NO_FLOOR` steps the
+  gate off on the same call; going AWAY FROM `NO_FLOOR` steps the gate back on **and** writes the
+  target preset's far-active/dt dB values through the existing (ramped/stepped) setters in the same
+  call, so a round trip never lands on a half-applied mix of "gate on, dB still at `no_floor`'s inert
+  value" or vice versa. `aec_res_set_preset()` also mirrors the gate into `r->sg_cfg.split_floor_
+  enabled`, matching the existing `split_floor_far_active`/`split_floor_dt` mirrors — this is what
+  `aec_res_reset()`'s `rebuild()` re-inits `suppression_gain_init()` from, so a missing mirror write
+  would have passed every other check and only failed on reset (covered by a dedicated test, see
+  below).
+- CLI: `example/aec_wav.c`'s `--preset` accepts `3` / `no_floor`; usage string and the preset-name
+  trace line updated for the 4th case. The remaining three CLI surfaces this entry originally left
+  out are now also wired: `test/bench_rtf.c`'s `--preset` (`parse_preset()`/`preset_name()`/usage/
+  error text), `test/test_rate_structural.c`'s hardcoded preset-sweep array (`{MILD, BALANCED,
+  AGGRESSIVE}` -> adds `NO_FLOOR`; the "presets don't affect `aec_get_mem_size()`" invariant this
+  array drives holds for the 4th preset too — verified directly, not assumed), and
+  `test/parity_aec_e2e.c`'s `argv[2]` preset parse (previously fail-loud with "no no_floor case
+  wired up" — now accepts `3`/`no_floor` and replays correctly: a `no_floor`-preset golden from
+  `gen_aec_e2e_golden.py` passes both grids tested, 16 kHz and 48 kHz, with linear/output maxima in
+  the same range as `balanced`'s, well inside the existing frozen `TOL_E2E`/`TOL_E2E_48K`).
+- Tests: `c_impl/test/test_runtime_preset.c` gained `run_no_floor_switch()` (INTO/AWAY-FROM, each
+  landing field-for-field on a freshly constructed reference instance) and `run_no_floor_round_trip()`
+  (BALANCED -> NO_FLOOR -> AGGRESSIVE, gate and both dB scalars checked at each leg); `test_aec_res.c`
+  gained the `AecRes`-side NO_FLOOR block next to its existing preset/reset coverage, including the
+  reset-survives-the-gate assertion described above. `test/pyc_parity/pyc_parity.py` gained two new
+  scenario rows (`dtb.16k256.nofloor`, `dtb.48k1024.nofloor`); both pass Layer 1 and Layer 2 cleanly
+  within the existing frozen tolerances (margins 0.0041–0.02x of tolerance — no tolerance constant
+  was touched). `test_rate_structural.c`'s sizing sweep re-run clean (386/386) with the 4th preset
+  added; `bench_rtf --preset no_floor` smoke-tested directly (full/linear/post stages all report).
+
+### Known gap — not closed by this entry
+
+Python's `AEC.set_preset()` still **rejects** a runtime retarget to or from `NO_FLOOR` (the
+`orchestrator.py` guard from `265f718`/`b60a1d1` is untouched) — only `AecConfig.from_preset(AecPreset.
+NO_FLOOR)` (construction-time) is supported on the Python side. C now allows what Python still
+refuses; porting Python to match (removing its guard, adding the equivalent boolean-step setter) is a
+separate, not-yet-landed change. Construction-time `NO_FLOOR` is already symmetric between both
+languages (confirmed directly: the new `pyc_parity` `nofloor` scenarios above compare C's and Python's
+`NO_FLOOR` construction against each other and pass).
+
+Doc figures regenerated for the ABI growth: `STATIC_MEMORY.md`'s two balanced-preset pool-size
+figures (16 kHz/256: 399,872 B -> 399,888 B; 16 kHz/512: 529,616 B -> 529,632 B — +16 B, not +4 B,
+because the pool carve rounds up to a 16-byte boundary) and every absolute byte figure in
+`docs/c_user_manual_zh_TW.md`'s memory-pool tables (§ "記憶池大小"), re-measured via `make
+test-delay-num-filters` and `aec_wav --print-mem-size`, not hand-patched — every per-mode/per-n/
+per-grid *delta* is unchanged, only the absolute totals moved. `docs/c_user_manual_zh_TW.md` §7/§7.1
+and `README.md`'s preset table/retargeting section gained the 4th preset and the C/Python asymmetry
+note above.
+
+## [Unreleased] — 2026-10-20 — NO_FLOOR Python-side runtime setter + S-05 fix, landed as one combined `aec_behavior_hash` migration
+
+Closes the "known gap" left open by the C-side NO_FLOOR entry directly above: `AEC.set_preset()` now
+accepts `AecPreset.NO_FLOOR` at runtime, in both directions, matching C's `aec_set_preset()` exactly.
+Landed together with an independent, unrelated fix (S-05) because both touch the hash-covered surface
+(`aec.py` + `modules/**`) and this campaign's migration table is a single hop, not a chain — two
+separate entries would not compose.
+
+### Added — NO_FLOOR runtime setter (Python)
+
+- **`SuppressionGain.set_split_floor_enabled(bool)`** (`modules/residual/suppression_gain.py`): steps
+  immediately, no ramp — the same deliberate asymmetry as the existing `set_split_floor_dt_db()`, and
+  the direct mirror of the C-side entry above's `suppression_gain_set_split_floor_enabled()`. No
+  validation needed; any truthy/falsy value coerces, matching `set_initial_state()`'s own contract.
+- **`AEC.set_preset()` now accepts `AecPreset.NO_FLOOR`, with no accept/reject guard.** Both the
+  identity-check guard (`265f718`/`1b9e5b2`) and, in this repo only, a redundant duplicate from a
+  prior merge (`02df7cd`) that also carried the later symmetric property-check guard (`b60a1d1`) are
+  removed. Going INTO `NO_FLOOR` steps the gate off on the same call; going AWAY FROM `NO_FLOOR` steps
+  the gate back on **and** writes the target preset's far-active/dt dB values through the existing
+  setters in the same call — a round trip never lands on a half-applied mix of the two presets'
+  behavior. `Audio_ALG/lib/aec/python` never carried the duplicate-guard merge artifact (it only had
+  the single `b60a1d1`-style guard), so its edit removes one guard block where this repo's removes two;
+  the two files converge to the same `set_preset()` body as a result — this is expected convergence
+  from removing the only pre-existing textual difference between them, not a forced rewrite.
+- `_far_active_latched` (`suppression_gain.py`) is deliberately **not** reset or force-armed on a
+  gate transition: the same "lazy catch-up, cheapest and least disruptive" choice the C-side entry
+  above made, kept here for C/Python parity rather than independently re-decided.
+- Tests (`tests/test_runtime_preset.py`, identical in both repos): `test_set_preset_rejects_no_floor`
+  and `test_set_preset_rejects_retargeting_away_from_no_floor` are rewritten to
+  `test_set_preset_allows_no_floor` / `test_set_preset_allows_retargeting_away_from_no_floor` (same
+  scenarios, opposite expected outcome); added `test_set_preset_no_floor_round_trip` (BALANCED ->
+  NO_FLOOR -> AGGRESSIVE, gate and both dB scalars checked against a fresh instance of the target
+  preset at each leg) and `test_set_preset_no_floor_gate_steps_without_ramp` (a large `ramp_ms` must
+  not affect the gate). Mutation-tested: temporarily restoring the old rejection guard in
+  `set_preset()` turns all four of these tests RED; reverting the mutation turns them GREEN again
+  (full suite: 42/42 passed in both repos, both before-mutation and after-revert).
+
+### Fixed — S-05 (`AecResContext.filter_converged` one hop late on the rising edge)
+
+- `AEC.process()` built `AecResContext` (when `return_res_context=True`) **before**
+  `self._convergence.update_convergence()` ran for that hop, so `context.filter_converged` always
+  reported the *previous* hop's convergence state. Every hop except one was unaffected (convergence
+  is monotonic once reached, so the stale read matched the fresh one almost everywhere) — the one hop
+  that differed was the exact rising edge, where convergence transitions `False -> True`: the context
+  returned for that hop said "not converged" one hop later than it should have. C's twin,
+  `aec_get_res_context()`, is a separate pull the caller makes only *after* `aec_process()` returns for
+  the hop, so it was never exposed to this — it is always implicitly post-update. The fix patches
+  `_res_context.filter_converged` right after `update_convergence()` runs (same hop, nothing else
+  touched), bringing Python's single-call return in line with that same post-update contract. No other
+  field, no filter/gain/mu-scale behavior, and no other consumer of `self._convergence.converged`
+  changes — this is a pure read-timing correction of one diagnostic output field.
+- Confirmed via the C-vs-Python `pyc_parity` harness (`test/pyc_parity_aec.sh --only
+  dtb.16k256.bal.ctx,dtb.48k1024.bal.ctx,speechdt.16k256.bal.ctx_nores`): all three scenarios carried
+  the `EXPECTED_RED(S-05)` marker before this fix (`ctx_conv_mismatch_hops` > 0, shape = late rising
+  edge only) and now show `ctx_conv_mismatch_hops=0` and a clean `PASS`. The marker and its
+  `EXPECTED_RED_INFO` entry are removed from `pyc_parity.py` (identical in both repos); leaving it in
+  place would have made the harness itself fail once fixed (`FAIL UNEXPECTED_GREEN`/"S-05 shape lost",
+  by the harness's own self-check). A `--quick` run of the other 10 scenarios shows no other
+  regression (`RESULT: PASS`).
+- Test (`tests/test_res_context_wola.py`, identical in both repos):
+  `test_res_context_filter_converged_tracks_this_hop_not_last` drives a synthetic near-ideal echo
+  scene (no near-end, no noise) for 2000 hops at 16 kHz/512, and on every hop asserts
+  `context.filter_converged == aec.get_stats().filter_converged` (the latter is read from
+  `self._filter_converged`, by construction always post-update once `process()` has returned) — the
+  scene is checked to actually reach the convergence rule's rising edge, not just run long enough that
+  it probably does. Mutation-tested: disabling the patch reproduces exactly the documented failure
+  mode (`AecResContext.filter_converged (False) disagrees with ... (True)`, on the rising-edge hop);
+  restoring it passes again (full suite: 7/7 passed in both repos, both before-mutation and after-revert).
+- `docs/c_python_function_map.md` (identical in both repos): the `S-05` and `S-20` gap tags are
+  removed from every row and from the appendix definition list (the pattern this doc already uses for
+  a closed gap — compare `S-01`, which does not appear anywhere in the current table either), the two
+  new C functions from the entry above (`aec_preset_split_floor_enabled`,
+  `suppression_gain_set_split_floor_enabled`) and this entry's new Python function
+  (`SuppressionGain.set_split_floor_enabled`) get rows, three stale "NO_FLOOR 僅 Python 有" / "C 的列舉
+  沒有 NO_FLOOR" notes left over from the C-side entry above are corrected, and the `§0.4` stats block
+  is regenerated by the document's own guard test (`c_src_total` 427->429, `c_src_mirror` 265->268,
+  `c_src_partial` 75->74, `c_total` 461->463, `c_mapped` 341->343, `py_total` 512->513, `py_mapped`
+  303->304), not hand-computed.
+
+### `aec_behavior_hash` migration (combined, single hop)
+
+Both changes above touch `modules/**`, which `AIAEC/dataset_gen/aec_behavior_hash.py` hashes; neither
+is callable from any dataset-generation code path (`set_preset`/`set_split_floor_enabled` are never
+called from `AIAEC/dataset_gen/*.py`, confirmed by grep; the `AecResContext` instance `LinearAecProcessor`
+discards is never read back). Registered as **one** combined migration, per
+`linear_aec.py`'s own "single hop by construction" rule — a second entry stacked on top of a first
+would not compose.
+
+- **Source** `aec_python_behavior_hash()` on `Audio_ALG/lib/aec/python`: `428aa9b796c2491a9cb7baaff82a5c1ba3fc6da4f8e04a38d0676458bf1a562d`
+  (re-measured immediately before this change; matches the value already on record — nothing else had
+  landed in `modules/**` or `aec.py` in the meantime).
+- **Target** (after both fixes): `419f473e609ec0c3fd645a9dcb7ccd53a742fb8c22d17a45578e6cc6df2ff8fa`.
+- **Admission**: a repo-wide search for the source hash found nothing live referencing it (one hit, in
+  an already-archived `_archive/cleanup_2026-10-01.*/inventory.json` — not an in-progress corpus or
+  checkpoint). Nothing is stranded under the old hash, so `ACCEPTED_BEHAVIOR_HASH_MIGRATIONS` and
+  `_BEHAVIOR_MIGRATION_SAMPLE_RATES` stay empty (the old hash is simply superseded, not retired — it is
+  not added to `RETIRED_BEHAVIOR_HASHES` either, since inertness holds). Only the unconditional
+  `RELEASED_INFERENCE_BEHAVIOR_HASH_COMPATIBILITY` pointer is bumped (that table is not a migration
+  admission; `test_released_checkpoint_exception_is_separate_and_targets_this_build()` hard-asserts it
+  always equals the live hash).
+- **Inertness, measured**: `LinearAecProcessor.process_numpy()` run before and after both edits on
+  three real double-talk clips from this campaign's allowed corpora — AEC 2021 blind
+  (`aec_challenge_blind/doubletalk`, 16 kHz), AEC 2023 ICASSP blind
+  (`aec_challenge_blind_icassp2023/doubletalk`, 48 kHz), and the tracked self-recording
+  (`aec_record_{mic,ref}_10s.wav`, 16 kHz) — `error`/`echo_estimate` sha256 byte-identical on all three,
+  both sample rates covered.
+- **Harness-can-fail control**: constructed `AEC(AecConfig.from_preset(BALANCED))` and
+  `AEC(AecConfig.from_preset(NO_FLOOR))` directly on the AEC-2021 clip above and confirmed their raw
+  outputs differ (max abs diff 0.134, not byte-identical) — proves the byte-compare methodology used
+  for the inertness check above is capable of detecting a real difference, so its "no difference"
+  result is not vacuous.
+- `AIAEC/tests/test_linear_aec_behavior_migration.py`: 18/18 passed against the new hash values with
+  no test edits (the file compares against the live `aec_python_behavior_hash()` and the two named
+  constants, neither of which needed to change).
+
+## [Unreleased] — 2026-10-20 — Python<->C parity tolerances frozen (supersedes the Wave-S-prep provisional cut)
+
+### Changed
+
+- **`c_impl/test/pyc_parity/pyc_parity.py` (`TOL`) marked FROZEN instead of provisional**, with each
+  of its nine constants re-justified against a full measurement on the real tree *after* the S-01 /
+  S-03 / S-06 fixes below (44 scenarios, grids 8k256/16k256/16k512/48k1024, `--repeat-check`
+  byte-identical both before and after this edit). The earlier numbers were set by the Wave-S prep
+  workflow before those fixes existed; this freeze re-measures on the current tree instead of
+  re-using that stale baseline.
+- Five of the nine constants are **unchanged** because twice the worst currently-GREEN cell for that
+  metric already rounds to the existing number (`L1_out_max_abs`, `L1_raw_max_abs`, `L1_out_rms_db`,
+  `L2_out_max_abs`, `CTX_gain_max_abs`): `L1_out_max_abs`/`L1_raw_max_abs` 3.0e-4 (worst GREEN
+  1.453e-4 / 1.153e-4, margin 2.06x / 2.60x); `L1_out_rms_db` -75.0 dB (worst GREEN -80.07 dB, margin
+  5.07 dB); `L2_out_max_abs` 2.0e-3 (worst GREEN 7.893e-4, margin 2.53x); `CTX_gain_max_abs` 1.0e-3
+  (worst GREEN 4.380e-4, margin 2.28x).
+- Four constants **tightened** because the real margin was far wider than the old number implied:
+  `L2_raw_max_abs` 2.0e-3 → **2.0e-4** (worst GREEN 9.049e-5, margin 2.21x); `L2_out_rms_db` -60.0 →
+  **-61.0 dB** (worst GREEN -67.75 dB, margin 6.75 dB); `CTX_scalar_rel` 1.0e-3 → **2.0e-5** (worst
+  GREEN 2.265e-6, the `erle_factor` scalar, margin 8.8x — kept well above the float32 one-ulp noise
+  floor this harness's own docstring measures at ~1e-7, not frozen any tighter for that reason);
+  `CTX_spec_rel_l2` 1.0e-3 → **1.0e-5** (worst GREEN 5.28e-7, the `echo_spec` block, margin 18.9x,
+  same noise-floor caution). No constant was loosened.
+- Verified no acceptance criterion moved: a per-cell diff of the pre-edit and post-edit full-suite
+  JSON (all 44 scenarios x 2 layers) shows **zero verdict changes** (`PASS`/`EXPECTED_RED(S-xx)`/
+  `INFO(...)` all identical), and `make test-header-fresh`'s equivalent static check
+  (`s03_balanced_config_regen`) stays `PASS`. Both the pre-edit and post-edit full runs are
+  individually `--repeat-check` byte-identical (sha256 `9eff612f…` before, `95024ee5f5…` after).
+- **Gate can-fail proof**: in a scratch copy of this tree, an S-01-style mutation was planted in
+  `src/pbfdkf.c` (the unconditional `call_counter` increment removed entirely, rather than an exact
+  revert of the S-01 fix, so this is a stronger regression than S-01's historic gap and the numbers
+  below should not be read as the size of that gap); against the frozen tolerances this moved
+  `rec.16k256.bal` / `rec.48k1024.bal` / `dtb.16k256.bal` (among others) from `PASS` to
+  `FAIL (layer 1 red, no marker)` with Layer-1 `out_max_abs` 0.12–0.22 (400-700x over the unchanged
+  3.0e-4 tolerance) — 6 of 10 scenarios in that subset failed. The same subset against the real
+  (unreverted) tree stays all `PASS`/`EXPECTED_RED`/`INFO`, as in the full run above.
+- **Known gate blind spots this freeze does NOT close** (left open deliberately, not fixed on
+  the side): (a) Layer 2's `INCONCLUSIVE_CHAOTIC` bucket absorbed **every** Layer-2 cell that
+  exceeded tolerance in this measurement (7 of 44 scenarios; `layer2_red: 0` both before and after)
+  — on the current default build, Layer 2 as a gate currently never fires `RED`, only `PASS` or
+  `INCONCLUSIVE_CHAOTIC`; (b) `TOL` is still one global value shared by every scenario row — the
+  measured per-row headroom on `L1_out_max_abs` alone ranges from 2.1x (`dtb.8k256.bal`,
+  `rec.16k256.mild`, `recdc.48k1024.bal.nohpf`) to 1669x (`echo.8k256.bal`) under the frozen number,
+  so a small deliberate constant change in a low-headroom row is far easier to catch than the same
+  change in a high-headroom row; per-row tolerances remain out of scope for this freeze.
+
+### Fixed
+
+- **S-01: observer-path `call_counter` now increments unconditionally before the zero-mu early
+  return.** `pbfdaf_process()` (`src/pbfdkf.c`) used to check `mu` against zero and return before
+  bumping `call_counter` on an all-zero-mu hop; `filters.py`'s `_update_weights` always ticks its
+  counter first. With the live observer enabled this desynced the observer's counter from Python's
+  by one per such hop. The increment (floored at `LONG_MAX`, same as the equivalent counter in
+  `erl_estimator.c`) now happens before any of the early returns. The production-default observer-off
+  path is byte-exact unaffected: `make test-output-hash` still matches its golden digests on
+  `ne10_neon` and `ne10_scalar`.
+- **S-03: `include/aec_balanced_config.h` regenerated from its generator.** The checked-in header had
+  drifted from `python/diag/gen_aec_balanced_config_h.py` by two literals (`_db_to_power_f32` moving to
+  a float32 `powf`-based computation on the Python side without the header being re-run). The header
+  is now byte-identical to the generator's output. Added `make test-header-fresh`
+  (`c_impl/Makefile`): regenerates the header into a scratch copy of `python/` and diffs it against the
+  checked-in copy, so a future drift between the balanced config and the generator fails a build gate
+  instead of sitting unnoticed.
+- **S-06: `epc_render_forced_remaining` now decrements every hop, unconditionally.** `aec.c`'s main
+  loop used to tick this countdown only inside the RES-enabled block; `orchestrator.py` ticks it right
+  after the shadow-rise tick, independent of `enable_res`/`return_res_context`. The field is
+  diagnostic-only (nothing in the C library reads it back — it is set by the EPV/shadow-rise events and
+  otherwise only decremented), so this keeps the counter's own value in step with Python's for
+  diagnostics (e.g. the `pyc_parity` trace) with zero effect on any audio output.
+
+All three were found and fixed together with the C<->Python function-map audit
+(`docs/c_python_function_map.md`, added this entry); the map's own rows for `pbfdaf_process`,
+`aec_post_run_observer_step`, `aec_process_core`, `suppression_gain_init` and `aecb_rate_cfg` have been
+updated to describe the fixed behaviour instead of these three now-closed gaps.
+
+## [Unreleased] — 2026-10-19 — C code tidy: NE10 is the only FFT backend, upstream-derived names removed from C, numeric `--preset` (no output change; C API renames)
+
+Every `aec_wav` output, `AecResContext` field and `aec_get_mem_size()` value is bit-identical to the
+commit before this entry (SIMD=1 and SIMD=0); the renames below change C symbols and file names only.
+
+### Removed
+
+1. **The KISS FFT backend.** `BACKEND` accepts `ne10` only (`BACKEND=kiss` is a Makefile error, as in
+   `audio_common`); `LINK` is always `$(CXX)`. `test/golden/output_hash.txt` lost its `kiss` rows (the
+   `ne10_neon` and `ne10_scalar` rows are unchanged). `test/run_fp_flag_policy_test.sh` and
+   `test/run_counter_saturation_ubsan.sh` now pass `BACKEND=ne10`; `eval/run_c_ab.sh` builds and finds
+   its binary under `bin/ne10-*`. `make audit-no-stdio` no longer has a "CALIBRATED" branch for a
+   vendor residual: any stdio-family symbol in the linked executable is now fatal (the NE10 executable
+   has none).
+2. README / `docs/` statements that KISS is the production or a selectable backend; the pool-size
+   tables in `docs/c_user_manual_zh_TW.md`, `docs/html/aec.html` and `docs/html/aec_c_api.html` now
+   carry the NE10 measurements only.
+
+### Changed
+
+1. **C file names:** `delay_aec3.{c,h}` -> `delay_aec.{c,h}`, `aec3_post.{c,h}` -> `aec_post.{c,h}`,
+   `aec3_scale.{c,h}` -> `aec_scale.{c,h}`, `aec3_balanced_config.h` -> `aec_balanced_config.h`.
+2. **C identifiers** (mechanical, one old->new table, every new name checked for zero collisions
+   across the repos): `DelayAec3` -> `DelayAec`, `delay_aec3_*` -> `delay_aec_*`, `Aec3Post*` ->
+   `AecPost*`, `aec3_post_*` -> `aec_post_*`, `aec3_*` helpers of the scale module -> `aec_*`,
+   `AEC3_*` constants -> `AEC_*` (the post driver's `AEC3_DELAY_ADJ_*` / `AEC3_DELAY_QUALITY_REFINED` ->
+   `AEC_POST_DELAY_ADJ_*` / `AEC_POST_DELAY_QUALITY_REFINED`, because `AEC_DELAY_ADJ_NONE` already
+   exists in `aec_state.c`), `Aec3BalancedRateDims` / `aec3b_rate_cfg` / `AEC3B_*` ->
+   `AecBalancedRateDims` / `aecb_rate_cfg` / `AECB_*`, `DA_AEC3_BLOCK_SIZE` -> `DA_BLOCK_SIZE`,
+   `SC_AEC3_STREAK_FRAMES` -> `SC_STREAK_FRAMES`, `ERL_AEC3_X2_MIN` -> `ERL_X2_MIN`,
+   `pbfdkf_update_weights_aec3` -> `pbfdkf_update_weights`, `mu_aec3` / `scr_mu_aec3` -> `mu_aec` /
+   `scr_mu_aec`, the config fields `use_aec3_echo_gen_window` / `use_aec3_residual_noise_gate` ->
+   `use_aec_echo_gen_window` / `use_aec_residual_noise_gate`, and the test-support helpers
+   `rde_update_aec3_strict` / `lazy_init_aec3` -> `rde_update_strict` / `lazy_init_strict`.
+   No struct field was reordered, retyped or padded (the `sg_config.txt` digests and every
+   `aec_get_mem_size()` value are unchanged). C callers outside this repo (the multi-lane pipelines) must
+   follow the new names. The `a3_*` member prefix of `Aec` is kept.
+3. **Comments in `.c` / `.h`** describe the algorithm instead of naming the upstream implementation; no
+   `.c` / `.h` outside `test/historical/` contains `aec3`, `webrtc` or `kiss` any more.
+   `python/diag/gen_aec_balanced_config_h.py` emits the new header name, guard and `AECB_*` / `aecb_*`
+   names (its output differs from the checked-in header only by the two `SG_SPLIT_FLOOR_FAR_*` literals
+   it already differed in before this change). `docs/timing_constant_inventory.{json,md}` cite the new
+   file names.
+4. **`--preset` takes `0|1|2` or the name** (`0` mild, `1` balanced, `2` aggressive, the existing
+   `AecPreset` values) in `example/aec_wav.c`, `test/bench_rtf.c`, `test/parity_aec_e2e.c` and, through
+   the new `python/preset_arg.py`, in `run_one_case.py`, `eval_aec_challenge.py` and `eval_manifest90.py`.
+   The Python CLIs normalise back to the name, so `scores.json`, `AecPreset(...)` and the corpus contract
+   see the same strings as before. `modules/**` (and its `--preset` in `orchestrator.py`) is untouched.
+5. `parity_aec_e2e.c` header: tolerances are now documented against the maxima measured with the NE10
+   backend (16 kHz: out 4.3e-3 against 2e-2; 48 kHz: out 6.2e-2 / 8.9e-2 against 1e-1; SIMD=1 and SIMD=0
+   agree). The 8 kHz legacy-grid golden exceeds its 2e-2 ceiling (out max 1.3e-1); the retired KISS build
+   gave the same figure, so it is a standing C/Python difference of that grid, not a backend effect.
+
+### Fixed
+
+1. A stale comment in `aec.c` claiming the saturation getter returns `double` (`saturation_detect()`
+   returns `float`).
+
+---
+
 ## [Unreleased] — 2026-10-19 — remove the Path-B backward-jump delay-change guard (measured net-negative; ABI: `sizeof(AecConfig)` −8 B, `aec_get_mem_size()` −16 B, raw `sizeof(Aec)` −8 B — see the ABI note below for why those last two differ)
 
 ### Removed
@@ -1059,7 +1588,7 @@ changes.
    means a hand-written `EXTRA_CFLAGS=-DAEC_STAGE_TIMING=1` here and a
    `PROFILE=1` there. `PROFILE=1` is exactly `-DAEC_STAGE_TIMING=1`; default
    0, unchanged behaviour. Orthogonal to `DEBUG`/`make debug`, which is about
-   log call sites (`AEC_DEBUG_LOG`) rather than measurement -- profiling a
+   a `-g` debug build rather than measurement -- profiling a
    build with logging compiled in measures a binary nobody ships.
 
 2. **`AEC_NOW_US`** — the microsecond stamp, substitutable at build time.
@@ -1180,7 +1709,7 @@ changes.
    means a hand-written `EXTRA_CFLAGS=-DAEC_STAGE_TIMING=1` here and a
    `PROFILE=1` there. `PROFILE=1` is exactly `-DAEC_STAGE_TIMING=1`; default
    0, unchanged behaviour. Orthogonal to `DEBUG`/`make debug`, which is about
-   log call sites (`AEC_DEBUG_LOG`) rather than measurement -- profiling a
+   a `-g` debug build rather than measurement -- profiling a
    build with logging compiled in measures a binary nobody ships.
 
 2. **`AEC_NOW_US`** — the microsecond stamp, substitutable at build time.

@@ -3,11 +3,11 @@
  * multiplier is value-cast to f32 inside the numpy array op). The reverb
  * decay's pow() runs in double precision (matching Python's float64
  * exponentiation, single-narrowed to float32 at the end -- see
- * aec3_scale.h's aec3_per_block_growth_to_per_hop) and is evaluated at init,
+ * aec_scale.h's aec_per_block_growth_to_per_hop) and is evaluated at init,
  * not per hop. Built with -ffp-contract=off. */
 #include "residual_echo_estimator.h"
-#include "aec3_scale.h"
-#include "aec_simd_kernels.h"
+#include "aec_scale.h"
+#include "utility/simd_aec.h"
 
 #include <math.h>
 #include <string.h>
@@ -43,9 +43,9 @@ void ree_init(ResidualEchoEstimator *r,
               int erle_onset_comp_in_dominant,
               double reverb_decay, double reverb_mild_decay_scale,
               int reverb_enabled, float reverb_tail_strength,
-              int use_aec3_residual_noise_gate,
+              int use_aec_residual_noise_gate,
               int use_stationarity_properties,
-              int use_aec3_echo_gen_window,
+              int use_aec_echo_gen_window,
               int nl_r2_enabled, float nl_r2_alpha, float nl_norm_power,
               float nl_r2_cap_multiple,
               float residual_noise_gate_power,
@@ -62,13 +62,13 @@ void ree_init(ResidualEchoEstimator *r,
     r->n_bins = n_bins;
     r->hop_size = hop_size;
     r->sample_rate = sample_rate;
-    /* AEC3 UpdateRenderNoisePower per-block growth (x2_noise_floor *= 1.1,
-     * cc:325-359), rescaled to the live grid so the wall-clock
+    /* Render-noise-power per-block growth (x2_noise_floor *= 1.1),
+     * rescaled to the live grid so the wall-clock
      * recovery-after-hold rate is preserved at any grid. Mirrors
      * residual_echo_estimator.py. 1.1 (not 1.1f): the exponentiation must
-     * run on the full-precision double literal -- see aec3_scale.h. */
+     * run on the full-precision double literal -- see aec_scale.h. */
     r->noise_floor_growth_per_hop =
-        aec3_per_block_growth_to_per_hop(1.1, hop_size, sample_rate);
+        aec_per_block_growth_to_per_hop(1.1, hop_size, sample_rate);
     r->echo_model = *echo_model;
     r->default_gain_early = default_gain;
     r->default_gain_late = default_gain;
@@ -89,25 +89,25 @@ void ree_init(ResidualEchoEstimator *r,
         double d_mild = reverb_decay;
         d_mild *= reverb_mild_decay_scale;
         r->reverb_decay_per_hop =
-            aec3_per_block_growth_to_per_hop(reverb_decay, hop_size,
-                                             sample_rate);
+            aec_per_block_growth_to_per_hop(reverb_decay, hop_size,
+                                            sample_rate);
         r->reverb_decay_per_hop_mild =
-            aec3_per_block_growth_to_per_hop(d_mild, hop_size, sample_rate);
+            aec_per_block_growth_to_per_hop(d_mild, hop_size, sample_rate);
     } else {
         r->reverb_decay_per_hop = 0.0f;
         r->reverb_decay_per_hop_mild = 0.0f;
     }
     r->reverb_tail_strength = reverb_tail_strength;
-    r->use_aec3_residual_noise_gate = use_aec3_residual_noise_gate ? 1 : 0;
+    r->use_aec_residual_noise_gate = use_aec_residual_noise_gate ? 1 : 0;
     r->use_stationarity_properties = use_stationarity_properties ? 1 : 0;
-    r->use_aec3_echo_gen_window = use_aec3_echo_gen_window ? 1 : 0;
+    r->use_aec_echo_gen_window = use_aec_echo_gen_window ? 1 : 0;
     r->nl_r2_enabled = nl_r2_enabled ? 1 : 0;
     r->nl_r2_alpha = nl_r2_alpha;
     r->nl_norm_power = nl_norm_power;
     r->nl_r2_cap_multiple = nl_r2_cap_multiple;
     r->residual_noise_gate_power = residual_noise_gate_power;
     r->noise_floor_hold_hops = noise_floor_hold_hops;
-    r->render_pre_window_size = use_aec3_echo_gen_window ? 1 : 0;
+    r->render_pre_window_size = use_aec_echo_gen_window ? 1 : 0;
     r->render_post_window_size = 1;
 
     r->x2_noise_floor = x2_noise_floor;
@@ -210,11 +210,6 @@ static float ree_reverb_decay(const ResidualEchoEstimator *r,
                               int dominant_nearend) {
     return dominant_nearend ? r->reverb_decay_per_hop_mild
                             : r->reverb_decay_per_hop;
-}
-
-float ree_reverb_decay_value(const ResidualEchoEstimator *r,
-                             int dominant_nearend) {
-    return ree_reverb_decay(r, dominant_nearend);
 }
 
 /* _update_reverb_linear (cc:390-392). */
@@ -340,7 +335,7 @@ void ree_estimate(ResidualEchoEstimator *r,
             float echo_path_gain = ree_echo_path_gain(r, transparent_mode, 1);
             /* EchoGeneratingPower window walk. x2 lives in per-instance scratch. */
             float *x2 = r->scratch;
-            if (r->use_aec3_echo_gen_window) {
+            if (r->use_aec_echo_gen_window) {
                 int delay = (filter_delay_blocks > 0 ? filter_delay_blocks : 0);
                 int pre = r->render_pre_window_size;   /* 1 */
                 int post = r->render_post_window_size; /* 1 */
@@ -400,7 +395,7 @@ void ree_estimate(ResidualEchoEstimator *r,
                     }
                 }
             }
-            /* AEC3 cc:121-129 noise gate — SKIPPED when
+            /* Noise gate — SKIPPED when
              * use_stationarity_properties=True (matches Python
              * `if not self._use_stationarity_properties:`). Production sets
              * this True, so the gate does not run; a `transparent_mode` guard
@@ -408,7 +403,7 @@ void ree_estimate(ResidualEchoEstimator *r,
              * this path, so the gate would fire and collapse x2 to 0). */
             if (!r->use_stationarity_properties) {
                 /* noise gate (cc:121-129). */
-                float ng = r->use_aec3_residual_noise_gate
+                float ng = r->use_aec_residual_noise_gate
                            ? r->residual_noise_gate_power
                            : r->echo_model.noise_gate_power;
                 float slope = r->echo_model.noise_gate_slope; /* 0.3 */

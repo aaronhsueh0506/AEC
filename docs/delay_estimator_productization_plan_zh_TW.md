@@ -131,7 +131,7 @@ grid：
   非零 `fft_size`。
 - `fft_size`、delay mode、n 都是 init-time immutable；任何一項改變都必須
   重新查 memory requirement 並 re-init。
-- internal `DelayAec3` 不需要假裝使用 FFT；它應接收 resolved
+- internal `DelayAec` 不需要假裝使用 FFT；它應接收 resolved
   `sample_rate + hop_size + num_filters`，用 hop 配置 edge/resample scratch。
 - 三組 grid 都要有「get-mem-size 所見 grid == init 所見 grid == process hop」
   的 lockstep/mutation test。
@@ -144,7 +144,7 @@ grid：
 
 ### 3.1 現況問題
 
-目前 `DelayAec3` 直接內嵌下列最大尺寸陣列：
+目前 `DelayAec` 直接內嵌下列最大尺寸陣列：
 
 - `DaRing.buffer[DA_RING_CAPACITY]`。
 - `DaMatchedFilter.filters[DA_NUM_FILTERS][DA_FILTER_SIZE]`。
@@ -156,14 +156,14 @@ grid：
 
 ### 3.2 目標架構
 
-維持 caller-owned static pool、零 heap，將 `DelayAec3` 改成小型 metadata/state + pool pointers：
+維持 caller-owned static pool、零 heap，將 `DelayAec` 改成小型 metadata/state + pool pointers：
 
 ```c
-size_t delay_aec3_get_mem_size(
+size_t delay_aec_get_mem_size(
     int sample_rate, int hop_size, int num_filters);
 
-int delay_aec3_init(
-    DelayAec3* state,
+int delay_aec_init(
+    DelayAec* state,
     void* mem,
     size_t bytes,
     int sample_rate,
@@ -210,7 +210,7 @@ int delay_aec3_init(
 
 ### 3.3 Lockstep 與安全性
 
-- `delay_aec3_get_mem_size()` 與 init carve 必須使用同一套 checked size helper。
+- `delay_aec_get_mem_size()` 與 init carve 必須使用同一套 checked size helper。
 - init 完成後 cursor 必須剛好用完所宣告的 bytes。
 - 所有乘法、加法、alignment 做 overflow check。
 - pool alignment 保持全專案統一值。
@@ -240,7 +240,7 @@ int delay_aec3_init(
 
 ### 4.1 Mono／4ch
 
-- 上層 pipeline config 必須真的傳到 `aec_get_mem_size()`、AEC init、shared `DelayAec3` init。
+- 上層 pipeline config 必須真的傳到 `aec_get_mem_size()`、AEC init、shared `DelayAec` init。
 - validation、get-mem-size、init 必須看到完全相同的 resolved config。
 - descriptor/config hash 必須包含 `delay_mode`、`delay_num_filters`、`fixed_delay_samples`。
 - unknown enum、n=0、n>5、negative fixed delay、mode/欄位衝突全部拒絕。
@@ -385,7 +385,7 @@ p99.9 residual + jitter + drift + safety margin < bank reliable reach
 ### 8.1 結構／bit-exact gate
 
 - grid：16k/256/128、16k/512/256、48k/1024/512。
-- C：KISS/NE10 × SIMD=0/1 × shadow on/off × CNG on/off。
+- C：NE10 × SIMD=0/1 × shadow on/off × CNG on/off。
 - Python/C delay trace parity。
 - mono/4ch static-vs-heap/caller-pool parity。
 - n=5 refactor 前後 WAV SHA-256 byte-equal。
@@ -424,7 +424,7 @@ p99.9 residual + jitter + drift + safety margin < bank reliable reach
 每步獨立 commit、每步先測再進下一步：
 
 1. AEC：delay mode config + validation，尚不改 memory layout。
-2. AEC：pool-first variable-size `DelayAec3`，n=5 byte-exact。
+2. AEC：pool-first variable-size `DelayAec`，n=5 byte-exact。
 3. AEC：FIXED／EXTERNAL alignment state與測試。
 4. AEC：CLI、memory diagnostics、文件與 ABI/version。
 5. push AEC。
@@ -499,6 +499,6 @@ p99.9 residual + jitter + drift + safety margin < bank reliable reach
    n=5），不必等 B 線——B 線 controller 若日後放行，才觸發真正的 re-materialize。
 7. **§3 refactor 的 byte-exact 風險點**（執行提醒）：陣列從內嵌改 pool-carve 時，
    每個 f32 陣列一律 ALIGN16（NEON kernel 對 512-tap 陣列的對齊假設）；init/
-   memset 順序不得重排；n=5 SHA byte-equal gate 在 KISS/NE10 × SIMD 0/1 全矩陣跑。
+   memset 順序不得重排；n=5 SHA byte-equal gate 在 NE10 × SIMD 0/1 全矩陣跑。
 8. 舊 `feature/delay-prescan-anchor` branch（6fb2abc，為 research branch 祖先）
    刪除，避免雙 branch 混淆。

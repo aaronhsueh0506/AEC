@@ -2,11 +2,12 @@
  * to aec_create() (dynamic) on the same input.
  *
  * Build (standalone, NE10 FFT backend (default); the FFT wrapper + fast_math
- * now live in the shared audio_common archive, built once and linked in):
- *   make -C ../../audio_common BACKEND=ne10 lib
- *   gcc -O2 -ffp-contract=off -std=gnu99 -Iinclude -Iexample -I../../audio_common/include \
+ * now live in the shared audiolib archive, built once and linked in):
+ *   make -C ../../audiolib/common BACKEND=ne10 lib
+ *   gcc -O2 -ffp-contract=off -std=gnu99 -Iinclude -Iexample -I../../audiolib/common/include \
+ *       -I../../audiolib/common \
  *       test/test_static_aec.c $(find src -name '*.c') \
- *       $(make -s -C ../../audio_common BACKEND=ne10 print-lib-path) -lm -o bin/test_static_aec
+ *       $(make -s -C ../../audiolib/common BACKEND=ne10 print-lib-path) -lm -o bin/test_static_aec
  * The normal entry point is `make test-static-aec`; the standalone recipe is
  * retained for bring-up environments that do not use this repository's
  * Makefile.
@@ -18,6 +19,7 @@
  * (this test does not resample).
  */
 #include "aec.h"
+#include "aec_pool_test_util.h"
 #include "wav_io.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -53,7 +55,9 @@ int main(int argc, char** argv) {
 
     /* Dynamic path */
     Aec aec_dyn;
-    aec_create(&aec_dyn, &cfg);
+    if (aec_create(&aec_dyn, &cfg) != 0) {
+        fprintf(stderr, "aec_create failed\n"); free(mic); free(ref); return 1;
+    }
     int hop = aec_hop_size(&aec_dyn);
     int frames = n / hop;
     float* out_dyn = (float*)calloc((size_t)frames * hop, sizeof(float));
@@ -63,7 +67,7 @@ int main(int argc, char** argv) {
 
     /* Static path */
     size_t pool_sz = aec_get_mem_size(&cfg);
-    void* pool = malloc(pool_sz);
+    void* pool = aec_test_pool_alloc(pool_sz);
     if (!pool) { fprintf(stderr, "pool alloc failed\n"); return 1; }
     Aec* aec_st = aec_init(pool, pool_sz, &cfg);
     if (!aec_st) { fprintf(stderr, "aec_init returned NULL\n"); return 1; }
@@ -86,14 +90,10 @@ int main(int argc, char** argv) {
     else
         printf("FAIL: %d/%d samples differ\n", diffs, frames * hop);
 
-    /* B2 regression guard: aec_destroy() must be called on the static
-     * instance too. On a NE10 build this is what releases the 3 NE10 R2C
-     * twiddle configs (post_fft / main_filter.fft / shadow_filter.fft) that
-     * live outside the pool and therefore aren't reclaimed by free(pool)
-     * alone. Harmless no-op cost on the KISS backend (fft_destroy() is a
-     * no-op for a pool-owned KISS handle). */
+    /* aec_destroy() must also run on the static instance (it tears down the
+     * FFT handle); the caller-owned pool itself is freed by the caller. */
     aec_destroy(aec_st);
-    free(out_dyn); free(out_st); free(pool); free(mic); free(ref);
+    free(out_dyn); free(out_st); free(pool);
 
     /* Leak-loop: repeat init -> process -> destroy so a leak checker
      * (`leaks --atExit -- ./bin/test_static_aec ...`) can see whether
@@ -105,7 +105,7 @@ int main(int argc, char** argv) {
         const int loop_frames = frames < 20 ? frames : 20; /* keep it fast */
         for (int iter = 0; iter < kIters; ++iter) {
             size_t sz = aec_get_mem_size(&cfg);
-            void* p = malloc(sz);
+            void* p = aec_test_pool_alloc(sz);
             if (!p) { fprintf(stderr, "leak-loop: pool alloc failed at iter %d\n", iter); return 1; }
             Aec* inst = aec_init(p, sz, &cfg);
             if (!inst) { fprintf(stderr, "leak-loop: aec_init failed at iter %d\n", iter); free(p); return 1; }
@@ -120,5 +120,6 @@ int main(int argc, char** argv) {
         printf("Leak-loop: %d init->process->destroy cycles completed\n", kIters);
     }
 
+    free(mic); free(ref);
     return diffs ? 1 : 0;
 }

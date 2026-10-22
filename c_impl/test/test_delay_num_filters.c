@@ -27,14 +27,14 @@
  *          control that makes the previous assertion meaningful.
  *      Mutation-checked: reverting the loop bound in
  *      da_matched_filter_update() to DA_NUM_FILTERS, or hardcoding aec.c's
- *      delay_aec3_init() call to DA_NUM_FILTERS, makes the n=2 /
+ *      delay_aec_init() call to DA_NUM_FILTERS, makes the n=2 /
  *      350 ms case lock and this test go red.
  *
  *      Why 350 ms and not 400: on a PURE single-tap echo (no reverb tail)
- *      the AEC3 pre-echo aggregator occasionally reports an onset one
+ *      the pre-echo aggregator occasionally reports an onset one
  *      alignment shift early, and 400 ms at n=5 happens to be one of those
  *      points (reports 4800 instead of 6336, deterministically, on every
- *      seed tried). That is pre-existing upstream-port behaviour, unrelated
+ *      seed tried). That is a property of the pre-echo aggregator, unrelated
  *      to the bank size, and matched_filter.py's own
  *      header already warns that detect_pre_echo can produce noisy
  *      estimates on material without real pre-echo. Sitting the control
@@ -43,7 +43,7 @@
  *   3. Out-of-range config values are REJECTED by aec_validate_config
  *      (aec_create fails), matching the Python side's ValueError rather
  *      than silently normalising a caller's wrong mental model.
- *   4. The lower-level delay_aec3_get_mem_size()/delay_aec3_init() pair
+ *   4. The lower-level delay_aec_get_mem_size()/delay_aec_init() pair
  *      REJECTS out-of-range n as well (get_mem_size -> 0, init -> nonzero;
  *      a silent clamp would let direct callers run a different bank than
  *      requested with no error signal), plus the pool rejection
@@ -56,16 +56,18 @@
  *      sample-exact at every bank size (the layout depends on it).
  *
  * Build (standalone, from c_impl/ — mirrors test_linear_context.c):
- *   make -C ../../audio_common BACKEND=kiss lib
+ *   make -C ../../audiolib/common lib
  *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=gnu99 -Iinclude -Iexample \
- *       -I../../audio_common/include \
+ *       -I../../audiolib/common/include \
+ *       -I../../audiolib/common \
  *       test/test_delay_num_filters.c $(find src -name '*.c') \
- *       $(make -s -C ../../audio_common BACKEND=kiss print-lib-path) -lm \
+ *       $(make -s -C ../../audiolib/common print-lib-path) -lm \
  *       -o bin/test_delay_num_filters
  * Run:  ./bin/test_delay_num_filters
  * Also wired into the Makefile: `make test-delay-num-filters`.
  */
 #include "aec.h"
+#include "utility/mem_align.h"   /* ALIGN16 -- was transitively reached via fft_wrapper.h */
 #include "delay_pool_test_util.h"
 #include <math.h>
 #include <stdio.h>
@@ -137,7 +139,7 @@ static int run_case(int num_filters, int delay, int *bank_out) {
     for (i = 0; i < n_hops; ++i)
         aec_process(&a, g_near + i * HOP, g_far + i * HOP, g_out);
     *bank_out = a.delay.est.matched_filter.num_filters;
-    int got = delay_aec3_estimated_delay(&a.delay);
+    int got = delay_aec_estimated_delay(&a.delay);
     aec_destroy(&a);
     return got;
 }
@@ -152,7 +154,7 @@ static void test_default_is_five(void) {
     aec_config_defaults(&cfg, SR);
     CHECK(cfg.delay_num_filters == DA_NUM_FILTERS,
           "aec_config_defaults: delay_num_filters == DA_NUM_FILTERS (5)");
-    CHECK(DA_NUM_FILTERS == 5, "DA_NUM_FILTERS is still 5 (the AEC3 default)");
+    CHECK(DA_NUM_FILTERS == 5, "DA_NUM_FILTERS is still 5 (the default)");
 
     aec_config_from_preset(&cfg, AEC_PRESET_MILD, SR);
     CHECK(cfg.delay_num_filters == 5, "preset mild: delay_num_filters == 5");
@@ -237,7 +239,7 @@ static void test_config_validation(void) {
 
 /* Shared pool-first construction (delay_pool_test_util.h), reported through
  * this file's CHECK macro. */
-static void *da_pool_init(DelayAec3 *d, int sr, int hop, int n) {
+static void *da_pool_init(DelayAec *d, int sr, int hop, int n) {
     const char *why = NULL;
     void *pool = delay_pool_init(d, sr, hop, n, &why);
     if (!pool) CHECK(0, why);
@@ -245,7 +247,7 @@ static void *da_pool_init(DelayAec3 *d, int sr, int hop, int n) {
 }
 
 static void test_low_level_init_contract(void) {
-    DelayAec3 d;
+    DelayAec d;
     void *pool;
     char msg[160];
     int n;
@@ -260,60 +262,60 @@ static void test_low_level_init_contract(void) {
         free(pool);
     }
 
-    CHECK(delay_aec3_get_mem_size(SR, HOP, 0) == 0,  "get_mem_size(n=0) rejects (0)");
-    CHECK(delay_aec3_get_mem_size(SR, HOP, -7) == 0, "get_mem_size(n=-7) rejects (0)");
-    CHECK(delay_aec3_get_mem_size(SR, HOP, DA_NUM_FILTERS + 1) == 0,
+    CHECK(delay_aec_get_mem_size(SR, HOP, 0) == 0,  "get_mem_size(n=0) rejects (0)");
+    CHECK(delay_aec_get_mem_size(SR, HOP, -7) == 0, "get_mem_size(n=-7) rejects (0)");
+    CHECK(delay_aec_get_mem_size(SR, HOP, DA_NUM_FILTERS + 1) == 0,
           "get_mem_size(n=max+1) rejects (0)");
-    CHECK(delay_aec3_get_mem_size(SR, HOP, 99) == 0, "get_mem_size(n=99) rejects (0)");
+    CHECK(delay_aec_get_mem_size(SR, HOP, 99) == 0, "get_mem_size(n=99) rejects (0)");
     {
         /* A validly-sized pool must still be refused when n is invalid --
          * rejection must come from validation, not from a size mismatch. */
-        size_t ok_bytes = delay_aec3_get_mem_size(SR, HOP, DA_NUM_FILTERS);
+        size_t ok_bytes = delay_aec_get_mem_size(SR, HOP, DA_NUM_FILTERS);
         void *p = NULL;
         CHECK(ok_bytes > 0, "reference size for rejection probe");
         if (ok_bytes > 0 && posix_memalign(&p, 16, ok_bytes) == 0) {
-            CHECK(delay_aec3_init(&d, p, ok_bytes, SR, HOP, 0) != 0,
+            CHECK(delay_aec_init(&d, p, ok_bytes, SR, HOP, 0) != 0,
                   "init(n=0) rejects");
-            CHECK(delay_aec3_init(&d, p, ok_bytes, SR, HOP, 99) != 0,
+            CHECK(delay_aec_init(&d, p, ok_bytes, SR, HOP, 99) != 0,
                   "init(n=99) rejects");
             free(p);
         }
     }
 
-    /* The bank size must survive a reset — delay_aec3_reset() clears the
+    /* The bank size must survive a reset — delay_aec_reset() clears the
      * signal chain, not the geometry. */
     pool = da_pool_init(&d, SR, HOP, 2);
     if (pool) {
         int cap = d.est.render_ring.capacity;
         int hpn = d.est.aggregator.highest_peak.hist_size;
         int pen = d.est.aggregator.pre_echo.hist_size;
-        delay_aec3_reset(&d);
-        CHECK(d.est.matched_filter.num_filters == 2, "bank size survives delay_aec3_reset()");
+        delay_aec_reset(&d);
+        CHECK(d.est.matched_filter.num_filters == 2, "bank size survives delay_aec_reset()");
         CHECK(d.est.render_ring.capacity == cap &&
               d.est.aggregator.highest_peak.hist_size == hpn &&
               d.est.aggregator.pre_echo.hist_size == pen,
-              "pool geometry survives delay_aec3_reset()");
+              "pool geometry survives delay_aec_reset()");
         free(pool);
     }
 
     /* Rejection contract: NULL, misaligned base, and an undersized block are
      * all refused rather than carved past. */
     {
-        size_t need = delay_aec3_get_mem_size(SR, HOP, DA_NUM_FILTERS);
+        size_t need = delay_aec_get_mem_size(SR, HOP, DA_NUM_FILTERS);
         void *p = NULL;
-        CHECK(delay_aec3_init(&d, NULL, need, SR, HOP, DA_NUM_FILTERS) != 0,
-              "delay_aec3_init(NULL pool) rejected");
+        CHECK(delay_aec_init(&d, NULL, need, SR, HOP, DA_NUM_FILTERS) != 0,
+              "delay_aec_init(NULL pool) rejected");
         if (posix_memalign(&p, 16, need + 16) == 0 && p) {
-            CHECK(delay_aec3_init(&d, (char *)p + 8, need, SR, HOP, DA_NUM_FILTERS) != 0,
-                  "delay_aec3_init(base not 16-byte aligned) rejected");
-            CHECK(delay_aec3_init(&d, p, need - 1, SR, HOP, DA_NUM_FILTERS) != 0,
-                  "delay_aec3_init(pool one byte short) rejected");
-            CHECK(delay_aec3_init(&d, p, need, SR, HOP, DA_NUM_FILTERS) == 0,
-                  "delay_aec3_init(exactly the queried size) accepted");
+            CHECK(delay_aec_init(&d, (char *)p + 8, need, SR, HOP, DA_NUM_FILTERS) != 0,
+                  "delay_aec_init(base not 16-byte aligned) rejected");
+            CHECK(delay_aec_init(&d, p, need - 1, SR, HOP, DA_NUM_FILTERS) != 0,
+                  "delay_aec_init(pool one byte short) rejected");
+            CHECK(delay_aec_init(&d, p, need, SR, HOP, DA_NUM_FILTERS) == 0,
+                  "delay_aec_init(exactly the queried size) accepted");
             free(p);
         }
-        CHECK(delay_aec3_get_mem_size(0, HOP, DA_NUM_FILTERS) == 0 &&
-              delay_aec3_get_mem_size(SR, 0, DA_NUM_FILTERS) == 0,
+        CHECK(delay_aec_get_mem_size(0, HOP, DA_NUM_FILTERS) == 0 &&
+              delay_aec_get_mem_size(SR, 0, DA_NUM_FILTERS) == 0,
               "get_mem_size rejects a non-positive rate or hop");
     }
 
@@ -322,7 +324,7 @@ static void test_low_level_init_contract(void) {
      * hop-dependent term, so it is the one place a wrong hop is observable
      * from outside -- and it is observable, which is the point of asserting
      * it here rather than trusting the call site.
-     * Mutation-checked: passing any other hop to delay_aec3_init() in
+     * Mutation-checked: passing any other hop to delay_aec_init() in
      * aec_carve() turns this row red. */
     {
         static const struct { int sr, fft, hop, cap; } grids[] = {
@@ -362,8 +364,8 @@ static void test_low_level_init_contract(void) {
      * bank costs strictly more at 48 kHz than at 16 kHz, and the difference
      * is exactly the two ALIGN16'd scratch buffers. */
     for (n = 1; n <= DA_NUM_FILTERS; ++n) {
-        size_t m16 = delay_aec3_get_mem_size(16000, 128, n);
-        size_t m48 = delay_aec3_get_mem_size(48000, 512, n);
+        size_t m16 = delay_aec_get_mem_size(16000, 128, n);
+        size_t m48 = delay_aec_get_mem_size(48000, 512, n);
         size_t scratch = 2 * (size_t)((DA_RESAMPLE48_CAP_FOR(512) * sizeof(float) + 15) & ~(size_t)15);
         snprintf(msg, sizeof msg,
                  "n=%d: 48 kHz costs exactly the two sidechain scratch buffers more "
@@ -375,7 +377,7 @@ static void test_low_level_init_contract(void) {
 /* ------------------------------------------- pool geometry, HAND-COMPUTED */
 
 /* The three n-dependent array lengths, pinned against LITERALS derived by
- * hand from the AEC3 geometry -- NOT against DA_*_FOR(n), which is the very
+ * hand from the reference geometry -- NOT against DA_*_FOR(n), which is the very
  * thing under test (reading those macros back would make every row a
  * tautology: pinning the macros to a fixed n=5 bound, exactly the regression
  * this file exists to catch, would leave it green).

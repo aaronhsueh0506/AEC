@@ -1,7 +1,7 @@
 /* test_delay_dominant_selection.c — the product delay is the DOMINANT
  * matched-filter peak, not the pre-echo one.
  *
- * AEC3 runs its delay estimator inside a RenderDelayController and wants the
+ * The reference design runs its delay estimator inside a RenderDelayController and wants the
  * earliest echo-path onset, so upstream substitutes the pre-echo candidate for
  * the reported delay while still qualifying it with the dominant peak's
  * histogram. This port's product path is different: the reported sample delay
@@ -23,13 +23,14 @@
  *
  * Build (standalone, from c_impl/ -- same recipe as test_delay_reset.c):
  *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=gnu99 -Iinclude \
- *       -I../../audio_common/include \
- *       src/delay_aec3.c src/aec3_scale.c test/test_delay_dominant_selection.c \
+ *       -I../../audiolib/common/include \
+ *       -I../../audiolib/common \
+ *       src/delay_aec.c src/aec_scale.c test/test_delay_dominant_selection.c \
  *       -lm -o bin/test_delay_dominant_selection
  * Run:
  *   ./bin/test_delay_dominant_selection
  */
-#include "delay_aec3.h"
+#include "delay_aec.h"
 #include "delay_pool_test_util.h"
 
 #include <stdio.h>
@@ -59,7 +60,7 @@ static float rng_next(void) {
 #define EARLY_GAIN   0.30f
 
 /* near = early_gain * far[n - early] + dominant_gain * far[n - dominant]. */
-static int feed_paths(DelayAec3 *d, unsigned int seed, int n_hops, int hop,
+static int feed_paths(DelayAec *d, unsigned int seed, int n_hops, int hop,
                       int early, float early_gain,
                       int dominant, float dominant_gain) {
     int total = n_hops * hop + dominant;
@@ -77,8 +78,8 @@ static int feed_paths(DelayAec3 *d, unsigned int seed, int n_hops, int hop,
     }
     for (i = 0; i < n_hops; ++i) {
         int cur;
-        delay_aec3_accumulate(d, near + (size_t)i * hop, far + (size_t)i * hop, hop);
-        cur = delay_aec3_estimated_delay(d);
+        delay_aec_accumulate(d, near + (size_t)i * hop, far + (size_t)i * hop, hop);
+        cur = delay_aec_estimated_delay(d);
         if (cur >= 0) last = cur;
     }
     free(far);
@@ -87,7 +88,7 @@ static int feed_paths(DelayAec3 *d, unsigned int seed, int n_hops, int hop,
 }
 
 /* Convenience for feeding both paths at the fixture's gains. */
-static int feed_dual_path(DelayAec3 *d, unsigned int seed, int n_hops, int hop,
+static int feed_dual_path(DelayAec *d, unsigned int seed, int n_hops, int hop,
                           int early, int dominant) {
     return feed_paths(d, seed, n_hops, hop, early, EARLY_GAIN, dominant, 1.0f);
 }
@@ -100,7 +101,7 @@ static int feed_dual_path(DelayAec3 *d, unsigned int seed, int n_hops, int hop,
 static int check_early_path_is_detectable(int sample_rate, int hop, int n_hops,
                                           int early, int dominant,
                                           const char *label) {
-    DelayAec3 probe;
+    DelayAec probe;
     const char *why = NULL;
     void *pool = delay_pool_init(&probe, sample_rate, hop, DA_NUM_FILTERS, &why);
     int reported, ok;
@@ -118,7 +119,7 @@ static int check_early_path_is_detectable(int sample_rate, int hop, int n_hops,
 }
 
 static void test_reported_delay_is_the_dominant_peak(int sample_rate, int hop) {
-    DelayAec3 d;
+    DelayAec d;
     const char *why = NULL;
     void *pool = delay_pool_init(&d, sample_rate, hop, DA_NUM_FILTERS, &why);
     int scale = sample_rate / 16000;
@@ -160,18 +161,18 @@ static void test_reported_delay_is_the_dominant_peak(int sample_rate, int hop) {
     snprintf(msg, sizeof msg,
              "%d Hz/hop %d: confidence describes the delay it is attached to",
              sample_rate, hop);
-    CHECK(delay_aec3_confidence(&d) >= 0.5f, msg);
+    CHECK(delay_aec_confidence(&d) >= 0.5f, msg);
     free(pool);
 }
 
 /* The other half of the contract: the onset estimate is not merely
  * unreported, it is not computed. After a long dual-path run -- one that
- * would have driven every pre-echo update the old path had -- the buffers it
+ * would have driven every pre-echo update a per-tap-prefix path makes -- the buffers it
  * fed and the histogram it fed into must still hold their initialised values.
  * This is what a patch that quietly re-introduced the per-tap-prefix error
  * would trip over. */
 static void test_pre_echo_path_is_inert(void) {
-    DelayAec3 d;
+    DelayAec d;
     const char *why = NULL;
     void *pool = delay_pool_init(&d, 16000, 256, DA_NUM_FILTERS, &why);
     const DaMatchedFilter *mf;
@@ -192,20 +193,20 @@ static void test_pre_echo_path_is_inert(void) {
           "the per-tap-prefix (instantaneous) error stays at its zero init");
     CHECK(acc_moved == 0,
           "the accumulated error stays at its 1.0 init");
-    /* the run really was long enough to have driven the old path */
+    /* the run really was long enough to have driven a per-tap-prefix path */
     CHECK(mf->number_pre_echo_updates == DA_PRE_ECHO_UPDATES_TO_REPORT,
           "the fixture is long enough that the old update gate would have opened");
     free(pool);
 }
 
 static void test_reset_reacquires_the_dominant_candidate(void) {
-    DelayAec3 d;
+    DelayAec d;
     const char *why = NULL;
     void *pool = delay_pool_init(&d, 16000, 256, DA_NUM_FILTERS, &why);
     int reported;
     if (!pool) { printf("FAIL: pool (%s)\n", why ? why : "?"); g_fail++; return; }
     feed_dual_path(&d, 11u, 900, 256, EARLY_16K, DOMINANT_16K);
-    delay_aec3_reset(&d);
+    delay_aec_reset(&d);
     {
         int i, sum = 0;
         for (i = 0; i < d.est.aggregator.highest_peak.hist_size; ++i)

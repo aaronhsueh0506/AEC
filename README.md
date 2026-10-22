@@ -45,19 +45,17 @@ float32 end-to-end (delay chain, orchestrator scalars, post/state modules,
 `residual_echo_estimator`, HPF). **Python bit-exact parity is retired
 repo-wide** — the Python reference (fp64) is now the **algorithm spec**, C is
 the float32 **implementation**, and Python↔C comparison is **tolerance-based**
-(~−60 dB class, correlation 0.99999958), not 0/0. The production **FFT
-backend is KISS FFT (float32)** on the host/reference build (`make`, malloc);
-the embedded deployment (`make BACKEND=ne10`, caller pool via
-`aec_get_mem_size`/`aec_init`) ships from the same main branch — NE10 vs KISS
-output is not bit-identical to each other (pre-existing), but each backend's
-static path is byte-equal to its own malloc path. `SIMD=0` and `SIMD=1` are
+(~−60 dB class, correlation 0.99999958), not 0/0. The **FFT backend is
+NE10 (float32, ARM NEON)** for both the host build (`make`, malloc) and the
+embedded deployment (caller pool via `aec_get_mem_size`/`aec_init`); the
+static path is byte-equal to the malloc path. `SIMD=0` and `SIMD=1` are
 likewise not bit-identical: the matched filter's dot product
-(`c_impl/src/delay_aec3.c`) uses four accumulators plus `vfmaq_f32` — reordered
+(`c_impl/src/delay_aec.c`) uses four accumulators plus `vfmaq_f32` — reordered
 summation *and* fused rounding — and its NLMS update fuses where the scalar
 spells a separate multiply and add. Every gate here is therefore
 **per configuration**: byte-exact against the same configuration before a
-change, never across configurations. Regression anchors: C-goldens
-(`c_impl/test/parity_delay.c` + `c_impl/test/parity_aec_e2e.c`) and staged
+change, never across configurations. Regression anchors: the end-to-end tolerance gate
+(`c_impl/test/parity_aec_e2e.c`) and staged
 gates vs the `fp64-baseline` tag (60-case stratified AECMOS within noise bar,
 waveform drift median −95 dB, 1-hour soak stable). See the float32 and SIMD
 entries under [CHANGELOG.md](CHANGELOG.md) `[4.0.0]`.
@@ -154,7 +152,7 @@ False`) instead of deepening it further:
 | `mild`       | −20 dB | −20 dB | near-priority — more near-end kept, more echo leak (FS dips below the 3.5 bar by design). Was `gentle` until 2026-07-15 (NR-style naming, same parameters) |
 | **`balanced` ★** | −28 dB | −20 dB | **production** — all four ship bars met |
 | `aggressive`   | −38 dB | −30 dB | echo-priority — deeper suppression, more near-end loss (deg stays >2.0, above AEC3); dev-pool DT_static echo +0.17/+0.14 MOS vs a shared-dt-floor aggressive, at a bounded near-end cost |
-| `no_floor`   | n/a (off) | n/a (off) | deepest point on the axis — purely audibility/R²-derived gain; most near-end loss |
+| `no_floor`   | inert (gate off) | inert (gate off) | deepest point on the axis — purely audibility/R²-derived gain; most near-end loss. `AecPreset.NO_FLOOR` / `AEC_PRESET_NO_FLOOR` (C enum value `3`); the dB columns are the same bytes as `balanced`'s but never read once `min_gain_split_floor_enabled` (C) / `min_gain_split_floor_enabled` (Python) is `False` |
 
 `mild` / `aggressive` / `no_floor` are deliberate Pareto operating points on the
 proven single-channel DT-deg-vs-echo wall; all share the same `_aec3_post`
@@ -164,8 +162,18 @@ chain and 800-case-tuned base. Full version history → [CHANGELOG.md](CHANGELOG
 
 The preset can be changed on a live instance without rebuilding it — the
 filter, the delay lock and every smoothing history carry on. `no_floor`
-changes a boolean the ramp below cannot represent, so it is construction-time
-only (`aec_set_preset`/`AEC.set_preset` reject it):
+changes a boolean (`min_gain_split_floor_enabled`), which the ramp below
+cannot represent, so it STEPS immediately instead of ramping — the same
+instant-step discipline the DT floor already uses, just extended to one
+more field. **Both C** (`aec_set_preset()` / `aec_res_set_preset()`) **and
+Python** (`AEC.set_preset()`): switching to or from `no_floor` is allowed,
+with no accept/reject guard — the gate steps on the same call that also
+writes the far-active/dt floors through their existing (ramped / stepped)
+setters, so a round trip through `no_floor` always lands back on the
+target preset's exact values, never on a half-applied mix. Construction-time
+`no_floor` (`aec_config_from_preset()` / `AecConfig.from_preset()`) and
+runtime retargeting are both symmetric between the two languages as of
+2026-10-20.
 
 ```c
 int aec_set_preset(Aec* a, AecPreset preset, float ramp_ms);   /* aec.h */
@@ -181,12 +189,19 @@ out-of-range `ramp_ms`. Unlike `aec_config_from_preset()`, which falls back to
 balanced for an unrecognised value, this **refuses** — a setter has a caller to
 tell.
 
-The primitives underneath, `suppression_gain_set_split_floor_far_active_db()`
-(ramped) and `suppression_gain_set_split_floor_dt_db()` (steps immediately —
+The primitives underneath — `suppression_gain_set_split_floor_far_active_db()`
+(ramped), `suppression_gain_set_split_floor_dt_db()` (steps immediately —
 the DT floor is a hard per-hop override, not a value the gain rule converges
-toward, so `ramp_ms` does not apply to it), are internal; a caller that owns a
-post-stage suppressor outside any `Aec` (the four-channel product) uses
-`aec_res_set_preset()` from `aec_res.h`, same semantics.
+toward, so `ramp_ms` does not apply to it), and
+`suppression_gain_set_split_floor_enabled()` (steps immediately — a boolean
+has no continuous path to ramp along; gates all three floor variants
+together: far-active, far-silent/pure-NE, and DT-lifted) — are internal; a
+caller that owns a post-stage suppressor outside any `Aec` (the four-channel
+product) uses `aec_res_set_preset()` from `aec_res.h`, same semantics.
+`aec_preset_split_floor_enabled(AecPreset, int*)` is the public lookup for
+the gate's value alone, mirroring `aec_preset_floor_db()` /
+`aec_preset_dt_floor_db()`, for a caller that wants the gate without the dB
+lookups.
 
 Two things to know before measuring a preset change: lanes built with
 `spatial_linear_context` never reach the suppressor's gain path, so retargeting
@@ -216,11 +231,10 @@ A/B guidance → [docs/c_user_manual_zh_TW.md §7.1](docs/c_user_manual_zh_TW.md
 | | |
 |---|---|
 | Static pool | Backend、grid、filter 長度與功能開關都會影響大小；部署時以 `aec_get_mem_size()` 查詢，不使用文件中的固定常數 |
-| Static pool, other backend | Query `aec_get_mem_size`; FFT workspace is backend-dependent |
 | Compute / frame | 4 × 256-FFT + Kalman update (129 bins × 7 partitions) |
-| FFT                                | KISS FFT (float32; NE10 ARM-NEON opt-in) — ~float32 precision vs numpy `np.fft` |
+| FFT                                | NE10 ARM-NEON FFT (float32) — ~float32 precision vs numpy `np.fft` |
 
-Both backends are static==dynamic byte-equal (`test_static_aec`); full
+The static pool path is byte-equal to the malloc path (`test_static_aec`); full
 per-region breakdown → [c_impl/STATIC_MEMORY.md](c_impl/STATIC_MEMORY.md).
 
 ### Known limitations (cases this AEC cannot fully solve)
@@ -422,7 +436,7 @@ make
 BIN="$(make -s print-bin-dir)"
 
 "$BIN"/aec_wav mic.wav ref.wav out.wav                  # BALANCED preset
-"$BIN"/aec_wav mic.wav ref.wav out.wav --preset aggressive
+"$BIN"/aec_wav mic.wav ref.wav out.wav --preset 2       # 0 mild | 1 balanced | 2 aggressive | 3 no_floor (names also accepted)
 "$BIN"/aec_wav mic.wav ref.wav out.wav --cng            # enable CNG (default off)
 "$BIN"/aec_wav mic.wav ref.wav out.wav --no-res         # skip residual filter
 "$BIN"/aec_wav mic.wav ref.wav out.wav --debug-level 2  # per-frame log

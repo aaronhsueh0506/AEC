@@ -1,6 +1,6 @@
 /* stationarity_estimator.h — C port of
- * python/modules/state/stationarity_estimator.py (which mirrors AEC3
- * stationarity_estimator.cc + the echo_audibility residual-scaling bits).
+ * python/modules/state/stationarity_estimator.py (the reference stationarity
+ * estimator + the echo_audibility residual-scaling bits).
  *
  * Render-path per-bin stationarity flag:
  *   - _NoiseSpectrum : per-bin slow noise-floor EMA tracker over a window.
@@ -15,15 +15,15 @@
  *   are bytes (bool). Built with -ffp-contract=off so the compiler does not
  *   fuse the three-step float32 roundings.
  *
- *   window_hops / hangover_hops are derived from AEC3 block counts (13 / 12) via
- *   aec3_blocks_to_hops(); at hop=160/sr=16000 both = 5.
+ *   window_hops / hangover_hops are derived from reference block counts (13 / 12) via
+ *   aec_blocks_to_hops(); at hop=160/sr=16000 both = 5.
  */
 #ifndef STATIONARITY_ESTIMATOR_H
 #define STATIONARITY_ESTIMATOR_H
 
 #include <stdint.h>
 
-/* ── Constants mirrored from aec3_scale.py (16 kHz / hop=160 reference) ──── */
+/* ── Constants mirrored from the Python scale module (16 kHz / hop=160 reference) ── */
 /* STATIONARITY_MIN_NOISE_POWER_FLOAT = psd_int16_to_float(10.0) = 10 / 32768² */
 #define STAT_MIN_NOISE_POWER_FLOAT (10.0f / (32768.0f * 32768.0f)) /* 9.31e-9 */
 #define STAT_THR_RATIO             10.0f  /* acum < 10×noise → stationary */
@@ -82,7 +82,7 @@ void stationarity_estimator_update_noise_estimator(StationarityEstimator *s,
                                                    const float *render_psd);
 
 /* update_stationarity_flags — refresh flags using latest render PSD.
- * average_reverb: previous-hop avg_reverb from aec3_post (Aec3Post.avg_reverb.reverb);
+ * average_reverb: previous-hop avg_reverb from aec_post (AecPost.avg_reverb.reverb);
  * NULL treated as zeros. */
 void stationarity_estimator_update_stationarity_flags(StationarityEstimator *s,
                                                       const float *render_psd,
@@ -94,8 +94,5 @@ void stationarity_estimator_band_stationary_mask(const StationarityEstimator *s,
 
 /* is_block_stationary: mean(band_stationary_mask) > STAT_BLOCK_FRACTION. */
 int stationarity_estimator_is_block_stationary(const StationarityEstimator *s);
-
-/* is_band_stationary(k). */
-int stationarity_estimator_is_band_stationary(const StationarityEstimator *s, int k);
 
 #endif /* STATIONARITY_ESTIMATOR_H */

@@ -4,8 +4,8 @@
  * The following checks run at each of the four whitelisted grids
  * (8000/256, 16000/256, 16000/512, 48000/1024):
  *
- *   (a) COLA: the rate's own synthesis window (Aec3BalancedRateDims::
- *       synth_window, looked up via aec3b_rate_cfg()) satisfies the
+ *   (a) COLA: the rate's own synthesis window (AecBalancedRateDims::
+ *       synth_window, looked up via aecb_rate_cfg()) satisfies the
  *       sqrt-Hann 50%-overlap perfect-reconstruction identity --
  *       w[i]^2 + w[i+hop_size]^2 == 1 for i in [0, hop_size) -- within 1e-6.
  *       This is the actual OLA correctness property the synthesis stage
@@ -24,26 +24,26 @@
  *           cancels at every rate, not a quality bar).
  *
  *   (b2) impulse-through-full-post-chain: identical excitation, cfg.enable_res
- *       = 1 -- the actual production path. (b) alone never touches the AEC3
- *       post-chain (SuppressionGain/ResidualEchoEstimator/CNG), which reads
- *       a per-(sample_rate, fft_size) tuning row from aec3b_rate_cfg().
+ *       = 1 -- the actual production path. (b) alone never touches the
+ *       post-filter chain (SuppressionGain/ResidualEchoEstimator/CNG), which reads
+ *       a per-(sample_rate, fft_size) tuning row from aecb_rate_cfg().
  *
  *   (c) aec_get_mem_size monotonicity/consistency: pool size must increase
  *       8k < 16k < 48k (bigger FFT/filter/n_partitions at higher rates), and
- *       must be identical across the three presets at a fixed rate (mild/
- *       balanced/aggressive differ only in one float field, not a size-
- *       affecting one).
+ *       must be identical across all four presets at a fixed rate (mild/
+ *       balanced/aggressive/no_floor differ only in a few float/int fields,
+ *       not a size-affecting one).
  *
  *   (c2) aec_init (static pool) byte-equal to aec_create (heap), full
  *       post-chain, every grid -- looping all four grids explicitly so a
  *       default flip can't silently leave the non-default grid's static path
  *       unchecked.
  *
- *   (d) top-level (non-AEC3) constant retiming: proves
+ *   (d) top-level (non-reference) constant retiming: proves
  *       shadow_err_alpha / warmup_frames / epc_hangover / ne_recent_hold /
  *       filter_misadjustment_{stable,hangover}_frames and EpcDetector's
  *       EPV_FAST_TC/EPV_SLOW_TC cover approximately the SAME wall-clock
- *       duration at every grid -- these are project-native (non-AEC3)
+ *       duration at every grid -- these are project-native (non-reference)
  *       constants authored as literal hop counts / per-hop EMA constants at
  *       the hop=160/sample_rate=16000 (10 ms) grid. Builds via
  *       aec_config_from_preset() THEN overrides cfg.fft_size (mirrors
@@ -56,7 +56,7 @@
  *       constants that live in the ADAPTATION path rather than in AecConfig --
  *       Aec::alpha_pow (per-SAMPLE), alpha_erl_tracking/alpha_erl_converged,
  *       PBFDKF::alpha_r, and Saturation::alpha_attack/alpha_release. They are
- *       assigned in aec_carve()/pbfdkf_init()/saturation_init(), not read out
+ *       assigned in aec_carve()/pbfdkf_init_static()/saturation_init(), not read out
  *       of the config struct. This is the C mirror of
  *       python/tests/test_detector_timing_effective_values.py, so the C/Python
  *       agreement is a REGRESSION GATE. Includes both halves of the negative
@@ -109,19 +109,21 @@
  *       happens to reach these states).
  *
 
- * Build (standalone, KISS FFT backend; from c_impl/):
- *   make -C ../../audio_common BACKEND=kiss lib
- *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=gnu99 -Iinclude -Iexample \
- *       -I../../audio_common/include \
+ * Build (standalone; from c_impl/):
+ *   make -C ../../audiolib/common lib
+ *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=gnu99 -DAEC_TESTING -Iinclude -Iexample \
+ *       -I../../audiolib/common/include \
+ *       -I../../audiolib/common \
  *       test/test_rate_structural.c $(find src -name '*.c') \
- *       $(make -s -C ../../audio_common BACKEND=kiss print-lib-path) -lm \
+ *       $(make -s -C ../../audiolib/common print-lib-path) -lm \
  *       -o bin/test_rate_structural
  * Run:
  *   ./bin/test_rate_structural
  */
 #include "aec.h"
-#include "aec3_balanced_config.h"
-#include "aec3_scale.h"
+#include "aec_pool_test_util.h"
+#include "aec_balanced_config.h"
+#include "aec_scale.h"
 #include "aec_test_hooks.h"   /* AEC_TESTING-only; see check (d6) */
 
 #include <math.h>
@@ -149,9 +151,9 @@ static void test_cola(void) {
     for (int r = 0; r < N_GRIDS; ++r) {
         int sr = GRIDS[r].sample_rate;
         int fft_size = GRIDS[r].fft_size;
-        const Aec3BalancedRateDims *rd = aec3b_rate_cfg(sr, fft_size);
+        const AecBalancedRateDims *rd = aecb_rate_cfg(sr, fft_size);
         char what[96];
-        snprintf(what, sizeof(what), "sr=%d fft=%d: aec3b_rate_cfg() found", sr, fft_size);
+        snprintf(what, sizeof(what), "sr=%d fft=%d: aecb_rate_cfg() found", sr, fft_size);
         CHECK(rd != NULL, what);
         if (!rd) continue;
 
@@ -174,9 +176,9 @@ static void test_cola(void) {
     }
 }
 
-/* FilterAnalyzer's AEC3 64/128-sample peak-exclusion window is 4/8 ms
+/* FilterAnalyzer's 64/128-sample peak-exclusion window is 4/8 ms
  * at 16 kHz. It indexes impulse-response samples, so the 48-kHz product
- * grid needs 192/384 rather than the old literals. Legacy 8 kHz remains
+ * grid needs 192/384 rather than the 16 kHz literals 64/128. Legacy 8 kHz remains
  * frozen at its established values and is not retuned by this test. */
 static void test_filter_analyzer_rate_scaled_exclusion_window(void) {
     static const int expected_low[] = { 64, 64, 64, 192 };
@@ -224,7 +226,7 @@ static float lcg_uniform(void) {
 }
 
 /* ── (b) impulse-through-linear-path (and, parametrized, through the full
- * AEC3 post-chain) ────────────────────────────────────────────────────── */
+ * post-filter chain) ────────────────────────────────────────────────────── */
 static void run_impulse_test(int enable_res, const char *label) {
     /* A perfectly PERIODIC impulse train is an adversarial input for the online
      * delay estimator: an exactly-periodic comb is ambiguous under any matched
@@ -324,10 +326,10 @@ static void test_impulse_linear_path(void) {
     run_impulse_test(0, "linear-only");   /* aec_wav.c's --no-res knob */
 }
 
-/* Same excitation, full AEC3 post-chain (RES) enabled -- the actual
+/* Same excitation, full post-filter chain (RES) enabled -- the actual
  * production path (BALANCED ships with enable_res=1). test_impulse_linear_path
  * above only ever exercised the linear PBFDKF filter; the 16000/256
- * grid has its own aec3b_rate_cfg() tuning row (CNG/REE/SG parameters) that
+ * grid has its own aecb_rate_cfg() tuning row (CNG/REE/SG parameters) that
  * only this test runs end-to-end. */
 static void test_impulse_res_enabled(void) {
     run_impulse_test(1, "RES-enabled");
@@ -341,7 +343,7 @@ static void test_res_context_wola_identity(void) {
         for (int r = 0; r < N_GRIDS; ++r) {
             int sr = GRIDS[r].sample_rate;
             int fft_size = GRIDS[r].fft_size;
-            const Aec3BalancedRateDims *rd = aec3b_rate_cfg(sr, fft_size);
+            const AecBalancedRateDims *rd = aecb_rate_cfg(sr, fft_size);
             AecConfig cfg;
             Aec aec;
             FftHandle *fft = NULL;
@@ -733,7 +735,7 @@ static void test_suppression_gain_dne_prefix_matches_get_gain(void) {
         /* Phases, driven by the trigger/exit formula's exact inequalities
          * (thresholds in balanced: dne_enr_threshold=0.25,
          * dne_enr_exit_threshold=10, dne_snr_threshold=30 -- see
-         * aec3_balanced_config.h -- margins below are wide enough to hold
+         * aec_balanced_config.h -- margins below are wide enough to hold
          * regardless of the exact per-rate table row). */
         int enter_end = trig_hops + 2;
         int hold_check = enter_end + (hold_hops > 2 ? hold_hops / 2 : 1);
@@ -819,7 +821,7 @@ static void test_static_pool_matches_heap(void) {
         if (rc != 0) continue;
 
         size_t pool_sz = aec_get_mem_size(&cfg);
-        void *pool = malloc(pool_sz);
+        void *pool = aec_test_pool_alloc(pool_sz);
         Aec *aec_static = aec_init(pool, pool_sz, &cfg);
         snprintf(what, sizeof(what), "sr=%d fft=%d: aec_init() for static-vs-heap test", sr, fft_size);
         CHECK(aec_static != NULL, what);
@@ -872,11 +874,11 @@ static void test_mem_size_consistency(void) {
     CHECK(sizes[1] < sizes[2], "mem_size(16000/256) < mem_size(16000/512)");
     CHECK(sizes[2] < sizes[3], "mem_size(16000/512) < mem_size(48000/1024)");
 
-    AecPreset presets[] = { AEC_PRESET_MILD, AEC_PRESET_BALANCED, AEC_PRESET_AGGRESSIVE };
-    const char *preset_names[] = { "mild", "balanced", "aggressive" };
+    AecPreset presets[] = { AEC_PRESET_MILD, AEC_PRESET_BALANCED, AEC_PRESET_AGGRESSIVE, AEC_PRESET_NO_FLOOR };
+    const char *preset_names[] = { "mild", "balanced", "aggressive", "no_floor" };
     for (int r = 0; r < N_GRIDS; ++r) {
         size_t base = 0;
-        for (int p = 0; p < 3; ++p) {
+        for (int p = 0; p < 4; ++p) {
             AecConfig cfg;
             aec_config_from_preset(&cfg, presets[p], GRIDS[r].sample_rate);
             cfg.fft_size = GRIDS[r].fft_size;
@@ -891,7 +893,7 @@ static void test_mem_size_consistency(void) {
     }
 }
 
-/* ── (d) top-level (non-AEC3) constant retiming ──────────────────────────
+/* ── (d) top-level (non-reference) constant retiming ─────────────────────
  * See file header comment. Target: the wall-clock duration/TC each constant
  * is authored to cover at the hop=160/sample_rate=16000 (10 ms) grid. A
  * relative tolerance of 15% comfortably covers integer-hop-count rounding at
@@ -947,7 +949,7 @@ static void test_top_level_constant_retiming(void) {
                     aec.cfg.filter_misadjustment_hangover_frames * hop_ms, 1000.0, HOP_MS_TOL);
 
         /* Time-constant form (EMA "RETENTION" convention -- see
-         * aec3_growth_rehop's doc comment) for the three alpha-shaped
+         * aec_growth_rehop's doc comment) for the three alpha-shaped
          * constants: TC = -hop_seconds / ln(retention). Continuous (no
          * integer rounding), so this should track the legacy target far
          * tighter than the hop-count fields above. */
@@ -985,7 +987,7 @@ static void test_top_level_constant_retiming(void) {
  * (d) above covers the constants that live in AecConfig/EpcDetector. This
  * covers the five that live in the ADAPTATION path -- Aec's own EMAs, the
  * PBFDAF/PBFDKF filter EMAs and the saturation detector's attack/release --
- * which are set in aec_carve()/pbfdkf_init()/saturation_init() rather than
+ * which are set in aec_carve()/pbfdkf_init_static()/saturation_init() rather than
  * read out of the config struct.
  *
  * This asserts the value each instance ACTUALLY ENDS UP WITH at every grid,
@@ -1199,7 +1201,7 @@ static void test_additive_rate_reference_exactness(void) {
     CHECK(other == 0.25f, what);
 
     /* Degenerate grid: fall back to the authored value ("not retimed"), the
-     * same well-defined degradation aec3_growth_rehop() documents, rather
+     * same well-defined degradation aec_growth_rehop() documents, rather
      * than to a division by zero. */
     CHECK(aec_testing_legacy10ms_rate(0.001f, 0, 16000) == 0.001f &&
           aec_testing_legacy10ms_rate(0.001f, 160, 0) == 0.001f,
@@ -1456,14 +1458,24 @@ static DirectProbe pbfdkf_direct_probe(int fft, int hop, int sr, unsigned seed,
     int K = fft / 2 + 1;
     memset(&out, 0, sizeof(out));
 
-    if (pbfdkf_init(&p, fft / 2, N_PART, 0.3f, 1e-6f, hop, sr) != 0)
+    FftHandle *shared_fft = fft_create(fft);
+    size_t pool_bytes = pbfdkf_get_mem_size(fft / 2, N_PART, hop);
+    void *pool = aec_test_pool_alloc(pool_bytes);
+    if (!shared_fft || !pool ||
+        pbfdkf_init_static(&p, pool, pool_bytes, fft / 2, N_PART, 0.3f, 1e-6f,
+                           hop, sr, shared_fft) != 0) {
+        if (shared_fft) fft_destroy(shared_fft);
+        free(pool);
         return out;
+    }
 
     float *mic = (float*)calloc((size_t)hop, sizeof(float));
     float *far = (float*)malloc((size_t)hop * sizeof(float));
     float *res = (float*)malloc((size_t)hop * sizeof(float));
     if (!mic || !far || !res) {
-        free(mic); free(far); free(res); pbfdkf_free(&p); return out;
+        free(mic); free(far); free(res); pbfdkf_free(&p);
+        fft_destroy(shared_fft); free(pool);
+        return out;
     }
     g_lcg_state = seed;
     for (int i = 0; i < hop; ++i) {
@@ -1510,6 +1522,7 @@ static DirectProbe pbfdkf_direct_probe(int fft, int hop, int sr, unsigned seed,
 
     free(mic); free(far); free(res);
     pbfdkf_free(&p);
+    fft_destroy(shared_fft); free(pool);
     return out;
 }
 
@@ -1545,8 +1558,8 @@ static void test_alpha_r_reaches_the_direct_pbfdkf_path(void) {
          * `a` comes out of the two sums alone -- no assumption about the
          * signal, the filter state, or the number of bins that converged. */
         const double a_meas = (p2.psd_sum - p1.psd_sum) / (K * old2);
-        const double a_field = (double)aec3_growth_rehop(0.95f, 160, 16000,
-                                                         hop, sr);
+        const double a_field = (double)aec_growth_rehop(0.95f, 160, 16000,
+                                                        hop, sr);
 
         snprintf(what, sizeof(what),
                  "sr=%d fft=%d: error_psd EMA actually applied alpha=%.6f, "
@@ -1664,10 +1677,10 @@ static void test_simple_mu_frozen_exception(void) {
         /* Prove the default grid distinguishes the frozen policy from the
          * rejected wall-clock retime. */
         if (sr == 16000 && fft == 256) {
-            CHECK(aec3_ms_to_hops(200.0f, hop, sr) != 20,
+            CHECK(aec_ms_to_hops(200.0f, hop, sr) != 20,
                   "default grid distinguishes frozen and retimed holdoff");
             for (int i = 0; i < 3; ++i) {
-                float retimed = aec3_growth_rehop(expected_alpha[i], 160,
+                float retimed = aec_growth_rehop(expected_alpha[i], 160,
                                                    16000, hop, sr);
                 CHECK(fabsf(retimed - expected_alpha[i]) > 1e-5f,
                       "default grid distinguishes frozen and retimed alpha");
@@ -1788,7 +1801,7 @@ static void test_filter_restart_clears_derived_counters(void) {
 }
 
 /* The partition constraint is an overlap-save validity boundary, not a
- * cosmetic taper: AEC3 keeps every causal coefficient and clears the complete
+ * cosmetic taper: the reference keeps every causal coefficient and clears the complete
  * circular half.  Pin the actual table at every supported grid so a future
  * smoothing retune cannot silently put non-causal taps back into W. */
 static void test_td_constraint_strict_half_zero(void) {
@@ -1799,12 +1812,18 @@ static void test_td_constraint_strict_half_zero(void) {
         PBFDAF filter;
         char what[192];
         int ok = 1;
+        FftHandle *shared_fft = fft_create(fft);
+        size_t pool_bytes = pbfdaf_get_mem_size(fft, 2, hop, 1);
+        void *pool = aec_test_pool_alloc(pool_bytes);
 
-        if (pbfdaf_init(&filter, fft, 2, 0.3f, 1e-6f,
-                        hop, 1, sr) != 0) {
+        if (!shared_fft || !pool ||
+            pbfdaf_init_static(&filter, pool, pool_bytes, fft, 2, 0.3f, 1e-6f,
+                               hop, 1, sr, shared_fft) != 0) {
             snprintf(what, sizeof(what),
                      "sr=%d fft=%d: build filter for TD constraint", sr, fft);
             CHECK(0, what);
+            if (shared_fft) fft_destroy(shared_fft);
+            free(pool);
             continue;
         }
         for (int i = 0; i < fft; ++i) {
@@ -1819,6 +1838,8 @@ static void test_td_constraint_strict_half_zero(void) {
                  sr, fft);
         CHECK(ok, what);
         pbfdaf_free(&filter);
+        fft_destroy(shared_fft);
+        free(pool);
     }
 }
 

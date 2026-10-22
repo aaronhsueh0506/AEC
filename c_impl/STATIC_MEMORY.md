@@ -13,7 +13,12 @@ are identical within the same FFT backend.
 - `aec_destroy` releases heap instances. It is a no-op for pool instances; the
   caller still owns and releases the pool.
 - The static path performs no heap allocation from initialization through
-  destruction on KISS and NE10. `test/test_zero_heap_aec.c` enforces this.
+  destruction. `test/test_zero_heap_aec.c` enforces this.
+- Heap construction also aligns its arena to 16 bytes explicitly; an ILP32
+  allocator's natural 8-byte alignment is insufficient for carved subobjects.
+- Pool sizes and public structure layouts belong to the compiled ABI. Query
+  them on the target; do not reuse an ARM64 pool-size literal or raw instance
+  image in an ARM32 program.
 
 ## Example
 
@@ -75,15 +80,15 @@ Audio_ALG production pipelines accept only the three rows above.
 Pool size depends on the complete config, backend and target ABI. Do not copy a
 checked-in byte count into firmware. Query `aec_get_mem_size` and reserve that
 exact result in the board memory map. For orientation, the balanced 16 kHz
-build measured on the current host, at the default `delay_mode = MATCHED` /
-`delay_num_filters = 5`, is:
+build with the NE10 FFT backend (the only backend), measured on the current
+host at the default `delay_mode = MATCHED` / `delay_num_filters = 5`, is:
 
-| Backend | 256 / 128 | 512 / 256 |
-|---|---:|---:|
-| KISS | 400,480 B | 530,992 B |
-| NE10 | 399,872 B | 529,616 B |
+| FFT / hop | Pool size |
+|---:|---:|
+| 256 / 128 | 398,768 B |
+| 512 / 256 | 527,488 B |
 
-These four figures move with `Aec`/`AecConfig`'s own struct size whenever a
+These figures move with `Aec`/`AecConfig`'s own struct size whenever a
 field is added or removed, so they are re-measured fresh at each revision
 rather than carried forward — do not patch them by hand against a diff;
 re-run `aec_get_mem_size()` (or `make test-delay-num-filters`) and copy its
@@ -130,10 +135,9 @@ make test-static-aec TEST_STATIC_MIC=mic.wav TEST_STATIC_REF=ref.wav TEST_STATIC
 test/docs_smoke.sh
 ```
 
-Repeat with `BACKEND=ne10` for the embedded FFT backend. Heap-vs-pool equality
-is checked within each backend; KISS and NE10 are not expected to be
-bit-identical to each other. `make test-zero-heap` runs the allocator-hook
-acceptance test for the complete static-pool lifecycle.
+Heap-vs-pool equality is checked by `make test-static-aec`.
+`make test-zero-heap` runs the allocator-hook acceptance test for the complete
+static-pool lifecycle.
 
 For firmware builds without hosted I/O, use `NO_STDIO=1` and run
 `make audit-no-stdio`. For the complete public lifecycle and streaming API,

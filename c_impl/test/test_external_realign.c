@@ -2,8 +2,8 @@
  * wrapper's output discontinuity.
  *
  * An AEC_DELAY_EXTERNAL_ALIGNED instance converges while the caller serves
- * one far alignment; the caller then changes the alignment. The old wrapper
- * response -- full aec_reset() -- wipes the converged filter, so the echo is
+ * one far alignment; the caller then changes the alignment. A full
+ * aec_reset() response wipes the converged filter, so the echo is
  * fully re-exposed for dozens of hops (bright broadband line) and the WOLA
  * restart adds a near-zero output hop (dark line). On this exact
  * scene with the full reset: linear residual jumped 0.030 -> 0.075 (~= the 0.076
@@ -26,7 +26,7 @@
  *      alignment between bursts, i.e. the common case -- would read "not
  *      cancelling" on a filter cancelling at 13 dB and fall to the reset
  *      branch for nothing. aec_linear_is_cancelling()'s windowed reading is
- *      what still knows. (Needs the AEC3 post chain to run -- context-only is
+ *      what still knows. (Needs the post-filter chain to run -- context-only is
  *      enough -- since that is what maintains the windowed ERLE.)
  *   6. THE RESET BRANCH ACTUALLY RECONVERGES. When the gate legitimately
  *      rejects, the taps sit at the alignment the caller abandoned. Keeping
@@ -42,7 +42,7 @@
 #include <string.h>
 
 #include "aec.h"
-#include "aec_simd_kernels.h"
+#include "utility/simd_aec.h"
 
 #define SR   16000
 #define FFT  512
@@ -140,8 +140,8 @@ static void run_silent_hop(Aec* a, float* out)
     aec_process(a, zero, zero, out);
 }
 
-/* res_context=1 keeps the AEC3 post chain running in context-only mode: the
- * emitted samples are still exactly the linear residual (aec3_post_run's
+/* res_context=1 keeps the post-filter chain running in context-only mode: the
+ * emitted samples are still exactly the linear residual (aec_post_run's
  * context_only path forwards raw_output untouched), but the windowed-ERLE
  * bookkeeping the realign gate reads is maintained. That is the seam
  * configuration a 4-lane wrapper -- the caller this API exists for -- runs. */

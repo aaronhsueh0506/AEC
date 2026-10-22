@@ -733,6 +733,16 @@ class SuppressionGain:
         self._check_split_floor_db(db, "split_floor_dt_db")
         self._split_floor_dt = _db_to_power_f32(db)
 
+    # ── Runtime floor-gate retarget ────────────────────────────────────────
+    # Same deliberate asymmetry as set_split_floor_dt_db above: a boolean
+    # gate has no continuum to ramp across, so it steps immediately rather
+    # than walking like set_split_floor_far_active_db does. Mirrors the C
+    # twin's suppression_gain_set_split_floor_enabled(). No validation is
+    # needed -- any truthy/falsy value coerces, matching set_initial_state's
+    # own contract exactly.
+    def set_split_floor_enabled(self, enabled: bool) -> None:
+        self._split_floor_enabled = bool(enabled)
+
     def set_initial_state(self, state: bool) -> None:
         self._initial_state = bool(state)
 

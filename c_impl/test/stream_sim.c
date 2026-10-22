@@ -1,6 +1,13 @@
 /* stream_sim.c — streaming API verification (no Python golden needed).
  *
- * Four checks:
+ * Five checks, run on every supported grid (16 kHz/256, 16 kHz/512,
+ * 48 kHz/1024 and the legacy 8 kHz/256):
+ *   0. CAPACITY — fifo_cap_hops is the documented 320 ms of render hops,
+ *      rounded up to a power of two (aec_derive_dims). It differs per grid:
+ *      the hop is 8 ms at 16 kHz/256, so 320 ms is 40 hops and the ring is 64;
+ *      the other grids land on 32. The later checks size their pushes from
+ *      the instance's own fifo_cap_hops, so this is the check that pins the
+ *      capacity rule itself.
  *   1. LOCKSTEP EQUIVALENCE — feeding the same (mic,ref) through aec_process()
  *      vs through aec_analyze_render()+aec_process_capture() in lockstep yields
  *      BYTE-IDENTICAL output. This is the bit-exact-preservation guarantee:
@@ -17,13 +24,10 @@
  *      heals the occupancy to <=1, and the following render+capture pair is
  *      back to NONE/NONE.
  *
- * Build (from c_impl/); the FFT wrapper now lives in the shared audio_common
- * archive:
- *   make -C ../../audio_common BACKEND=ne10 lib
- *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=gnu99 -Iinclude -I../../audio_common/include \
- *       $(find src -name '*.c') test/stream_sim.c \
- *       $(make -s -C ../../audio_common BACKEND=ne10 print-lib-path) -lm -o /tmp/stream_sim
- *   /tmp/stream_sim
+ * Build and run (from c_impl/; the FFT wrapper lives in the shared
+ * audiolib archive, which the Makefile resolves):
+ *   make test-stream-sim
+ *   make test-stream-sim SIMD=0
  */
 #include "aec.h"
 
@@ -31,6 +35,13 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+
+/* The documented render-FIFO span (README "320 ms render FIFO"; aec.c
+ * AEC_STREAM_FIFO_MS). Restated here on purpose: the test pins the rule
+ * rather than echoing whatever the library computed. */
+#define FIFO_SPAN_MS 320
+/* Renders pushed past capacity in the overrun check. */
+#define OVERRUN_EXTRA 68
 
 /* Deterministic LCG — no Math.random / time. */
 static unsigned int g_lcg = 0x12345678u;
@@ -55,13 +66,23 @@ static void gen_signal(float *mic, float *ref, int n) {
     }
 }
 
-int main(void) {
-    const int sr = 16000;
+static int next_pow2_int(int v) {
+    int p = 1;
+    while (p < v) p <<= 1;
+    return p;
+}
+
+/* Runs all checks on one grid; returns 0 on success, 1 on a check failure,
+ * 2 on a setup failure. */
+static int run_grid(int sr, int fft) {
     AecConfig cfg; aec_config_from_preset(&cfg, AEC_PRESET_BALANCED, sr);
+    cfg.fft_size = fft;
+    printf("---- grid %d Hz / fft %d ----\n", sr, fft);
 
     Aec a_off, a_str;
     if (aec_create(&a_off, &cfg) || aec_create(&a_str, &cfg)) {
-        fprintf(stderr, "aec_create failed\n"); return 2;
+        fprintf(stderr, "aec_create failed (%d Hz / fft %d)\n", sr, fft);
+        return 2;
     }
     const int hop = aec_hop_size(&a_off);
     const int n_hops = 400;
@@ -69,6 +90,25 @@ int main(void) {
     float *ref = malloc(sizeof(float) * hop);
     float *out_off = malloc(sizeof(float) * hop);
     float *out_str = malloc(sizeof(float) * hop);
+    int rc = 1;
+
+    /* ---- Check 0: FIFO capacity rule ---- */
+    {
+        int want = (FIFO_SPAN_MS * sr / 1000 + hop - 1) / hop;
+        if (want < 2) want = 2;
+        want = next_pow2_int(want);
+        const int got = a_str.fifo_cap_hops;
+        const double span_ms = 1000.0 * (double)got * (double)hop / (double)sr;
+        if (got != want || span_ms < (double)FIFO_SPAN_MS) {
+            printf("FAIL: FIFO capacity — hop %d, got fifo_cap_hops=%d (%.1f ms),"
+                   " expected %d (320 ms of hops rounded up to a power of two)\n",
+                   hop, got, span_ms, want);
+            goto done;
+        }
+        printf("PASS: FIFO capacity — hop %d samples, fifo_cap_hops=%d (%.1f ms)\n",
+               hop, got, span_ms);
+    }
+    const int cap = a_str.fifo_cap_hops;
 
     /* ---- Check 1: lockstep equivalence ---- */
     long mismatches = 0;
@@ -81,9 +121,9 @@ int main(void) {
         AecBufferingEvent ev1 = aec_analyze_render(&a_str, ref); /* streaming */
         AecBufferingEvent ev2 = aec_process_capture(&a_str, mic, out_str);
         if (ev1 != AEC_BUF_NONE || ev2 != AEC_BUF_NONE) {
-            fprintf(stderr, "FAIL: unexpected event in lockstep h=%d (%d,%d)\n",
-                    h, ev1, ev2);
-            return 1;
+            printf("FAIL: unexpected event in lockstep h=%d (%d,%d)\n",
+                   h, ev1, ev2);
+            goto done;
         }
         if (memcmp(out_off, out_str, (size_t)hop * sizeof(float)) != 0)
             mismatches++;
@@ -91,40 +131,41 @@ int main(void) {
     if (mismatches) {
         printf("FAIL: lockstep equivalence — %ld/%d hops differ\n",
                mismatches, n_hops);
-        return 1;
+        goto done;
     }
     printf("PASS: lockstep equivalence — 0/%d hops differ (byte-exact)\n", n_hops);
 
     /* ---- Check 2: overrun (push > capacity renders before a capture) ---- */
     aec_reset(&a_str);
-    /* fifo_cap is 32 @ 16 kHz (AEC_STREAM_FIFO_MS=320 / hop=10 ms, rounded up
-     * to the next power of two by aec_derive_dims -- already a power of two
-     * at this rate, so no growth). The streaming FIFO is drop-new: the ring
-     * fills after the first 32 renders (fifo_write - fifo_read reaches cap
-     * with zero capture calls to drain it), and every render after that is
-     * dropped, so pushing 100 renders with no intervening capture must
-     * report exactly 100-32=68 overruns -- not just "at least one". */
+    /* The streaming FIFO is drop-new: the ring fills after the first `cap`
+     * renders (fifo_write - fifo_read reaches cap with zero capture calls to
+     * drain it), and every render after that is dropped, so pushing
+     * cap + OVERRUN_EXTRA renders with no intervening capture must report
+     * exactly OVERRUN_EXTRA overruns -- not just "at least one". `cap` is
+     * the capacity Check 0 just verified (64 at 16 kHz/256, 32 elsewhere);
+     * it is NOT a constant. */
     int overrun_count = 0;
-    for (int h = 0; h < 100; ++h) {
+    for (int h = 0; h < cap + OVERRUN_EXTRA; ++h) {
         gen_signal(mic, ref, hop);
         AecBufferingEvent ev = aec_analyze_render(&a_str, ref);
-        if (h < 32) {
+        if (h < cap) {
             if (ev != AEC_BUF_NONE) {
                 printf("FAIL: overrun count — render %d expected NONE, got %d\n", h, ev);
-                return 1;
+                goto done;
             }
         } else {
             if (ev != AEC_BUF_RENDER_OVERRUN) {
                 printf("FAIL: overrun count — render %d expected OVERRUN, got %d\n", h, ev);
-                return 1;
+                goto done;
             }
             overrun_count++;
         }
     }
-    int overrun_seen = (overrun_count == 68);
-    printf("%s: overrun count exactly 68/100 (first 32 NONE, then 68 OVERRUN)\n",
-           overrun_seen ? "PASS" : "FAIL");
-    if (!overrun_seen) return 1;
+    int overrun_seen = (overrun_count == OVERRUN_EXTRA);
+    printf("%s: overrun count exactly %d/%d (first %d NONE, then %d OVERRUN)\n",
+           overrun_seen ? "PASS" : "FAIL", overrun_count, cap + OVERRUN_EXTRA,
+           cap, OVERRUN_EXTRA);
+    if (!overrun_seen) goto done;
 
     /* ---- Check 3: underrun (capture with empty FIFO) + recovery ---- */
     aec_reset(&a_str);
@@ -138,7 +179,7 @@ int main(void) {
     int recovered = (rev == AEC_BUF_NONE);
     printf("%s: underrun detected on empty FIFO; %s: recovered to NONE\n",
            underrun_ok ? "PASS" : "FAIL", recovered ? "PASS" : "FAIL");
-    if (!underrun_ok || !recovered) return 1;
+    if (!underrun_ok || !recovered) goto done;
 
     /* ---- Check 4: consumer catch-up ---- */
     aec_reset(&a_str);
@@ -150,7 +191,7 @@ int main(void) {
         AecBufferingEvent ev = aec_analyze_render(&a_str, ref);
         if (ev != AEC_BUF_NONE) {
             printf("FAIL: catch-up setup — render %d expected NONE, got %d\n", h, ev);
-            return 1;
+            goto done;
         }
     }
     /* Single-threaded peek (no atomics needed -- this is the test harness,
@@ -159,7 +200,7 @@ int main(void) {
     if (occ_before != (unsigned)a_str.fifo_cap_hops) {
         printf("FAIL: catch-up setup — ring not full (occupancy=%u, cap=%d)\n",
                occ_before, a_str.fifo_cap_hops);
-        return 1;
+        goto done;
     }
     AecBufferingEvent catchup_ev = aec_process_capture(&a_str, mic, out_str);
     int catchup_ok = (catchup_ev == AEC_BUF_RENDER_OVERRUN);
@@ -167,7 +208,7 @@ int main(void) {
     int healed = (occ_after <= 1u);
     printf("%s: catch-up capture reports OVERRUN; %s: occupancy heals to <=1 (occ=%u)\n",
            catchup_ok ? "PASS" : "FAIL", healed ? "PASS" : "FAIL", occ_after);
-    if (!catchup_ok || !healed) return 1;
+    if (!catchup_ok || !healed) goto done;
 
     /* The very next render+capture pair must be back to a clean NONE/NONE
      * lockstep -- the catch-up must not leave any lingering skew. */
@@ -177,10 +218,28 @@ int main(void) {
     int recovered2 = (rev2 == AEC_BUF_NONE && cev2 == AEC_BUF_NONE);
     printf("%s: post-catch-up render+capture pair is NONE/NONE\n",
            recovered2 ? "PASS" : "FAIL");
-    if (!recovered2) return 1;
+    if (!recovered2) goto done;
+    rc = 0;
 
+done:
     aec_destroy(&a_off); aec_destroy(&a_str);
     free(mic); free(ref); free(out_off); free(out_str);
+    return rc;
+}
+
+int main(void) {
+    static const struct { int sr, fft; } grids[] = {
+        { 16000, 256 }, { 16000, 512 }, { 48000, 1024 }, { 8000, 256 },
+    };
+    int rc = 0;
+    for (size_t i = 0; i < sizeof grids / sizeof grids[0]; ++i) {
+        int r = run_grid(grids[i].sr, grids[i].fft);
+        if (r) {
+            printf("FAIL: grid %d Hz / fft %d (rc=%d)\n", grids[i].sr, grids[i].fft, r);
+            rc = 1;
+        }
+    }
+    if (rc) return rc;
     printf("\nALL STREAMING CHECKS PASSED\n");
     return 0;
 }

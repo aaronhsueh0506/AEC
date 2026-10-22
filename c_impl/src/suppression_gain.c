@@ -6,22 +6,22 @@
  *    SuppressionGainConfig thresholds) is float32, single rounding per op;
  *    native C float arithmetic throughout.
  *  - np.sum/np.mean-equivalent reductions over f32 stay pairwise float32
- *    (f32_pairwise_sum / the local float32 pairwise-sum helper below).
+ *    (sk_pairwise_sum_tailfold_b_f32 / the local f32_sum_slice helper below).
  *  - np.exp/np.sqrt equivalents use fast_exp/fast_sqrt (float32).
  */
 #include "suppression_gain.h"
 
 #include <assert.h>
 #include <string.h>
-#include "fast_math.h"
-#include "aec_simd_kernels.h"
-#include "aec3_scale.h"
+#include "utility/fast_math.h"
+#include "utility/simd_aec.h"
+#include "aec_scale.h"
 
 
 /* float32 sum of a sub-slice a[lo:hi) via the canonical pairwise sum. */
 static float f32_sum_slice(const float *a, int lo, int hi) {
     if (hi <= lo) return 0.0f;
-    return f32_pairwise_sum(a + lo, (size_t)(hi - lo));
+    return sk_pairwise_sum_tailfold_b_f32(a + lo, (size_t)(hi - lo));
 }
 
 /* ---------------------------------------------------------------- helpers */
@@ -70,7 +70,7 @@ void suppression_gain_init(SuppressionGain *sg,
         sg->last_echo[k] = 0.0f;
     }
     sg->low_render_avg_power = 32768.0f * 32768.0f;
-    /* AEC3 power IIR (average_power = 0.9*avg + 0.1*x2) is per-4ms-block; a bare
+    /* Power IIR (average_power = 0.9*avg + 0.1*x2) is per-4ms-block; a bare
      * hardcoded 0.9f/0.1f has no rate conversion at all (the correct per-hop
      * alpha at hop=160/sr=16000 is 1-0.9^2.5 ~= 0.2316, not 0.1). The
      * wall-clock-rescaled form below mirrors suppression_gain.py's
@@ -78,7 +78,7 @@ void suppression_gain_init(SuppressionGain *sg,
      * the Python default -- is OFF (cfg->use_wallclock_ema_alpha=0); see
      * suppression_gain.h. */
     if (cfg->use_wallclock_ema_alpha) {
-        float alpha = aec3_per_block_ema_alpha_to_per_hop(
+        float alpha = aec_per_block_ema_alpha_to_per_hop(
             0.1f, cfg->hop_size, cfg->sr);
         sg->low_render_iir_decay = 1.0f - alpha;
         sg->low_render_iir_weight = alpha;
@@ -156,7 +156,7 @@ int suppression_gain_set_split_floor_far_active_db(SuppressionGain *sg,
 
     hops = 0;
     if (ramp_ms > 0.0f && target > 0.0f && live > 0.0f && live != target) {
-        /* aec3_ms_to_hops() ends in a float->int conversion that would be
+        /* aec_ms_to_hops() ends in a float->int conversion that would be
          * undefined for a large enough input; the SG_SPLIT_FLOOR_RAMP_MS_MAX
          * check above is what keeps it in range, since sr and hop_size only
          * ever come from the library's fixed grid table (worst case
@@ -164,7 +164,7 @@ int suppression_gain_set_split_floor_far_active_db(SuppressionGain *sg,
          * open-coding the division is also what makes this path round exactly
          * the way every other ms-authored constant does -- and the way the
          * Python reference's float32 twin does. */
-        hops = aec3_ms_to_hops(ramp_ms, sg->cfg.hop_size, sg->cfg.sr);
+        hops = aec_ms_to_hops(ramp_ms, sg->cfg.hop_size, sg->cfg.sr);
         if (hops < 1) hops = 1;
     }
 
@@ -201,6 +201,18 @@ int suppression_gain_set_split_floor_dt_db(SuppressionGain *sg, float db) {
     return 0;
 }
 
+/* See suppression_gain.h's comment on this function for why a boolean gate
+ * steps rather than ramps. A plain coerce-and-store, no range to validate --
+ * same shape as suppression_gain_set_split_floor_dt_db() above, minus the
+ * float range check. Python's SuppressionGain.set_split_floor_enabled() /
+ * AEC.set_preset() (orchestrator.py) have the identical step-not-ramp
+ * contract. */
+int suppression_gain_set_split_floor_enabled(SuppressionGain *sg, int enabled) {
+    if (!sg) return -1;
+    sg->cfg.split_floor_enabled = enabled ? 1 : 0;
+    return 0;
+}
+
 int suppression_gain_is_dominant_nearend(const SuppressionGain *sg) {
     return sg->dne_nearend_state ? 1 : 0;
 }
@@ -221,16 +233,16 @@ static int low_noise_render_detect(SuppressionGain *sg, const float *rb,
     float x2_sum, x2_max;
     int low_noise, i;
     *x2_sum_out = 0.0f;
-    if (hop == 0) return 0;
+    if (hop <= 0 || hop > (int)(sizeof(x2) / sizeof(x2[0]))) return 0;
     /* x2[i] = rb[i]*rb[i]; sk_sq_scale_f32 with scale=1.0f is bit-exact here
      * ((x*x)*1.0f == x*x for every finite value, no rounding change). */
     sk_sq_scale_f32(rb, 1.0f, x2, hop);
-    x2_sum = f32_pairwise_sum(x2, (size_t)hop);
+    x2_sum = sk_pairwise_sum_tailfold_b_f32(x2, (size_t)hop);
     *x2_sum_out = x2_sum;
     x2_max = x2[0];
     for (i = 1; i < hop; ++i) if (x2[i] > x2_max) x2_max = x2[i];
     /* Normalize average_power to per-sample before peak comparison.
-     * AEC3 uses 64-sample blocks; at larger hop sizes, average_power is
+     * The reference uses 64-sample blocks; at larger hop sizes, average_power is
      * hop/64 times larger for the same RMS, making the peak-rejection
      * 2.5x too loose at hop=160.  Mirror Python: avg_per_sample = avg*(64/hop). */
     {
@@ -545,7 +557,7 @@ static void gain_to_no_audible_echo(SuppressionGain *sg, const float *nearend,
 }
 
 /* _limit_lf_gains — mirrors Python: np.minimum(gain[:lf_clamp_bin], gain[lf_clamp_bin]).
- * AEC3 native fft=128 uses hardcoded bins 0-2 (≤125 Hz); our fft=512 needs
+ * The reference's native fft=128 uses hardcoded bins 0-2 (≤125 Hz); our fft=512 needs
  * 9 bins (0-250 Hz).  lf_clamp_bin = hz_to_bin(250 Hz) = 8 at 16 kHz / 512-pt. */
 static void limit_lf_gains(float *gain, int n, int lf_clamp_bin) {
     if (lf_clamp_bin > 0 && lf_clamp_bin < n) {

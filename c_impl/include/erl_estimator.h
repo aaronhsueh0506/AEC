@@ -1,5 +1,5 @@
 /* erl_estimator.h — C port of python/modules/state/erl_estimator.py
- * (which mirrors AEC3 erl_estimator.{cc,h}).
+ * (the reference per-bin ERL estimator).
  *
  * Per-bin echo return loss (ERL = Y²/X²) with minimum-statistics tracking:
  *   - per-bin _erl[k] for k=1..n_bins-2 (endpoints mirror neighbours)
@@ -24,8 +24,8 @@
  *     erl[k]    = min(1000.0f, 2.0f*erl[k])      -> float32 compare (doubling)
  *
  *   Fullband: x2_sum/y2_sum are numpy-pairwise float32 sums
- *   (f32_pairwise_sum); the ratio/EMA/doubling that follow are float32
- *   end-to-end.
+ *   (sk_pairwise_sum_tailfold_b_f32); the ratio/EMA/doubling that follow are
+ *   float32 end-to-end.
  *
  * Built with -ffp-contract=off so the per-op roundings are not fused.
  */
@@ -41,19 +41,15 @@ extern "C" {
 /* ── Constants (erl_estimator.py module level) ───────────────────────────── */
 #define ERL_MIN_ERL  0.01f    /* _MIN_ERL */
 #define ERL_MAX_ERL  1000.0f  /* _MAX_ERL */
-/* _AEC3_X2_MIN source constant, passed as the `calibrated_value` argument to
- * the shared aec3_per_bin_psd_threshold() helper (aec3_scale.h/.c, itself
+/* The reference X2-minimum constant, passed as the `calibrated_value` argument to
+ * the shared aec_per_bin_psd_threshold() helper (aec_scale.h/.c, itself
  * float32-typed and outside this conversion's file set). The float32 result
  * of that call is stored directly at the `x2_min` store in
  * erl_estimator_init(). _HOLD_HOPS = int(4.0 * HOPS_PER_SECOND) = 400. */
-#define ERL_AEC3_X2_MIN  44015068.0f
-/* hold_hops (AEC3 1000 blocks, ~4 s; 400 at hop=160/sr=16000) is computed
+#define ERL_X2_MIN  44015068.0f
+/* hold_hops (1000 blocks, ~4 s; 400 at hop=160/sr=16000) is computed
  * live in erl_estimator_init() from hop_size/sample_rate -- see the
  * ErlEstimator.hold_hops field below. */
-
-/* numpy 1.26 pairwise float32 sum (declared in reverb_frequency_response.c).
- * Reused here for float(np.sum(x2)) / float(np.sum(y2)). */
-float f32_pairwise_sum(const float *a, size_t n);
 
 /* ── ErlEstimator ─────────────────────────────────────────────────────────
  * Caller provides backing storage:
@@ -62,9 +58,9 @@ float f32_pairwise_sum(const float *a, size_t n);
 typedef struct {
     int     startup_hops;          /* _startup_hops               */
     int     n_bins;                /* _n_bins                     */
-    int     hold_hops;             /* live-computed, was ERL_HOLD_HOPS */
+    int     hold_hops;             /* derived from the live grid (hop/sample rate) */
     float   x2_min;                /* _x2_min (float32; result of
-                                     * aec3_per_bin_psd_threshold(), itself float32) */
+                                     * aec_per_bin_psd_threshold(), itself float32) */
     float   x2_min_total;          /* = x2_min * (float)n_bins, cached at init */
     float  *erl;                   /* _erl,           length n_bins     */
     int    *hold_counters;         /* _hold_counters, length n_bins-2   */
@@ -73,7 +69,7 @@ typedef struct {
     int     blocks_since_reset;    /* _blocks_since_reset         */
 } ErlEstimator;
 
-/* hop_size feeds aec3_per_bin_psd_threshold(44015068.0, hop_size) for x2_min.
+/* hop_size feeds aec_per_bin_psd_threshold(44015068.0, hop_size) for x2_min.
  * sample_rate (with hop_size) drives the live hold_hops computation. */
 void erl_estimator_init(ErlEstimator *e, int startup_phase_length_hops,
                         int n_bins, int hop_size, int sample_rate,
@@ -86,10 +82,6 @@ void erl_estimator_update(ErlEstimator *e,
                           const float *render_psd,
                           const float *capture_psd,
                           int converged_filter);
-
-/* Accessors. erl() returns the internal _erl pointer (length n_bins). */
-const float *erl_estimator_erl(const ErlEstimator *e);
-float erl_estimator_erl_time_domain(const ErlEstimator *e);
 
 #ifdef __cplusplus
 }

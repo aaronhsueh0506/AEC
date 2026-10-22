@@ -1,0 +1,460 @@
+/* delay_aec.h — C port of python/modules/delay/ (the matched-filter
+ * delay-estimation package). The ENTIRE C delay chain (decimator biquads,
+ * matched-filter dot products / NLMS update, error_sum_anchor /
+ * x2_sum_threshold scalars, the confidence getter) runs float32
+ * unconditionally -- an intentional divergence from the Python float64
+ * reference. The chain is not bit-exact to Python by design;
+ * test/parity_aec_e2e.c bounds the end-to-end difference.
+ *
+ * Chain (mirrors the Python package):
+ *   Decimator x4 (cascaded biquad LP + HP; Python runs float64, C runs
+ *   float32 -- see the divergence note above)
+ *     -> DownsampledRenderBuffer (forward-stored ring)
+ *       -> MatchedFilter bank (num_filters NLMS cross-correlators)
+ *         -> MatchedFilterLagAggregator (250-estimate histogram +
+ *            PreEchoLagAggregator)
+ *           -> ClockdriftDetector
+ *   + EchoPathDelayEstimator (the 64-sample inner-block edge-chunker draining
+ *     160-sample hops) + LegacyDelayShim (the adapter the orchestrator uses).
+ *
+ * Public surface mirrors LegacyDelayShim:
+ *   delay_aec_get_mem_size(sr, hop, n) -> size_t  (pool bytes for this config)
+ *   delay_aec_init(d, mem, bytes, sr, hop, n) -> 0/-1  (pool-first lifecycle)
+ *   delay_aec_accumulate(d, near[hop], far[hop], hop)  -- per-hop drive
+ *   delay_aec_estimated_delay(d)  -> int    (-1 until first estimate)
+ *   delay_aec_confidence(d)       -> float  (0.0 / 0.5 / 1.0)
+ *   delay_aec_is_solid(d)         -> int    (confidence >= 1.0)
+ *   delay_aec_n_updates(d)        -> int    (estimate_count)
+ *
+ * NUMERICS (numpy 1.26 reference; -ffp-contract=off mandatory). The C side is
+ * float32 throughout:
+ *   - Decimator biquads: Python b/a/z are float64, each section direct-form-II
+ *     transposed, output cast to float32 per sample then strided [::4]. The C
+ *     port (DaBiquad) runs the whole cascade in float32 -- an intentional
+ *     divergence.
+ *   - The NLMS update `h += alpha * x_window` follows the numpy ARRAY scalar
+ *     rule: alpha is value-cast to float32 FIRST, then the per-tap product and
+ *     add are computed in float32. The C port computes alpha directly as a
+ *     float32 expression (no double intermediate).
+ *   - `instantaneous * one_over_anchor` and `0.015 * (norm - accumulated)`
+ *     are also the array scalar rule (scalar cast to f32, op in f32); the C
+ *     port carries one_over_anchor as float32 end to end.
+ *   - The dot products `np.dot(h, x)` / `np.dot(x, x)` are float32 inputs.
+ *     numpy routes these through OpenBLAS SDOT (a CPU-dispatched AVX kernel
+ *     that is NOT portably bit-reproducible). The matched-filter's two
+ *     512-tap dot products (da_dot_f32 in delay_aec.c) accumulate in
+ *     float32 directly (block-wise NEON matched-filter style). The smaller
+ *     16-sample error_sum_anchor dot (delay_aec_dot) also accumulates in
+ *     float32. The matched-filter peak (argmax h^2) and the histogram-voted
+ *     lag are robust to the sub-ULP/f32 accumulation difference in practice,
+ *     but are not guaranteed bit-exact to Python by construction.
+ *   - argmax = numpy argmax = FIRST max index on ties.
+ *   - int(round())/lrint not needed here: every quantisation is integer
+ *     floor (// ) or bit-shift, reproduced verbatim.
+ */
+#ifndef AEC_DELAY_AEC_H
+#define AEC_DELAY_AEC_H
+
+#include <stddef.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* ============================ MEMORY CONTRACT ============================
+ * POOL-FIRST, CONFIG-SIZED. Every array whose length depends on the runtime
+ * bank size -- the matched-filter coefficient bank, its accumulated-error
+ * rows, the down-sampled render ring, and both lag histograms -- is carved
+ * from a CALLER-OWNED block by delay_aec_init(), sized by
+ * delay_aec_get_mem_size() for that exact (sample_rate, hop_size,
+ * num_filters) triple. The struct below keeps only scalars, biquad state, the
+ * 64-sample edge-chunker buffers, and pointers.
+ *
+ * The pool size is a function of the init config (as for the AEC as a whole
+ * -- aec_get_mem_size(cfg)), so a short bank saves BYTES as well as MACs.
+ * n=1 saves ~23 KB against n=5 at every grid.
+ *
+ * Consequences the caller must respect:
+ *   - There is exactly ONE canonical lifecycle: get_mem_size -> init. There
+ *     is no construct-in-place-from-a-bare-struct entry point; a `DelayAec`
+ *     that was never handed a pool has NULL array pointers.
+ *   - num_filters (like sample_rate and hop_size) is init-time IMMUTABLE.
+ *     Changing it means re-querying the size and re-initialising, because the
+ *     layout differs. Nothing pre-allocates the n=5 maximum "just in case".
+ *   - Zero heap: neither entry point allocates.
+ *   - Every carved array is ALIGN16 (mem_align.h's project-wide value), which
+ *     the NEON matched-filter kernels' 512-tap loads rely on.
+ *
+ * DA_NUM_FILTERS below is only the GEOMETRY UPPER BOUND used by validation
+ * (and by the reach table in this header) -- it sizes nothing. */
+
+/* ---- DelayQuality (delay_types.py) ---- */
+typedef enum {
+    DELAY_QUALITY_COARSE  = 0,
+    DELAY_QUALITY_REFINED = 1
+} DelayQuality;
+
+/* ---- ClockdriftLevel (clockdrift_detector.py) ---- */
+typedef enum {
+    CLOCKDRIFT_NONE     = 0,
+    CLOCKDRIFT_PROBABLE = 1,
+    CLOCKDRIFT_VERIFIED = 2
+} ClockdriftLevel;
+
+/* ================ Delay-estimator config (balanced defaults) ================
+ * All values traced from the Python defaults the LegacyDelayShim constructs
+ * (legacy_compat.py builds EchoPathDelayEstimator() with no overrides, so the
+ * EchoPathDelayEstimator __init__ defaults are authoritative):
+ *   num_filters=5, window_size_sub_blocks=32, alignment_shift_sub_blocks=24,
+ *   excitation_limit=150/32768, smoothing_fast=0.7, smoothing_slow=0.1,
+ *   matching_filter_threshold=0.3, delay_headroom_samples=32,
+ *   detect_pre_echo=True, thresholds=DelaySelectionThresholds(5, 20).
+ *
+ * ⚠ detect_pre_echo is a Python-side default with no effect here: the
+ * reported delay is always da_aggregator_aggregate()'s dominant highest-peak
+ * candidate, a deliberate divergence from upstream at that one seam (see its
+ * comment, and docs/aec_methods.md). Upstream reports the earliest onset
+ * because its estimator feeds a RenderDelayController; here the reported
+ * delay aligns a short PBFDKF directly, so the accumulated-error onset
+ * search has no consumer and is not run -- the pre-echo buffers and
+ * histogram below stay at their initialised values.
+ *   _DOWN_SAMPLING_FACTOR=4, block size 64, _SUB_BLOCK_SIZE=16,
+ *   _CONSISTENT_ESTIMATE_THRESHOLD=125.
+ */
+/* Down-sampling factor: 4, the reference decimation. */
+#define DA_DOWN_SAMPLING_FACTOR 4
+#define DA_BLOCK_SIZE           64
+#define DA_SUB_BLOCK_SIZE       (DA_BLOCK_SIZE / DA_DOWN_SAMPLING_FACTOR) /* 16 */
+/* DA_NUM_FILTERS is the matched-filter bank's GEOMETRY UPPER BOUND: the
+ * largest n aec_validate_config()/delay_aec_get_mem_size() accept, and the
+ * `n` the reference design itself uses. It sizes NOTHING -- see the MEMORY
+ * CONTRACT block at the top of this header. The bank actually searched is
+ * DaMatchedFilter::num_filters, fixed at init from AecConfig::
+ * delay_num_filters (range [1, DA_NUM_FILTERS], default 5 = the reference
+ * geometry), and every array is carved to match it. */
+#define DA_NUM_FILTERS          5
+#define DA_WINDOW_SIZE_SB       32
+#define DA_ALIGNMENT_SHIFT_SB   24
+#define DA_FILTER_SIZE          (DA_WINDOW_SIZE_SB * DA_SUB_BLOCK_SIZE)        /* 512 */
+#define DA_FILTER_INTRA_SHIFT   (DA_ALIGNMENT_SHIFT_SB * DA_SUB_BLOCK_SIZE)   /* 384 */
+#define DA_ACC_ERR_SIZE         (DA_FILTER_SIZE / 4)   /* 128 ; subsample rate 4 */
+/* DA_HIST_WINDOW is the CAPACITY of both aggregator rings: a TIME window
+ * (~1 s of estimates at the 64-sample inner-block cadence), not a geometry
+ * term, so it does NOT scale with n. The window actually used is
+ * round(feed_rate / 64) (Python lag_aggregator._num_blocks_per_second):
+ * 250 at the 16 kHz feed every product grid lands on (48 kHz is resampled
+ * to a 16 kHz-equivalent feed first), 125 at the LEGACY native 8 kHz feed
+ * -- see DaHighestPeak.window / DaPreEcho.window and da_hist_window_for_rate()
+ * in delay_aec.c. The carve stays at the capacity so the pool image is
+ * grid-invariant. */
+#define DA_HIST_WINDOW          250
+#define DA_HEADROOM             (32 / DA_DOWN_SAMPLING_FACTOR)      /* 8 */
+
+/* ---- per-bank-size geometry (the ONLY sizing formulas; used by both
+ * delay_aec_get_mem_size() and delay_aec_init(), and reproduced by the
+ * permanent size tests) ---------------------------------------------------
+ *
+ * DA_RING_CAPACITY_FOR(n) is the exact gather reach: the deepest sample the
+ * bank ever touches is (n-1)*DA_FILTER_INTRA_SHIFT + DA_FILTER_SIZE +
+ * DA_SUB_BLOCK_SIZE - 2, and this capacity is exactly that plus two.
+ *
+ * DA_MAX_FILTER_LAG_FOR(n) DELIBERATELY CARRIES ONE FILTER OF HEADROOM: the
+ * deepest lag the bank can actually report is (n-1)*SHIFT + (SIZE-1), so the
+ * arithmetically tight bound would be (n-1)*SHIFT + SIZE. The n*SHIFT + SIZE
+ * form is used ON PURPOSE, for two reasons:
+ *
+ *   0. IT IS THE UPSTREAM FORMULA. The reference matched filter's
+ *      max-filter-lag getter -- and this repo's Python port of it,
+ *      matched_filter.py's get_max_filter_lag(), whose docstring spells the
+ *      over-count out -- computes exactly `num_filters * intra_shift +
+ *      filter_size` and uses it for exactly this purpose: SIZING the
+ *      aggregator histograms, not describing reach. Diverging here would put
+ *      the C port's histogram geometry out of step with both.
+ *
+ *   1. n=5 gives the reference array sizes EXACTLY (2433 highest-peak
+ *      bins, 152 pre-echo bins), so the default configuration is byte-exact
+ *      by construction rather than by argument.
+ *
+ * The over-sized tail is behaviour-neutral for the highest-peak histogram:
+ * bins above the reachable lag are
+ * never incremented, and both sk_argmax_i32 and the incremental-argmax
+ * tracker return the FIRST maximum, so an all-zero tail can never win a
+ * tie. */
+#define DA_RING_CAPACITY_FOR(n) \
+    ((DA_WINDOW_SIZE_SB + DA_ALIGNMENT_SHIFT_SB * ((n) - 1) + 1) * DA_SUB_BLOCK_SIZE)
+#define DA_MAX_FILTER_LAG_FOR(n) ((n) * DA_FILTER_INTRA_SHIFT + DA_FILTER_SIZE)
+#define DA_HP_HIST_SIZE_FOR(n)   (DA_MAX_FILTER_LAG_FOR(n) + 1)
+#define DA_PE_HIST_SIZE_FOR(n) \
+    (((DA_MAX_FILTER_LAG_FOR(n) + 1) * DA_DOWN_SAMPLING_FACTOR) >> 6)
+#define DA_THRESH_INITIAL       5
+#define DA_THRESH_CONVERGED     20
+#define DA_CONSISTENT_EST_THR   125
+#define DA_PRE_ECHO_UPDATES_TO_REPORT 50
+#define DA_ACCUMULATED_ERROR_SUBSAMPLE_RATE 4
+#define DA_BLOCK_SIZE_LOG2      6    /* kBlockSizeLog2 (64 = 1<<6) */
+/* DA_HIST_WINDOW (above) and the ring/histogram arrays it sizes are fixed
+ * at the 16kHz-native block rate (16000/64 = 250 blocks/s) and are NOT
+ * rate-parameterised for sample rates above 16 kHz -- the decimator's fixed
+ * anti-alias biquad coefficients have the same 16kHz-only limitation (see
+ * downsampled_ring.py's docstring). */
+/* DaClockdrift.stability_reset_hops is computed live in delay_aec_init() from
+ * sample_rate: the counter ticks once per DA_BLOCK_SIZE=64-sample inner
+ * block, not once per outer hop. Matches the Python ClockdriftDetector (see
+ * clockdrift_detector.py). */
+
+/* ---- biquad cascade ----
+ * Max sections: 4 (the ds4 LP is elliptic, 3 sections; the 48k->16k
+ * pre-decimation anti-alias stage below is elliptic order-7, 4 sections). */
+#define DA_BQ_MAX_SECTIONS 4
+typedef struct {
+    int    n_sections;
+    float  b[DA_BQ_MAX_SECTIONS][3];    /* {b0,b1,b2} per section */
+    float  a[DA_BQ_MAX_SECTIONS][2];    /* {a1,a2} per section (a0 normalised) */
+    float  z[DA_BQ_MAX_SECTIONS][2];    /* per-section state */
+} DaBiquad;
+
+/* ---- 48kHz -> 16kHz pre-decimation sidechain ----
+ * DelayAec's own internal decimator/matched-filter/clockdrift constants are
+ * all native to a 16kHz feed rate (250 blocks/s; see the DA_HIST_WINDOW
+ * rate note above). At 48kHz, this stage anti-alias-filters + decimates-by-3
+ * BEFORE any of that internal machinery ever sees a sample, so DelayAec
+ * always operates on a genuine 16kHz-equivalent stream regardless of the
+ * caller's native rate -- mirroring the shared 4ch pipeline's
+ * SharedMatchedDelayEstimator (Python pipeline.py), which does the same
+ * 48->16 reduction externally before feeding this same estimator. Two
+ * independent filter+phase chains (capture/near, render/far) since they're
+ * independent signals.
+ *
+ * The two scratch buffers this stage needs are POOL-CARVED AND 48 kHz-ONLY:
+ * sized DA_RESAMPLE48_CAP_FOR(hop) from the resolved hop, and not carved at
+ * all at any other rate. */
+#define DA_RESAMPLE48_FACTOR      3
+/* Output samples per call is at most ceil(hop/3) (the phase only ever moves
+ * which samples are kept, never how many, beyond that ceiling); hop/3 + 1 is
+ * >= ceil(hop/3) for every hop and is exactly 171 at the only 48 kHz grid
+ * (hop=512), which is that ceiling. */
+#define DA_RESAMPLE48_CAP_FOR(hop) ((hop) / DA_RESAMPLE48_FACTOR + 1)
+typedef struct {
+    DaBiquad near_lp;    /* capture channel anti-alias LP (order-7, 4 sections) */
+    DaBiquad far_lp;     /* render channel anti-alias LP (order-7, 4 sections) */
+    int      phase;      /* decimation phase, continuous across hops (like the
+                           * 4ch pipeline's own delay_phase) */
+} DaResample48;
+
+typedef struct {
+    DaBiquad anti_alias;       /* LP ds4 (3 sections) */
+    DaBiquad noise_reduction;  /* HP (1 section) */
+} DaDecimator;
+
+typedef struct {
+    float *buffer;     /* pool-carved [capacity], ALIGN16 */
+    int    capacity;   /* DA_RING_CAPACITY_FOR(num_filters) */
+    int    write;
+} DaRing;
+
+typedef struct {
+    /* Runtime bank size, [1, DA_NUM_FILTERS]. EVERY row below exists -- the
+     * bank is carved to exactly this size, so there is no inactive tail to
+     * initialise for byte-image determinism. */
+    int   num_filters;
+    /* Pool-carved, row-major, ALIGN16. Row i of `filters` is
+     * filters + i*DA_FILTER_SIZE (2048 B, itself 16-aligned, so every row is
+     * 16-aligned); row i of `accumulated_error` is
+     * accumulated_error + i*DA_ACC_ERR_SIZE (512 B, likewise). */
+    float *filters;             /* [num_filters][DA_FILTER_SIZE] */
+    float *accumulated_error;   /* [num_filters][DA_ACC_ERR_SIZE] */
+    /* per-tap-prefix err, ONE filter-size buffer at every bank size (matches
+     * Python's single shared buffer). Carved and initialised,
+     * not written per update -- see the detect_pre_echo note at the top of
+     * this header. */
+    float *instantaneous_error; /* [DA_ACC_ERR_SIZE] */
+    int   last_detected_best_lag_filter;
+    int   number_pre_echo_updates;   /* saturates at
+                                       * DA_PRE_ECHO_UPDATES_TO_REPORT     */
+    /* reported lag */
+    int   reported_valid;
+    int   reported_lag;
+    int   reported_pre_echo_lag;     /* not produced; the reported delay is
+                                       * reported_lag                       */
+    /* per-update winner lag (transient) */
+    int   winner_lag_valid;
+    int   winner_lag;
+} DaMatchedFilter;
+
+typedef struct {
+    int *histogram;   /* pool-carved [hist_size], ALIGN16 */
+    int *ring;        /* pool-carved [DA_HIST_WINDOW], ALIGN16 */
+    int hist_size;    /* DA_HP_HIST_SIZE_FOR(num_filters) */
+    int window;       /* da_hist_window_for_rate(feed rate): ring entries in use */
+    int ring_index;
+    int candidate;
+    int candidate_valid;   /* internal-only: 0 forces a sk_argmax_i32 rescan on
+                             * the next aggregate() call (set on every reset();
+                             * `candidate` itself deliberately is NOT reset --
+                             * see da_highest_peak_reset -- this flag exists
+                             * precisely so the incremental-argmax scheme never
+                             * trusts that stale value). */
+} DaHighestPeak;
+
+typedef struct {
+    int *histogram;   /* pool-carved [hist_size], ALIGN16 */
+    int *ring;        /* pool-carved [DA_HIST_WINDOW], ALIGN16 */
+    int hist_size;    /* DA_PE_HIST_SIZE_FOR(num_filters) */
+    int window;       /* da_hist_window_for_rate(feed rate): ring entries in use */
+    int ring_index;
+    int number_updates;
+    int pre_echo_candidate;
+    int block_size_log2;
+    int argmax_idx;        /* raw bin index, NOT shifted by block_size_log2 */
+    int argmax_valid;
+} DaPreEcho;
+
+typedef struct {
+    DaHighestPeak highest_peak;
+    DaPreEcho     pre_echo;
+    int           significant_candidate_found;  /* bool */
+} DaLagAggregator;
+
+typedef struct {
+    int delay_history[3];      /* newest -> oldest */
+    ClockdriftLevel level;
+    int stability_counter;
+    int stability_reset_hops;  /* derived from the live grid; 3000 blocks at 16 kHz */
+} DaClockdrift;
+
+typedef struct {
+    DaDecimator     capture_decimator;
+    DaDecimator     render_decimator;
+    /* Cached da_decimator_same_coefficients(capture,render) result, recomputed
+     * whenever either decimator is (re)initialised -- avoids a memcmp pair
+     * every 64-sample inner block on the NEON paired-decimate fast path
+     * (delay_aec.c). Unused on non-NEON builds. */
+    int             decimators_same_coefficients;
+    DaRing          render_ring;
+    DaMatchedFilter matched_filter;
+    DaLagAggregator aggregator;
+    DaClockdrift    clockdrift;
+    /* old aggregated lag (raw samples) */
+    int old_agg_valid;
+    int old_agg_delay;
+    DelayQuality old_agg_quality;
+    int consistent_estimate_counter;
+    int consistent_estimate_threshold; /* derived from the live grid; 125 at 16 kHz */
+    /* outer->inner edge buffers (raw 16 kHz samples awaiting a 64-sample
+     * block). Deliberately EMBEDDED, not pool-carved: DA_BLOCK_SIZE is
+     * the fixed inner-block length, independent of both the bank size
+     * and the hop, so these are 256 B each at every config -- pooling them
+     * would add two carve steps and buy nothing. */
+    float capture_pending[DA_BLOCK_SIZE];
+    float render_pending[DA_BLOCK_SIZE];
+    int   pending_count;
+} DaEstimator;
+
+/* ===================== LegacyDelayShim ===================== */
+typedef struct {
+    DaEstimator est;
+    /* 48kHz->16kHz sidechain (see DaResample48 above). rate_factor is 1 at
+     * every native-16kHz-equivalent grid (est always runs at 16kHz-native
+     * regardless), 3 only when this instance was constructed at 48000. */
+    int          rate_factor;
+    DaResample48 resample48;
+    /* Pool-carved [resample_cap] each, ALIGN16 -- both NULL and
+     * resample_cap == 0 at every rate other than 48 kHz, where the sidechain
+     * does not run at all. */
+    float       *near16_scratch;
+    float       *far16_scratch;
+    int          resample_cap;
+    /* latest emitted estimate (raw samples in the ESTIMATOR's own 16kHz-
+     * equivalent domain; delay_aec_estimated_delay() rescales by
+     * rate_factor before returning to the caller's native domain) */
+    int          latest_valid;
+    int          latest_delay;
+    DelayQuality latest_quality;
+    int          estimate_count;   /* _n_updates */
+} DelayAec;
+
+/* ============================== lifecycle ================================
+ * Canonical pool-first pair. Query, then place. Both take the SAME
+ * (sample_rate, hop_size, num_filters) triple and derive every size from ONE
+ * internal layout helper, so they cannot drift.
+ *
+ * sample_rate selects the 48kHz->16kHz sidechain (rate_factor=3 at 48000,
+ * else 1) -- the underlying DaEstimator always runs at a fixed 16kHz-native
+ * cadence (da_estimator_init() is always called with 16000, never the
+ * caller's sample_rate) since accumulate() below guarantees it is only ever
+ * fed a 16kHz-equivalent stream, either directly (native 16kHz callers) or
+ * via the pre-decimation sidechain (48kHz callers). This mirrors the Python
+ * SharedMatchedDelayEstimator's identical design.
+ *
+ * hop_size is the RESOLVED grid hop (aec_resolve_signal_grid). It sizes only
+ * the 48 kHz sidechain scratch; DelayAec does not need, and deliberately
+ * does not take, an fft_size.
+ *
+ * num_filters is the number of staggered matched-filter hypotheses actually
+ * searched; out-of-range values ([1, DA_NUM_FILTERS] inclusive) are REJECTED
+ * here too -- delay_aec_get_mem_size() returns 0 and delay_aec_init()
+ * returns -1 -- matching the fail-fast rule the top-level
+ * aec_validate_config() applies. A silent clamp at this layer would let a
+ * direct low-level caller run a different bank size than requested with no
+ * error signal. One shared validity helper feeds both entry points, so a
+ * query and an init can never disagree about whether a request is
+ * admissible.
+ *
+ * Reliable reach shrinks with the bank: (n-1)*DA_FILTER_INTRA_SHIFT +
+ * (DA_FILTER_SIZE - 11) downsampled samples at 0.25 ms each, i.e.
+ * n=1 -> 125 ms, 2 -> 221 ms, 3 -> 317 ms, 4 -> 413 ms, 5 -> 509 ms. Use a
+ * short bank only where the bulk system delay is already compensated
+ * out-of-band (the reference design's external-delay-hint stance); evaluation runs should stay
+ * at 5. */
+
+/* Bytes this exact config needs. 0 = invalid input (non-positive rate/hop,
+ * or a size computation that overflowed). Always ALIGN16-sized, so callers
+ * embedding it in a larger pointer-bump pool stay aligned afterwards. */
+size_t delay_aec_get_mem_size(int sample_rate, int hop_size, int num_filters);
+
+/* Place the estimator in `mem` (>= delay_aec_get_mem_size() bytes, 16-byte
+ * aligned base). Returns 0 on success, -1 on NULL/misaligned/undersized/
+ * invalid input. Allocates nothing. The carve is asserted to consume EXACTLY
+ * the queried byte count. */
+int delay_aec_init(DelayAec *d, void *mem, size_t bytes,
+                   int sample_rate, int hop_size, int num_filters);
+
+/* Clears the signal chain (matched filter, aggregator, decimators, ring,
+ * pending samples, sidechain). Keeps the geometry, the pool pointers and the
+ * bank size -- never re-carves, never allocates. */
+void delay_aec_reset(DelayAec *d);
+
+/* per-hop drive. near/far are length `hop` float arrays in the CALLER's
+ * native sample-rate domain (near = HPF mic, far = raw reference, both
+ * BEFORE ring-buffer alignment) -- at 48kHz they are internally anti-alias
+ * filtered + decimated by 3 before reaching the 16kHz-native estimator; at
+ * every other supported rate this is a no-op passthrough. Returns 1 iff a
+ * NEW delay value was emitted this hop (mirrors shim accumulate()). */
+int  delay_aec_accumulate(DelayAec *d, const float *near, const float *far, int hop);
+
+/* Duty-cycle variant. aec.c's per-hop duty-cycle state machine (always
+ * active — see the duty_* fields in aec.h) drives this unconditionally. With
+ * run_matched_filter=1: identical to delay_aec_accumulate (byte-exact).
+ * With 0: the hop is FED (decimators run for state continuity, the decimated
+ * render sub-blocks are pushed into the ring so the matched filter never
+ * sees gapped audio) but not ANALYSED (no matched-filter / aggregator /
+ * clockdrift update; latest_* unchanged). Feeding-without-analysing has no
+ * Python counterpart — an intentional, sampled-cost-free divergence. */
+int  delay_aec_accumulate_ex(DelayAec *d, const float *near, const float *far,
+                             int hop, int run_matched_filter);
+
+/* legacy accessors */
+int    delay_aec_estimated_delay(const DelayAec *d);   /* -1 until first estimate;
+                                                            * else caller-native-rate
+                                                            * samples (rescaled by
+                                                            * rate_factor internally) */
+float  delay_aec_confidence(const DelayAec *d);        /* 0.0 / 0.5 / 1.0 (float32) */
+int    delay_aec_is_solid(const DelayAec *d);          /* confidence >= 1.0 */
+int    delay_aec_n_updates(const DelayAec *d);
+int    delay_aec_has_clockdrift(const DelayAec *d);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* AEC_DELAY_AEC_H */

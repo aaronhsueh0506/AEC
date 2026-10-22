@@ -3,7 +3,7 @@
  * accepted).
  */
 #include "detectors.h"
-#include "aec3_scale.h"
+#include "aec_scale.h"
 #include <math.h>
 
 /* Every wall-clock constant below is authored against the hop=160 @
@@ -13,7 +13,7 @@
 #define DET_REF_HOP 160
 #define DET_REF_SR  16000
 #define DET_REHOP(v, hop, sr) \
-    aec3_growth_rehop((v), DET_REF_HOP, DET_REF_SR, (hop), (sr))
+    aec_growth_rehop((v), DET_REF_HOP, DET_REF_SR, (hop), (sr))
 
 /* ── RenderActivityDetector ──────────────────────────────────── */
 
@@ -219,8 +219,8 @@ void doubletalk_init(DoubleTalk* d, float offset, float advantage_scale,
     d->shadow_advantage = 1.0f;
     d->shadow_dtd_offset           = offset;
     d->shadow_dtd_advantage_scale  = advantage_scale;
-    d->shadow_frame_gate = aec3_ms_to_hops(DT_SHADOW_FRAME_GATE_MS,
-                                           hop_size, sample_rate);
+    d->shadow_frame_gate = aec_ms_to_hops(DT_SHADOW_FRAME_GATE_MS,
+                                          hop_size, sample_rate);
     /* Only the OLD (retention) term is retimed; NEW is 1-OLD by construction
      * so each pair keeps summing to 1 on every grid. */
     d->dte_rise_old  = DET_REHOP(DTE_RISE_OLD_REF, hop_size, sample_rate);
@@ -275,68 +275,4 @@ void doubletalk_update_energy_dt(DoubleTalk* d,
         d->dt_from_energy = d->dte_decay_old * d->dt_from_energy
                           + d->dte_decay_new * inst;
     }
-}
-
-/* ── FilterPlateauDetector ──────────────────────────────────── */
-
-void filter_plateau_init(FilterPlateauDetector* p) {
-    p->grace_frames     = 400;
-    p->erle_max_db      = 6.0f;
-    p->far_active_ratio = 0.5f;
-    p->dt_signal_ratio  = 0.10f;
-    p->max_attempts     = 2;
-    filter_plateau_reset(p);
-}
-
-void filter_plateau_reset(FilterPlateauDetector* p) {
-    p->frame_count        = 0;
-    p->far_active_count   = 0;
-    p->dt_signal_count    = 0;
-    p->consecutive_match  = 0;
-    p->attempts           = 0;
-    p->cooldown_remaining = 0;
-    p->last_reset_frame   = -1;
-}
-
-int filter_plateau_update(FilterPlateauDetector* p,
-                             int    far_active,
-                             int    dt_signal_present,
-                             float  erle_windowed_db,
-                             int    once_converged) {
-    p->frame_count++;
-    if (far_active)        p->far_active_count++;
-    if (dt_signal_present) p->dt_signal_count++;
-
-    if (p->cooldown_remaining > 0) {
-        p->cooldown_remaining--;
-        return 0;
-    }
-    if (once_converged) { p->consecutive_match = 0; return 0; }
-    if (p->attempts >= p->max_attempts) return 0;
-    if (p->frame_count <= p->grace_frames) return 0;
-
-    int64_t denom = p->frame_count > 1 ? p->frame_count : (int64_t)1;
-    float far_ratio = (float)p->far_active_count / (float)denom;
-    float dt_ratio  = (float)p->dt_signal_count  / (float)denom;
-
-    /* require dt_signal_present in the current frame too. */
-    int criteria_met = (far_ratio > p->far_active_ratio)
-                    && (erle_windowed_db < p->erle_max_db)
-                    && (dt_ratio > p->dt_signal_ratio)
-                    && dt_signal_present;
-
-    if (!criteria_met) { p->consecutive_match = 0; return 0; }
-
-    p->consecutive_match++;
-    if (p->consecutive_match < FILTER_PLATEAU_CONSECUTIVE_REQUIRED) return 0;
-
-    /* Fire — also reset cumulative counters. */
-    p->consecutive_match  = 0;
-    p->attempts++;
-    p->cooldown_remaining = FILTER_PLATEAU_POST_RESET_GRACE_FRAMES;
-    p->last_reset_frame   = p->frame_count;
-    p->frame_count        = 0;
-    p->far_active_count   = 0;
-    p->dt_signal_count    = 0;
-    return 1;
 }

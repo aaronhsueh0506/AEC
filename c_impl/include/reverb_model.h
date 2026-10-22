@@ -1,5 +1,5 @@
 /* reverb_model.h — C port of python/modules/residual/reverb_model.py
- * (which mirrors AEC3 reverb_model.cc). Tiny exponential IIR accumulator over a
+ * (the reference reverb model). Tiny exponential IIR accumulator over a
  * per-bin power spectrum:
  *
  *     reverb[k] = (reverb[k] + power_spectrum[k] * scaling) * decay

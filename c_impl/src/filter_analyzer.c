@@ -2,9 +2,9 @@
  * python/modules/state/filter_analyzer.py. See header for the parity
  * contract. Build with -ffp-contract=off. */
 #include "filter_analyzer.h"
-#include "aec3_scale.h"
+#include "aec_scale.h"
 
-#include "aec_simd_kernels.h"
+#include "utility/simd_aec.h"
 
 #include <limits.h>   /* LONG_MAX */
 #include <math.h>
@@ -28,22 +28,6 @@ static int fa_floor_scale(int sample_rate) {
      * scoped to the 48-kHz product grid; both 16-kHz grids remain x1. */
     return sample_rate == 48000 ? 3 : 1;
 }
-
-/* ---------------------------------------------------------------------------
- * numpy 1.26 pairwise summation (float32 accumulate). Mirrors
- * numpy/core/src/umath/loops_utils.h.src @pairwise_sum@:
- *   n < 8     -> sequential
- *   n <= 128  -> 8 partial accumulators, balanced-tree combine, sequential tail
- *   n > 128   -> split at n2 = (n/2) floored to a multiple of 8, recurse, add.
- * Every op is a float32 add (no f64 widening).
- * Body delegates to simd_kernels.h's sk_pairwise_sum_tailfold_b_f32 (this
- * exact tree is that kernel's `_scalar` twin verbatim source; identical local
- * copies in reverb_frequency_response.c/filter_state_bridge.c/
- * fullband_erle.c delegate to the same shared kernel). */
-float fa_f32_pairwise_sum(const float *a, size_t n) {
-    return sk_pairwise_sum_tailfold_b_f32(a, n);
-}
-
 
 /* ----------------------- ConsistentFilterDetector ------------------------ */
 static void cd_reset(FaConsistentDetector *c) {
@@ -71,7 +55,7 @@ static void cd_accumulate_slice(FaConsistentDetector *c, const float *taps,
         if (scratch[i] > seg_max) seg_max = scratch[i];
     }
     /* np.abs(seg).sum() : float32 pairwise, accumulated directly (float32-by-design) */
-    c->floor_accum += fa_f32_pairwise_sum(scratch, (size_t)n);
+    c->floor_accum += sk_pairwise_sum_tailfold_b_f32(scratch, (size_t)n);
     /* np.abs(seg).max(initial=0.0) : float32 max, stored directly (float32-by-design) */
     if (seg_max > c->secondary_peak) {
         c->secondary_peak = seg_max;
@@ -132,12 +116,11 @@ static int cd_detect(FaConsistentDetector *c, const float *h, int size,
                   > c->active_render_threshold);
         if (c->delay_ref == delay_blocks) {
             /* Floored at LONG_MAX to avoid signed overflow (not at the
-             * FA_CONSISTENT_HOLD_HOPS threshold the boolean below reads): unlike a pure
-             * boolean-gate counter, this field's raw value is compared bit-exact by
-             * test/historical/parity_filter_analyzer.c (`m.consistent.counter !=
-             * e_counter`), which mirrors the Python ConsistentFilterDetector's own
-             * unbounded `_counter` accumulator. Capping at the threshold would still
-             * make the `> FA_CONSISTENT_HOLD_HOPS` boolean below match, but would desync
+             * consistent_hold_hops threshold the boolean below reads): unlike a pure
+             * boolean-gate counter, this field's raw value must track the Python
+             * ConsistentFilterDetector's own unbounded `_counter` accumulator.
+             * Capping at the threshold would still
+             * make the `> consistent_hold_hops` boolean below match, but would desync
              * the raw value from Python the very next hop (same constraint as
              * erl_estimator.c's hold_counter_time_domain). Capping at LONG_MAX is a
              * no-op for every practically reachable state (this counter only advances
@@ -164,11 +147,11 @@ void fa_init(FilterAnalyzer *m, float *h_highpass_storage, int size,
     m->default_gain = default_gain;
     m->consistent.active_render_threshold =
         (active_render_limit * active_render_limit) * (float)hop_size;
-    /* AEC3 verbatim: 5s convergence threshold, 1.5s consistency hold. Were
+    /* Reference values: 5s convergence threshold, 1.5s consistency hold. Were
      * frozen #defines (500/150, correct only at hop=160/sr=16000); computed
      * live here. */
-    m->convergence_threshold_hops = aec3_ms_to_hops(5000.0f, hop_size, sample_rate);
-    m->consistent.consistent_hold_hops = aec3_ms_to_hops(1500.0f, hop_size, sample_rate);
+    m->convergence_threshold_hops = aec_ms_to_hops(5000.0f, hop_size, sample_rate);
+    m->consistent.consistent_hold_hops = aec_ms_to_hops(1500.0f, hop_size, sample_rate);
     cd_reset(&m->consistent);
     m->region_start = 0;
     m->region_end = 0;
@@ -258,7 +241,7 @@ void fa_update(FilterAnalyzer *m, const float *filter_taps,
                const float *render_block, int render_block_len) {
     int size = m->size;
     const float *h;
-    int seg_lo, seg_hi, i, seg_amax;
+    int seg_lo, seg_hi, seg_amax;
     float cur_sq, best_sq, hp, sp;
     int sufficient;
     float peak_abs;
@@ -283,12 +266,12 @@ void fa_update(FilterAnalyzer *m, const float *filter_taps,
     if (m->abs_scratch_len < size || m->render_sq_scratch_len < render_block_len) {
         return;
     }
-    /* Ceilinged at FA_CONVERGENCE_THRESHOLD_HOPS+1 to avoid signed overflow: the
+    /* Ceilinged at convergence_threshold_hops+1 to avoid signed overflow: the
      * ONLY consumer of blocks_since_reset in this file is the
-     * `> FA_CONVERGENCE_THRESHOLD_HOPS` check below
-     * (test/historical/parity_filter_analyzer.c does not read this field, only
-     * `consistent.counter`). Once the counter exceeds
-     * FA_CONVERGENCE_THRESHOLD_HOPS, further increments can never change that
+     * `> convergence_threshold_hops` check below (the raw value is not
+     * part of the Python-parity surface, unlike `consistent.counter`). Once
+     * the counter exceeds
+     * convergence_threshold_hops, further increments can never change that
      * comparison's outcome (already true, stays true), so gating the increment
      * at the smallest value that still satisfies `>` is observationally
      * identical to an unbounded increment for every reachable state. */
@@ -323,25 +306,19 @@ void fa_update(FilterAnalyzer *m, const float *filter_taps,
     cur_sq = hp * hp;                   /* float32 */
     seg_lo = m->region_start;
     seg_hi = m->region_end + 1;         /* exclusive */
-    /* np.argmax(seg*seg): first index of the maximum (strict-greater scan). */
-    seg_amax = 0;
-    best_sq = h[seg_lo] * h[seg_lo];
-    for (i = 1; i < seg_hi - seg_lo; ++i) {
-        sp = h[seg_lo + i];
-        {
-            float s = sp * sp;
-            if (s > best_sq) {
-                best_sq = s;
-                seg_amax = i;
-            }
-        }
-    }
+    /* np.argmax(seg*seg): first index of the maximum (strict-greater scan).
+     * sk_argmax_sq_f32 returns 0 for a 0- or 1-element range, matching this
+     * loop's own effective no-op there (its body never executes, leaving
+     * seg_amax=0 unconditionally). */
+    seg_amax = sk_argmax_sq_f32(h + seg_lo, seg_hi - seg_lo);
+    sp = h[seg_lo + seg_amax];
+    best_sq = sp * sp;
     if (best_sq > cur_sq) {
         m->peak_index = seg_lo + seg_amax;
     }
     m->delay_blocks = m->peak_index / m->hop_size;
 
-    /* UpdateFilterGain (filter_analyzer.cc:142-159). AEC3 passes h_highpass_ to
+    /* UpdateFilterGain. The reference passes h_highpass_ to
      * UpdateFilterGain and reads filter_time_domain[peak_index] from it, so the
      * gain is |h_hpf[peak]| (matches filter_analyzer.py update()). */
     sufficient = (m->blocks_since_reset > m->convergence_threshold_hops);
@@ -368,18 +345,7 @@ int fa_min_filter_delay_blocks(const FilterAnalyzer *m) {
     return m->delay_blocks;
 }
 
-int fa_any_filter_consistent(const FilterAnalyzer *m) {
-    return m->consistent_estimate;
-}
-
 float fa_max_echo_path_gain(const FilterAnalyzer *m) {
     return m->gain;
 }
 
-int fa_peak_index(const FilterAnalyzer *m) {
-    return m->peak_index;
-}
-
-const float *fa_get_adjusted_filters(const FilterAnalyzer *m) {
-    return m->h_highpass;
-}

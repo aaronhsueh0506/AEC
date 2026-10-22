@@ -1,19 +1,19 @@
-/* Top-level PBFDKF AEC orchestration with the AEC3-style post-filter chain.
+/* Top-level PBFDKF AEC orchestration with the post-filter chain.
  * Python defines the algorithm; this file is the float32 C implementation. */
 #include "aec.h"
 #include "aec_config_build.h"
 #include "aec_debug.h"
-#include "aec3_balanced_config.h"
-#include "aec3_scale.h"
-#include "aec_simd_kernels.h"
+#include "aec_balanced_config.h"
+#include "aec_scale.h"
+#include "utility/simd_aec.h"
+#include "utility/mem_align.h"   /* ALIGN16 -- was transitively reached via fft_wrapper.h */
 #include <stdint.h>
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
 
-/* DelayAdjustment enum mirror (delay/delay_types.py). */
-#define AEC_DA_NONE          0
-#define AEC_DA_BUFFER_FLUSH  1
+/* DelayAdjustment value (delay/delay_types.py) stored in pending_delay_change. */
 #define AEC_DA_NEW_DETECTED  2
 
 /* Streaming render/capture call-jitter FIFO budget (milliseconds). Converted
@@ -35,13 +35,13 @@
 #define AEC_LEGACY10MS_SR   16000
 static int aec_legacy10ms_hops(float legacy_ms, int hop, int sample_rate) {
     return (hop > 0 && sample_rate > 0)
-        ? aec3_ms_to_hops(legacy_ms, hop, sample_rate)
+        ? aec_ms_to_hops(legacy_ms, hop, sample_rate)
         : (int)lrintf(legacy_ms / 10.0f);
 }
 static float aec_legacy10ms_alpha(float legacy_alpha, int hop, int sample_rate) {
     return (hop > 0 && sample_rate > 0)
-        ? aec3_growth_rehop(legacy_alpha, AEC_LEGACY10MS_HOP, AEC_LEGACY10MS_SR,
-                            hop, sample_rate)
+        ? aec_growth_rehop(legacy_alpha, AEC_LEGACY10MS_HOP, AEC_LEGACY10MS_SR,
+                           hop, sample_rate)
         : legacy_alpha;
 }
 /* Third rate-conversion convention: an ADDITIVE per-hop amount (a leak, a
@@ -53,9 +53,9 @@ static float aec_legacy10ms_alpha(float legacy_alpha, int hop, int sample_rate) 
  * the authored value comes back bit-for-bit (the Makefile pins
  * -ffp-contract=off and rejects -ffast-math, so x/x == 1.0f holds).
  *
- * aec3_scale.c has the same arithmetic against a FIXED reference, as
- * aec3_per_block_rate_to_per_hop() (AEC3's 4 ms block). aec3_scale.h/.c is a
- * 1:1 port of python/modules/aec3_scale.py, so a shared helper for the
+ * aec_scale.c has the same arithmetic against a FIXED reference, as
+ * aec_per_block_rate_to_per_hop() (the reference 4 ms block). aec_scale.h/.c is
+ * a 1:1 port of the Python scale module, so a shared helper for the
  * additive convention would have to be added on the Python side as well; it
  * stays local here. */
 static float aec_legacy10ms_rate(float legacy_per_hop, int hop,
@@ -122,19 +122,16 @@ void aec_config_defaults(AecConfig* cfg, int sr) {
     cfg->max_delay_ms = 1024.0f;
     cfg->delay_buffer_ms = 2048.0f;
     cfg->delay_est_init_s = 0.3f;
-    /* AMEND_35: was 0.5 (duty-cycle throttle once solid). 0.0 = full-rate,
-     * matching the Python reference (which has no throttle at all -- its
-     * same-named config field is a dead legacy kwarg, see aec.h). The
-     * throttle traded bit-exactness for compute: confirmed on a real file
-     * (XCXc, 2026-10-18) that the default 0.5s period can keep the matched
-     * filter from ever reaching a candidate lag Python's always-full-rate
-     * analysis does reach, changing WHICH delay gets selected, not just the
-     * compute cost. User ruling (2026-10-18): bit-exact first, so default
-     * to full-rate; --delay-est-period / this field still lets an embedded
-     * deployment opt back into the throttle once it accepts that cost. */
+    /* 0.0 = full-rate analysis, matching the Python reference (which has no
+     * throttle at all -- its same-named config field is a dead legacy kwarg,
+     * see aec.h). A throttled period can keep the matched filter from ever
+     * reaching a candidate lag the full-rate analysis does reach, changing
+     * WHICH delay gets selected, not just the compute cost, so bit-exact
+     * full-rate is the default; --delay-est-period / this field still lets
+     * an embedded deployment opt into the throttle and accept that cost. */
     cfg->delay_est_period_s = 0.0f;
     /* Matched-filter bank size (mirrors config.py's delay_num_filters). 5 =
-     * unchanged AEC3 geometry; see aec.h for the embedded compute knob. */
+     * unchanged reference geometry; see aec.h for the embedded compute knob. */
     cfg->delay_num_filters = DA_NUM_FILTERS;
     cfg->highpass_cutoff_hz = 80.0f;
     cfg->saturation_threshold = 0.95f;
@@ -163,7 +160,7 @@ void aec_config_defaults(AecConfig* cfg, int sr) {
     cfg->filter_misadjustment_hangover_frames = 100;
     cfg->filter_misadjustment_scale_min = 0.5f;
     cfg->filter_misadjustment_scale_max = 2.0f;
-    /* Live observer (A21 Stage 2). Default OFF, byte-equal when off;
+    /* Live observer. Default OFF, byte-equal when off;
      * mirrors config.py's live_observer_* defaults exactly. */
     cfg->live_observer_enabled = 0;
     cfg->live_observer_shift_ms = 24.0f;
@@ -171,16 +168,34 @@ void aec_config_defaults(AecConfig* cfg, int sr) {
     cfg->live_observer_mu = 0.3f;
     cfg->live_observer_corrob_ms = 100.0f;
     cfg->live_observer_corrob_margin_db = 0.0f;
+    /* NO_FLOOR preset support: default ON, matching the pre-NO_FLOOR
+     * hardcoded `scfg.split_floor_enabled = 1` this field replaced in
+     * aec_build_sg_config() below. A caller that builds a config straight
+     * from aec_config_defaults() (bypassing aec_config_from_preset()
+     * entirely) must still get the floor enabled -- the memset at the top
+     * of this function would otherwise leave it at 0 (disabled). */
+    cfg->min_gain_split_floor_enabled = 1;
 }
 
 /* The preset strength table, in ONE place: both floors per preset, so
  * aec_preset_floor_db() and aec_preset_dt_floor_db() below can't drift
  * relative to each other the way two independent switch statements would
- * invite. Row order matches the AecPreset enum (aec.h). */
-static const struct { float far_active_db, dt_db; } AEC_PRESET_FLOORS[] = {
-    [AEC_PRESET_MILD]       = { -20.0f, -20.0f },
-    [AEC_PRESET_BALANCED]   = { -28.0f, -20.0f },
-    [AEC_PRESET_AGGRESSIVE] = { -38.0f, -30.0f },
+ * invite. Row order matches the AecPreset enum (aec.h).
+ *
+ * split_floor_enabled added as a 3rd column for NO_FLOOR. mild/balanced/
+ * aggressive keep split_floor_enabled=1 (byte-identical to the pre-NO_FLOOR
+ * hardcoded `scfg.split_floor_enabled = 1` in aec_build_sg_config() below).
+ * NO_FLOOR's far_active_db/dt_db are set to balanced's values but are
+ * INERT -- never read once split_floor_enabled is 0 -- matching Python
+ * AecConfig.from_preset (config.py: "far_active_db is inert when
+ * min_gain_split_floor_enabled=False, so no_floor deliberately does not
+ * also set it"). */
+static const struct { float far_active_db, dt_db; int split_floor_enabled; }
+AEC_PRESET_FLOORS[] = {
+    [AEC_PRESET_MILD]       = { -20.0f, -20.0f, 1 },
+    [AEC_PRESET_BALANCED]   = { -28.0f, -20.0f, 1 },
+    [AEC_PRESET_AGGRESSIVE] = { -38.0f, -30.0f, 1 },
+    [AEC_PRESET_NO_FLOOR]   = { -28.0f, -20.0f, 0 },
 };
 
 int aec_preset_floor_db(AecPreset p, float* db_out) {
@@ -189,6 +204,7 @@ int aec_preset_floor_db(AecPreset p, float* db_out) {
         case AEC_PRESET_MILD:
         case AEC_PRESET_BALANCED:
         case AEC_PRESET_AGGRESSIVE:
+        case AEC_PRESET_NO_FLOOR:
             *db_out = AEC_PRESET_FLOORS[p].far_active_db;
             return 0;
         default: return -1;
@@ -203,7 +219,25 @@ int aec_preset_dt_floor_db(AecPreset p, float* db_out) {
         case AEC_PRESET_MILD:
         case AEC_PRESET_BALANCED:
         case AEC_PRESET_AGGRESSIVE:
+        case AEC_PRESET_NO_FLOOR:
             *db_out = AEC_PRESET_FLOORS[p].dt_db;
+            return 0;
+        default: return -1;
+    }
+}
+
+/* Companion lookup for the gate itself, same discipline as the two lookups
+ * above. Added as its own function (rather than folded into
+ * aec_preset_floor_db()'s signature) so existing callers that only want the
+ * dB value are unaffected. */
+int aec_preset_split_floor_enabled(AecPreset p, int* enabled_out) {
+    if (enabled_out == NULL) return -1;
+    switch (p) {
+        case AEC_PRESET_MILD:
+        case AEC_PRESET_BALANCED:
+        case AEC_PRESET_AGGRESSIVE:
+        case AEC_PRESET_NO_FLOOR:
+            *enabled_out = AEC_PRESET_FLOORS[p].split_floor_enabled;
             return 0;
         default: return -1;
     }
@@ -211,13 +245,17 @@ int aec_preset_dt_floor_db(AecPreset p, float* db_out) {
 
 void aec_config_from_preset(AecConfig* cfg, AecPreset p, int sr) {
     float db, dt_db;
+    int en;
     aec_config_defaults(cfg, sr);
     /* preset enum out of range: both floors stay at aec_config_defaults'
-     * -28 dB / -20 dB (balanced), a safe defined fallback. */
+     * -28 dB / -20 dB (balanced), a safe defined fallback; the gate stays
+     * at aec_config_defaults' enabled=1 for the same reason. */
     cfg->min_gain_floor_far_active_db =
         (aec_preset_floor_db(p, &db) == 0) ? db : -28.0f;
     cfg->min_gain_floor_dt_db =
         (aec_preset_dt_floor_db(p, &dt_db) == 0) ? dt_db : -20.0f;
+    cfg->min_gain_split_floor_enabled =
+        (aec_preset_split_floor_enabled(p, &en) == 0) ? en : 1;
 }
 
 /* ── Signal-grid resolver: the single source of truth ─────────────────────
@@ -231,7 +269,7 @@ void aec_config_from_preset(AecConfig* cfg, AecPreset p, int sr) {
  * Accepted rates: 8000, 16000, 48000; 44100 and any other rate are rejected
  * (no per-rate tables exist for them).
  *
- * AEC3B_RATE_TABLE carries its own copy of {n_bins, fft_size, block_size,
+ * AECB_RATE_TABLE carries its own copy of {n_bins, fft_size, block_size,
  * hop_size} alongside ~40 tuning constants. It is not a second resolver
  * (nothing consults it to decide admissibility), and test_rate_structural.c
  * pins it row-for-row against this table.
@@ -397,7 +435,7 @@ static int aec_validate_config(const AecConfig* cfg_in) {
      * apply_output() (Step 21) never reads the skipped gain -- true only
      * when context_only holds (enable_res==0 && return_res_context==1).
      * Reject any other combination here rather than relying on the
-     * aec3_post_run() debug assert alone. */
+     * aec_post_run() debug assert alone. */
     if (cfg->spatial_linear_context &&
         (cfg->enable_res || !cfg->return_res_context)) return 0;
 
@@ -416,7 +454,7 @@ static int aec_validate_config(const AecConfig* cfg_in) {
     AEC_CK_RANGE_F(delay_est_period_s,          0.0f,  3600.0f);
     /* When enable_highpass is set, this field is fed straight into hpf_init()
      * (aec_carve), which returns NULL -- dropping the HPF with no error -- when
-     * audio_common's hpf_params_valid() (hpf.c) rejects the (cutoff_hz,
+     * audiolib's hpf_params_valid() (hpf.c) rejects the (cutoff_hz,
      * sample_rate) pair. hpf_params_valid is rate-relative (cutoff must stay <
      * 0.45*sample_rate, matching hpf_compute_coeffs's tan(wc/2) margin from the
      * pi/2 singularity), so a flat range is not enough: e.g.
@@ -459,7 +497,7 @@ static int aec_validate_config(const AecConfig* cfg_in) {
      * side's ValueError (config.py __post_init__). */
     AEC_CK_RANGE_I(delay_num_filters,                    1, DA_NUM_FILTERS);
 
-    /* Live observer (A21 Stage 2). Mirrors config.py's __post_init__
+    /* Live observer. Mirrors config.py's __post_init__
      * ValueErrors exactly: shift/max_hz/corrob_ms >= 0, mu in (0, 2]. */
     AEC_CK_BOOL(live_observer_enabled);
     AEC_CK_RANGE_F(live_observer_shift_ms,       0.0f, 1.0e9f);
@@ -511,32 +549,18 @@ static int aec_validate_config(const AecConfig* cfg_in) {
 /* ───────────────────────── helpers ─────────────────────────────────────── */
 
 /* np.mean(x ** 2): square in fp32, sum via numpy-1.26 pairwise f32, divide.
- * Float32 throughout. Uses the bit-exact pairwise from aec3_post.
+ * Float32 throughout. Uses the bit-exact pairwise from aec_post.
  * `scratch` must hold >= n floats (n is always hop_size at every call site;
  * callers pass a->scr_sq, sized hop_size -- see aec.h struct comment). */
 static float mean_sq(const float* x, int n, float* scratch) {
     /* sk_sq_scale_f32(x, 1.0f, ...) is bit-exact to x[i]*x[i] (scale=1.0f is
      * an exact IEEE no-op multiply) -- same established pattern already
-     * shipped at suppression_gain.c:112 and aec3_post.c:270/272. */
+     * shipped at suppression_gain.c:112 and aec_post.c:270/272. */
     sk_sq_scale_f32(x, 1.0f, scratch, n);
-    float s = aec3_post_pairwise_sum_f32(scratch, (size_t)n);
+    float s = sk_pairwise_sum_f32(scratch, (size_t)n);
     return s / (float)n;
 }
 
-
-/* Unused: every call site goes through simd_kernels.h's
- * sk_cmag2_np_f32/_acc_f32. The attribute keeps the build warning-clean. */
-__attribute__((unused)) static float cmag2_c(float r, float i) {
-    /* numpy complex64 |z|² via scaled-hypot FMA (cmag2_np). */
-    float ar = r < 0.0f ? -r : r;
-    float ai = i < 0.0f ? -i : i;
-    float larger = ar > ai ? ar : ai;
-    float smaller = ar > ai ? ai : ar;
-    float m;
-    if (larger == 0.0f) m = 0.0f;
-    else { float ratio = smaller / larger; m = larger * sqrtf(fmaf(ratio, ratio, 1.0f)); }
-    return m * m;
-}
 
 /* set Q on a filter to Q_high (no per-band scale in balanced). */
 static void filter_q_high(PBFDKF* f) {
@@ -544,15 +568,31 @@ static void filter_q_high(PBFDKF* f) {
     for (int k = 0; k < K; ++k) f->Q[k] = f->Q_high[k];
 }
 
+/* Statistics and hop counters are plain `long`, which is 32 bits on ILP32 targets,
+ * where 2^31 hops is reachable in a long-running session. Signed overflow is
+ * undefined, so they hold at LONG_MAX instead of wrapping. Any count below LONG_MAX
+ * increments exactly as before. */
+static inline void aec_counter_bump(long* c) {
+    if (*c < LONG_MAX) *c += 1;
+}
+
+/* The detectors take the shadow hop count as `int` and only compare it against a
+ * warm-up gate, so a count past INT_MAX is reported as INT_MAX (still "past every
+ * gate") instead of being narrowed modulo 2^32, which turns it negative and
+ * re-closes the gate. Identical to the plain conversion for every count <= INT_MAX. */
+static inline int aec_count_as_int(long c) {
+    return c > (long)INT_MAX ? INT_MAX : (int)c;
+}
+
 /* Re-arm a PBFDAF's excitation guard after a delay change (shadow_filter or
  * observer_filter -- main_filter is PBFDKF, handled via
  * pbfdkf_handle_echo_path_change instead). Shared by the 3 delay-change
  * call sites below, each of which re-arms shadow then observer the same
- * way (AMEND_12/13's fix: the observer must be re-armed at every site
- * shadow already was, or PBFDAF's own excitation guard holds its taps at
- * zero forever after a delay change). */
+ * way: the observer must be re-armed at every site shadow already is, or
+ * PBFDAF's own excitation guard holds its taps at zero forever after a
+ * delay change. */
 static inline void aec_rearm_excitation(PBFDAF* f) {
-    f->poor_excitation_counter = AEC3_POOR_EXC_COUNTER_INITIAL_HOPS;
+    f->poor_excitation_counter = AEC_POOR_EXC_COUNTER_INITIAL_HOPS;
     f->call_counter = 0;
 }
 
@@ -563,7 +603,7 @@ static inline void aec_rearm_excitation(PBFDAF* f) {
  *    Path-A (delay_first) + Path-B (delay_shift). preserve_render_ema is a
  *    no-op at this layer (render-side trackers live in the StationarityEstimator
  *    which is preserved per preserve_render_side=True). ───────────────────── */
-static void aec3_post_chain_reset(Aec* a);   /* fwd */
+static void aec_post_chain_reset(Aec* a);   /* fwd */
 
 /* The filter-DERIVED latches, EMAs and detectors — everything downstream of
  * the taps that a restarted filter must not carry forward. Shared verbatim by
@@ -641,8 +681,8 @@ static void aec_reset_filter_derived_state(Aec* a) {
     filter_convergence_reset(&a->convergence);
     aec_reset_filter_latches(a);
 
-    /* AEC3 post chain (filter-output-derived); render-side preserved. */
-    aec3_post_chain_reset(a);
+    /* post-filter chain (filter-output-derived); render-side preserved. */
+    aec_post_chain_reset(a);
 
     /* clear pending delay shift state */
     a->pending_delay = -1;
@@ -650,7 +690,7 @@ static void aec_reset_filter_derived_state(Aec* a) {
     a->pending_delay_ttl = 0;
 }
 
-/* AMEND_35: C mirror of orchestrator.py's _apply_delay_shift_hard_reset.
+/* C mirror of orchestrator.py's _apply_delay_shift_hard_reset.
  * Commits target_delay as the new ring-read alignment and runs the delay-
  * shift recovery chain. Factored out of Path B's own hard-reset branch
  * (aec_process_core, below) ONLY -- not Path A's, which Python does not
@@ -665,7 +705,7 @@ static void aec_reset_filter_derived_state(Aec* a) {
  * before calling this (Path B's own forward-shift site) just redo that
  * assignment redundantly -- Python's orchestrator.py does the identical
  * redundant assignment at its own call site, not worth special-casing. */
-/* AMEND_35: mirrors orchestrator.py's Path B gate extension
+/* Mirrors orchestrator.py's Path B gate extension
  * (`not any(abs(new_delay - _rv) < 16 for _rv in _delay_reject_values)`). */
 static int aec_delay_value_rejected(const Aec* a, int candidate) {
     int i;
@@ -692,7 +732,7 @@ static void aec_apply_delay_shift_hard_reset(Aec* a, int target_delay) {
  *
  * Preserved on purpose -- these are what separate this from aec_reset(), and
  * they are the whole reason the API exists:
- *   - the AEC3 post chain. aec3_post_reset() zeroes ola_buf, the synthesis
+ *   - the post-filter chain. aec_post_reset() zeroes ola_buf, the synthesis
  *     overlap-add tail; zeroing it produces a near-zero output hop.
  *   - near_buffer, the MIC half of the block_size analysis frame. Zeroing it
  *     makes the next hop's near_spec / error_spec_windowed the transform of a
@@ -725,7 +765,7 @@ static void aec_apply_delay_shift_hard_reset(Aec* a, int target_delay) {
  *
  * What it adds beyond the common filter-derived latch reset above is the
  * stationarity re-arm.
- * The AEC3 stationary-render freeze (pbfdkf_process's block_stationary
+ * The stationary-render freeze (pbfdkf_process's block_stationary
  * early-return) is gated on stationarity_active_hops having reached
  * stationarity_converge_hops -- i.e. on the filter being presumed converged. A
  * wiped filter is not, and under stationary far the latch otherwise holds the
@@ -749,9 +789,9 @@ static void aec_reset_filter_for_realign(Aec* a) {
                (size_t)a->observer_filter.block_size * sizeof(float));
         /* Mirrors orchestrator._reset_filter_for_realign resetting the
          * corroboration EMAs directly (this path does NOT call
-         * aec3_post_chain_reset -- the AEC3 post chain is deliberately
+         * aec_post_chain_reset -- the post-filter chain is deliberately
          * preserved across a realign, per this function's own doc
-         * comment -- so aec3_post_reset()'s own EMA zeroing is not
+         * comment -- so aec_post_reset()'s own EMA zeroing is not
          * reached from here and must happen explicitly). */
         a->post.observer_obs_err_ema = 0.0;
         a->post.observer_main_err_ema = 0.0;
@@ -805,7 +845,7 @@ static const float SIMPLE_MU_ALPHA_HOLD    = 0.99f;
 static const float SIMPLE_MU_ALPHA_RELEASE = 0.95f;
 
 /* ERL tracking (B4) plus the energy-DT update. Both call sites -- inside the
- * AEC3 post gate and the no-RES path after it -- run the identical sequence,
+ * post-filter gate and the no-RES path after it -- run the identical sequence,
  * and the gated one needs mic_pwr/raw_err_pwr afterwards anyway, so the three
  * powers are passed in rather than recomputed here. */
 static void advance_erl_and_dt(Aec* a, int render_active, float far_pwr,
@@ -850,11 +890,12 @@ static void update_simple_mu_ratio(Aec* a, const float* output,
      * no data dependency between echo_spec and near_spec) */
     sk_cmag2_np_f32(a->main_filter.base.echo_spec, e2_echo, K);
     sk_cmag2_np_f32(a->main_filter.base.near_spec, e2_near, K);
-    float echo_est_pwr = aec3_post_pairwise_sum_f32(e2_echo, (size_t)K) + 1e-10f;
-    float near_pwr     = aec3_post_pairwise_sum_f32(e2_near, (size_t)K) + 1e-10f;
+    float echo_est_pwr = sk_pairwise_sum_f32(e2_echo, (size_t)K) + 1e-10f;
+    float near_pwr     = sk_pairwise_sum_f32(e2_near, (size_t)K) + 1e-10f;
     if (near_pwr > 1e-8f) {
         float r2 = echo_est_pwr / near_pwr;
-        if (r2 < 0.0f) r2 = 0.0f; if (r2 > 1.0f) r2 = 1.0f;
+        if (r2 < 0.0f) r2 = 0.0f;
+        if (r2 > 1.0f) r2 = 1.0f;
         float r2_half = r2 * 0.5f;
         if (r2_half > ratio) ratio = r2_half;
     }
@@ -955,21 +996,21 @@ static void aec_fill_filter_taps(void* ctx, int first, int last) {
                                         a->filter_taps_full);
 }
 
-/* Clear + recreate the AEC3 post chain sub-objects (mirrors _reset_aec3_post
- * with preserve_render_side=True: StationarityEstimator + non_zero_render_seen
+/* Clear + recreate the post-filter chain sub-objects (mirrors the orchestrator's
+ * post-chain reset with preserve_render_side=True: StationarityEstimator + non_zero_render_seen
  * + active_hops are preserved; everything else re-init'd). */
-static void aec3_post_chain_reset(Aec* a) {
-    /* aec3_post_reset clears OLA / CNG / coherence EMAs / avg-reverb. */
-    aec3_post_reset(&a->post);
+static void aec_post_chain_reset(Aec* a) {
+    /* aec_post_reset clears OLA / CNG / coherence EMAs / avg-reverb. */
+    aec_post_reset(&a->post);
     /* URO crossfade memory (_form_prev_output_time / _form_last_selection /
-     * _refined_filter_output_last_selected) — _reset_aec3_post clears it
+     * _refined_filter_output_last_selected) — the post-chain reset clears it
      * (orchestrator 1189-1190). */
     linear_filter_select_reset(&a->a3_lfs);
     /* Rate-varying REE absolute-power floats read through this lookup.
      * cfg.sample_rate never changes across a reset (aec_validate_config already
-     * ran at construction), so it always hits; the `rd ? rd->x : AEC3B_x`
+     * ran at construction), so it always hits; the `rd ? rd->x : AECB_x`
      * fallback below is a defensive no-op. */
-    const Aec3BalancedRateDims* rd = aec3b_rate_cfg(
+    const AecBalancedRateDims* rd = aecb_rate_cfg(
         a->cfg.sample_rate, a->cfg.fft_size);
     /* AecState + REE + SuppressionGain are recreated in Python; here we
      * re-init in place (same backing storage). */
@@ -977,28 +1018,28 @@ static void aec3_post_chain_reset(Aec* a) {
         AecStateConfig acfg;
         aec_state_config_defaults(&acfg);
         acfg.n_bins = a->n_freqs;
-        acfg.num_capture_channels = AEC3B_ST_NUM_CAPTURE_CHANNELS;
+        acfg.num_capture_channels = AECB_ST_NUM_CAPTURE_CHANNELS;
         acfg.hop_size = a->hop_size;
         /* The config default is 16000; set the real rate so every hop/sr-scaled
          * threshold downstream follows cfg.sample_rate. */
         acfg.sample_rate = a->cfg.sample_rate;
-        acfg.enable_filter_analyzer = AEC3B_ST_ENABLE_FILTER_ANALYZER;
-        /* AEC3B_ST_ERLE_STARTUP_HOPS/ST_ERL_STARTUP_HOPS are always the
+        acfg.enable_filter_analyzer = AECB_ST_ENABLE_FILTER_ANALYZER;
+        /* AECB_ST_ERLE_STARTUP_HOPS/ST_ERL_STARTUP_HOPS are always the
          * AEC_STATE_STARTUP_HOPS_AUTO sentinel (-1, aec_state.c), never a literal hop
          * count -- resolve_startup_hops() re-derives the real hop count from
          * acfg.hop_size/acfg.sample_rate above (which vary across the 8k/16k/48k
          * grids). Do not replace with a literal. */
-        acfg.erle_startup_hops = AEC3B_ST_ERLE_STARTUP_HOPS;
-        acfg.erl_startup_hops = AEC3B_ST_ERL_STARTUP_HOPS;
-        acfg.echo_can_saturate = AEC3B_ST_ECHO_CAN_SATURATE;
-        acfg.use_linear_filter = AEC3B_ST_USE_LINEAR_FILTER;
-        acfg.conservative_initial_phase = AEC3B_ST_CONSERVATIVE_INITIAL_PHASE;
-        acfg.delay_headroom_samples = AEC3B_ST_DELAY_HEADROOM_SAMPLES;
-        acfg.initial_state_seconds = AEC3B_ST_INITIAL_STATE_SECONDS;
-        acfg.erle_min = AEC3B_ST_ERLE_MIN;
-        acfg.erle_max_l = AEC3B_ST_ERLE_MAX_L;
-        acfg.erle_max_h = AEC3B_ST_ERLE_MAX_H;
-        /* Runtime np*hop, not AEC3B_FILTER_TAPS_SIZE (== rd->filter_taps_size at
+        acfg.erle_startup_hops = AECB_ST_ERLE_STARTUP_HOPS;
+        acfg.erl_startup_hops = AECB_ST_ERL_STARTUP_HOPS;
+        acfg.echo_can_saturate = AECB_ST_ECHO_CAN_SATURATE;
+        acfg.use_linear_filter = AECB_ST_USE_LINEAR_FILTER;
+        acfg.conservative_initial_phase = AECB_ST_CONSERVATIVE_INITIAL_PHASE;
+        acfg.delay_headroom_samples = AECB_ST_DELAY_HEADROOM_SAMPLES;
+        acfg.initial_state_seconds = AECB_ST_INITIAL_STATE_SECONDS;
+        acfg.erle_min = AECB_ST_ERLE_MIN;
+        acfg.erle_max_l = AECB_ST_ERLE_MAX_L;
+        acfg.erle_max_h = AECB_ST_ERLE_MAX_H;
+        /* Runtime np*hop, not AECB_FILTER_TAPS_SIZE (== rd->filter_taps_size at
          * 16 kHz); mirrors aec_carve's AecStateConfig wiring. */
         acfg.filter_taps_size = a->n_partitions * a->hop_size;
         /* Re-init reuses the same fa_abs_scratch/fa_render_sq_scratch
@@ -1015,27 +1056,27 @@ static void aec3_post_chain_reset(Aec* a) {
         /* Rate-varying REE absolute-power floats via rd (see the lookup comment
          * above). */
         em.min_noise_floor_power = rd ? rd->ree_min_noise_floor_power
-                                      : AEC3B_REE_MIN_NOISE_FLOOR_POWER;
-        em.noise_gate_power = AEC3B_REE_NOISE_GATE_POWER_LEGACY;
-        em.noise_gate_slope = AEC3B_REE_NOISE_GATE_SLOPE;
-        em.stationary_gate_slope = AEC3B_REE_STATIONARY_GATE_SLOPE;
-        em.model_reverb_in_nonlinear_mode = AEC3B_REE_MODEL_REVERB_IN_NL;
+                                      : AECB_REE_MIN_NOISE_FLOOR_POWER;
+        em.noise_gate_power = AECB_REE_NOISE_GATE_POWER_LEGACY;
+        em.noise_gate_slope = AECB_REE_NOISE_GATE_SLOPE;
+        em.stationary_gate_slope = AECB_REE_STATIONARY_GATE_SLOPE;
+        em.model_reverb_in_nonlinear_mode = AECB_REE_MODEL_REVERB_IN_NL;
         /* re-init reuses the same storage pointers already bound in a3_ree. */
         ree_init(&a->a3_ree, a->n_freqs, a->hop_size, a->cfg.sample_rate, &em,
-                 AEC3B_REE_DEFAULT_GAIN, AEC3B_REE_TM_GAIN, AEC3B_REE_ERLE_ONSET_COMP,
-                 AEC3B_REE_REVERB_DECAY, AEC3B_REE_REVERB_MILD_SCALE,
-                 AEC3B_REE_REVERB_ENABLED, AEC3B_REE_REVERB_TAIL_STRENGTH,
-                 AEC3B_REE_USE_AEC3_RESIDUAL_NOISE_GATE,
-                 AEC3B_USE_STATIONARITY_PROPERTIES,
-                 AEC3B_REE_USE_AEC3_ECHO_GEN_WINDOW,
-                 AEC3B_REE_NL_R2_ENABLED, AEC3B_REE_NL_R2_ALPHA,
-                 rd ? rd->ree_nl_norm_power : AEC3B_REE_NL_NORM_POWER,
-                 AEC3B_REE_NL_R2_CAP_MULTIPLE,
+                 AECB_REE_DEFAULT_GAIN, AECB_REE_TM_GAIN, AECB_REE_ERLE_ONSET_COMP,
+                 AECB_REE_REVERB_DECAY, AECB_REE_REVERB_MILD_SCALE,
+                 AECB_REE_REVERB_ENABLED, AECB_REE_REVERB_TAIL_STRENGTH,
+                 AECB_REE_USE_AEC_RESIDUAL_NOISE_GATE,
+                 AECB_USE_STATIONARITY_PROPERTIES,
+                 AECB_REE_USE_AEC_ECHO_GEN_WINDOW,
+                 AECB_REE_NL_R2_ENABLED, AECB_REE_NL_R2_ALPHA,
+                 rd ? rd->ree_nl_norm_power : AECB_REE_NL_NORM_POWER,
+                 AECB_REE_NL_R2_CAP_MULTIPLE,
                  rd ? rd->ree_residual_noise_gate_power
-                    : AEC3B_REE_RESIDUAL_NOISE_GATE_POWER,
-                 rd ? rd->ree_noise_floor_hold_hops : AEC3B_REE_NOISE_FLOOR_HOLD_HOPS,
-                 AEC3B_REE_USE_FREQ_RESPONSE, AEC3B_REE_REVERB_USE_CONSERVATIVE,
-                 rd ? rd->ree_reverb_smoothing_base : AEC3B_REE_REVERB_SMOOTHING_BASE,
+                    : AECB_REE_RESIDUAL_NOISE_GATE_POWER,
+                 rd ? rd->ree_noise_floor_hold_hops : AECB_REE_NOISE_FLOOR_HOLD_HOPS,
+                 AECB_REE_USE_FREQ_RESPONSE, AECB_REE_REVERB_USE_CONSERVATIVE,
+                 rd ? rd->ree_reverb_smoothing_base : AECB_REE_REVERB_SMOOTHING_BASE,
                  a->a3_ree.x2_noise_floor, a->a3_ree.x2_noise_floor_counter,
                  a->a3_ree.reverb_model.reverb,
                  a->a3_ree.reverb_freq_resp.tail_response,
@@ -1086,8 +1127,11 @@ int aec_create(Aec* a, const AecConfig* cfg_in) {
     if (total == 0) return -1;
     size_t arena_sz = total - ALIGN16(sizeof(Aec));
 
-    uint8_t* arena = (uint8_t*)malloc(arena_sz);
-    if (!arena) return -1;
+    /* malloc may provide only 8-byte alignment on ILP32; the carved FFT
+     * and static subobjects require the same 16-byte base on either ABI. */
+    void* arena_mem = NULL;
+    if (posix_memalign(&arena_mem, 16u, arena_sz) != 0) return -1;
+    uint8_t* arena = (uint8_t*)arena_mem;
 
     memset(a, 0, sizeof(*a));
     if (aec_carve(a, arena, cfg, hop, blk, fft, K, np, buf_samp, fcap,
@@ -1221,17 +1265,6 @@ static void aec_derive_dims(const AecConfig* cfg,
     *o_fifo_cap = cap;
 }
 
-/* Checked equivalent of `t += ALIGN16(count*elem_size) * reps` — reps
- * identically-sized fields laid out back-to-back (each individually
- * ALIGN16'd by aec_init's pool-carve, so their sum is exactly
- * reps * ALIGN16(count*elem_size)). Saturates to SIZE_MAX on overflow via
- * mem_align.h's ck_* helpers, same as ck_field_size. */
-static size_t ck_field_size_reps(size_t total, size_t count, size_t elem_size,
-                                  size_t reps) {
-    size_t one = ck_align16_size(ck_mul_size(count, elem_size));
-    return ck_add_size(total, ck_mul_size(one, reps));
-}
-
 size_t aec_get_mem_size(const AecConfig* cfg_in) {
     if (!cfg_in) return 0;
     if (!aec_validate_config(cfg_in)) return 0;
@@ -1240,9 +1273,9 @@ size_t aec_get_mem_size(const AecConfig* cfg_in) {
     int hop, blk, fft, K, np, buf, fcap;
     aec_derive_dims(cfg, &hop, &blk, &fft, &K, &np, &buf, &fcap);
 
-    const int ncc  = AEC3B_ST_NUM_CAPTURE_CHANNELS;
-    const int rh   = (AEC3B_REE_USE_AEC3_ECHO_GEN_WINDOW ? 1 : 0) + 2;
-    const Aec3BalancedRateDims* rd = aec3b_rate_cfg(
+    const int ncc  = AECB_ST_NUM_CAPTURE_CHANNELS;
+    const int rh   = (AECB_REE_USE_AEC_ECHO_GEN_WINDOW ? 1 : 0) + 2;
+    const AecBalancedRateDims* rd = aecb_rate_cfg(
         cfg->sample_rate, cfg->fft_size);
     if (!rd) return 0;
     const int sg_n = rd->sg_nearend_smoother_n;
@@ -1257,15 +1290,15 @@ size_t aec_get_mem_size(const AecConfig* cfg_in) {
     size_t t = 0;
     t = ck_field_size(t, 1, sizeof(Aec));
     /* Matched-filter delay estimator. `Aec` does not embed the bank/ring/
-     * histogram arrays -- DelayAec3 is a metadata struct and its arrays are
+     * histogram arrays -- DelayAec is a metadata struct and its arrays are
      * carved from THIS pool, sized by the resolved (sample_rate, hop,
      * delay_num_filters) triple, so n=1 really is ~23 KB cheaper than n=5
      * instead of merely cheaper in MACs. Carved only for MATCHED: that is the
      * only mode that constructs an estimator. Must stay in lockstep with the
      * matching carve in aec_carve(). */
     if (cfg->delay_mode == AEC_DELAY_MATCHED) {
-        size_t da_sz = delay_aec3_get_mem_size(cfg->sample_rate, hop,
-                                               cfg->delay_num_filters);
+        size_t da_sz = delay_aec_get_mem_size(cfg->sample_rate, hop,
+                                              cfg->delay_num_filters);
         if (da_sz == 0) return 0;   /* sub-config rejected its own inputs */
         t = ck_add_size(t, da_sz);
     }
@@ -1283,7 +1316,7 @@ size_t aec_get_mem_size(const AecConfig* cfg_in) {
     t = ck_field_size(t, (size_t)hop, sizeof(float));  /* fifo_zero_ref (underrun reference) */
     t = ck_field_size(t, (size_t)(K - 2 > 0 ? K - 2 : 1), sizeof(int64_t));
     /* Shared FFT handle: ONE FftHandle for the whole instance (main filter,
-     * shadow filter, and aec3_post all borrow it -- see aec_carve()). Carved
+     * shadow filter, and aec_post all borrow it -- see aec_carve()). Carved
      * here, before the main/shadow filters, since both require an
      * already-constructed handle to borrow at their own init time; kf_sz/af_sz
      * below include no nested-FFT term (pbfdaf_get_mem_size never does). */
@@ -1298,12 +1331,12 @@ size_t aec_get_mem_size(const AecConfig* cfg_in) {
         if (af_sz == 0) return 0;
         t = ck_add_size(t, af_sz);
     }
-    /* Live observer (A21 Stage 2): third PBFDAF instance, same sizing as
+    /* Live observer: third PBFDAF instance, same sizing as
      * the shadow filter above, plus its own hop-length far-end scratch
      * (observer_far_hop, carved here beside the filter) and the per-hop
      * corroboration scratch -- a discarded hop-length output buffer and 3
      * n_bins-length buffers (complex diff spectrum + two magnitude-squared
-     * arrays), carved later in the Aec3PostRunScratch block below (same
+     * arrays), carved later in the AecPostRunScratch block below (same
      * `cfg->live_observer_enabled` guard there). Total must stay in
      * lockstep with aec_carve()'s two matching conditional blocks. */
     if (cfg->live_observer_enabled) {
@@ -1315,7 +1348,7 @@ size_t aec_get_mem_size(const AecConfig* cfg_in) {
         t = ck_field_size(t, Kz, sizeof(Complex));          /* a3_sc.observer_diff_spec */
         t = ck_field_size_reps(t, Kz, sizeof(float), 2);    /* a3_sc diff/cap magnitude^2 */
     }
-    /* AMEND_35: pre-shift W snapshot(s) for the bad-relock judgment's revert
+    /* Pre-shift W snapshot(s) for the bad-relock judgment's revert
      * path (Aec::delay_shift_judgment_pre_W/_pre_shadow_W doc in aec.h).
      * Same shape as the filters' own W (np*K Complex); shadow's only when
      * enable_shadow, matching that filter's own conditional carve above. */
@@ -1325,7 +1358,7 @@ size_t aec_get_mem_size(const AecConfig* cfg_in) {
     /* RenderActivityDetector pairwise-sum scratch: ceil(hop/8) blocks, see
      * detectors.c. */
     t = ck_field_size(t, (size_t)((hop + 7) / 8), sizeof(float));
-    /* aec3_post (21) */
+    /* aec_post (21) */
     t = ck_field_size_reps(t, Kz, sizeof(float), 6);   /* avg_rev y2s n2 n2i sye_re sye_im */
     t = ck_field_size_reps(t, Kz, sizeof(float), 2);   /* syy see */
     t = ck_field_size(t, (size_t)blk, sizeof(float));  /* ola */
@@ -1377,7 +1410,7 @@ size_t aec_get_mem_size(const AecConfig* cfg_in) {
      * stack-overflow hazard on small embedded task stacks. */
     t = ck_field_size_reps(t, (size_t)hop, sizeof(float), 3); /* scr_sq scr_sref scr_scoa */
     t = ck_field_size(t, (size_t)fft, sizeof(float));  /* scr_tin */
-    /* Aec3PostRunScratch (19) */
+    /* AecPostRunScratch (19) */
     t = ck_field_size_reps(t, Kz, sizeof(Complex), 4); /* sel_esw sel_echo nsw_e1 ybase */
     t = ck_field_size_reps(t, Kz, sizeof(float), 9);   /* abs_near..x2_past */
     t = ck_field_size(t, ck_mul_size((size_t)np, Kz), sizeof(float)); /* w_mag2 */
@@ -1403,7 +1436,7 @@ size_t aec_get_mem_size(const AecConfig* cfg_in) {
  * caller (aec_wav.c's --print-mem-size) reads the SAME number
  * aec_get_mem_size() would give it, not a second, driftable computation of
  * it. estimator_bytes/ring_bytes reuse the identical helpers
- * aec_get_mem_size() itself carves against (delay_aec3_get_mem_size(),
+ * aec_get_mem_size() itself carves against (delay_aec_get_mem_size(),
  * aec_derive_dims()'s buf out-param), so a query here can never disagree
  * with what aec_carve() actually lays out. */
 int aec_get_mem_breakdown(const AecConfig* cfg_in, AecMemBreakdown* out) {
@@ -1422,7 +1455,7 @@ int aec_get_mem_breakdown(const AecConfig* cfg_in, AecMemBreakdown* out) {
 
     size_t est = 0;
     if (cfg->delay_mode == AEC_DELAY_MATCHED) {
-        est = delay_aec3_get_mem_size(cfg->sample_rate, hop,
+        est = delay_aec_get_mem_size(cfg->sample_rate, hop,
                                        cfg->delay_num_filters);
     }
     size_t ring = (buf > 0) ? ck_field_size(0, (size_t)buf, sizeof(float)) : 0;
@@ -1438,11 +1471,11 @@ int aec_get_mem_breakdown(const AecConfig* cfg_in, AecMemBreakdown* out) {
  * undersized pool. */
 /* ── shared arena carve ────────────────────────────────────────────────────
  * Both aec_init() (caller-owned pool, Aec placed at mem[0]) and aec_create()
- * (caller-owned Aec, followed by a single malloc'd arena) carve the
+ * (caller-owned Aec, followed by a single aligned arena) carve the
  * identical set of sub-module buffers in the identical order from a raw
  * byte cursor -- this is that shared body. `a` must already be zeroed by the
  * caller; `ptr` is the first byte of the arena (aec_init: mem +
- * ALIGN16(sizeof(Aec)); aec_create: the base of the freshly malloc'd arena).
+ * ALIGN16(sizeof(Aec)); aec_create: the base of the freshly allocated arena).
  * `is_static` records the two paths' only remaining difference, read by
  * aec_destroy(): 1 means the caller owns the memory and aec_destroy() must
  * not free it.
@@ -1470,10 +1503,10 @@ int aec_get_mem_breakdown(const AecConfig* cfg_in, AecMemBreakdown* out) {
  * truth so the two call sites cannot drift the way they briefly did before
  * this helper existed. */
 static void aec_recompute_wallclock_thresholds(Aec* a, int hop, int sample_rate) {
-    a->poor_coarse_threshold_hops = aec3_blocks_to_hops(5, hop, sample_rate);
-    a->coarse_reset_hangover_hops = aec3_blocks_to_hops(25, hop, sample_rate);
-    a->leakage_div_sustain_hops = aec3_ms_to_hops(50.0f, hop, sample_rate);
-    a->stat_dt_hangover_hops = aec3_ms_to_hops(800.0f, hop, sample_rate);
+    a->poor_coarse_threshold_hops = aec_blocks_to_hops(5, hop, sample_rate);
+    a->coarse_reset_hangover_hops = aec_blocks_to_hops(25, hop, sample_rate);
+    a->leakage_div_sustain_hops = aec_ms_to_hops(50.0f, hop, sample_rate);
+    a->stat_dt_hangover_hops = aec_ms_to_hops(800.0f, hop, sample_rate);
 }
 
 /* Suppression-gain configuration and per-bin tuning for `cfg`, which must be a
@@ -1485,13 +1518,13 @@ static void aec_recompute_wallclock_thresholds(Aec* a, int hop, int sample_rate)
 int aec_build_sg_config(const AecConfig* cfg, SuppressionGainConfig* out_cfg,
                         SuppressionGainTuning* out_tun) {
     AecSignalGrid grid;
-    const Aec3BalancedRateDims* rd;
+    const AecBalancedRateDims* rd;
     SuppressionGainConfig scfg;
     SuppressionGainTuning stun;
     int hop, K;
     if (!cfg || !out_cfg || !out_tun) return -1;
     if (!aec_resolve_signal_grid(cfg->sample_rate, cfg->fft_size, &grid)) return -1;
-    rd = aec3b_rate_cfg(cfg->sample_rate, cfg->fft_size);
+    rd = aecb_rate_cfg(cfg->sample_rate, cfg->fft_size);
     if (!rd) return -1;
     hop = grid.hop_size;
     K = grid.n_freqs;
@@ -1502,43 +1535,49 @@ int aec_build_sg_config(const AecConfig* cfg, SuppressionGainConfig* out_cfg,
     scfg.last_lf_band = rd->sg_last_lf_band;
     scfg.first_hf_band = rd->sg_first_hf_band;
     scfg.last_lf_smoothing_band = rd->sg_last_lf_smoothing_band;
-    scfg.last_permanent_lf_smoothing_band = AEC3B_SG_LAST_PERMANENT;
-    scfg.lf_smoothing_during_initial_phase = AEC3B_SG_LF_SMOOTHING_INITIAL;
+    scfg.last_permanent_lf_smoothing_band = AECB_SG_LAST_PERMANENT;
+    scfg.lf_smoothing_during_initial_phase = AECB_SG_LF_SMOOTHING_INITIAL;
     scfg.lf_clamp_bin = rd->sg_lf_clamp_bin;
     scfg.dne_lf_end = rd->sg_dne_lf_end;
     scfg.nearend_smoother_n = rd->sg_nearend_smoother_n;
     scfg.aud_lf_end_bin = rd->sg_aud_lf_end_bin; scfg.aud_mf_end_bin = rd->sg_aud_mf_end_bin;
     /* Absolute-power floor, render limits and low-render threshold are per-rate. */
     scfg.floor_power = rd->sg_floor_power;
-    scfg.aud_thr_lf = AEC3B_SG_AUD_THR_LF; scfg.aud_thr_mf = AEC3B_SG_AUD_THR_MF;
-    scfg.aud_thr_hf = AEC3B_SG_AUD_THR_HF;
+    scfg.aud_thr_lf = AECB_SG_AUD_THR_LF; scfg.aud_thr_mf = AECB_SG_AUD_THR_MF;
+    scfg.aud_thr_hf = AECB_SG_AUD_THR_HF;
     scfg.low_render_limit = rd->sg_low_render_limit;
     scfg.normal_render_limit = rd->sg_normal_render_limit;
-    scfg.hf_lgb = rd->sg_hf_lgb; scfg.hf_biq = AEC3B_SG_HF_BIQ;
-    scfg.conservative_hf = AEC3B_SG_CONSERVATIVE_HF;
+    scfg.hf_lgb = rd->sg_hf_lgb; scfg.hf_biq = AECB_SG_HF_BIQ;
+    scfg.conservative_hf = AECB_SG_CONSERVATIVE_HF;
     scfg.max_inc_normal = rd->sg_max_inc;
     scfg.max_inc_nearend = rd->sg_max_inc;
     scfg.max_dec_lf_normal = rd->sg_max_dec_lf;
     scfg.max_dec_lf_nearend = rd->sg_max_dec_lf;
     scfg.floor_first_increase = 0.00001f;
     scfg.low_render_threshold = rd->sg_low_render_threshold;
-    scfg.split_floor_enabled = 1;
+    /* Was hardcoded `= 1`; now threaded from AecConfig so NO_FLOOR
+     * (min_gain_split_floor_enabled=0) actually reaches the suppressor at
+     * construction time. mild/balanced/aggressive (and aec_config_defaults'
+     * own default) all set this field to 1, so this is byte-identical for
+     * them. Shared by both Aec's own construction path and AecRes's (via
+     * aec_res.c's resolve() -> aec_build_sg_config()). */
+    scfg.split_floor_enabled = cfg->min_gain_split_floor_enabled;
     scfg.split_floor_far_active =
         powf(10.0f, cfg->min_gain_floor_far_active_db / 10.0f);
-    scfg.split_floor_far_silent = AEC3B_SG_SPLIT_FLOOR_FAR_SILENT;
+    scfg.split_floor_far_silent = AECB_SG_SPLIT_FLOOR_FAR_SILENT;
     /* Double-talk floor: 10^(min_gain_floor_dt_db/10). */
     scfg.split_floor_dt =
         powf(10.0f, cfg->min_gain_floor_dt_db / 10.0f);
-    scfg.split_floor_latch_power = AEC3B_SG_SPLIT_FLOOR_LATCH_POWER;
-    scfg.soft_blend_enabled = AEC3B_SG_SOFT_BLEND_ENABLED;
-    scfg.soft_blend_per_bin = AEC3B_SG_SOFT_BLEND_PER_BIN;
-    scfg.soft_blend_enr_thr = (float)AEC3B_SG_SOFT_BLEND_ENR_THR;
-    scfg.soft_blend_softness = (float)AEC3B_SG_SOFT_BLEND_SOFTNESS;
-    scfg.dne_enr_threshold = AEC3B_SG_DNE_ENR_THRESHOLD;
-    scfg.dne_enr_exit_threshold = AEC3B_SG_DNE_ENR_EXIT_THRESHOLD;
-    scfg.dne_snr_threshold = AEC3B_SG_DNE_SNR_THRESHOLD;
-    scfg.dne_use_during_initial_phase = AEC3B_SG_DNE_USE_DURING_INITIAL_PHASE;
-    scfg.dne_use_unbounded_echo = AEC3B_SG_DNE_USE_UNBOUNDED_ECHO;
+    scfg.split_floor_latch_power = AECB_SG_SPLIT_FLOOR_LATCH_POWER;
+    scfg.soft_blend_enabled = AECB_SG_SOFT_BLEND_ENABLED;
+    scfg.soft_blend_per_bin = AECB_SG_SOFT_BLEND_PER_BIN;
+    scfg.soft_blend_enr_thr = (float)AECB_SG_SOFT_BLEND_ENR_THR;
+    scfg.soft_blend_softness = (float)AECB_SG_SOFT_BLEND_SOFTNESS;
+    scfg.dne_enr_threshold = AECB_SG_DNE_ENR_THRESHOLD;
+    scfg.dne_enr_exit_threshold = AECB_SG_DNE_ENR_EXIT_THRESHOLD;
+    scfg.dne_snr_threshold = AECB_SG_DNE_SNR_THRESHOLD;
+    scfg.dne_use_during_initial_phase = AECB_SG_DNE_USE_DURING_INITIAL_PHASE;
+    scfg.dne_use_unbounded_echo = AECB_SG_DNE_USE_UNBOUNDED_ECHO;
     scfg.dne_lf_endpoint_bin = rd->sg_dne_lf_endpoint_bin;
     scfg.dne_trigger_threshold_hops = rd->sg_trigger_threshold_hops;
     scfg.dne_hold_duration_hops = rd->sg_hold_duration_hops;
@@ -1561,26 +1600,13 @@ int aec_resolve_valid_config(const AecConfig* in, AecConfig* out) {
     return 1;
 }
 
-static int aec_carve(Aec* a, uint8_t* ptr, const AecConfig* cfg,
-                      int hop, int blk, int fft, int K, int np,
-                      int buf_samp, int fcap, int is_static) {
-    /* Per-rate lookup for every constant below that AEC3B_RATE_TABLE carries.
-     * aec_validate_config guarantees a hit (both aec_create and aec_init run it
-     * before reaching aec_carve), so this never returns NULL in practice;
-     * guarded anyway. At 16 kHz this row is value-identical to the unsuffixed
-     * macros/arrays in aec3_balanced_config.h. */
-    const Aec3BalancedRateDims* rd = aec3b_rate_cfg(
-        cfg->sample_rate, cfg->fft_size);
-    if (!rd) return -1;
-    SuppressionGainConfig scfg;
-    SuppressionGainTuning stun;
-    if (aec_build_sg_config(cfg, &scfg, &stun) != 0) return -1;
-
+static void aec_init_config_state(Aec* a, const AecConfig* cfg, int hop, int blk,
+                                  int fft, int K, int np) {
     a->cfg = *cfg;
     a->hop_size = hop; a->block_size = blk; a->fft_size = fft;
     a->n_freqs = K; a->n_partitions = np;
 
-    /* Retime the top-level (non-AEC3) wall-clock-authored constants against the
+    /* Retime the top-level (non-reference) wall-clock-authored constants against the
      * FINAL resolved (hop, cfg->sample_rate) grid -- see
      * aec_legacy10ms_hops()/aec_legacy10ms_alpha()'s doc comment for why this
      * happens here (aec_carve, construction time) rather than in
@@ -1610,7 +1636,7 @@ static int aec_carve(Aec* a, uint8_t* ptr, const AecConfig* cfg,
         a->erle_slope_head = 0;
     }
 
-    /* HPF: arena/pool-carved at the scratch tail below (audio_common f32 HPF). */
+    /* HPF: arena/pool-carved at the scratch tail below (audiolib f32 HPF). */
     /* Saturation */
     if (cfg->enable_saturation) {
         saturation_init(&a->sat_ref, cfg->saturation_threshold,
@@ -1619,6 +1645,10 @@ static int aec_carve(Aec* a, uint8_t* ptr, const AecConfig* cfg,
                         hop, cfg->sample_rate);
         a->has_sat = 1;
     }
+}
+
+static uint8_t* aec_carve_delay_fifo(Aec* a, uint8_t* ptr, const AecConfig* cfg,
+                                 int hop, int K, int buf_samp, int fcap) {
     /* Delay ring. `cfg` is already delay-resolved by every entry point
      * (aec_create / aec_init), so delay_mode is authoritative here.
      *   MATCHED           estimator + ring, delay unknown until acquisition
@@ -1641,18 +1671,18 @@ static int aec_carve(Aec* a, uint8_t* ptr, const AecConfig* cfg,
         /* Same rejection aec_get_mem_size() already made for this config;
          * repeated so the carve can never walk a ring it could not size.
          * Nothing has been constructed yet, so there is nothing to unwind. */
-        if (buf_samp <= 0) return -1;
+        if (buf_samp <= 0) return NULL;
         if (cfg->delay_mode == AEC_DELAY_MATCHED) {
-            size_t da_sz = delay_aec3_get_mem_size(cfg->sample_rate, hop,
-                                                   cfg->delay_num_filters);
+            size_t da_sz = delay_aec_get_mem_size(cfg->sample_rate, hop,
+                                                  cfg->delay_num_filters);
             /* Unreachable for a validated config (aec_get_mem_size already
              * queried the identical triple and declined to size the pool if
              * it came back 0), but this carve must never walk past a block
              * it could not size. Nothing has been constructed yet at this
              * point, so there is nothing to unwind. */
-            if (da_sz == 0) return -1;
-            if (delay_aec3_init(&a->delay, ptr, da_sz, cfg->sample_rate, hop,
-                                cfg->delay_num_filters) != 0) return -1;
+            if (da_sz == 0) return NULL;
+            if (delay_aec_init(&a->delay, ptr, da_sz, cfg->sample_rate, hop,
+                               cfg->delay_num_filters) != 0) return NULL;
             ptr += da_sz;
             a->has_delay = 1;
         }
@@ -1688,19 +1718,24 @@ static int aec_carve(Aec* a, uint8_t* ptr, const AecConfig* cfg,
     size_t rsa_sz = ALIGN16((size_t)(K - 2 > 0 ? K - 2 : 1) * sizeof(int64_t));
     memset(ptr, 0, rsa_sz); ptr += rsa_sz;
 
+    return ptr;
+}
+
+static uint8_t* aec_carve_filters(Aec* a, uint8_t* ptr, const AecConfig* cfg,
+                              int hop, int blk, int fft, int K, int np) {
     /* Shared FFT handle. ONE FftHandle for the whole instance, carved and
-     * constructed first so the main filter, shadow filter, and aec3_post all
+     * constructed first so the main filter, shadow filter, and aec_post all
      * have something to borrow at their own init time below -- none carves or
      * owns a private handle (see pbfdaf_init_static's doc comment). Safe because
      * all three run at the identical fft_size and fully sequentially on the
      * single-threaded synchronous call path: shadow runs to completion, then
-     * main, then aec3_post, never interleaved. This is the only nested-FFT
+     * main, then aec_post, never interleaved. This is the only nested-FFT
      * allocation in this carve, so a failure here needs no unwind: nothing has
      * been constructed yet that owns an external (NE10 twiddle-config)
      * allocation. */
     size_t fft_sz = fft_get_mem_size(fft);
     a->post_fft = fft_init(ptr, fft_sz, fft);
-    if (!a->post_fft) return -1;   /* fft_init failed (OOM) -- nothing to unwind yet */
+    if (!a->post_fft) return NULL;   /* fft_init failed (OOM) -- nothing to unwind yet */
     ptr += fft_sz;
 
     /* Main filter (PBFDKF, carved from the arena/pool on both the heap and
@@ -1709,15 +1744,15 @@ static int aec_carve(Aec* a, uint8_t* ptr, const AecConfig* cfg,
     size_t kf_sz = pbfdkf_get_mem_size(blk, np, hop);
     if (pbfdkf_init_static(&a->main_filter, ptr, kf_sz, blk, np, cfg->mu, cfg->delta, hop, cfg->sample_rate, a->post_fft) != 0) {
         fft_destroy(a->post_fft); a->post_fft = NULL;
-        return -1;
+        return NULL;
     }
     for (int k = 0; k < K; ++k) {
         a->main_filter.Q_high[k] = cfg->kalman_q_high;
         a->main_filter.Q_low[k]  = cfg->kalman_q_low;
         a->main_filter.Q[k]      = cfg->kalman_q_high;
     }
-    a->main_filter.base.poor_excitation_counter = aec3_blocks_to_hops(1000, hop, cfg->sample_rate);
-    a->main_filter.base.constraint_round_robin = 1;  /* AEC3 round-robin (main) */
+    a->main_filter.base.poor_excitation_counter = aec_blocks_to_hops(1000, hop, cfg->sample_rate);
+    a->main_filter.base.constraint_round_robin = 1;  /* round-robin (main) */
     ptr += kf_sz;
 
     /* Shadow filter (PBFDAF, carved from the arena/pool on both paths). Borrows
@@ -1731,18 +1766,18 @@ static int aec_carve(Aec* a, uint8_t* ptr, const AecConfig* cfg,
              * it borrowed). */
             pbfdkf_free(&a->main_filter);
             fft_destroy(a->post_fft); a->post_fft = NULL;
-            return -1;
+            return NULL;
         }
         a->shadow_filter.poor_excitation_counter = a->main_filter.base.poor_excitation_counter;
         a->shadow_filter.saturated_capture = 0;
         /* FFT dedup: skip the shadow's unread near_spec / error_spec_windowed. */
         a->shadow_filter.lightweight = 1;
-        a->shadow_filter.constraint_round_robin = 1;  /* AEC3 round-robin (shadow) */
+        a->shadow_filter.constraint_round_robin = 1;  /* round-robin (shadow) */
         a->has_shadow = 1;
         ptr += af_sz;
     }
 
-    /* Live observer (A21 Stage 2): third PBFDAF instance, same construction
+    /* Live observer: third PBFDAF instance, same construction
      * as the shadow filter above (borrows a->post_fft), EXCEPT mu is
      * cfg->live_observer_mu, not shadow_mu_nlms. constraint_round_robin is
      * set the same way as the shadow filter just above: amortizes the TD
@@ -1752,7 +1787,7 @@ static int aec_carve(Aec* a, uint8_t* ptr, const AecConfig* cfg,
      * main/shadow (mirrors _seed_poor_excitation_counters() seeding all
      * three in Python). NOT (yet) mirrored from main/shadow, on both ports:
      * the soft-realign warm IR-shift, the RenderSignalAnalyzer narrowband mu
-     * mask, and the AMEND_35 bad-relock tap snapshot/restore -- a consistent
+     * mask, and the bad-relock tap snapshot/restore -- a consistent
      * gap across languages, not a port divergence, but real missing
      * coverage for the observer lane specifically. */
     if (cfg->live_observer_enabled) {
@@ -1763,20 +1798,20 @@ static int aec_carve(Aec* a, uint8_t* ptr, const AecConfig* cfg,
             if (a->has_shadow) pbfdaf_free(&a->shadow_filter);
             pbfdkf_free(&a->main_filter);
             fft_destroy(a->post_fft); a->post_fft = NULL;
-            return -1;
+            return NULL;
         }
         a->observer_filter.poor_excitation_counter = a->main_filter.base.poor_excitation_counter;
         a->observer_filter.saturated_capture = 0;
         a->observer_filter.lightweight = 1;
-        a->observer_filter.constraint_round_robin = 1;  /* AEC3 round-robin (observer) */
+        a->observer_filter.constraint_round_robin = 1;  /* round-robin (observer) */
         a->has_observer = 1;
         ptr += obs_sz;
         a->observer_far_hop = (float*)ptr; ptr += ALIGN16((size_t)hop * sizeof(float));
         a->observer_far_hop_valid = 0;
-        a->observer_shift_hops = aec3_ms_to_hops(cfg->live_observer_shift_ms, hop, cfg->sample_rate);
+        a->observer_shift_hops = aec_ms_to_hops(cfg->live_observer_shift_ms, hop, cfg->sample_rate);
     }
 
-    /* AMEND_35: pre-shift W snapshot(s), same position as the matching
+    /* Pre-shift W snapshot(s), same position as the matching
      * aec_get_mem_size() block above. */
     {
         size_t w_snap_sz = ALIGN16(ck_mul_size((size_t)np, (size_t)K) * sizeof(Complex));
@@ -1793,6 +1828,11 @@ static int aec_carve(Aec* a, uint8_t* ptr, const AecConfig* cfg,
     a->delay_shift_judgment_hops_left = 0;
     a->delay_reject_count = 0;
 
+    return ptr;
+}
+
+static uint8_t* aec_carve_detectors(Aec* a, uint8_t* ptr, const AecConfig* cfg,
+                                    int hop, int K, int np) {
     /* Detectors / EPC / regime / RSA */
     a->ra_pairwise_scratch = (float*)ptr;
     ptr += ALIGN16((size_t)((hop + 7) / 8) * sizeof(float));
@@ -1806,19 +1846,25 @@ static int aec_carve(Aec* a, uint8_t* ptr, const AecConfig* cfg,
                               a->cfg.epc_hangover, hop, cfg->sample_rate);
     rsa_init(&a->rsa, a->rsa_counters, K, np);
 
-    /* aec3_post backing (reuses a->post_fft, the shared handle constructed
+    return ptr;
+}
+
+static uint8_t* aec_carve_post_backing(Aec* a, uint8_t* ptr, const AecConfig* cfg,
+                                       const AecBalancedRateDims* rd,
+                                       int hop, int blk, int fft, int K) {
+    /* aec_post backing (reuses a->post_fft, the shared handle constructed
      * above -- no separate carve/init here anymore). */
     {
-        Aec3PostConfig pcfg;
-        aec3_post_config_defaults(&pcfg);
+        AecPostConfig pcfg;
+        aec_post_config_defaults(&pcfg);
         pcfg.n_bins = K; pcfg.fft_size = fft; pcfg.block_size = blk; pcfg.hop_size = hop;
         /* Rate-table synth window length (== block_size at every validated rate);
-         * aec3_post_apply_output asserts this before reading synth_window. */
+         * aec_post_apply_output asserts this before reading synth_window. */
         pcfg.synth_window_len            = rd->synth_window_len;
-        pcfg.erle_coh_gate_enabled       = AEC3B_ERLE_COH_GATE_ENABLED;
-        pcfg.erle_windowed_capture_psd   = AEC3B_ERLE_WINDOWED_CAPTURE_PSD;
-        pcfg.erle_render_x2_psd_scale    = AEC3B_ERLE_RENDER_X2_PSD_SCALE;
-        pcfg.output_capture_when_linear_unusable = AEC3B_OUTPUT_CAPTURE_WHEN_LINEAR_UNUSABLE;
+        pcfg.erle_coh_gate_enabled       = AECB_ERLE_COH_GATE_ENABLED;
+        pcfg.erle_windowed_capture_psd   = AECB_ERLE_WINDOWED_CAPTURE_PSD;
+        pcfg.erle_render_x2_psd_scale    = AECB_ERLE_RENDER_X2_PSD_SCALE;
+        pcfg.output_capture_when_linear_unusable = AECB_OUTPUT_CAPTURE_WHEN_LINEAR_UNUSABLE;
         pcfg.enable_cng                  = cfg->enable_cng;
         pcfg.cng_n2_windowed_psd         = cfg->cng_n2_windowed_psd;
         pcfg.cng_n2_update_onset_hops    = rd->cng_n2_update_onset_hops;
@@ -1829,10 +1875,10 @@ static int aec_carve(Aec* a, uint8_t* ptr, const AecConfig* cfg,
         pcfg.cng_n2_slow_up              = rd->cng_n2_slow_up;
         pcfg.cng_n2_initial_alpha        = rd->cng_n2_initial_alpha;
         pcfg.noise_floor_int16sq         = rd->noise_floor_int16sq;
-        pcfg.erle_coh_gate_alpha         = AEC3B_ERLE_COH_GATE_ALPHA;
-        pcfg.erle_coh_gate_threshold     = AEC3B_ERLE_COH_GATE_THRESHOLD;
+        pcfg.erle_coh_gate_alpha         = AECB_ERLE_COH_GATE_ALPHA;
+        pcfg.erle_coh_gate_threshold     = AECB_ERLE_COH_GATE_THRESHOLD;
 
-        /* Live observer (A21 Stage 2). Mirrors orchestrator.py's __init__
+        /* Live observer. Mirrors orchestrator.py's __init__
          * observer construction exactly: max_bin from max_hz/bin_hz
          * (bin_hz = sample_rate/frame_size, frame_size==fft here);
          * err_ema_alpha = exp(-hop_ms/corrob_ms) (corrob_ms floored at
@@ -1862,9 +1908,9 @@ static int aec_carve(Aec* a, uint8_t* ptr, const AecConfig* cfg,
             double corrob_ms = (double)cfg->live_observer_corrob_ms;
             if (corrob_ms < 1e-6) corrob_ms = 1e-6;
             pcfg.observer_err_ema_alpha =
-                aec3_ema_alpha_from_tau_ms(corrob_ms, hop_ms);
+                aec_ema_alpha_from_tau_ms(corrob_ms, hop_ms);
             pcfg.observer_corrob_margin =
-                aec3_db_to_linear((double)cfg->live_observer_corrob_margin_db);
+                aec_db_to_linear((double)cfg->live_observer_corrob_margin_db);
         }
 
 #define P_FSLICE(n) ((float*)(ptr));    ptr += ALIGN16(K * sizeof(float));    (void)(n)
@@ -1883,13 +1929,18 @@ static int aec_carve(Aec* a, uint8_t* ptr, const AecConfig* cfg,
         Complex      *eout     = P_CSLICE(0);
         float        *eout_full = (float*)ptr; ptr += ALIGN16((size_t)fft * sizeof(float));
         memset(syy, 0, K * sizeof(float)); memset(see, 0, K * sizeof(float));
-        aec3_post_init(&a->post, &pcfg, a->post_fft,
-                       rd->synth_window, AEC3B_SQRT2_SIN_LUT, avg_rev,
-                       y2s, n2, n2i, sye_re, sye_im, syy, see, ola,
-                       np_, fp_, ep_, erp_, cpe, x2r, cgm, cn, nf_,
-                       eout, eout_full);
+        aec_post_init(&a->post, &pcfg, a->post_fft,
+                      rd->synth_window, AECB_SQRT2_SIN_LUT, avg_rev,
+                      y2s, n2, n2i, sye_re, sye_im, syy, see, ola,
+                      np_, fp_, ep_, erp_, cpe, x2r, cgm, cn, nf_,
+                      eout, eout_full);
     }
 
+    return ptr;
+}
+
+static uint8_t* aec_carve_state(Aec* a, uint8_t* ptr, const AecConfig* cfg,
+                                int hop, int K, int np) {
     /* AecStateStorage */
     {
         AecStateStorage* s = &a->a3_state_st;
@@ -1902,9 +1953,9 @@ static int aec_carve(Aec* a, uint8_t* ptr, const AecConfig* cfg,
         s->erle_low_render    = P_BSLICE(0);
         s->erl                = P_FSLICE(0);
         s->erl_hold           = (int*)ptr; ptr += ALIGN16((size_t)(K - 2) * sizeof(int));
-        s->filter_delays_blocks = (int*)ptr; ptr += ALIGN16((size_t)AEC3B_ST_NUM_CAPTURE_CHANNELS * sizeof(int));
+        s->filter_delays_blocks = (int*)ptr; ptr += ALIGN16((size_t)AECB_ST_NUM_CAPTURE_CHANNELS * sizeof(int));
         /* Runtime np*hop (== rd->filter_taps_size at 16 kHz), not the
-         * AEC3B_FILTER_TAPS_SIZE macro -- must stay in lockstep with the matching
+         * AECB_FILTER_TAPS_SIZE macro -- must stay in lockstep with the matching
          * aec_get_mem_size term above. */
         s->fa_h_highpass      = (float*)ptr; ptr += ALIGN16(ck_mul_size((size_t)np, (size_t)hop) * sizeof(float));
         /* FilterAnalyzer fa_update() scratch: sized from the same runtime dims
@@ -1913,24 +1964,24 @@ static int aec_carve(Aec* a, uint8_t* ptr, const AecConfig* cfg,
         s->fa_render_sq_scratch = (float*)ptr; ptr += ALIGN16((size_t)hop * sizeof(float));
         {
             AecStateConfig acfg; aec_state_config_defaults(&acfg);
-            acfg.n_bins = K; acfg.num_capture_channels = AEC3B_ST_NUM_CAPTURE_CHANNELS;
+            acfg.n_bins = K; acfg.num_capture_channels = AECB_ST_NUM_CAPTURE_CHANNELS;
             acfg.hop_size = hop;
             /* Set the real rate (the config default is 16000), as at the sibling call
              * site above. */
             acfg.sample_rate = cfg->sample_rate;
-            acfg.enable_filter_analyzer = AEC3B_ST_ENABLE_FILTER_ANALYZER;
+            acfg.enable_filter_analyzer = AECB_ST_ENABLE_FILTER_ANALYZER;
             /* Sentinel, not a literal hop count -- see the sibling call
              * site's comment above (AEC_STATE_STARTUP_HOPS_AUTO). */
-            acfg.erle_startup_hops = AEC3B_ST_ERLE_STARTUP_HOPS;
-            acfg.erl_startup_hops  = AEC3B_ST_ERL_STARTUP_HOPS;
-            acfg.echo_can_saturate = AEC3B_ST_ECHO_CAN_SATURATE;
-            acfg.use_linear_filter = AEC3B_ST_USE_LINEAR_FILTER;
-            acfg.conservative_initial_phase = AEC3B_ST_CONSERVATIVE_INITIAL_PHASE;
-            acfg.delay_headroom_samples = AEC3B_ST_DELAY_HEADROOM_SAMPLES;
-            acfg.initial_state_seconds  = AEC3B_ST_INITIAL_STATE_SECONDS;
-            acfg.erle_min = AEC3B_ST_ERLE_MIN; acfg.erle_max_l = AEC3B_ST_ERLE_MAX_L;
-            acfg.erle_max_h = AEC3B_ST_ERLE_MAX_H;
-            /* Runtime np*hop, not AEC3B_FILTER_TAPS_SIZE (== rd->filter_taps_size at
+            acfg.erle_startup_hops = AECB_ST_ERLE_STARTUP_HOPS;
+            acfg.erl_startup_hops  = AECB_ST_ERL_STARTUP_HOPS;
+            acfg.echo_can_saturate = AECB_ST_ECHO_CAN_SATURATE;
+            acfg.use_linear_filter = AECB_ST_USE_LINEAR_FILTER;
+            acfg.conservative_initial_phase = AECB_ST_CONSERVATIVE_INITIAL_PHASE;
+            acfg.delay_headroom_samples = AECB_ST_DELAY_HEADROOM_SAMPLES;
+            acfg.initial_state_seconds  = AECB_ST_INITIAL_STATE_SECONDS;
+            acfg.erle_min = AECB_ST_ERLE_MIN; acfg.erle_max_l = AECB_ST_ERLE_MAX_L;
+            acfg.erle_max_h = AECB_ST_ERLE_MAX_H;
+            /* Runtime np*hop, not AECB_FILTER_TAPS_SIZE (== rd->filter_taps_size at
              * 16 kHz) -- see the aec_get_mem_size / fa_h_highpass carve comments above
              * for the lockstep pair. */
             acfg.filter_taps_size = np * hop;
@@ -1940,9 +1991,14 @@ static int aec_carve(Aec* a, uint8_t* ptr, const AecConfig* cfg,
         }
     }
 
+    return ptr;
+}
+
+static uint8_t* aec_carve_residual(Aec* a, uint8_t* ptr, const AecConfig* cfg,
+                                   const AecBalancedRateDims* rd, int hop, int K) {
     /* ResidualEchoEstimator */
     {
-        int rh = (AEC3B_REE_USE_AEC3_ECHO_GEN_WINDOW ? 1 : 0) + 2;
+        int rh = (AECB_REE_USE_AEC_ECHO_GEN_WINDOW ? 1 : 0) + 2;
         float *x2_nf  = P_FSLICE(0);
         int   *x2_nfc = (int*)ptr;   ptr += ALIGN16(K * sizeof(int));
         float *rm_st  = P_FSLICE(0); float *rt_st = P_FSLICE(0);
@@ -1955,26 +2011,32 @@ static int aec_carve(Aec* a, uint8_t* ptr, const AecConfig* cfg,
          * macros' value at 16 kHz); noise_gate_power / slope /
          * model_reverb_in_nonlinear_mode are rate-invariant and stay direct. */
         em.min_noise_floor_power = rd->ree_min_noise_floor_power;
-        em.noise_gate_power      = AEC3B_REE_NOISE_GATE_POWER_LEGACY;
-        em.noise_gate_slope      = AEC3B_REE_NOISE_GATE_SLOPE;
-        em.stationary_gate_slope = AEC3B_REE_STATIONARY_GATE_SLOPE;
-        em.model_reverb_in_nonlinear_mode = AEC3B_REE_MODEL_REVERB_IN_NL;
+        em.noise_gate_power      = AECB_REE_NOISE_GATE_POWER_LEGACY;
+        em.noise_gate_slope      = AECB_REE_NOISE_GATE_SLOPE;
+        em.stationary_gate_slope = AECB_REE_STATIONARY_GATE_SLOPE;
+        em.model_reverb_in_nonlinear_mode = AECB_REE_MODEL_REVERB_IN_NL;
         ree_init(&a->a3_ree, K, hop, cfg->sample_rate, &em,
-                 AEC3B_REE_DEFAULT_GAIN, AEC3B_REE_TM_GAIN, AEC3B_REE_ERLE_ONSET_COMP,
-                 AEC3B_REE_REVERB_DECAY, AEC3B_REE_REVERB_MILD_SCALE,
-                 AEC3B_REE_REVERB_ENABLED, AEC3B_REE_REVERB_TAIL_STRENGTH,
-                 AEC3B_REE_USE_AEC3_RESIDUAL_NOISE_GATE,
-                 AEC3B_USE_STATIONARITY_PROPERTIES,
-                 AEC3B_REE_USE_AEC3_ECHO_GEN_WINDOW,
-                 AEC3B_REE_NL_R2_ENABLED, AEC3B_REE_NL_R2_ALPHA, rd->ree_nl_norm_power,
-                 AEC3B_REE_NL_R2_CAP_MULTIPLE,
+                 AECB_REE_DEFAULT_GAIN, AECB_REE_TM_GAIN, AECB_REE_ERLE_ONSET_COMP,
+                 AECB_REE_REVERB_DECAY, AECB_REE_REVERB_MILD_SCALE,
+                 AECB_REE_REVERB_ENABLED, AECB_REE_REVERB_TAIL_STRENGTH,
+                 AECB_REE_USE_AEC_RESIDUAL_NOISE_GATE,
+                 AECB_USE_STATIONARITY_PROPERTIES,
+                 AECB_REE_USE_AEC_ECHO_GEN_WINDOW,
+                 AECB_REE_NL_R2_ENABLED, AECB_REE_NL_R2_ALPHA, rd->ree_nl_norm_power,
+                 AECB_REE_NL_R2_CAP_MULTIPLE,
                  rd->ree_residual_noise_gate_power, rd->ree_noise_floor_hold_hops,
-                 AEC3B_REE_USE_FREQ_RESPONSE, AEC3B_REE_REVERB_USE_CONSERVATIVE,
+                 AECB_REE_USE_FREQ_RESPONSE, AECB_REE_REVERB_USE_CONSERVATIVE,
                  rd->ree_reverb_smoothing_base,
                  x2_nf, x2_nfc, rm_st, rt_st, rh_st, drd_st, rrd_st,
                  ld_st, lr_st, scr_st);
     }
 
+    return ptr;
+}
+
+static uint8_t* aec_carve_suppression(Aec* a, uint8_t* ptr, const AecBalancedRateDims* rd,
+                                      const SuppressionGainConfig* scfg,
+                                      const SuppressionGainTuning* stun, int K) {
     /* SuppressionGain */
     {
         SuppressionGain* sg = &a->a3_sg;
@@ -1983,10 +2045,14 @@ static int aec_carve(Aec* a, uint8_t* ptr, const AecConfig* cfg,
         float *ne_s = P_FSLICE(0); float *wr_s = P_FSLICE(0);
         float *ming = P_FSLICE(0); float *maxg = P_FSLICE(0);
         float *graw = P_FSLICE(0); float *gout = P_FSLICE(0); float *gsum = P_FSLICE(0);
-        suppression_gain_init(sg, &scfg, &stun, last_gain, last_ne, last_echo,
+        suppression_gain_init(sg, scfg, stun, last_gain, last_ne, last_echo,
                               ma, ne_s, wr_s, ming, maxg, graw, gout, gsum);
     }
 
+    return ptr;
+}
+
+static uint8_t* aec_carve_stationarity(Aec* a, uint8_t* ptr, const AecConfig* cfg, int hop, int K) {
     /* StationarityEstimator */
     {
         float        *st_noise = P_FSLICE(0);
@@ -1997,6 +2063,10 @@ static int aec_carve(Aec* a, uint8_t* ptr, const AecConfig* cfg,
                                     st_noise, st_hang, st_flg, st_hist);
     }
 
+    return ptr;
+}
+
+static uint8_t* aec_carve_linear_select(Aec* a, uint8_t* ptr, int hop, int blk, int fft, int K) {
     /* LinearFilterSelect (manual slice — no static API) */
     {
         memset(&a->a3_lfs, 0, sizeof(a->a3_lfs));
@@ -2017,9 +2087,14 @@ static int aec_carve(Aec* a, uint8_t* ptr, const AecConfig* cfg,
         linear_filter_select_reset(&a->a3_lfs);
     }
 
-    /* Aec3PostRunScratch */
+    return ptr;
+}
+
+static uint8_t* aec_carve_post_scratch(Aec* a, uint8_t* ptr, const AecConfig* cfg,
+                                       int hop, int K, int np) {
+    /* AecPostRunScratch */
     {
-        Aec3PostRunScratch* sc = &a->a3_sc;
+        AecPostRunScratch* sc = &a->a3_sc;
         sc->sel_esw  = P_CSLICE(0); sc->sel_echo = P_CSLICE(0);
         sc->nsw_e1   = P_CSLICE(0); sc->ybase    = P_CSLICE(0);
         sc->abs_near     = P_FSLICE(0); sc->abs_far      = P_FSLICE(0);
@@ -2045,6 +2120,11 @@ static int aec_carve(Aec* a, uint8_t* ptr, const AecConfig* cfg,
 #undef P_CSLICE
 #undef P_BSLICE
 
+    return ptr;
+}
+
+static uint8_t* aec_carve_hop_scratch(Aec* a, uint8_t* ptr, const AecConfig* cfg,
+                                  int hop, int K, int np) {
     /* hop scratch */
     a->per_bin_mu_scale = (float*)ptr; ptr += ALIGN16(K * sizeof(float));
     a->near_hop   = (float*)ptr; ptr += ALIGN16((size_t)hop * sizeof(float));
@@ -2064,8 +2144,8 @@ static int aec_carve(Aec* a, uint8_t* ptr, const AecConfig* cfg,
     a->scr_mu_buf    = (float*)ptr; ptr += ALIGN16((size_t)K   * sizeof(float));
     a->scr_e2ref_arr = (float*)ptr; ptr += ALIGN16((size_t)K   * sizeof(float));
     a->scr_erl_arr   = (float*)ptr; ptr += ALIGN16((size_t)K   * sizeof(float));
-    /* mic-path HPF (audio_common f32; arena/pool-resident, hpf_destroy no-ops).
-     * hpf_init() returns NULL if hpf_params_valid() (audio_common hpf.c) rejects
+    /* mic-path HPF (audiolib f32; arena/pool-resident, hpf_destroy no-ops).
+     * hpf_init() returns NULL if hpf_params_valid() (audiolib hpf.c) rejects
      * (cutoff_hz, sample_rate) -- aec_validate_config mirrors that exact check
      * whenever enable_highpass is set, so this should never fire in practice.
      * Checked anyway (same unwind-and-fail shape as the nested FFT allocations
@@ -2077,16 +2157,21 @@ static int aec_carve(Aec* a, uint8_t* ptr, const AecConfig* cfg,
         if (!a->hp_mic) {
             /* Unwind every nested allocation brought up earlier in this
              * carve (post_fft is always non-NULL here -- the fft_init check
-             * above already returned -1 if it failed). */
+             * above already returned NULL if it failed). */
             fft_destroy(a->post_fft); a->post_fft = NULL;
             if (a->has_observer) pbfdaf_free(&a->observer_filter);
             if (a->has_shadow) pbfdaf_free(&a->shadow_filter);
             pbfdkf_free(&a->main_filter);
-            return -1;
+            return NULL;
         }
         ptr += ALIGN16(hpf_get_mem_size());
     }
 
+    return ptr;
+}
+
+static void aec_init_scalar_state(Aec* a, const AecConfig* cfg, const AecBalancedRateDims* rd,
+                                  int hop, int is_static) {
     /* scalar state */
     a->pending_gain_change = 0; a->pending_delay_change = -1;
     a->stationarity_active_hops = 0; a->non_zero_render_seen = 0;
@@ -2102,17 +2187,17 @@ static int aec_carve(Aec* a, uint8_t* ptr, const AecConfig* cfg,
     a->warmup_frames_remaining = a->cfg.warmup_frames; a->warmup_far_active = 0;
     a->simple_mu_ratio = 1.0f; a->simple_mu_holdoff = 0; a->has_per_bin_mu = 0;
     a->near_power = 0.0f; a->raw_error_power = 0.0f; a->alpha_pow = powf(0.95f, 16000.0f / (float)a->cfg.sample_rate);
-    a->alpha_erl_tracking  = aec3_growth_rehop(0.99f,  160, 16000,
-                                               a->hop_size, a->cfg.sample_rate);
-    a->alpha_erl_converged = aec3_growth_rehop(0.999f, 160, 16000,
-                                               a->hop_size, a->cfg.sample_rate);
+    a->alpha_erl_tracking  = aec_growth_rehop(0.99f,  160, 16000,
+                                              a->hop_size, a->cfg.sample_rate);
+    a->alpha_erl_converged = aec_growth_rehop(0.999f, 160, 16000,
+                                              a->hop_size, a->cfg.sample_rate);
     /* ^ per-SAMPLE ERLE power EMA (applied once per sample, not per hop),
      * so it is retimed off the SAMPLE RATE and is hop-invariant.
-     * aec3_growth_rehop() would be wrong here. Mirrors orchestrator.py. */
+     * aec_growth_rehop() would be wrong here. Mirrors orchestrator.py. */
     /* Duty-cycle ERLE watchdog leak. The machine's other two spans are
      * grid-derived where they are read (hold_hops from delay_est_init_s, K
      * from delay_est_period_s, both via hop_s); this leak is converted HERE
-     * because it is a conversion and not a per-hop reading -- aec3_scale.h's
+     * because it is a conversion and not a per-hop reading -- aec_scale.h's
      * banner states the rule (these helpers run once at setup). 0.001 dB/hop
      * is authored on the reference 10 ms grid = 0.1 dB/s = 60 s to leak the
      * 6 dB collapse threshold; as a literal it would be 0.125 dB/s at the
@@ -2130,8 +2215,8 @@ static int aec_carve(Aec* a, uint8_t* ptr, const AecConfig* cfg,
         a->duty_hold_hops = (int)lrintf(a->cfg.delay_est_init_s / hop_s);
         a->duty_period_hops = (int)lrintf(a->cfg.delay_est_period_s / hop_s) / 5;
         if (a->duty_hold_hops < 1) a->duty_hold_hops = 1;
-        /* AMEND_35: floor was 2 (every-other-hop minimum), which silently
-         * capped delay_est_period_s=0.0 at 50% engagement instead of true
+        /* Floor of 1 (not 2): a floor of 2 would silently cap
+         * delay_est_period_s=0.0 at 50% engagement instead of true
          * full-rate. K=1 makes run_filter (below) unconditionally true,
          * matching Python's no-throttle default exactly. */
         if (a->duty_period_hops < 1) a->duty_period_hops = 1;
@@ -2142,6 +2227,39 @@ static int aec_carve(Aec* a, uint8_t* ptr, const AecConfig* cfg,
     a->last_erle_windowed = 0.0f;
     filter_q_high(&a->main_filter);
     a->is_static = is_static;
+}
+
+static int aec_carve(Aec* a, uint8_t* ptr, const AecConfig* cfg,
+                      int hop, int blk, int fft, int K, int np,
+                      int buf_samp, int fcap, int is_static) {
+    /* Per-rate lookup for every constant below that AECB_RATE_TABLE carries.
+     * aec_validate_config guarantees a hit (both aec_create and aec_init run it
+     * before reaching aec_carve), so this never returns NULL in practice;
+     * guarded anyway. At 16 kHz this row is value-identical to the unsuffixed
+     * macros/arrays in aec_balanced_config.h. */
+    const AecBalancedRateDims* rd = aecb_rate_cfg(
+        cfg->sample_rate, cfg->fft_size);
+    if (!rd) return -1;
+    SuppressionGainConfig scfg;
+    SuppressionGainTuning stun;
+    if (aec_build_sg_config(cfg, &scfg, &stun) != 0) return -1;
+
+    aec_init_config_state(a, cfg, hop, blk, fft, K, np);
+    ptr = aec_carve_delay_fifo(a, ptr, cfg, hop, K, buf_samp, fcap);
+    if (!ptr) return -1;
+    ptr = aec_carve_filters(a, ptr, cfg, hop, blk, fft, K, np);
+    if (!ptr) return -1;
+    ptr = aec_carve_detectors(a, ptr, cfg, hop, K, np);
+    ptr = aec_carve_post_backing(a, ptr, cfg, rd, hop, blk, fft, K);
+    ptr = aec_carve_state(a, ptr, cfg, hop, K, np);
+    ptr = aec_carve_residual(a, ptr, cfg, rd, hop, K);
+    ptr = aec_carve_suppression(a, ptr, rd, &scfg, &stun, K);
+    ptr = aec_carve_stationarity(a, ptr, cfg, hop, K);
+    ptr = aec_carve_linear_select(a, ptr, hop, blk, fft, K);
+    ptr = aec_carve_post_scratch(a, ptr, cfg, hop, K, np);
+    ptr = aec_carve_hop_scratch(a, ptr, cfg, hop, K, np);
+    if (!ptr) return -1;
+    aec_init_scalar_state(a, cfg, rd, hop, is_static);
     return 0;
 }
 
@@ -2195,8 +2313,8 @@ void aec_destroy(Aec* a) {
      * calling it a second time (e.g. via a stray destroy inside
      * main_filter/shadow_filter) would double-free that allocation, which is what
      * borrowing-not-owning avoids.
-     * fft_destroy() is a no-op for a NULL handle and (KISS backend) for a
-     * pool-owned handle, so this is safe pre- or post- pool/arena teardown.
+     * fft_destroy() is a no-op for a NULL handle, so this is safe pre- or
+     * post- pool/arena teardown.
      * post_fft is NULLed right after so a second aec_destroy() call on the
      * same instance (see test_lifecycle.c) cannot dereference a pointer that
      * now lives in freed memory instead of silently corrupting/crashing. */
@@ -2208,11 +2326,11 @@ void aec_destroy(Aec* a) {
 
     if (a->is_static) return;   /* caller owns the pool: nothing else to free */
 
-    /* Everything else (ref_ring, render_fifo, rsa_counters, the whole AEC3 post
+    /* Everything else (ref_ring, render_fifo, rsa_counters, the whole post-filter
      * chain's backing arrays, hop / per-hop-freq-bin scratch, ...) is carved out
      * of the single arena below rather than individually malloc'd -- freeing any
      * of those pointers on their own would free an interior address instead of
-     * the malloc() base, which is undefined behaviour. One free() reclaims all
+     * the allocation base, which is undefined behaviour. One free() reclaims all
      * of it, and is itself idempotent (a second call sees heap_arena already
      * NULLed). */
     free(a->heap_arena);
@@ -2234,30 +2352,49 @@ static void aec_bump_delay_generation(Aec* a) {
  * caller), summed across whichever of shadow/main filter is the one that
  * can run it fresh this hop. At most one of main/shadow ever increments per
  * hop (shadow's own internal dedup already guarantees that) -- see
- * pbfdaf_frontend()'s far_fft_real_compute_count comment. The live observer
- * (A21 Stage 2), when enabled, is NOT part of that mutual-exclusion: it
+ * pbfdaf_frontend()'s far_fft_real_compute_count comment. The live observer,
+ * when enabled, is NOT part of that mutual-exclusion: it
  * reads a different, independently-shifted far-end slice than main/shadow
  * share, so nothing ever primes its own precomputed_far_spec dedup slot and
  * it runs a real forward FFT every hop it is fed -- added unconditionally
  * (has_observer-gated) rather than folded into the main/shadow either/or. */
 long aec_far_fft_real_compute_count(const Aec* a) {
-    return a->main_filter.base.far_fft_real_compute_count +
-           (a->has_shadow ? a->shadow_filter.far_fft_real_compute_count : 0) +
-           (a->has_observer ? a->observer_filter.far_fft_real_compute_count : 0);
+    /* Counters are nonnegative; clamp the diagnostic sum to its public ABI. */
+    long total = a->main_filter.base.far_fft_real_compute_count;
+    if (a->has_shadow) {
+        long extra = a->shadow_filter.far_fft_real_compute_count;
+        if (extra > LONG_MAX - total) return LONG_MAX;
+        total += extra;
+    }
+    if (a->has_observer) {
+        long extra = a->observer_filter.far_fft_real_compute_count;
+        if (extra > LONG_MAX - total) return LONG_MAX;
+        total += extra;
+    }
+    return total;
 }
 
 int aec_set_preset(Aec* a, AecPreset preset, float ramp_ms) {
     float db, dt_db;
+    int en;
     if (a == NULL) return -1;
     if (aec_preset_floor_db(preset, &db) != 0) return -1;
     if (aec_preset_dt_floor_db(preset, &dt_db) != 0) return -1;
+    /* NO_FLOOR runtime switching is allowed on both sides (no rejection
+     * guard here or in Python's orchestrator.py).
+     * min_gain_split_floor_enabled has no ramp -- a boolean has no
+     * continuous path -- so it STEPS immediately, same discipline as
+     * suppression_gain_set_split_floor_dt_db's existing instant-step
+     * asymmetry with the ramped far-active setter. Looked up and validated
+     * BEFORE any write, same as db/dt_db above. */
+    if (aec_preset_split_floor_enabled(preset, &en) != 0) return -1;
     /* Let the suppressor validate and apply first: it refuses without writing
      * anything, so a rejected call cannot leave a->cfg claiming a floor that
-     * is not in force. Both lookups above come from the same in-enum
-     * `preset` already checked valid by the first call, so dt_db is always
-     * in SuppressionGain's range and this second setter cannot itself fail
-     * -- checked anyway, not assumed, to match the far-active setter's own
-     * discipline. */
+     * is not in force. All three lookups above come from the same in-enum
+     * `preset` already checked valid by the first call, so dt_db/en are
+     * always in SuppressionGain's range and these setters cannot themselves
+     * fail -- checked anyway, not assumed, to match the far-active setter's
+     * own discipline. */
     if (suppression_gain_set_split_floor_far_active_db(&a->a3_sg, db,
                                                        ramp_ms) != 0) {
         return -1;
@@ -2265,8 +2402,12 @@ int aec_set_preset(Aec* a, AecPreset preset, float ramp_ms) {
     if (suppression_gain_set_split_floor_dt_db(&a->a3_sg, dt_db) != 0) {
         return -1;
     }
+    if (suppression_gain_set_split_floor_enabled(&a->a3_sg, en) != 0) {
+        return -1;
+    }
     a->cfg.min_gain_floor_far_active_db = db;
     a->cfg.min_gain_floor_dt_db = dt_db;
+    a->cfg.min_gain_split_floor_enabled = en;
     return 0;
 }
 
@@ -2285,11 +2426,9 @@ int aec_apply_external_realign(Aec* a, int delta_samples) {
      * merely-quiet far stretch as "not cancelling". Both thresholds are
      * unchanged. The shift must also fit the tap span in BOTH
      * directions or the learned response would be pushed off the filter.
-     * (Note the ring-only reading used to be all there is when the AEC3 post
-     * chain never ran -- enable_res=0 AND return_res_context=0 left
-     * last_erle_windowed at 0 forever. AMEND_37 fixed that: erle_windowed now
-     * updates every hop regardless of enable_res, so aec_linear_is_cancelling's
-     * windowed reading is live here too, not just the ring.) */
+     * (erle_windowed updates every hop regardless of enable_res, so
+     * aec_linear_is_cancelling's windowed reading is live here too, not just
+     * the ring.) */
     int warm_ok = 0;
     if (a->cfg.delay_acquire_warm_transfer) {
         int reach = pbfdaf_tap_span(&a->main_filter.base);
@@ -2318,7 +2457,7 @@ int aec_apply_external_realign(Aec* a, int delta_samples) {
      * cancelling against the wrong lag -- a decorrelated copy of the echo the
      * filter then ADDS. A counters-only echo-path-change leaves the residual
      * above pass-through for hundreds of hops: the still-latched converged flag
-     * pins mu at its floor, and under stationary far the AEC3 stationarity
+     * pins mu at its floor, and under stationary far the stationarity
      * freeze stops the update outright (taps bit-identical hop after
      * hop). Wiping the taps and releasing those latches reconverges on the
      * aec_reset() twin's trajectory instead, without the reset's synthesis
@@ -2337,13 +2476,13 @@ void aec_reset(Aec* a) {
      * clears the ring under `_delay_active` and re-seeds _current_delay from
      * fixed_delay_samples when there is no estimator to reset. */
     if (aec_ring_active(&a->cfg)) {
-        if (a->has_delay) delay_aec3_reset(&a->delay);
+        if (a->has_delay) delay_aec_reset(&a->delay);
         memset(a->ref_ring, 0, (size_t)a->ref_ring_size * sizeof(float));
         a->ref_ring_write = 0; a->ref_ring_filled = 0;
         a->current_delay = a->has_delay ? -1 : a->cfg.fixed_delay_samples;
         a->pending_delay = -1; a->has_pending = 0;
         a->pending_delay_ttl = 0;
-        /* AMEND_35: a fresh instance has no basis for a prior rejection or a
+        /* A fresh instance has no basis for a prior rejection or a
          * pending judgment on an alignment that no longer exists -- mirrors
          * orchestrator.py's reset() clearing _delay_reject_values /
          * _delay_shift_judgment in the same place. */
@@ -2394,7 +2533,7 @@ void aec_reset(Aec* a) {
     a->stationarity_active_hops = 0;
     a->non_zero_render_seen = 0;
     a->block_stationary_next = 0;
-    aec3_post_chain_reset(a);
+    aec_post_chain_reset(a);
     a->pending_gain_change = 0;
     a->pending_delay_change = -1;
     a->saturation_level = 0.0f;
@@ -2464,7 +2603,7 @@ static void misadj_update(Aec* a, const float* near_hpf, const float* raw_out, i
     a->misadj_e2_acum = 0.0f; a->misadj_y2_acum = 0.0f; a->misadj_n_acum = 0;
 }
 
-/* _fire_aec3_misadj_scale (orchestrator 150-191). float32-by-design. */
+/* Filter-misadjustment scale fire (orchestrator). float32-by-design. */
 static void misadj_fire(Aec* a) {
     if (a->misadj_hangover_remaining > 0) { a->misadj_hangover_remaining--; return; }
     int stable = a->convergence.converged && !a->epc.active && !a->regime.main_paused;
@@ -2528,7 +2667,7 @@ int aec_linear_is_cancelling(const Aec* a) {
 
 /* The context-only split's shared core: everything aec_process()/
  * aec_process_context() share -- steps 1-17
- * (linear filter + AEC3 post/RES block, writing a->final_out) and steps 19-20
+ * (linear filter + post-filter/RES block, writing a->final_out) and steps 19-20
  * (power EMAs + convergence detection, which the NEXT hop's step-17 logic
  * depends on and therefore can never be skipped by either caller). Does NOT
  * run step 21 (emit into a caller `out` buffer) -- that is caller-specific
@@ -2585,7 +2724,7 @@ int aec_linear_is_cancelling(const Aec* a) {
  *
  * The pipelines that wrap this library each carry their own override for the
  * same reason, deliberately rather than sharing one: a component's timer is
- * part of that component's build contract, and audio_common is a producer of
+ * part of that component's build contract, and audiolib is a producer of
  * these builds, not a place to key them from. */
 #ifndef AEC_NOW_US
 #include <time.h>
@@ -2613,91 +2752,285 @@ void aec_get_last_timing(const Aec* a, AecStageTiming* out) {
     *out = a->last_timing;
 }
 
-static void aec_process_core(Aec* a, const float* mic_in, const float* ref_in,
-                              const Complex* shared_far_spec) {
-    const int hop = a->hop_size, K = a->n_freqs, N = a->n_partitions;
-    int stationarity_block_for_post;
-    /* Stage stamps. t_stage closes one stage and opens the next where they
-     * are adjacent, so the five windows cost seven reads, not ten. t_delay
-     * brackets section 3, which sits INSIDE the frontend window and is
-     * subtracted back out of it so the two never double-count. */
-    uint32_t t_stage, t_mark, t_delay;
-    /* AecLinearContext bookkeeping: CHANGED is "generation moved during this
-     * hop", so snapshot at entry; far_hop_aligned is re-derived every hop. */
-    a->delay_gen_hop_start = a->delay_generation;
-    a->far_hop_aligned = 0;
-    /* Cleared per hop so a stage that does not run this hop reports 0 rather
-     * than the previous hop's figure. */
-    a->last_timing.delay_us = 0;
-    a->last_timing.frontend_us = 0;
-    a->last_timing.linear_us = 0;
-    a->last_timing.res_us = 0;
-    a->last_timing.steering_us = 0;
-    t_stage = aec_now_us();
-    memcpy(a->near_hop, mic_in, (size_t)hop * sizeof(float));
-    memcpy(a->far_hop,  ref_in, (size_t)hop * sizeof(float));
-
-    /* 1. mic HPF (ref HPF OFF). */
-    if (a->hp_mic) hpf_process(a->hp_mic, a->near_hop, hop);
-
-    /* Held "near-end seen recently" gate for DT-aware soft recovery (mirrors
-     * the Python orchestrator). Reads the PREVIOUS frame's dt_from_energy
-     * (doubletalk_update_energy_dt runs later in this frame, in the RES block),
-     * so the value here is the prior hop's — exactly like Python's _dt_from_energy
-     * property read at the top of process(). dt_from_energy ONLY: it is
-     * normally low in far-end single-talk (mic ≈ echo), while dt_from_shadow
-     * false-fires more often on path changes. Loud residual echo can still
-     * false-arm this gate; the selected DT floor accounts for that
-     * trade-off. Require `sustain` consecutive frames above threshold before
-     * arming, then hold for `hold` frames. */
+static void aec_update_delay_estimator(Aec* a) {
+    const int hop = a->hop_size;
+    int hold_hops = a->duty_hold_hops;
+    int K = a->duty_period_hops;
+    int run_filter = 1;
+    if (a->duty_active) {
+        a->duty_pos += 1;
+        if (a->duty_pos >= K) a->duty_pos = 0;
+        run_filter = (a->duty_pos == 0);
+    }
+    /* Engagement census (diagnostic; see the duty_hops_* doc in aec.h).
+     * Counted HERE, at the one call site that consumes run_filter, so
+     * the census can never drift from what actually executed. */
+    a->duty_hops_total += 1;
+    if (run_filter) a->duty_hops_run += 1;
+    delay_aec_accumulate_ex(&a->delay, a->near_hop, a->far_hop, hop,
+                            run_filter);
     {
-        float ne_ind = a->dt_analyzer.dt_from_energy;
-        if (ne_ind > a->cfg.ne_recent_threshold) {
-            /* Threshold-gate counter: the sole reader is the
-             * ">= a->cfg.ne_recent_sustain" comparison two lines below. Sustained
-             * near-end energy above ne_recent_threshold (e.g. a long nearend-singletalk
-             * or continuous-speech stretch) can hold this branch for the entire
-             * unbounded-overflow timeframe with no reset in between, so an unconditional
-             * `+= 1` would eventually overflow a signed int on a very long streaming
-             * session. Saturate at ne_recent_sustain: once reached, the ">=" comparison
-             * is permanently true either way, so saturating is observationally
-             * identical to an unbounded increment for every reachable state. */
-            if (a->ne_above < a->cfg.ne_recent_sustain)
-                a->ne_above += 1;
-        } else
-            a->ne_above = 0;
-        if (a->ne_above >= a->cfg.ne_recent_sustain)
-            a->ne_recent_frames = a->cfg.ne_recent_hold;
-        else if (a->ne_recent_frames > 0)
-            a->ne_recent_frames -= 1;
+        int cur = delay_aec_estimated_delay(&a->delay);
+        int solid = delay_aec_is_solid(&a->delay);
+        if (!solid || cur < 0 || cur != a->duty_last_delay) {
+            /* estimate moved / lost confidence → full rate + re-arm */
+            a->duty_active = 0;
+            a->duty_stable_hops = 0;
+        } else if (!a->duty_active) {
+            a->duty_stable_hops += 1;
+            if (a->duty_stable_hops >= hold_hops) {
+                a->duty_active = 1;
+                a->duty_pos = 0;
+                a->duty_erle_peak = a->last_erle_windowed;
+            }
+        }
+        a->duty_last_delay = cur;
+    }
+    if (a->duty_active) {
+        /* ERLE watchdog: leaky peak (0.1 dB/s, at every grid — the leak
+         * is duty_erle_leak_db, derived from the hop at carve time and
+         * exactly the historical 0.001f at the 10 ms grid it was
+         * calibrated on); resume full-rate analysis on a >6 dB collapse
+         * from that peak. Armed only once the peak exceeds 6 dB so it
+         * cannot fire before the filter ever converged. */
+        if (a->last_erle_windowed > a->duty_erle_peak)
+            a->duty_erle_peak = a->last_erle_windowed;
         else
-            a->ne_recent_frames = 0;
+            a->duty_erle_peak -= a->duty_erle_leak_db;
+        if (a->duty_erle_peak > 6.0f &&
+            a->last_erle_windowed < a->duty_erle_peak - 6.0f) {
+            a->duty_active = 0;
+            a->duty_stable_hops = 0;
+            a->duty_erle_peak = 0.0f;
+        }
+    }
+}
+
+static void aec_judge_delay_shift(Aec* a) {
+    /* Judge any pending post-shift window once per hop, before
+     * Path A/B run -- mirrors orchestrator.py's judgment-tick
+     * at the identical position (right after _delay_eligible). See
+     * Path B's hard-reset branch below for why this exists. A
+     * confirmed-bad relock's candidate is remembered in
+     * delay_reject_values for the rest of this instance's life
+     * (cleared only by aec_reset()), not a timed cooldown -- same
+     * reasoning as the Python side: the matched-filter aggregator's
+     * histogram has no mechanism to un-learn a candidate it favors. */
+    if (a->delay_shift_judgment_active) {
+        a->delay_shift_judgment_hops_left -= 1;
+        if (a->delay_shift_judgment_hops_left <= 0) {
+            float cur_erle = a->last_erle_windowed;
+            /* Plain float32 '<', no epsilon: raw_error_power and
+             * near_power are both C `float`, so the smallest possible
+             * gap between two distinct values is one float32 ULP
+             * (>=~6e-8 relative) -- already >50x past the 1e-9 relative
+             * slack Python's float64 version of this check uses. Any
+             * float32 value strictly less than near_power is therefore
+             * already below near_power*(1-1e-9) too; the margin cannot
+             * change the outcome for float32 operands (exhaustively
+             * verified over every finite non-negative float32 value of
+             * near_power against its immediate float32 neighbors). A
+             * double promotion here would not add precision raw_error_
+             * power/near_power do not already have -- both are
+             * quantized to float32 by the EMAs that produce them,
+             * independent of how this one comparison is evaluated. */
+            int has_estimate = (a->raw_error_power < a->near_power);
+            if (has_estimate && cur_erle
+                    < a->delay_shift_judgment_pre_erle - 1.0f) {
+                int bad_delay = a->current_delay;
+                size_t w_elems = (size_t)a->n_partitions * (size_t)a->n_freqs;
+                /* Order matters: aec_apply_delay_shift_hard_reset calls
+                 * aec_reset_filter_derived_state, which always wipes
+                 * main_filter/shadow_filter's W (pbfdkf_reset /
+                 * pbfdaf_reset) -- restoring the pre-shift snapshot
+                 * BEFORE that call had it immediately zeroed again.
+                 * Call the reset chain first, then overwrite the
+                 * just-wiped taps with the snapshot. */
+                aec_apply_delay_shift_hard_reset(
+                    a, a->delay_shift_judgment_pre_delay);
+                memcpy(a->main_filter.base.W,
+                       a->delay_shift_judgment_pre_W,
+                       w_elems * sizeof(Complex));
+                if (a->has_shadow
+                        && a->delay_shift_judgment_pre_shadow_W != NULL) {
+                    memcpy(a->shadow_filter.W,
+                           a->delay_shift_judgment_pre_shadow_W,
+                           w_elems * sizeof(Complex));
+                }
+                if (a->delay_reject_count < AEC_DELAY_REJECT_CAP) {
+                    a->delay_reject_values[a->delay_reject_count++] = bad_delay;
+                }
+            }
+            a->delay_shift_judgment_active = 0;
+        }
     }
 
-    /* 2. saturation. */
-    float sat_ref = 0.0f;  /* receive: Saturation getter returns double */
-    if (a->has_sat) {
-        sat_ref = saturation_detect(&a->sat_ref, a->far_hop, hop);
-        float sat_mic = saturation_detect(&a->sat_mic, a->near_hop, hop);
-        a->saturation_level = (sat_ref > sat_mic * 0.5f) ? sat_ref : sat_mic * 0.5f;
-        if (a->cfg.saturation_softclip_ref && sat_ref > 0.1f)
-            saturation_soft_clip(a->far_hop, a->far_hop, hop, 0.8);
+}
+
+static void aec_acquire_delay(Aec* a, int new_delay, int eligible) {
+    /* Path A — first acquisition. */
+    int already_cancelling = a->cfg.delay_acquire_protect_converged
+                             && (a->last_erle_windowed > 2.5f);
+    if (eligible && a->current_delay < 0 && delay_aec_is_solid(&a->delay)
+            && !already_cancelling) {
+        a->current_delay = new_delay;
+        /* Single bump site covers warm-transfer, soft and hard branches
+         * below alike -- generation tracks the ring offset, not the
+         * recovery flavour. */
+        aec_bump_delay_generation(a);
+        /* Warm tap-transfer: if the filter is already cancelling (inst-ERLE peak >
+         * thresh) AND the delay fits the tap reach, shift the learned IR by the
+         * delay instead of zeroing -- the cold-start cancellation survives the
+         * realign. Outside that, fall through to soft / hard reset unchanged. */
+        int warm_ok = 0;
+        if (a->cfg.delay_acquire_warm_transfer) {
+            float wpk = aec_erle_ring_max_last15(a);
+            int reach = pbfdaf_tap_span(&a->main_filter.base);
+            warm_ok = (wpk > a->cfg.delay_acquire_inst_erle_db)
+                      && (new_delay > 0) && (new_delay < reach);
+        }
+        /* A refused shift means the taps did NOT move while current_delay
+         * did, so warm success would be a lie -- fall through to the
+         * soft/hard branches. Unreachable at every grid this repo ships
+         * (the guard needs n_partitions*hop_size > 4096, i.e. an explicit
+         * cfg.n_partitions well past the preset geometry), so nothing
+         * changes for a production configuration. */
+        if (warm_ok
+            && pbfdaf_warm_shift_ir(&a->main_filter.base, new_delay) == 0) {
+            if (a->has_shadow) pbfdaf_warm_shift_ir(&a->shadow_filter, new_delay);
+        } else if (a->cfg.dt_aware_recovery_soft && a->ne_recent_frames > 0) {
+            /* Soft acquisition (mirrors Python): apply the ring
+             * alignment (current_delay set above) + reset filter excitation
+             * counters ONLY; keep the converged taps + let them re-adapt at
+             * normal step size. No tap wipe, no mark_diverged, no AecState
+             * full reset (no pending_delay_change). Avoids the aggressive-
+             * recovery tail overfitting near-end that arrives after this
+             * (far-only) acquisition. */
+            pbfdkf_handle_echo_path_change(&a->main_filter, 1, 0);
+            /* Re-arm shadow + live observer excitation
+             * counters -- see orchestrator.py's matching
+             * self._observer_filter.handle_echo_path_change() call. */
+            if (a->has_shadow) aec_rearm_excitation(&a->shadow_filter);
+            if (a->has_observer) aec_rearm_excitation(&a->observer_filter);
+        } else {
+            aec_reset_filter_derived_state(a);
+            filter_convergence_mark_diverged(&a->convergence);
+            pbfdkf_handle_echo_path_change(&a->main_filter, 1, 0);
+            /* shadow/observer are PBFDAF: handle_echo_path_change has no
+             * PBFDAF variant; the Python shadow/observer
+             * handle_echo_path_change resets the coarse counter. Mirror
+             * via the PBFDAF counters directly. */
+            if (a->has_shadow) aec_rearm_excitation(&a->shadow_filter);
+            if (a->has_observer) aec_rearm_excitation(&a->observer_filter);
+            a->pending_delay_change = AEC_DA_NEW_DETECTED;
+        }
     }
 
-    t_delay = aec_now_us();
+}
+
+static void aec_track_delay_shift(Aec* a, int new_delay, int eligible) {
+    /* pending TTL aging (once per estimation cycle / per hop). */
+    if (a->pending_delay_ttl > 0) {
+        a->pending_delay_ttl--;
+        if (a->pending_delay_ttl <= 0) { a->has_pending = 0; a->pending_delay = -1; }
+    }
+
+    float conf = delay_aec_confidence(&a->delay);
+
+    /* Path B — delay shift, with a reject-list veto: a
+     * candidate already confirmed bad by the judgment below does not
+     * get a second attempt (mirrors orchestrator.py's identical
+     * extension to this same gate). */
+    if (eligible && a->current_delay >= 0 && conf >= 0.5f
+            && abs(new_delay - a->current_delay) > 32
+            && !aec_delay_value_rejected(a, new_delay)) {
+        if (a->has_pending && abs(new_delay - a->pending_delay) < 16) {
+            int old_current_delay = a->current_delay;
+            /* Snapshot taps so a confirmed-bad relock (judged
+             * below) can restore them exactly, not just the ring
+             * alignment -- the ~AEC_DELAY_SHIFT_JUDGMENT_HOPS of
+             * Kalman-boosted adaptation against the wrong alignment
+             * otherwise leaves them scarred even after the delay
+             * itself reverts. Snapshot BEFORE current_delay/erle move,
+             * so pre_erle is genuinely "just before the shift". */
+            float pre_shift_erle = a->last_erle_windowed;
+            size_t w_elems = (size_t)a->n_partitions * (size_t)a->n_freqs;
+            memcpy(a->delay_shift_judgment_pre_W, a->main_filter.base.W,
+                   w_elems * sizeof(Complex));
+            if (a->has_shadow)
+                memcpy(a->delay_shift_judgment_pre_shadow_W,
+                       a->shadow_filter.W, w_elems * sizeof(Complex));
+            a->current_delay = new_delay;
+            /* Same single-site rule as Path A: the soft-realign branch
+             * below deliberately sets no other flag, so this bump is the
+             * ONLY externally visible trace of a soft shift. */
+            aec_bump_delay_generation(a);
+            a->has_pending = 0; a->pending_delay = -1; a->pending_delay_ttl = 0;
+            if (a->cfg.dt_aware_recovery_soft && a->ne_recent_frames > 0) {
+                /* Soft realign (mirrors Python): the ring read
+                 * offset is already updated (current_delay above). Keep the
+                 * converged filter, re-adapt at normal step size — no tap
+                 * wipe, no Kalman P-override, no q-boost, no mark_diverged,
+                 * no epc_force_delay, no pending_delay_change. Avoids the
+                 * over-cancel + near-end overfit when movement re-locks
+                 * through double-talk. (Python only sets the dead
+                 * _epc_reset_fired_this_frame FQA flag here — no audio
+                 * effect, not modelled in C.)
+                 *
+                 * The old taps are still trained for the OLD alignment
+                 * though, and this path's whole point is to NOT wait out
+                 * a cold reconverge -- so shift the IR by the same delta
+                 * the ring read just applied (pbfdaf_warm_shift_ir,
+                 * already used by Path A's warm transfer) instead of
+                 * leaving the mismatch to close at the unboosted
+                 * adaptation rate, which can take 100+ hops and overshoot
+                 * on any loud far-end burst in that window. Mirrors
+                 * the Python implementation; pbfdaf_warm_shift_ir clears far
+                 * history on a RETARD itself (its own doc comment), same
+                 * as Python's warm_shift_ir -- no caller-side clear
+                 * needed here, same as Path A's warm transfer above. */
+                int soft_delta = new_delay - old_current_delay;
+                if (abs(soft_delta) < pbfdaf_tap_span(&a->main_filter.base)) {
+                    pbfdaf_warm_shift_ir(&a->main_filter.base, soft_delta);
+                    if (a->has_shadow)
+                        pbfdaf_warm_shift_ir(&a->shadow_filter, soft_delta);
+                }
+            } else {
+                /* Filter taps were trained against the old delay
+                 * alignment; treating the shift like Path A (clear
+                 * filter-output-derived state) avoids ~50-100 frames of
+                 * poor cancellation while taps re-converge against
+                 * state that no longer matches. */
+                aec_apply_delay_shift_hard_reset(a, new_delay);
+            }
+            /* Bad-relock judgment (both branches above -- the
+             * aggregator's candidate can be wrong regardless of which
+             * recovery treatment applies it). Judge this shift only
+             * after AEC_DELAY_SHIFT_JUDGMENT_HOPS; see the judgment-tick
+             * block above for the verdict and revert. A good relock
+             * (the common case) is judged and kept at no extra cost. */
+            a->delay_shift_judgment_active = 1;
+            a->delay_shift_judgment_pre_delay = old_current_delay;
+            a->delay_shift_judgment_pre_erle = pre_shift_erle;
+            a->delay_shift_judgment_hops_left = AEC_DELAY_SHIFT_JUDGMENT_HOPS;
+        } else {
+            a->pending_delay = new_delay; a->has_pending = 1; a->pending_delay_ttl = 3;
+        }
+    }
+}
+
+static void aec_align_reference(Aec* a) {
+    const int hop = a->hop_size;
     /* 3. delay estimation + ring-buffer alignment. The estimator is FED
      * every hop regardless (accumulate_ex keeps decimators + ring gapless);
      * the matched-filter analysis itself can be decimated to 1-in-K once
      * the estimate has been solid+unchanged for delay_est_init_s, via
-     * delay_est_period_s -- but AMEND_35 (2026-10-18) changed that field's
-     * DEFAULT to 0.0 (K=1, full-rate), matching the Python reference (whose
-     * same-named field is a dead legacy kwarg -- Python always analyses
-     * every hop, full stop). The throttle is no longer "intentional
-     * divergence at no sampled cost": confirmed on a real file that it can
-     * change WHICH delay the matched filter ever finds, not just when, so
-     * it is opt-in now (non-zero delay_est_period_s / --delay-est-period)
-     * for an embedded deployment that wants the compute saving back and
-     * accepts the parity cost.
+     * delay_est_period_s. The default is 0.0 (K=1, full-rate), matching the
+     * Python reference (whose same-named field is a dead legacy kwarg --
+     * Python always analyses every hop). The throttle can change WHICH
+     * delay the matched filter ever finds, not just when, so it is opt-in
+     * (non-zero delay_est_period_s / --delay-est-period) for an embedded
+     * deployment that wants the compute saving and accepts the parity cost.
      *
      * Structure (mirrors the Python orchestrator): the OUTER gate is
      * "does a reference ring exist" (MATCHED or FIXED -- Python's
@@ -2708,58 +3041,9 @@ static void aec_process_core(Aec* a, const float* mic_in, const float* ref_in,
      * from the caller's bring-up measurement and never changes. */
     if (aec_ring_active(&a->cfg)) {
       if (a->has_delay) {
-        int hold_hops = a->duty_hold_hops;
-        int K = a->duty_period_hops;
-        int run_filter = 1;
-        if (a->duty_active) {
-            a->duty_pos += 1;
-            if (a->duty_pos >= K) a->duty_pos = 0;
-            run_filter = (a->duty_pos == 0);
-        }
-        /* Engagement census (diagnostic; see the duty_hops_* doc in aec.h).
-         * Counted HERE, at the one call site that consumes run_filter, so
-         * the census can never drift from what actually executed. */
-        a->duty_hops_total += 1;
-        if (run_filter) a->duty_hops_run += 1;
-        delay_aec3_accumulate_ex(&a->delay, a->near_hop, a->far_hop, hop,
-                                 run_filter);
-        {
-            int cur = delay_aec3_estimated_delay(&a->delay);
-            int solid = delay_aec3_is_solid(&a->delay);
-            if (!solid || cur < 0 || cur != a->duty_last_delay) {
-                /* estimate moved / lost confidence → full rate + re-arm */
-                a->duty_active = 0;
-                a->duty_stable_hops = 0;
-            } else if (!a->duty_active) {
-                a->duty_stable_hops += 1;
-                if (a->duty_stable_hops >= hold_hops) {
-                    a->duty_active = 1;
-                    a->duty_pos = 0;
-                    a->duty_erle_peak = a->last_erle_windowed;
-                }
-            }
-            a->duty_last_delay = cur;
-        }
-        if (a->duty_active) {
-            /* ERLE watchdog: leaky peak (0.1 dB/s, at every grid — the leak
-             * is duty_erle_leak_db, derived from the hop at carve time and
-             * exactly the historical 0.001f at the 10 ms grid it was
-             * calibrated on); resume full-rate analysis on a >6 dB collapse
-             * from that peak. Armed only once the peak exceeds 6 dB so it
-             * cannot fire before the filter ever converged. */
-            if (a->last_erle_windowed > a->duty_erle_peak)
-                a->duty_erle_peak = a->last_erle_windowed;
-            else
-                a->duty_erle_peak -= a->duty_erle_leak_db;
-            if (a->duty_erle_peak > 6.0f &&
-                a->last_erle_windowed < a->duty_erle_peak - 6.0f) {
-                a->duty_active = 0;
-                a->duty_stable_hops = 0;
-                a->duty_erle_peak = 0.0f;
-            }
-        }
-        int new_delay = delay_aec3_estimated_delay(&a->delay);
-        int eligible = (new_delay >= 0 && delay_aec3_n_updates(&a->delay) >= 3
+        aec_update_delay_estimator(a);
+        int new_delay = delay_aec_estimated_delay(&a->delay);
+        int eligible = (new_delay >= 0 && delay_aec_n_updates(&a->delay) >= 3
                         /* Defensive: a delay the ring cannot hold would alias
                          * through the modulo read below and silently return
                          * wrong (effectively future) far. Unreachable with the
@@ -2768,210 +3052,11 @@ static void aec_process_core(Aec* a, const float* mic_in, const float* ref_in,
                          * delay_buffer_ms/max_delay_ms. */
                         && new_delay <= a->ref_ring_size - hop);
 
-        /* AMEND_35: judge any pending post-shift window once per hop, before
-         * Path A/B run -- mirrors orchestrator.py's AMEND_34 judgment-tick
-         * at the identical position (right after _delay_eligible). See
-         * Path B's hard-reset branch below for why this exists. A
-         * confirmed-bad relock's candidate is remembered in
-         * delay_reject_values for the rest of this instance's life
-         * (cleared only by aec_reset()), not a timed cooldown -- same
-         * reasoning as the Python side: the matched-filter aggregator's
-         * histogram has no mechanism to un-learn a candidate it favors. */
-        if (a->delay_shift_judgment_active) {
-            a->delay_shift_judgment_hops_left -= 1;
-            if (a->delay_shift_judgment_hops_left <= 0) {
-                float cur_erle = a->last_erle_windowed;
-                /* Plain float32 '<', no epsilon: raw_error_power and
-                 * near_power are both C `float`, so the smallest possible
-                 * gap between two distinct values is one float32 ULP
-                 * (>=~6e-8 relative) -- already >50x past the 1e-9 relative
-                 * slack Python's float64 version of this check uses. Any
-                 * float32 value strictly less than near_power is therefore
-                 * already below near_power*(1-1e-9) too; the margin cannot
-                 * change the outcome for float32 operands (exhaustively
-                 * verified over every finite non-negative float32 value of
-                 * near_power against its immediate float32 neighbors). A
-                 * double promotion here would not add precision raw_error_
-                 * power/near_power do not already have -- both are
-                 * quantized to float32 by the EMAs that produce them,
-                 * independent of how this one comparison is evaluated. */
-                int has_estimate = (a->raw_error_power < a->near_power);
-                if (has_estimate && cur_erle
-                        < a->delay_shift_judgment_pre_erle - 1.0f) {
-                    int bad_delay = a->current_delay;
-                    size_t w_elems = (size_t)a->n_partitions * (size_t)a->n_freqs;
-                    /* Order matters: aec_apply_delay_shift_hard_reset calls
-                     * aec_reset_filter_derived_state, which always wipes
-                     * main_filter/shadow_filter's W (pbfdkf_reset /
-                     * pbfdaf_reset) -- restoring the pre-shift snapshot
-                     * BEFORE that call had it immediately zeroed again.
-                     * Call the reset chain first, then overwrite the
-                     * just-wiped taps with the snapshot. */
-                    aec_apply_delay_shift_hard_reset(
-                        a, a->delay_shift_judgment_pre_delay);
-                    memcpy(a->main_filter.base.W,
-                           a->delay_shift_judgment_pre_W,
-                           w_elems * sizeof(Complex));
-                    if (a->has_shadow
-                            && a->delay_shift_judgment_pre_shadow_W != NULL) {
-                        memcpy(a->shadow_filter.W,
-                               a->delay_shift_judgment_pre_shadow_W,
-                               w_elems * sizeof(Complex));
-                    }
-                    if (a->delay_reject_count < AEC_DELAY_REJECT_CAP) {
-                        a->delay_reject_values[a->delay_reject_count++] = bad_delay;
-                    }
-                }
-                a->delay_shift_judgment_active = 0;
-            }
-        }
+        aec_judge_delay_shift(a);
 
-        /* Path A — first acquisition. */
-        int already_cancelling = a->cfg.delay_acquire_protect_converged
-                                 && (a->last_erle_windowed > 2.5f);
-        if (eligible && a->current_delay < 0 && delay_aec3_is_solid(&a->delay)
-                && !already_cancelling) {
-            a->current_delay = new_delay;
-            /* Single bump site covers warm-transfer, soft and hard branches
-             * below alike -- generation tracks the ring offset, not the
-             * recovery flavour. */
-            aec_bump_delay_generation(a);
-            /* Warm tap-transfer: if the filter is already cancelling (inst-ERLE peak >
-             * thresh) AND the delay fits the tap reach, shift the learned IR by the
-             * delay instead of zeroing -- the cold-start cancellation survives the
-             * realign. Outside that, fall through to soft / hard reset unchanged. */
-            int warm_ok = 0;
-            if (a->cfg.delay_acquire_warm_transfer) {
-                float wpk = aec_erle_ring_max_last15(a);
-                int reach = pbfdaf_tap_span(&a->main_filter.base);
-                warm_ok = (wpk > a->cfg.delay_acquire_inst_erle_db)
-                          && (new_delay > 0) && (new_delay < reach);
-            }
-            /* A refused shift means the taps did NOT move while current_delay
-             * did, so warm success would be a lie -- fall through to the
-             * soft/hard branches. Unreachable at every grid this repo ships
-             * (the guard needs n_partitions*hop_size > 4096, i.e. an explicit
-             * cfg.n_partitions well past the preset geometry), so nothing
-             * changes for a production configuration. */
-            if (warm_ok
-                && pbfdaf_warm_shift_ir(&a->main_filter.base, new_delay) == 0) {
-                if (a->has_shadow) pbfdaf_warm_shift_ir(&a->shadow_filter, new_delay);
-            } else if (a->cfg.dt_aware_recovery_soft && a->ne_recent_frames > 0) {
-                /* Soft acquisition (mirrors Python): apply the ring
-                 * alignment (current_delay set above) + reset filter excitation
-                 * counters ONLY; keep the converged taps + let them re-adapt at
-                 * normal step size. No tap wipe, no mark_diverged, no AecState
-                 * full reset (no pending_delay_change). Avoids the aggressive-
-                 * recovery tail overfitting near-end that arrives after this
-                 * (far-only) acquisition. */
-                pbfdkf_handle_echo_path_change(&a->main_filter, 1, 0);
-                /* Re-arm shadow + live observer (A21 Stage 2) excitation
-                 * counters -- see orchestrator.py's matching
-                 * self._observer_filter.handle_echo_path_change() call. */
-                if (a->has_shadow) aec_rearm_excitation(&a->shadow_filter);
-                if (a->has_observer) aec_rearm_excitation(&a->observer_filter);
-            } else {
-                aec_reset_filter_derived_state(a);
-                filter_convergence_mark_diverged(&a->convergence);
-                pbfdkf_handle_echo_path_change(&a->main_filter, 1, 0);
-                /* shadow/observer are PBFDAF: handle_echo_path_change has no
-                 * PBFDAF variant; the Python shadow/observer
-                 * handle_echo_path_change resets the coarse counter. Mirror
-                 * via the PBFDAF counters directly. */
-                if (a->has_shadow) aec_rearm_excitation(&a->shadow_filter);
-                if (a->has_observer) aec_rearm_excitation(&a->observer_filter);
-                a->pending_delay_change = AEC_DA_NEW_DETECTED;
-            }
-        }
+        aec_acquire_delay(a, new_delay, eligible);
 
-        /* pending TTL aging (once per estimation cycle / per hop). */
-        if (a->pending_delay_ttl > 0) {
-            a->pending_delay_ttl--;
-            if (a->pending_delay_ttl <= 0) { a->has_pending = 0; a->pending_delay = -1; }
-        }
-
-        float conf = delay_aec3_confidence(&a->delay);
-
-        /* Path B — delay shift. AMEND_35 adds the reject-list veto: a
-         * candidate already confirmed bad by the judgment below does not
-         * get a second attempt (mirrors orchestrator.py's identical
-         * extension to this same gate). */
-        if (eligible && a->current_delay >= 0 && conf >= 0.5f
-                && abs(new_delay - a->current_delay) > 32
-                && !aec_delay_value_rejected(a, new_delay)) {
-            if (a->has_pending && abs(new_delay - a->pending_delay) < 16) {
-                int old_current_delay = a->current_delay;
-                /* AMEND_35: snapshot taps so a confirmed-bad relock (judged
-                 * below) can restore them exactly, not just the ring
-                 * alignment -- the ~AEC_DELAY_SHIFT_JUDGMENT_HOPS of
-                 * Kalman-boosted adaptation against the wrong alignment
-                 * otherwise leaves them scarred even after the delay
-                 * itself reverts. Snapshot BEFORE current_delay/erle move,
-                 * so pre_erle is genuinely "just before the shift". */
-                float pre_shift_erle = a->last_erle_windowed;
-                size_t w_elems = (size_t)a->n_partitions * (size_t)a->n_freqs;
-                memcpy(a->delay_shift_judgment_pre_W, a->main_filter.base.W,
-                       w_elems * sizeof(Complex));
-                if (a->has_shadow)
-                    memcpy(a->delay_shift_judgment_pre_shadow_W,
-                           a->shadow_filter.W, w_elems * sizeof(Complex));
-                a->current_delay = new_delay;
-                /* Same single-site rule as Path A: the soft-realign branch
-                 * below deliberately sets no other flag, so this bump is the
-                 * ONLY externally visible trace of a soft shift. */
-                aec_bump_delay_generation(a);
-                a->has_pending = 0; a->pending_delay = -1; a->pending_delay_ttl = 0;
-                if (a->cfg.dt_aware_recovery_soft && a->ne_recent_frames > 0) {
-                    /* Soft realign (mirrors Python): the ring read
-                     * offset is already updated (current_delay above). Keep the
-                     * converged filter, re-adapt at normal step size — no tap
-                     * wipe, no Kalman P-override, no q-boost, no mark_diverged,
-                     * no epc_force_delay, no pending_delay_change. Avoids the
-                     * over-cancel + near-end overfit when movement re-locks
-                     * through double-talk. (Python only sets the dead
-                     * _epc_reset_fired_this_frame FQA flag here — no audio
-                     * effect, not modelled in C.)
-                     *
-                     * The old taps are still trained for the OLD alignment
-                     * though, and this path's whole point is to NOT wait out
-                     * a cold reconverge -- so shift the IR by the same delta
-                     * the ring read just applied (pbfdaf_warm_shift_ir,
-                     * already used by Path A's warm transfer) instead of
-                     * leaving the mismatch to close at the unboosted
-                     * adaptation rate, which can take 100+ hops and overshoot
-                     * on any loud far-end burst in that window. Mirrors
-                     * AMEND_34's Python fix; pbfdaf_warm_shift_ir clears far
-                     * history on a RETARD itself (its own doc comment), same
-                     * as Python's warm_shift_ir -- no caller-side clear
-                     * needed here, same as Path A's warm transfer above. */
-                    int soft_delta = new_delay - old_current_delay;
-                    if (abs(soft_delta) < pbfdaf_tap_span(&a->main_filter.base)) {
-                        pbfdaf_warm_shift_ir(&a->main_filter.base, soft_delta);
-                        if (a->has_shadow)
-                            pbfdaf_warm_shift_ir(&a->shadow_filter, soft_delta);
-                    }
-                } else {
-                    /* Filter taps were trained against the old delay
-                     * alignment; treating the shift like Path A (clear
-                     * filter-output-derived state) avoids ~50-100 frames of
-                     * poor cancellation while taps re-converge against
-                     * state that no longer matches. */
-                    aec_apply_delay_shift_hard_reset(a, new_delay);
-                }
-                /* AMEND_35 bad-relock judgment (both branches above -- the
-                 * aggregator's candidate can be wrong regardless of which
-                 * recovery treatment applies it). Judge this shift only
-                 * after AEC_DELAY_SHIFT_JUDGMENT_HOPS; see the judgment-tick
-                 * block above for the verdict and revert. A good relock
-                 * (the common case) is judged and kept at no extra cost. */
-                a->delay_shift_judgment_active = 1;
-                a->delay_shift_judgment_pre_delay = old_current_delay;
-                a->delay_shift_judgment_pre_erle = pre_shift_erle;
-                a->delay_shift_judgment_hops_left = AEC_DELAY_SHIFT_JUDGMENT_HOPS;
-            } else {
-                a->pending_delay = new_delay; a->has_pending = 1; a->pending_delay_ttl = 3;
-            }
-        }
+        aec_track_delay_shift(a, new_delay, eligible);
       }   /* end MATCHED-only estimator block */
 
         /* Live observer: default to invalid every hop; only the
@@ -3017,7 +3102,7 @@ static void aec_process_core(Aec* a, const float* mic_in, const float* ref_in,
             }
             a->far_hop_aligned = 1;
 
-            /* Live observer (A21 Stage 2): same ring, read observer_shift_hops
+            /* Live observer: same ring, read observer_shift_hops
              * hops EARLIER (shorter effective delay) than the main filter's
              * read just above -- mirrors orchestrator.py's _observer_far_end
              * block exactly, including the max(0, ...) clamp (a clip whose
@@ -3062,25 +3147,63 @@ static void aec_process_core(Aec* a, const float* mic_in, const float* ref_in,
         a->far_hop_aligned = 1;
     }
 
-    /* far_hop is fully finalized above (memcpy + optional soft-clip +
-     * optional delay-ring re-read) and is never written again for the rest
-     * of this hop (every remaining reference below is a read) -- compute
-     * mean_sq(far_hop) ONCE here and reuse it at every call site that would
-     * otherwise recompute the identical deterministic value from the same
-     * unchanged input. */
-    /* Closes BEFORE the mean_sq below: that reduction is an O(hop) hoist for
-     * the stages after this one, not delay work, and delay_us documents
-     * itself as the filter bank plus the ring. */
-    t_delay = aec_now_us() - t_delay;
-    a->last_timing.delay_us = t_delay;
+}
 
-    float far_hop_mean_sq = mean_sq(a->far_hop, hop, a->scr_sq);
+static void aec_prepare_capture_hop(Aec* a, const float* mic_in, const float* ref_in) {
+    const int hop = a->hop_size;
+    memcpy(a->near_hop, mic_in, (size_t)hop * sizeof(float));
+    memcpy(a->far_hop,  ref_in, (size_t)hop * sizeof(float));
 
-    /* 4. render activity. */
-    RenderActivityResult ra = render_activity_update(&a->render_activity, a->far_hop, hop);
-    a->warmup_far_active = ra.warmup_active;
-    float far_pwr_global = ra.far_pwr;
+    /* 1. mic HPF (ref HPF OFF). */
+    if (a->hp_mic) hpf_process(a->hp_mic, a->near_hop, hop);
 
+    /* Held "near-end seen recently" gate for DT-aware soft recovery (mirrors
+     * the Python orchestrator). Reads the PREVIOUS frame's dt_from_energy
+     * (doubletalk_update_energy_dt runs later in this frame, in the RES block),
+     * so the value here is the prior hop's — exactly like Python's _dt_from_energy
+     * property read at the top of process(). dt_from_energy ONLY: it is
+     * normally low in far-end single-talk (mic ≈ echo), while dt_from_shadow
+     * false-fires more often on path changes. Loud residual echo can still
+     * false-arm this gate; the selected DT floor accounts for that
+     * trade-off. Require `sustain` consecutive frames above threshold before
+     * arming, then hold for `hold` frames. */
+    {
+        float ne_ind = a->dt_analyzer.dt_from_energy;
+        if (ne_ind > a->cfg.ne_recent_threshold) {
+            /* Threshold-gate counter: the sole reader is the
+             * ">= a->cfg.ne_recent_sustain" comparison two lines below. Sustained
+             * near-end energy above ne_recent_threshold (e.g. a long nearend-singletalk
+             * or continuous-speech stretch) can hold this branch for the entire
+             * unbounded-overflow timeframe with no reset in between, so an unconditional
+             * `+= 1` would eventually overflow a signed int on a very long streaming
+             * session. Saturate at ne_recent_sustain: once reached, the ">=" comparison
+             * is permanently true either way, so saturating is observationally
+             * identical to an unbounded increment for every reachable state. */
+            if (a->ne_above < a->cfg.ne_recent_sustain)
+                a->ne_above += 1;
+        } else
+            a->ne_above = 0;
+        if (a->ne_above >= a->cfg.ne_recent_sustain)
+            a->ne_recent_frames = a->cfg.ne_recent_hold;
+        else if (a->ne_recent_frames > 0)
+            a->ne_recent_frames -= 1;
+        else
+            a->ne_recent_frames = 0;
+    }
+
+    /* 2. saturation. */
+    float sat_ref = 0.0f;  /* far-end level from saturation_detect() (float) */
+    if (a->has_sat) {
+        sat_ref = saturation_detect(&a->sat_ref, a->far_hop, hop);
+        float sat_mic = saturation_detect(&a->sat_mic, a->near_hop, hop);
+        a->saturation_level = (sat_ref > sat_mic * 0.5f) ? sat_ref : sat_mic * 0.5f;
+        if (a->cfg.saturation_softclip_ref && sat_ref > 0.1f)
+            saturation_soft_clip(a->far_hop, a->far_hop, hop, 0.8);
+    }
+
+}
+
+static float aec_prepare_mu(Aec* a, int* is_array) {
     /* 5. mu_scale (simple variable mu, Valin 2007 RER-inspired). */
     int mu_is_array = 0;
     float mu_scalar = get_simple_mu_scale(a, &mu_is_array);
@@ -3091,6 +3214,12 @@ static void aec_process_core(Aec* a, const float* mic_in, const float* ref_in,
         mu_is_array = 0;
     }
 
+    *is_array = mu_is_array;
+    return mu_scalar;
+}
+
+static int aec_prepare_rsa(Aec* a) {
+    const int hop = a->hop_size, K = a->n_freqs;
     /* 7. RSA update + poor-excitation counters + saturated_capture. The PSD is
      *    |filter.far_spec|² from the PREVIOUS hop (far_spec set inside step-9
      *    pbfdkf_process). First hop: far_spec is zero. */
@@ -3149,12 +3278,20 @@ static void aec_process_core(Aec* a, const float* mic_in, const float* ref_in,
         rsa_mask_regions_around_narrow_bands(&a->rsa, rsa_mask);
     }
 
+    return rsa_mask_active;
+}
+
+static int aec_run_shadow(Aec* a, float far_hop_mean_sq, int rsa_mask_active,
+                          const Complex* shared_far_spec,
+                          const float* shared_far_cmag2) {
+    const int K = a->n_freqs;
+    const float* rsa_mask = a->scr_rsa_mask;
     /* 8.5: shadow runs BEFORE main so main's H_error refresh reads same-hop
      * e2_coarse (mirrors orchestrator.py). far_excited is hoisted here so
      * step 13 (doubletalk_update_shadow_dt) can use it. */
     int far_excited = 0;
     if (a->has_shadow) {
-        a->shadow_frame_count++;
+        aec_counter_bump(&a->shadow_frame_count);
         far_excited = (far_hop_mean_sq > 1e-4f);
         int saturation_safe_pre = (a->saturation_level < 0.5f);
         float shadow_mu_pre = (far_excited && saturation_safe_pre) ? 1.0f : 0.1f;
@@ -3167,34 +3304,31 @@ static void aec_process_core(Aec* a, const float* mic_in, const float* ref_in,
         if (rsa_mask_active) {
             float *mu_buf_pre = a->scr_mu_buf_pre;
             sk_scale_f32(mu_buf_pre, rsa_mask, shadow_mu_pre, K);
-            pbfdaf_process(&a->shadow_filter, a->near_hop, a->far_hop, mu_buf_pre, 0.0f, a->shadow_out);
+            pbfdaf_process_with_far_cmag2(&a->shadow_filter, a->near_hop, a->far_hop,
+                                           mu_buf_pre, 0.0f, a->shadow_out, shared_far_cmag2);
         } else {
-            pbfdaf_process(&a->shadow_filter, a->near_hop, a->far_hop, NULL,
-                           shadow_mu_pre, a->shadow_out);
+            pbfdaf_process_with_far_cmag2(&a->shadow_filter, a->near_hop, a->far_hop, NULL,
+                                           shadow_mu_pre, a->shadow_out, shared_far_cmag2);
         }
         /* Publish current-hop e2_coarse to main_filter BEFORE main runs. */
         {
             sk_cmag2_np_f32(a->shadow_filter.error_spec,
                             a->main_filter.e2_coarse_per_bin, K);
             a->main_filter.e2_coarse_for_refresh =
-                (float)aec3_post_pairwise_sum_f32(a->main_filter.e2_coarse_per_bin,
-                                                   (size_t)K);
+                (float)sk_pairwise_sum_f32(a->main_filter.e2_coarse_per_bin,
+                                           (size_t)K);
             a->main_filter.e2_coarse_per_bin_valid = 1;
         }
     }
 
-    /* One stamp closes the pre-filter run (stages 1-8.5) and opens the main
-     * filter. */
-    t_mark = aec_now_us();
-    /* Disjoint from delay_us: section 3 is a sub-interval of this window, so
-     * subtracting it leaves the mic HPF / saturation / render-activity /
-     * mu_scale / mic-clip / RSA / shadow remainder. Reads t_delay, the local,
-     * rather than the field it was just stored into: with timing compiled out
-     * both are 0, but only the local folds -- the field would be reloaded
-     * across the opaque calls in between. Unsigned arithmetic is exact here
-     * because the sub-interval can never exceed its container. */
-    a->last_timing.frontend_us = (t_mark - t_stage) - t_delay;
+    return far_excited;
+}
 
+static int aec_run_main_filter(Aec* a, float mu_scalar, int mu_is_array,
+                                int rsa_mask_active, const Complex* shared_far_spec,
+                                const float* shared_far_cmag2) {
+    const int K = a->n_freqs;
+    const float* rsa_mask = a->scr_rsa_mask;
     /* 9. MAIN filter. */
     /* FFT dedup: the shadow ran pre-main on the SAME far_hop with an identical
      * far_buffer (lockstep shift + paired reset), so reuse its far_spec instead
@@ -3205,6 +3339,8 @@ static void aec_process_core(Aec* a, const float* mic_in, const float* ref_in,
      * existed whenever no caller-supplied spectrum exists. */
     a->main_filter.base.precomputed_far_spec =
         a->has_shadow ? a->shadow_filter.far_spec : shared_far_spec;
+    const float* far_cmag2 = a->has_shadow
+        ? a->shadow_filter.far_cmag2_hold : shared_far_cmag2;
     float main_mu_scalar = a->regime.main_paused ? 0.0f : mu_scalar;
     {
         float *mu_buf = a->scr_mu_buf;
@@ -3220,21 +3356,17 @@ static void aec_process_core(Aec* a, const float* mic_in, const float* ref_in,
         } else if (rsa_mask_active && use_array) {
             for (int k = 0; k < K; ++k) mu_buf[k] = mu_buf[k] * rsa_mask[k];
         }
-        if (use_array)
-            pbfdkf_process(&a->main_filter, a->near_hop, a->far_hop, mu_buf, 0.0f, a->raw_output);
-        else
-            pbfdkf_process(&a->main_filter, a->near_hop, a->far_hop, NULL,
-                           main_mu_scalar, a->raw_output);
+        return pbfdkf_process_with_far_cmag2(
+            &a->main_filter, a->near_hop, a->far_hop,
+            use_array ? mu_buf : NULL, use_array ? 0.0f : main_mu_scalar,
+            a->raw_output, far_cmag2);
     }
 
-    /* One stamp closes the main filter and opens the steering window (steps
-     * 10-16), so the fifth bucket costs no extra clock read. */
-    {
-        uint32_t t_lin_end = aec_now_us();
-        a->last_timing.linear_us = t_lin_end - t_mark;
-        t_mark = t_lin_end;
-    }
+}
 
+static int aec_refresh_stationarity(Aec* a) {
+    const int hop = a->hop_size;
+    int stationarity_block_for_post;
     /* 10. stationarity refresh for NEXT hop (StationarityEstimator on
      *     |filter.far_spec|²; first-render latch; block-stationary push). */
     {
@@ -3246,21 +3378,21 @@ static void aec_process_core(Aec* a, const float* mic_in, const float* ref_in,
              * |far_spec|², which is what the estimator refreshes on. */
             const float *far_psd = a->main_filter.base.far_cmag2_hold;
             stationarity_estimator_update_noise_estimator(&a->a3_stat, far_psd);
-            /* Pass avg_reverb from the previous hop's aec3_post_compute_x2_reverb --
-             * the same state Python reads from _aec3_avg_render_reverb.reverb (one hop
-             * stale: aec3_post_run fires at step 18, AFTER this stationarity refresh). */
+            /* Pass avg_reverb from the previous hop's aec_post_compute_x2_reverb --
+             * the same state Python reads from its avg-render-reverb model (one hop
+             * stale: aec_post_run fires at step 18, AFTER this stationarity refresh). */
             stationarity_estimator_update_stationarity_flags(&a->a3_stat, far_psd,
                                                               a->post.avg_reverb.reverb);
             /* Threshold-gate counter: the sole reader is the
              * ">= a->stationarity_converge_hops" comparison just below (and the same
-             * comparison re-derived from the mirrored copy passed into aec3_post_run's
+             * comparison re-derived from the mirrored copy passed into aec_post_run's
              * inputs). Saturate at EXACTLY stationarity_converge_hops -- once the counter
              * reaches it the ">=" comparison is permanently true either way -- so a very
              * long streaming session can never hit signed-integer overflow on this
              * unconditional increment. The "<" guard settles the counter at exactly
              * stationarity_converge_hops (test/test_counter_saturation.c pins the
              * numeric cap, "stationarity_active_hops settles at converge_hops"); every
-             * downstream decision, here and in aec3_post.c's mirrored
+             * downstream decision, here and in aec_post.c's mirrored
              * "in->stationarity_active_hops >= in->stationarity_converge_hops" copy, is
              * identical for any value at or above the cap. */
             if (a->stationarity_active_hops < a->stationarity_converge_hops) {
@@ -3271,7 +3403,7 @@ static void aec_process_core(Aec* a, const float* mic_in, const float* ref_in,
          * overwrite this hop's filter.block_stationary — step 11's shadow
          * still reads the value pushed at step 8. */
         int converged_enough = (a->stationarity_active_hops >= a->stationarity_converge_hops);
-        /* This raw value is also consumed later by REE in aec3_post_run. No
+        /* This raw value is also consumed later by REE in aec_post_run. No
          * stationarity flags or hangovers change between here and that call,
          * so carry it forward instead of scanning every frequency bin twice
          * after convergence. Keep it separate from block_stationary_next:
@@ -3282,14 +3414,22 @@ static void aec_process_core(Aec* a, const float* mic_in, const float* ref_in,
             converged_enough && stationarity_block_for_post;
     }
 
-    /* 11. SHADOW filter -- already ran pre-main in step 8.5. */
+    return stationarity_block_for_post;
+}
 
+static void aec_update_shadow_quality(Aec* a, int main_error_cmag2_valid) {
+    const int K = a->n_freqs, N = a->n_partitions;
     /* 12. e2_coarse + erl publish + poor-coarse rescue. */
     if (a->has_shadow) {
         /* _e2_ref = Σ|filter.error_spec|² (cmag2_np, pairwise f32). */
         float *e2ref_arr = a->scr_e2ref_arr;
-        sk_cmag2_np_f32(a->main_filter.base.error_spec, e2ref_arr, K);
-        float e2_ref = aec3_post_pairwise_sum_f32(e2ref_arr, (size_t)K);
+        /* PBFDKF only fills its cache on far-active hops. Silence must
+         * compute the current error rather than reuse the previous hop. */
+        if (main_error_cmag2_valid)
+            memcpy(e2ref_arr, a->main_filter.e2_ref_scratch, (size_t)K * sizeof(float));
+        else
+            sk_cmag2_np_f32(a->main_filter.base.error_spec, e2ref_arr, K);
+        float e2_ref = sk_pairwise_sum_f32(e2ref_arr, (size_t)K);
         /* e2_coa: shadow_filter.error_spec did NOT change since step 8.5
          * (the shadow filter runs once/hop, pre-main; nothing between here
          * and there touches it) -- so cmag2(shadow_filter.error_spec) +
@@ -3352,19 +3492,23 @@ static void aec_process_core(Aec* a, const float* mic_in, const float* ref_in,
         }
     }
 
+}
+
+static void aec_update_shadow_dt(Aec* a, float far_hop_mean_sq, int far_excited) {
+    const int hop = a->hop_size, K = a->n_freqs;
     /* 13. smoothed errs + DT analyzer + regime handler. */
     if (a->has_shadow) {
         /* |error_spec|² for both filters already exists this hop: main's in
          * scr_e2ref_arr (step 12), the shadow's in main_filter.e2_coarse_per_bin
          * (step 8.5, written straight there instead of via a separate scratch).
          * Neither error_spec is touched in between, so the arrays hold exactly
-         * what a fresh cmag2 pass would produce; the two get_error_energy
-         * calls are just the reduction below.
+         * what a fresh cmag2 pass would produce; the reductions below just
+         * sum them.
          *
          * The REDUCTION is not shareable, only the arrays: step 8.5 and step
-         * 12 sum with aec3_post_pairwise_sum_f32 while an error ENERGY is a
+         * 12 sum with sk_pairwise_sum_f32 while an error ENERGY is a
          * tail-fold sum, and the two trees round differently by design
-         * (aec_simd_kernels.h documents them as distinct value functions).
+         * (utility/simd_aec.h documents them as distinct value functions).
          * Reusing e2_coa / e2_ref here instead of re-reducing would change these
          * two floats. */
         float main_err   = sk_pairwise_sum_tailfold_f32(a->scr_e2ref_arr, (size_t)K);
@@ -3372,17 +3516,17 @@ static void aec_process_core(Aec* a, const float* mic_in, const float* ref_in,
         float as = a->cfg.shadow_err_alpha, oas = 1.0f - as;
         a->main_err_smooth   = as * a->main_err_smooth   + oas * main_err;
         a->shadow_err_smooth = as * a->shadow_err_smooth + oas * shadow_err;
-        doubletalk_update_shadow_dt(&a->dt_analyzer, a->shadow_frame_count,
+        doubletalk_update_shadow_dt(&a->dt_analyzer, aec_count_as_int(a->shadow_frame_count),
                                     far_excited, a->main_err_smooth, a->shadow_err_smooth);
-        int delay_reliable = a->has_delay && (delay_aec3_confidence(&a->delay) >= 0.5f);
+        int delay_reliable = a->has_delay && (delay_aec_confidence(&a->delay) >= 0.5f);
         /* The shadow-copy warm-up is a 500 ms wall-clock guard, not a fixed hop
          * count. It is kept outside persistent state so Aec/arena layout is
          * unaffected; the conversion is negligible next to the two adaptive filters
          * and follows the canonical per-grid rounding rule. */
         int shadow_warmup_hops =
-            aec3_ms_to_hops(500.0f, hop, a->cfg.sample_rate);
+            aec_ms_to_hops(500.0f, hop, a->cfg.sample_rate);
         ShadowCopyDecision dec = shadow_copy_update(
-            &a->regime, a->shadow_frame_count, shadow_warmup_hops,
+            &a->regime, aec_count_as_int(a->shadow_frame_count), shadow_warmup_hops,
             far_hop_mean_sq,
             a->main_err_smooth, a->shadow_err_smooth,
             a->epc.active, a->saturation_level,
@@ -3391,6 +3535,9 @@ static void aec_process_core(Aec* a, const float* mic_in, const float* ref_in,
         /* reverse_copy: no-op on NLMS shadow (Python never invokes it). */
     }
 
+}
+
+static void aec_update_echo_path(Aec* a, float far_pwr_global) {
     /* 14. EPV trigger. */
     EpcEvent epv = epc_update_epv(&a->epc, far_pwr_global,
                                   a->convergence.converged, a->regime.main_paused);
@@ -3437,9 +3584,22 @@ static void aec_process_core(Aec* a, const float* mic_in, const float* ref_in,
         }
     }
 
+    /* EPC render-forced countdown: decrements every hop, unconditionally
+     * (mirrors orchestrator.py, which ticks it right after the shadow_rise
+     * tick/fire above and before final_output is seeded, independent of
+     * enable_res/return_res_context). No C code reads this field back --
+     * it is set by the EPV/shadow_rise events above and otherwise only
+     * decremented -- so this exists purely to keep the counter's own value
+     * in step with Python's for diagnostics (e.g. the pyc_parity trace). */
+    if (a->epc_render_forced_remaining > 0) a->epc_render_forced_remaining--;
+
+}
+
+static float aec_update_misadjustment_erle(Aec* a) {
+    const int hop = a->hop_size;
     /* final_output starts from raw_output -- but only load-bearing on the
      * path where nothing downstream overwrites it. When enable_res or
-     * return_res_context is set, aec3_post_run() (below) unconditionally
+     * return_res_context is set, aec_post_run() (below) unconditionally
      * determines every sample of a->final_out itself, making this memcpy
      * dead work on that path. */
     if (!(a->cfg.enable_res || a->cfg.return_res_context))
@@ -3468,25 +3628,18 @@ static void aec_process_core(Aec* a, const float* mic_in, const float* ref_in,
         if (a->erle_slope_len < a->erle_slope_cap) a->erle_slope_len++;
     }
 
-    /* 17. RES / post block (enable_res). One stamp closes the steering
-     * window and opens this one. */
-    t_stage = aec_now_us();
-    a->last_timing.steering_us = t_stage - t_mark;
-    int is_stationary_dt = 0;
-    float dt_indicator = 0.0f;
-    float far_power = 0.0f;
-    /* AMEND_37 mirror of the identical Python fix (orchestrator.py): windowed
-     * ERLE is a general-purpose signal (the bad-relock judgment, Path A's
-     * already_cancelling guard, the duty-cycle ERLE watchdog, divergence
-     * tracking below -- none of them RES-specific), so it must update
-     * regardless of enable_res. Previously this lived ONLY inside the
-     * enable_res-gated block below -- with enable_res=0 && return_res_context=0
-     * (aec_wav's --no-res, the C mirror of Python's "_nores" comparison run),
-     * erle_window_near/_err never updated and erle_windowed stayed pinned at
-     * its reset value of 0.0 for the entire file, silently defeating this same
-     * diff's own Fix-1 revert mechanism on that path (cur_erle < pre_erle - 1
-     * reads as 0.0 < -1.0, always false). Python has no queued-mode concept
-     * to gate on here (grepped: no match), so this block is unconditional. */
+    return _ei;
+}
+
+static float aec_update_windowed_erle(Aec* a) {
+    /* Mirrors the Python orchestrator: windowed ERLE is a general-purpose
+     * signal (the bad-relock judgment, Path A's already_cancelling guard, the
+     * duty-cycle ERLE watchdog, divergence tracking below -- none of them
+     * RES-specific), so it updates regardless of enable_res. Were it gated,
+     * enable_res=0 && return_res_context=0 (aec_wav's --no-res) would leave
+     * erle_window_near/_err un-updated and erle_windowed pinned at its reset
+     * value of 0.0, so the bad-relock revert (cur_erle < pre_erle - 1 reads
+     * 0.0 < -1.0, always false) could never fire on that path. */
     const float erle_decay = 0.999f;
     a->erle_window_near = erle_decay * a->erle_window_near + a->near_power;
     a->erle_window_err  = erle_decay * a->erle_window_err  + a->raw_error_power;
@@ -3494,246 +3647,252 @@ static void aec_process_core(Aec* a, const float* mic_in, const float* ref_in,
                                         / (a->erle_window_err + 1e-10f));
     /* Cache immediately, right next to the compute, for next frame's Path-A
      * guard, the duty watchdog, and the bad-relock judgment's cur_erle read
-     * (aec.c:2751) -- unconditional, matching the compute above. This cache
-     * write used to live ~300 lines away with its OWN enable_res gate,
-     * independent of (and initially missed by) the fix to this compute
-     * block; collapsing the two removes the chance of them drifting apart
-     * again. */
+     * (aec_judge_delay_shift) -- unconditional, matching the compute above,
+     * so the cache write and the compute cannot drift apart. */
     a->last_erle_windowed = erle_windowed;
     /* divergence indicator EMA: also general-purpose (external diagnostic API
      * only, ctx->divergence -- grepped, never read back to gate audio in this
      * file), so it moves out of the enable_res gate with erle_windowed for the
      * same reason. */
     filter_convergence_update_divergence(&a->convergence, a->near_power, a->raw_error_power);
-    /* Run the AEC3 post block when EITHER the internal RES is on OR the caller
-     * asked for the res-context seam (mirrors Python orchestrator.py:2021,
-     * `enable_res or return_res_context`). With enable_res=1 this is unchanged
-     * (return_res_context is irrelevant) → production cascade byte-exact. */
-    if (a->cfg.enable_res || a->cfg.return_res_context) {
-        far_power = far_hop_mean_sq;
-        /* erle_for_factor = max(get_erle_instant(), erle_windowed). _ei above
-         * is the identical expression over the same (not-yet-updated-this-hop)
-         * near_power/raw_error_power -- reuse it instead of recomputing. */
-        float erle_inst = _ei;
-        float erle_for_factor = erle_inst > erle_windowed ? erle_inst : erle_windowed;
-        float erle_factor = erle_for_factor / 10.0f;
-        if (erle_factor < 0.0f) erle_factor = 0.0f;
-        if (erle_factor > 1.0f) erle_factor = 1.0f;
-        a->erle_factor_prev = erle_factor;
+    return erle_windowed;
+}
 
-        float far_pwr = far_power + 1e-10f;
-        float mic_pwr = mean_sq(a->near_hop, hop, a->scr_sq) + 1e-10f;
-        float raw_err_pwr = mean_sq(a->raw_output, hop, a->scr_sq) + 1e-10f;
+static void aec_run_post_chain(Aec* a, int stationarity_block_for_post, int render_active) {
+    const int hop = a->hop_size, N = a->n_partitions;
+    /* ── aec_post_run → final_output ── */
+    {
+        /* filter_taps_full is materialized on demand by
+         * aec_fill_filter_taps(), driven from inside the FilterAnalyzer
+         * once it knows which region it is about to read -- not
+         * whole-filter up front here, which cost an inverse FFT per
+         * partition every hop to hand the analyzer one region's worth of
+         * taps. The buffer and its length are still passed exactly as
+         * before; only the partitions covering the analyzer's current
+         * region are refreshed inside the call below. */
 
-        advance_erl_and_dt(a, ra.is_active, far_pwr, mic_pwr, raw_err_pwr);
+        AecPostRunIn in;
+        memset(&in, 0, sizeof(in));
+        in.near_spec = a->main_filter.base.near_spec;
+        in.far_spec  = a->main_filter.base.far_spec;
+        in.echo_spec = a->main_filter.base.echo_spec;
+        in.error_spec_windowed = a->main_filter.base.error_spec_windowed;
+        in.W0 = a->main_filter.base.W;             /* W[0] */
+        in.W_all = a->main_filter.base.W;          /* live, read-only for the call */
+        in.X_buf = a->main_filter.base.X_buf;      /* live, read-only for the call */
+        in.x2_cache = a->main_filter.base.x2_cache;   /* |X_buf|² mirror, same lifetime */
+        in.sqrt_hann = a->main_filter.base.sqrt_hann;
+        in.kalman_P = NULL; in.kalman_P_len = 0;   /* divergence_indicator dead */
+        in.partition_idx = a->main_filter.base.partition_idx;
+        in.n_partitions = N;
+        in.filter_taps_full = a->filter_taps_full;
+        in.filter_taps_full_len = N * hop;
+        in.shadow_present = a->has_shadow;
+        in.shadow_error_spec = a->has_shadow ? a->shadow_filter.error_spec : NULL;
+        in.last_shadow_output_time = a->has_shadow ? a->shadow_out : NULL;
+        in.s_ref_max = a->main_filter.base.last_s_max_abs * 32768.0f;
+        in.s_coa_max = a->has_shadow ? a->shadow_filter.last_s_max_abs * 32768.0f : 0.0f;
+        /* in.main_error_energy / in.shadow_error_energy are left at their memset(0)
+         * default: AecPostRunIn.main_error_energy / shadow_error_energy have no
+         * readers in aec_post.c, so recomputing them here would be an O(n_freqs)
+         * cmag2 + pairwise-sum pass feeding an unread field. The computation that is
+         * needed (feeding a->main_err_smooth / a->shadow_err_smooth for double-talk
+         * detection) is at step 13 above; error_spec is not mutated between there and
+         * here in the same hop, so it would be a redundant recompute, not a distinct
+         * value. */
+        in.raw_output = a->raw_output;
+        in.near_end = a->near_hop;
+        in.far_end = a->far_hop;
+        in.current_delay = a->current_delay;
+        /* Mirrors Python's `self._delay_active`, which is "a reference ring
+         * exists", NOT "an estimator exists" -- so FIXED must report 1 here or the
+         * post-filter chain would see no external delay despite one being applied
+         * every hop. MATCHED reports 1 and EXTERNAL_ALIGNED 0, as `a->has_delay`
+         * would. */
+        in.delay_active = aec_ring_active(&a->cfg);
+        in.saturation_level = a->saturation_level;
+        in.pending_gain_change = a->pending_gain_change;
+        in.pending_delay_change = a->pending_delay_change;
+        in.stationarity_active_hops = a->stationarity_active_hops;
+        in.stationarity_converge_hops = a->stationarity_converge_hops;
+        in.stationary_block = stationarity_block_for_post;
+        in.erle_coh_gate_enabled = AECB_ERLE_COH_GATE_ENABLED;
+        in.use_stationarity_properties = AECB_USE_STATIONARITY_PROPERTIES;
+        /* In the external AEC→NR/RES seam, Step 19's comfort-noise PSD
+         * and Step 20's R² are consumed by the caller (Step 20's gain
+         * itself is consumed only when spatial_linear_context is unset --
+         * see below), but Step 21's private gain/CNG/IFFT/OLA result is
+         * immediately replaced by the linear residual. Skip only that
+         * final synthesis stage. */
+        in.context_only = (!a->cfg.enable_res && a->cfg.return_res_context);
+        /* spatial_linear_context requires context_only (enforced by
+         * aec_validate_config()): a caller that sets it has already
+         * committed to never reading res_gain (aec_get_res_context()
+         * exposes NULL for it in this mode), so Step 20 can skip
+         * computing the array Step 21 would otherwise never read here
+         * either way. */
+        in.spatial_linear_context = a->cfg.spatial_linear_context != 0;
+        in.linear_context_only =
+            a->cfg.spatial_linear_context == AEC_CONTEXT_LINEAR_ONLY;
+        in.active_render_threshold = AECB_ACTIVE_RENDER_THRESHOLD;
 
-        /* base DT confidence (simple energy-ratio estimate). */
-        float simple_dt = 1.0f - far_pwr / (mic_pwr + far_pwr);
-        float raw_dt = a->dt_analyzer.dt_from_energy;
-        float sd_half = simple_dt * 0.5f;
-        if (sd_half > raw_dt) raw_dt = sd_half;
+        AecPostRunObj obj;
+        obj.state = &a->a3_state; obj.ree = &a->a3_ree; obj.sg = &a->a3_sg;
+        obj.stationarity = &a->a3_stat; obj.lfs = &a->a3_lfs; obj.fft = a->post_fft;
 
-        /* stationary-DT macro detection. */
-        if (a->render_activity.is_stationary && a->convergence.converged) {
-            int fft_size = a->main_filter.base.fft_size;
-            float freq_per_bin = (float)a->cfg.sample_rate / (float)fft_size;
-            int vb_start = (int)(100.0f / freq_per_bin); if (vb_start < 1) vb_start = 1;
-            int vb_limit = (int)(3000.0f / freq_per_bin); if (vb_limit > K) vb_limit = K;
-            float track_err_pwr = 0.0f;
-            if (a->has_shadow) {
-                /* Step 12 (gated on has_shadow, above) already wrote
-                 * cmag2(main_filter.base.error_spec) for the FULL [0,K) range
-                 * into scr_e2ref_arr, and nothing between there and here
-                 * writes it (step 13 only reads it) -- so this subrange is
-                 * still exactly what a fresh cmag2 call would produce; sum
-                 * straight from it instead of recomputing. */
-                for (int k = vb_start; k < vb_limit; ++k) track_err_pwr += a->scr_e2ref_arr[k];
-            } else {
-                /* Scalar serial reduction (not an elementwise fill/acc target):
-                 * fill-scratch-then-serial-sum, reusing scr_e2ref_arr, which is
-                 * provably dead here when !has_shadow (step 12 never runs, so
-                 * nothing else in this hop touches it) — the k-order
-                 * `track_err_pwr +=` sum below is unchanged from the original
-                 * inline-compute-then-accumulate loop, just reading the
-                 * precomputed (bit-identical) per-bin magnitude values. */
-                float *terr_scr = a->scr_e2ref_arr;
-                sk_cmag2_np_f32(a->main_filter.base.error_spec + vb_start,
-                                 terr_scr + vb_start, vb_limit - vb_start);
-                for (int k = vb_start; k < vb_limit; ++k) track_err_pwr += terr_scr[k];
-            }
-            track_err_pwr += 1e-10f;
-            if (a->wn_err_baseline < 1e-6f) a->wn_err_baseline = track_err_pwr;
-            float jump_ratio = track_err_pwr / (a->wn_err_baseline + 1e-10f);
-            /* 800ms protection window (covers syllable gaps), live-computed
-             * at construction (stat_dt_hangover_hops), not a frozen literal. */
-            if (jump_ratio > 1.5f) a->stat_dt_hangover = a->stat_dt_hangover_hops;
-            if (a->stat_dt_hangover > 0) {
-                is_stationary_dt = 1;
-                a->stat_dt_hangover--;
-                a->wn_err_baseline = 0.999f * a->wn_err_baseline + 0.001f * track_err_pwr;
-            } else {
-                is_stationary_dt = 0;
-                a->wn_err_baseline = 0.95f * a->wn_err_baseline + 0.05f * track_err_pwr;
-            }
-        }
-        /* baseline slow-track. */
-        if (a->convergence.converged && !a->render_activity.is_stationary
-                && far_pwr > 1e-4f && a->wn_err_baseline > 1e-6f) {
-            a->wn_err_baseline = 0.995f * a->wn_err_baseline + 0.005f * raw_err_pwr;
-        }
+        /* DT-gated min-gain floor lift: pass the product latch and enable
+         * switch into aec_post_run(), which owns the final decision next
+         * to the suppression-gain consumer and exports that same result. */
+        in.dt_floor_enabled = a->cfg.dt_aware_res_floor_enabled;
+        in.nearend_recent = a->ne_recent_frames > 0;
 
-        /* inst_erle correction. */
-        float inst_erle_fast_raw = mic_pwr / raw_err_pwr;
-        a->inst_erle_smooth = 0.7f * a->inst_erle_smooth + 0.3f * inst_erle_fast_raw;
-        if (a->inst_erle_smooth > 2.0f) {
-            float erle_for_dt = a->inst_erle_smooth;
-            if (erle_for_dt > 4.0f) erle_for_dt = 4.0f;
-            raw_dt /= erle_for_dt;
-        }
-        /* EPC physical gate. */
-        if (a->epc.active) { raw_dt = 0.0f; is_stationary_dt = 0; }
-        dt_indicator = raw_dt; if (dt_indicator < 0.0f) dt_indicator = 0.0f;
-        if (dt_indicator > 0.8f) dt_indicator = 0.8f;
+        /* Live observer. render_activity_is_active is
+         * `self._render_activity.is_active` (the persistent
+         * RenderActivityDetector updated once per hop above, step 4) --
+         * DISTINCT from this function's own `active_render_threshold`-
+         * derived local (aec_post_run's Step 11), which is a different,
+         * simpler instantaneous quantity AecState.update() reads.
+         * obj.observer_filter is driven FROM INSIDE aec_post_run (not
+         * here), because the injection needs this hop's dominant_ne/
+         * usable_linear verdicts, which are only known there. */
+        in.render_activity_is_active = render_active;
+        in.observer_far_end = (a->has_observer && a->observer_far_hop_valid)
+                               ? a->observer_far_hop : NULL;
+        obj.observer_filter = a->has_observer ? &a->observer_filter : NULL;
 
-        /* EPC render-forced countdown (Python decrements + sets RES flag; the RES
-         * flag is consumed inside REE, which aec3_post_run drives -- the
-         * orchestrator does not wire using_render_based to REE, so this is a counter
-         * decrement only). */
-        if (a->epc_render_forced_remaining > 0) a->epc_render_forced_remaining--;
+        int pgc = a->pending_gain_change, pdc = a->pending_delay_change;
+        aec_post_run(&a->post, &in, &obj, &a->a3_sc, a->final_out, &pgc, &pdc);
+        a->pending_gain_change = pgc;
+        a->pending_delay_change = pdc;
 
-        /* shadow_dt stash for exported context telemetry. The in-tree RES
-         * does not consume it. Both operands come from DoubleTalk. */
-        float shadow_dt_v = a->dt_analyzer.dt_from_energy;
-        if (a->dt_analyzer.dt_from_shadow > shadow_dt_v) shadow_dt_v = a->dt_analyzer.dt_from_shadow;
-        if (a->epc.active) shadow_dt_v *= 0.08f;
-        a->last_far_power = far_power;
-        a->last_shadow_dt = shadow_dt_v;
-        a->last_is_stationary_dt = is_stationary_dt;
-        a->last_dt_indicator = dt_indicator;
+        /* In context-only mode aec_post_run emits raw_output directly;
+         * the external NR/RES remains the sole suppressor. */
+    }
 
-        /* ── aec3_post_run → final_output ── */
-        {
-            /* filter_taps_full is materialized on demand by
-             * aec_fill_filter_taps(), driven from inside the FilterAnalyzer
-             * once it knows which region it is about to read -- not
-             * whole-filter up front here, which cost an inverse FFT per
-             * partition every hop to hand the analyzer one region's worth of
-             * taps. The buffer and its length are still passed exactly as
-             * before; only the partitions covering the analyzer's current
-             * region are refreshed inside the call below. */
+}
 
-            Aec3PostRunIn in;
-            memset(&in, 0, sizeof(in));
-            in.near_spec = a->main_filter.base.near_spec;
-            in.far_spec  = a->main_filter.base.far_spec;
-            in.echo_spec = a->main_filter.base.echo_spec;
-            in.error_spec_windowed = a->main_filter.base.error_spec_windowed;
-            in.W0 = a->main_filter.base.W;             /* W[0] */
-            in.W_all = a->main_filter.base.W;          /* live, read-only for the call */
-            in.X_buf = a->main_filter.base.X_buf;      /* live, read-only for the call */
-            in.x2_cache = a->main_filter.base.x2_cache;   /* |X_buf|² mirror, same lifetime */
-            in.sqrt_hann = a->main_filter.base.sqrt_hann;
-            in.kalman_P = NULL; in.kalman_P_len = 0;   /* divergence_indicator dead */
-            in.partition_idx = a->main_filter.base.partition_idx;
-            in.n_partitions = N;
-            in.filter_taps_full = a->filter_taps_full;
-            in.filter_taps_full_len = N * hop;
-            in.shadow_present = a->has_shadow;
-            in.shadow_error_spec = a->has_shadow ? a->shadow_filter.error_spec : NULL;
-            in.last_shadow_output_time = a->has_shadow ? a->shadow_out : NULL;
-            in.s_ref_max = a->main_filter.base.last_s_max_abs * 32768.0f;
-            in.s_coa_max = a->has_shadow ? a->shadow_filter.last_s_max_abs * 32768.0f : 0.0f;
-            /* in.main_error_energy / in.shadow_error_energy are left at their memset(0)
-             * default: Aec3PostRunIn.main_error_energy / shadow_error_energy have no
-             * readers in aec3_post.c, so recomputing them here would be an O(n_freqs)
-             * cmag2 + pairwise-sum pass feeding an unread field. The computation that is
-             * needed (feeding a->main_err_smooth / a->shadow_err_smooth for double-talk
-             * detection) is at step 13 above; error_spec is not mutated between there and
-             * here in the same hop, so it would be a redundant recompute, not a distinct
-             * value. */
-            in.raw_output = a->raw_output;
-            in.near_end = a->near_hop;
-            in.far_end = a->far_hop;
-            in.current_delay = a->current_delay;
-            /* Mirrors Python's `self._delay_active`, which is "a reference ring
-             * exists", NOT "an estimator exists" -- so FIXED must report 1 here or the
-             * AEC3 post chain would see no external delay despite one being applied
-             * every hop. MATCHED reports 1 and EXTERNAL_ALIGNED 0, as `a->has_delay`
-             * would. */
-            in.delay_active = aec_ring_active(&a->cfg);
-            in.saturation_level = a->saturation_level;
-            in.pending_gain_change = a->pending_gain_change;
-            in.pending_delay_change = a->pending_delay_change;
-            in.stationarity_active_hops = a->stationarity_active_hops;
-            in.stationarity_converge_hops = a->stationarity_converge_hops;
-            in.stationary_block = stationarity_block_for_post;
-            in.erle_coh_gate_enabled = AEC3B_ERLE_COH_GATE_ENABLED;
-            in.use_stationarity_properties = AEC3B_USE_STATIONARITY_PROPERTIES;
-            /* In the external AEC→NR/RES seam, Step 19's comfort-noise PSD
-             * and Step 20's R² are consumed by the caller (Step 20's gain
-             * itself is consumed only when spatial_linear_context is unset --
-             * see below), but Step 21's private gain/CNG/IFFT/OLA result is
-             * immediately replaced by the linear residual. Skip only that
-             * final synthesis stage. */
-            in.context_only = (!a->cfg.enable_res && a->cfg.return_res_context);
-            /* spatial_linear_context requires context_only (enforced by
-             * aec_validate_config()): a caller that sets it has already
-             * committed to never reading res_gain (aec_get_res_context()
-             * exposes NULL for it in this mode), so Step 20 can skip
-             * computing the array Step 21 would otherwise never read here
-             * either way. */
-            in.spatial_linear_context = a->cfg.spatial_linear_context != 0;
-            in.linear_context_only =
-                a->cfg.spatial_linear_context == AEC_CONTEXT_LINEAR_ONLY;
-            in.active_render_threshold = AEC3B_ACTIVE_RENDER_THRESHOLD;
+static int aec_prepare_post_dt(Aec* a, float far_hop_mean_sq, float _ei,
+                               float erle_windowed, int render_active) {
+    const int hop = a->hop_size, K = a->n_freqs;
+    int is_stationary_dt = 0;
+    float dt_indicator = 0.0f, far_power = 0.0f;
+    far_power = far_hop_mean_sq;
+    /* erle_for_factor = max(get_erle_instant(), erle_windowed). _ei above
+     * is the identical expression over the same (not-yet-updated-this-hop)
+     * near_power/raw_error_power -- reuse it instead of recomputing. */
+    float erle_inst = _ei;
+    float erle_for_factor = erle_inst > erle_windowed ? erle_inst : erle_windowed;
+    float erle_factor = erle_for_factor / 10.0f;
+    if (erle_factor < 0.0f) erle_factor = 0.0f;
+    if (erle_factor > 1.0f) erle_factor = 1.0f;
+    a->erle_factor_prev = erle_factor;
 
-            Aec3PostRunObj obj;
-            obj.state = &a->a3_state; obj.ree = &a->a3_ree; obj.sg = &a->a3_sg;
-            obj.stationarity = &a->a3_stat; obj.lfs = &a->a3_lfs; obj.fft = a->post_fft;
+    float far_pwr = far_power + 1e-10f;
+    float mic_pwr = mean_sq(a->near_hop, hop, a->scr_sq) + 1e-10f;
+    float raw_err_pwr = mean_sq(a->raw_output, hop, a->scr_sq) + 1e-10f;
 
-            /* DT-gated min-gain floor lift: pass the product latch and enable
-             * switch into aec3_post_run(), which owns the final decision next
-             * to the suppression-gain consumer and exports that same result. */
-            in.dt_floor_enabled = a->cfg.dt_aware_res_floor_enabled;
-            in.nearend_recent = a->ne_recent_frames > 0;
+    advance_erl_and_dt(a, render_active, far_pwr, mic_pwr, raw_err_pwr);
 
-            /* Live observer (A21 Stage 2). render_activity_is_active is
-             * `self._render_activity.is_active` (the persistent
-             * RenderActivityDetector updated once per hop above, step 4) --
-             * DISTINCT from this function's own `active_render_threshold`-
-             * derived local (aec3_post_run's Step 11), which is a different,
-             * simpler instantaneous quantity AecState.update() reads.
-             * obj.observer_filter is driven FROM INSIDE aec3_post_run (not
-             * here), because the injection needs this hop's dominant_ne/
-             * usable_linear verdicts, which are only known there. */
-            in.render_activity_is_active = ra.is_active;
-            in.observer_far_end = (a->has_observer && a->observer_far_hop_valid)
-                                   ? a->observer_far_hop : NULL;
-            obj.observer_filter = a->has_observer ? &a->observer_filter : NULL;
+    /* base DT confidence (simple energy-ratio estimate). */
+    float simple_dt = 1.0f - far_pwr / (mic_pwr + far_pwr);
+    float raw_dt = a->dt_analyzer.dt_from_energy;
+    float sd_half = simple_dt * 0.5f;
+    if (sd_half > raw_dt) raw_dt = sd_half;
 
-            int pgc = a->pending_gain_change, pdc = a->pending_delay_change;
-            aec3_post_run(&a->post, &in, &obj, &a->a3_sc, a->final_out, &pgc, &pdc);
-            a->pending_gain_change = pgc;
-            a->pending_delay_change = pdc;
-
-            /* In context-only mode aec3_post_run emits raw_output directly;
-             * the external NR/RES remains the sole suppressor. */
-        }
-
-        /* per-bin mu_scale update AFTER RES (orchestrator 2291-2307). */
-        if (a->convergence.converged) {
-            float mu_min = a->cfg.shadow_mu_min;
-            for (int k = 0; k < K; ++k) a->per_bin_mu_scale[k] = mu_min;
-            a->simple_mu_ratio = 0.0f;
-            if (is_stationary_dt) {
-                a->simple_mu_ratio = mu_min;
-            }
-            a->has_per_bin_mu = 1;
+    /* stationary-DT macro detection. */
+    if (a->render_activity.is_stationary && a->convergence.converged) {
+        int fft_size = a->main_filter.base.fft_size;
+        float freq_per_bin = (float)a->cfg.sample_rate / (float)fft_size;
+        int vb_start = (int)(100.0f / freq_per_bin); if (vb_start < 1) vb_start = 1;
+        int vb_limit = (int)(3000.0f / freq_per_bin); if (vb_limit > K) vb_limit = K;
+        float track_err_pwr = 0.0f;
+        if (a->has_shadow) {
+            /* Step 12 (gated on has_shadow, above) already wrote
+             * cmag2(main_filter.base.error_spec) for the FULL [0,K) range
+             * into scr_e2ref_arr, and nothing between there and here
+             * writes it (step 13 only reads it) -- so this subrange is
+             * still exactly what a fresh cmag2 call would produce; sum
+             * straight from it instead of recomputing. */
+            for (int k = vb_start; k < vb_limit; ++k) track_err_pwr += a->scr_e2ref_arr[k];
         } else {
-            a->has_per_bin_mu = 0;
-            update_simple_mu_ratio(a, a->raw_output, a->far_hop, hop);
+            /* Scalar serial reduction (not an elementwise fill/acc target):
+             * fill-scratch-then-serial-sum, reusing scr_e2ref_arr, which is
+             * provably dead here when !has_shadow (step 12 never runs, so
+             * nothing else in this hop touches it) — the k-order
+             * `track_err_pwr +=` sum below is unchanged from the original
+             * inline-compute-then-accumulate loop, just reading the
+             * precomputed (bit-identical) per-bin magnitude values. */
+            float *terr_scr = a->scr_e2ref_arr;
+            sk_cmag2_np_f32(a->main_filter.base.error_spec + vb_start,
+                             terr_scr + vb_start, vb_limit - vb_start);
+            for (int k = vb_start; k < vb_limit; ++k) track_err_pwr += terr_scr[k];
+        }
+        track_err_pwr += 1e-10f;
+        if (a->wn_err_baseline < 1e-6f) a->wn_err_baseline = track_err_pwr;
+        float jump_ratio = track_err_pwr / (a->wn_err_baseline + 1e-10f);
+        /* 800ms protection window (covers syllable gaps), live-computed
+         * at construction (stat_dt_hangover_hops), not a frozen literal. */
+        if (jump_ratio > 1.5f) a->stat_dt_hangover = a->stat_dt_hangover_hops;
+        if (a->stat_dt_hangover > 0) {
+            is_stationary_dt = 1;
+            a->stat_dt_hangover--;
+            a->wn_err_baseline = 0.999f * a->wn_err_baseline + 0.001f * track_err_pwr;
+        } else {
+            is_stationary_dt = 0;
+            a->wn_err_baseline = 0.95f * a->wn_err_baseline + 0.05f * track_err_pwr;
         }
     }
+    /* baseline slow-track. */
+    if (a->convergence.converged && !a->render_activity.is_stationary
+            && far_pwr > 1e-4f && a->wn_err_baseline > 1e-6f) {
+        a->wn_err_baseline = 0.995f * a->wn_err_baseline + 0.005f * raw_err_pwr;
+    }
+
+    /* inst_erle correction. */
+    float inst_erle_fast_raw = mic_pwr / raw_err_pwr;
+    a->inst_erle_smooth = 0.7f * a->inst_erle_smooth + 0.3f * inst_erle_fast_raw;
+    if (a->inst_erle_smooth > 2.0f) {
+        float erle_for_dt = a->inst_erle_smooth;
+        if (erle_for_dt > 4.0f) erle_for_dt = 4.0f;
+        raw_dt /= erle_for_dt;
+    }
+    /* EPC physical gate. */
+    if (a->epc.active) { raw_dt = 0.0f; is_stationary_dt = 0; }
+    dt_indicator = raw_dt; if (dt_indicator < 0.0f) dt_indicator = 0.0f;
+    if (dt_indicator > 0.8f) dt_indicator = 0.8f;
+
+    /* shadow_dt stash for exported context telemetry. The in-tree RES
+     * does not consume it. Both operands come from DoubleTalk. */
+    float shadow_dt_v = a->dt_analyzer.dt_from_energy;
+    if (a->dt_analyzer.dt_from_shadow > shadow_dt_v) shadow_dt_v = a->dt_analyzer.dt_from_shadow;
+    if (a->epc.active) shadow_dt_v *= 0.08f;
+    a->last_far_power = far_power;
+    a->last_shadow_dt = shadow_dt_v;
+    a->last_is_stationary_dt = is_stationary_dt;
+    a->last_dt_indicator = dt_indicator;
+
+    return is_stationary_dt;
+}
+
+static void aec_update_post_mu(Aec* a, int is_stationary_dt) {
+    const int hop = a->hop_size, K = a->n_freqs;
+    /* per-bin mu_scale update AFTER RES (orchestrator 2291-2307). */
+    if (a->convergence.converged) {
+        float mu_min = a->cfg.shadow_mu_min;
+        for (int k = 0; k < K; ++k) a->per_bin_mu_scale[k] = mu_min;
+        a->simple_mu_ratio = 0.0f;
+        if (is_stationary_dt) {
+            a->simple_mu_ratio = mu_min;
+        }
+        a->has_per_bin_mu = 1;
+    } else {
+        a->has_per_bin_mu = 0;
+        update_simple_mu_ratio(a, a->raw_output, a->far_hop, hop);
+    }
+}
+
+static void aec_update_linear_only_steering(Aec* a, float far_hop_mean_sq, int render_active) {
+    const int hop = a->hop_size;
     /* Python advances three filter-steering quantities outside the RES gate
      * (orchestrator.py:2633-2676): the mu ratio, the converged mu freeze, and
      * the ERL/DT trackers. The gate above already performs all three whenever
@@ -3763,12 +3922,14 @@ static void aec_process_core(Aec* a, const float* mic_in, const float* ref_in,
             float far_pwr = far_hop_mean_sq + 1e-10f;
             float mic_pwr = mean_sq(a->near_hop, hop, a->scr_sq) + 1e-10f;
             float raw_err_pwr = mean_sq(a->raw_output, hop, a->scr_sq) + 1e-10f;
-            advance_erl_and_dt(a, ra.is_active, far_pwr, mic_pwr, raw_err_pwr);
+            advance_erl_and_dt(a, render_active, far_pwr, mic_pwr, raw_err_pwr);
         }
     }
 
-    a->last_timing.res_us = aec_now_us() - t_stage;
+}
 
+static void aec_finish_hop(Aec* a, float far_hop_mean_sq) {
+    const int hop = a->hop_size;
     /* 19. power EMAs (sample loop; read by NEXT frame's step 17). */
     {
         const float ap = a->alpha_pow, oap = 1.0f - a->alpha_pow;
@@ -3792,7 +3953,118 @@ static void aec_process_core(Aec* a, const float* mic_in, const float* ref_in,
         }
     }
 
-    a->frame_count++;
+    aec_counter_bump(&a->frame_count);
+}
+
+static void aec_process_core(Aec* a, const float* mic_in, const float* ref_in,
+                              const Complex* shared_far_spec,
+                              const float* shared_far_cmag2) {
+    const int hop = a->hop_size;
+    /* Stage stamps. t_stage closes one stage and opens the next where they
+     * are adjacent, so the five windows cost seven reads, not ten. t_delay
+     * brackets section 3, which sits INSIDE the frontend window and is
+     * subtracted back out of it so the two never double-count. */
+    uint32_t t_stage, t_mark, t_delay;
+    /* AecLinearContext bookkeeping: CHANGED is "generation moved during this
+     * hop", so snapshot at entry; far_hop_aligned is re-derived every hop. */
+    a->delay_gen_hop_start = a->delay_generation;
+    a->far_hop_aligned = 0;
+    /* Cleared per hop so a stage that does not run this hop reports 0 rather
+     * than the previous hop's figure. */
+    a->last_timing.delay_us = 0;
+    a->last_timing.frontend_us = 0;
+    a->last_timing.linear_us = 0;
+    a->last_timing.res_us = 0;
+    a->last_timing.steering_us = 0;
+    t_stage = aec_now_us();
+    aec_prepare_capture_hop(a, mic_in, ref_in);
+
+    t_delay = aec_now_us();
+    aec_align_reference(a);
+
+    /* far_hop is fully finalized above (memcpy + optional soft-clip +
+     * optional delay-ring re-read) and is never written again for the rest
+     * of this hop (every remaining reference below is a read) -- compute
+     * mean_sq(far_hop) ONCE here and reuse it at every call site that would
+     * otherwise recompute the identical deterministic value from the same
+     * unchanged input. */
+    /* Closes BEFORE the mean_sq below: that reduction is an O(hop) hoist for
+     * the stages after this one, not delay work, and delay_us documents
+     * itself as the filter bank plus the ring. */
+    t_delay = aec_now_us() - t_delay;
+    a->last_timing.delay_us = t_delay;
+
+    float far_hop_mean_sq = mean_sq(a->far_hop, hop, a->scr_sq);
+
+    /* 4. render activity. */
+    RenderActivityResult ra = render_activity_update(&a->render_activity, a->far_hop, hop);
+    a->warmup_far_active = ra.warmup_active;
+    float far_pwr_global = ra.far_pwr;
+
+    int mu_is_array;
+    float mu_scalar = aec_prepare_mu(a, &mu_is_array);
+
+    int rsa_mask_active = aec_prepare_rsa(a);
+
+    int far_excited = aec_run_shadow(a, far_hop_mean_sq, rsa_mask_active,
+                                     shared_far_spec, shared_far_cmag2);
+
+    /* One stamp closes the pre-filter run (stages 1-8.5) and opens the main
+     * filter. */
+    t_mark = aec_now_us();
+    /* Disjoint from delay_us: section 3 is a sub-interval of this window, so
+     * subtracting it leaves the mic HPF / saturation / render-activity /
+     * mu_scale / mic-clip / RSA / shadow remainder. Reads t_delay, the local,
+     * rather than the field it was just stored into: with timing compiled out
+     * both are 0, but only the local folds -- the field would be reloaded
+     * across the opaque calls in between. Unsigned arithmetic is exact here
+     * because the sub-interval can never exceed its container. */
+    a->last_timing.frontend_us = (t_mark - t_stage) - t_delay;
+
+    int main_error_cmag2_valid = aec_run_main_filter(
+        a, mu_scalar, mu_is_array, rsa_mask_active, shared_far_spec, shared_far_cmag2);
+
+    /* One stamp closes the main filter and opens the steering window (steps
+     * 10-16), so the fifth bucket costs no extra clock read. */
+    {
+        uint32_t t_lin_end = aec_now_us();
+        a->last_timing.linear_us = t_lin_end - t_mark;
+        t_mark = t_lin_end;
+    }
+
+    int stationarity_block_for_post = aec_refresh_stationarity(a);
+
+    /* 11. SHADOW filter -- already ran pre-main in step 8.5. */
+
+    aec_update_shadow_quality(a, main_error_cmag2_valid);
+
+    aec_update_shadow_dt(a, far_hop_mean_sq, far_excited);
+
+    aec_update_echo_path(a, far_pwr_global);
+
+    float _ei = aec_update_misadjustment_erle(a);
+
+    /* 17. RES / post block (enable_res). One stamp closes the steering
+     * window and opens this one. */
+    t_stage = aec_now_us();
+    a->last_timing.steering_us = t_stage - t_mark;
+    int is_stationary_dt = 0;
+    float erle_windowed = aec_update_windowed_erle(a);
+    /* Run the post-filter block when EITHER the internal RES is on OR the caller
+     * asked for the res-context seam (mirrors Python orchestrator.py:2021,
+     * `enable_res or return_res_context`). With enable_res=1 this is unchanged
+     * (return_res_context is irrelevant) → production cascade byte-exact. */
+    if (a->cfg.enable_res || a->cfg.return_res_context) {
+        is_stationary_dt = aec_prepare_post_dt(a, far_hop_mean_sq, _ei, erle_windowed, ra.is_active);
+        aec_run_post_chain(a, stationarity_block_for_post, ra.is_active);
+
+        aec_update_post_mu(a, is_stationary_dt);
+    }
+    aec_update_linear_only_steering(a, far_hop_mean_sq, ra.is_active);
+
+    a->last_timing.res_us = aec_now_us() - t_stage;
+
+    aec_finish_hop(a, far_hop_mean_sq);
 }
 
 /* Process exactly hop_size samples — OFFLINE / lockstep path. Byte-exact to
@@ -3800,24 +4072,24 @@ static void aec_process_core(Aec* a, const float* mic_in, const float* ref_in,
  * aec_process_core(): the only thing it adds is step 21 (emit into the
  * caller's `out` buffer), which aec_process_context() below does not want.
  * There is no output limiter: `final_out` is delivered exactly as the linear
- * filter + AEC3 post chain produced it. */
+ * filter + post-filter chain produced it. */
 void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
     const int hop = a->hop_size;
-    aec_process_core(a, mic_in, ref_in, NULL);
+    aec_process_core(a, mic_in, ref_in, NULL, NULL);
 
     /* ── per-frame structured trace ("logr"). Audio-passive, read-only: only
      *    runs when --debug-trace set a CSV file. Zero hot-path cost otherwise
      *    (single NULL test). Reads the post-filter internals — the three not
-     *    otherwise persisted (aec3_converged / far_active / gain_mean) were
-     *    stashed on a->post.trace during aec3_post_run; everything else is
-     *    re-read here from the AEC3 sub-module accessors.
+     *    otherwise persisted (aec_converged / far_active / gain_mean) were
+     *    stashed on a->post.trace during aec_post_run; everything else is
+     *    re-read here from the sub-module accessors.
      *
      * Whole block compiled out under AEC_NO_STDIO:
      * aec_debug_trace_active()/aec_debug_trace_row() are runtime-gated only
      * (a single NULL-FILE* test), which still pulls in aec_debug.o's
      * fprintf/vfprintf/stderr references for board/no-stdio builds even
      * though the trace is never armed there. NDEBUG alone never stripped
-     * this — it is release/debug orthogonal (unlike AEC_DEBUG_LOG, this
+     * this — it is release/debug orthogonal (the
      * trace runs in ordinary release builds whenever --debug-trace is set).
      * AEC_NO_STDIO removes the call sites entirely so the library carries
      * no stdio reference regardless of runtime state; see aec_debug.h/.c
@@ -3845,7 +4117,7 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
         tr.saturated_echo   = aec_state_saturated_echo(&a->a3_state);
         tr.usable_linear    = aec_state_usable_linear_estimate(&a->a3_state);
         tr.dominant_nearend = suppression_gain_is_dominant_nearend(&a->a3_sg);
-        tr.filter_converged = a->post.trace.aec3_converged;
+        tr.filter_converged = a->post.trace.aec_converged;
         tr.fullband_erle    = aec_state_fullband_erle_log2(&a->a3_state);
         tr.erle_mean        = (Kk > 0) ? esum  / Kk : 0.0f;
         tr.r2_mean          = (Kk > 0) ? r2sum / Kk : 0.0f;
@@ -3870,12 +4142,13 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
  * is pure waste for them.
  *
  * No mixing restriction: aec_process(), aec_process_capture(),
- * aec_process_context() and aec_process_context_shared_far() all advance
+ * aec_process_context(), aec_process_context_shared_far() and
+ * aec_process_context_shared_far_from() all advance
  * exactly the same state via aec_process_core(), and differ only by whether
  * they copy the result out. They may be interleaved freely on one instance,
  * in any order, without a reset in between. */
 void aec_process_context(Aec* a, const float* mic_in, const float* ref_in) {
-    aec_process_core(a, mic_in, ref_in, NULL);
+    aec_process_core(a, mic_in, ref_in, NULL, NULL);
 }
 
 /* Far-end-FFT-sharing entry point: like aec_process_context(), but shared_far_spec (non-NULL, length
@@ -3903,7 +4176,20 @@ void aec_process_context(Aec* a, const float* mic_in, const float* ref_in) {
 void aec_process_context_shared_far(
         Aec* a, const float* mic_in, const float* ref_in,
         const Complex* shared_far_spec) {
-    aec_process_core(a, mic_in, ref_in, shared_far_spec);
+    aec_process_core(a, mic_in, ref_in, shared_far_spec, NULL);
+}
+
+void aec_process_context_shared_far_from(
+        Aec* a, const float* mic_in, const float* ref_in, const Aec* far_owner) {
+    if (!a) return;
+    if (!far_owner || far_owner == a || far_owner->n_freqs != a->n_freqs ||
+        far_owner->hop_size != a->hop_size ||
+        far_owner->cfg.sample_rate != a->cfg.sample_rate) {
+        aec_process_core(a, mic_in, ref_in, NULL, NULL);
+        return;
+    }
+    aec_process_core(a, mic_in, ref_in, far_owner->main_filter.base.far_spec,
+                     far_owner->main_filter.base.far_cmag2_hold);
 }
 
 /* ── Streaming API ────────────────────────────────────────────────────────
@@ -3931,7 +4217,7 @@ void aec_process_context_shared_far(
 AecBufferingEvent aec_analyze_render(Aec* a, const float* ref) {
     const int hop = a->hop_size;
     const unsigned cap = (unsigned)a->fifo_cap_hops;
-    a->render_call_count++;                      /* producer-private: plain */
+    aec_counter_bump(&a->render_call_count);     /* producer-private: plain */
 
     /* fifo_write is this thread's own field (sole writer) -- a plain load
      * cannot race. fifo_read is the consumer's field -- ACQUIRE so this
@@ -3955,7 +4241,7 @@ AecBufferingEvent aec_analyze_render(Aec* a, const float* ref) {
 AecBufferingEvent aec_process_capture(Aec* a, const float* mic, float* out) {
     const int hop = a->hop_size;
     const unsigned cap = (unsigned)a->fifo_cap_hops;
-    a->capture_call_count++;   /* single-writer (capture thread only): plain */
+    aec_counter_bump(&a->capture_call_count);   /* single-writer (capture thread only): plain */
     AecBufferingEvent ev;
     const float* ref;
     int claimed;
@@ -4028,9 +4314,9 @@ void aec_get_res_context(const Aec* a, AecResContext* ctx) {
     ctx->hop_size = a->hop_size;
     ctx->linear_hop = a->raw_output;
     ctx->far_spec   = a->main_filter.base.far_spec;
-    /* Freq-domain seam (valid when the AEC3 post block ran this hop, i.e.
+    /* Freq-domain seam (valid when the post-filter block ran this hop, i.e.
      * enable_res || return_res_context). These alias the internal per-hop
-     * buffers populated by aec3_post_run.  sel_esw is the exact 50%-overlap
+     * buffers populated by aec_post_run.  sel_esw is the exact 50%-overlap
      * sqrt-Hann STFT of the formed linear output; sel_echo is its matching
      * echo estimate and ybase = sel_esw + sel_echo is the matching windowed
      * capture spectrum.  Do not expose main_filter.error_spec_windowed here:
@@ -4085,17 +4371,17 @@ void aec_get_res_context(const Aec* a, AecResContext* ctx) {
  * it, so a consumer polling the two can never see them disagree).
  *
  * MATCHED is the only mode with an estimator, so it is the only mode whose
- * confidence is a MEASUREMENT (delay_aec3_confidence's 0.0/0.5/1.0 ladder).
+ * confidence is a MEASUREMENT (delay_aec_confidence's 0.0/0.5/1.0 ladder).
  * FIXED and EXTERNAL_ALIGNED both report 1.0 for the same reason: the
  * alignment is a CALLER CONTRACT, not something this library estimated --
  * FIXED applies a delay the caller measured at bring-up, EXTERNAL_ALIGNED
  * applies none because the caller guarantees `ref` arrives aligned. Neither
- * may read the never-constructed DelayAec3, which would report 0.0 --
+ * may read the never-constructed DelayAec, which would report 0.0 --
  * "estimator present but unconverged" -- for an alignment that carries no
  * uncertainty at all. */
 static float aec_delay_confidence(const Aec* a) {
     if (a->cfg.delay_mode == AEC_DELAY_MATCHED)
-        return delay_aec3_confidence(&a->delay);
+        return delay_aec_confidence(&a->delay);
     return 1.0f;
 }
 
@@ -4108,7 +4394,7 @@ void aec_debug_status(const Aec* a, AecDebugStatus* out) {
 
     out->delay_samples    = a->current_delay;
     out->delay_confidence = aec_delay_confidence(a);
-    out->delay_updates    = a->has_delay ? delay_aec3_n_updates(&a->delay) : 0;
+    out->delay_updates    = a->has_delay ? delay_aec_n_updates(&a->delay) : 0;
 
     out->erle_windowed_db = a->last_erle_windowed;
     out->usable_linear    = aec_state_usable_linear_estimate(&a->a3_state);

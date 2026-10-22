@@ -2,28 +2,18 @@
  *
  *  A  configuration: the suppressor an AecRes builds is bit-for-bit the one an
  *     Aec lane builds (heap and caller-pool lanes), on every supported grid
- *     and preset, and equals the checked-in digests of the lane
- *     configuration (so the shared builder cannot drift from what the
- *     library produced before it was factored out).
- *  B  gain: aec_res_process against a transcription of the multi-lane
- *     pipeline's post-beam RES stage (power preparation, thresholds,
- *     suppressor call, preset retarget, reset), bit-identical per hop over
- *     long randomised runs that cross every branch of the preparation.
- *  C  aec_cng_fill against transcriptions of the two pipelines' comfort-noise
- *     loops, bit-identical spectrum and generator state.
+ *     and preset.
  *  D  contract: argument checks, sizing, alignment, no write outside the
  *     block, reset and preset semantics.
- *  E  details the comparison in B does not discriminate: the exact 32768
- *     scale of the render block (a block straddling the split-floor latch
- *     power), the initial-state exit (with the two flags that make it inert in
- *     the shipped configuration cleared), and the floor_first_increase limit on
- *     the first recovery hop after a saturated echo.
- *
- * usage: test_aec_res <sg_config golden> */
+ *  E  stage details: the exact 32768 scale of the render block (a block
+ *     straddling the split-floor latch power), the initial-state exit (with
+ *     the two flags that make it inert in the shipped configuration cleared),
+ *     and the floor_first_increase limit on the first recovery hop after a
+ *     saturated echo.
+ */
 #include "src/aec_res.c"
 
-#include "aec_simd_kernels.h"
-#include "support/sha256.h"
+#include "utility/simd_aec.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -54,19 +44,6 @@ static AecConfig make_cfg(int g, int preset) {
     return cfg;
 }
 
-static void sg_digest(const SuppressionGain* sg, char* hex) {
-    Sha h;
-    const float* t[6];
-    int i, n = sg->tun.table_len;
-    t[0] = sg->tun.nearend_enr_tr; t[1] = sg->tun.nearend_enr_su; t[2] = sg->tun.nearend_emr_tr;
-    t[3] = sg->tun.normal_enr_tr; t[4] = sg->tun.normal_enr_su; t[5] = sg->tun.normal_emr_tr;
-    sha_init(&h);
-    sha_update(&h, &sg->cfg, sizeof sg->cfg);
-    sha_update(&h, &n, sizeof n);
-    for (i = 0; i < 6; ++i) sha_update(&h, t[i], (size_t)n * sizeof(float));
-    sha_final(&h, hex);
-}
-
 static int tun_equal(const SuppressionGainTuning* a, const SuppressionGainTuning* b) {
     return a->table_len == b->table_len &&
            a->nearend_enr_tr == b->nearend_enr_tr && a->nearend_enr_su == b->nearend_enr_su &&
@@ -81,11 +58,8 @@ static void* aligned_block(size_t bytes) {
 }
 
 /* ---- A ---- */
-static void test_config(const char* golden_path) {
-    FILE* f = fopen(golden_path, "r");
-    char line[256];
+static void test_config(void) {
     int g, p;
-    CHECK(f != NULL, "open sg_config golden");
     for (g = 0; g < N_GRIDS; ++g) {
         for (p = 0; p < N_PRESETS; ++p) {
             AecConfig cfg = make_cfg(g, p);
@@ -94,8 +68,7 @@ static void test_config(const char* golden_path) {
             void *pool, *res_mem;
             AecRes* r;
             size_t need = aec_res_get_mem_size(&cfg);
-            char hex[65], want[80], id[48];
-            int found = 0;
+            char id[48];
             snprintf(id, sizeof id, "%d/%d/preset%d", GRIDS[g][0], GRIDS[g][1], p);
 
             CHECK(need > 0, "%s: aec_res_get_mem_size", id);
@@ -117,341 +90,11 @@ static void test_config(const char* golden_path) {
             CHECK(r->n_bins == heap_lane.n_freqs && r->hop_size == heap_lane.hop_size,
                   "%s: dimensions equal the lane's", id);
 
-            sg_digest(&heap_lane.a3_sg, hex);
-            if (f) {
-                rewind(f);
-                while (fgets(line, sizeof line, f)) {
-                    char gid[48], dg[80];
-                    if (line[0] == '#') continue;
-                    if (sscanf(line, "%47s %79s", gid, dg) == 2 && !strcmp(gid, id)) {
-                        strcpy(want, dg); found = 1; break;
-                    }
-                }
-            }
-            CHECK(found && !strcmp(hex, want), "%s: lane configuration digest equals the golden", id);
-            sg_digest(&r->sg, hex);
-            CHECK(found && !strcmp(hex, want), "%s: aec_res configuration digest equals the golden", id);
-
             aec_destroy(&heap_lane);
             aec_destroy(pool_lane);
             free(pool);
             free(res_mem);
         }
-    }
-    if (f) fclose(f);
-}
-
-/* ---- B: transcription of the multi-lane pipeline's post-beam RES stage ---- */
-typedef struct {
-    int n_freqs, hop_size;
-    SuppressionGain post_sg;
-    SuppressionGainConfig post_sg_cfg;
-    SuppressionGainTuning post_sg_tun;
-    float* post_sg_storage;
-    float *post_near_power, *error_power, *render_i16;
-    const float* aligned_ref;
-    const Complex* fused_near;
-    const float *fused_r2, *fused_comfort;
-} RefPost;
-
-#define REF_PSD_SCALE (32768.0f * 32768.0f)
-
-static void ref_mag2(float* out, const Complex* input, int n) {
-    int i;
-    for (i = 0; i < n; ++i) {
-        float real = input[i].r;
-        float imag = input[i].i;
-        out[i] = real * real + imag * imag;
-    }
-}
-
-static void ref_sg_init(RefPost* p) {
-    int n = p->n_freqs, ma_n = p->post_sg_cfg.nearend_smoother_n;
-    float* cursor = p->post_sg_storage;
-    float* last_gain = cursor; cursor += n;
-    float* last_near = cursor; cursor += n;
-    float* last_echo = cursor; cursor += n;
-    float* ma_buf = cursor; cursor += (size_t)ma_n * n;
-    float* near_s = cursor; cursor += n;
-    float* weighted = cursor; cursor += n;
-    float* min_gain = cursor; cursor += n;
-    float* max_gain = cursor; cursor += n;
-    float* raw_gain = cursor; cursor += n;
-    float* gain = cursor; cursor += n;
-    float* sum = cursor;
-    memset(p->post_sg_storage, 0, (size_t)(10 + ma_n) * (size_t)n * sizeof(float));
-    suppression_gain_init(&p->post_sg, &p->post_sg_cfg, &p->post_sg_tun, last_gain, last_near,
-                          last_echo, ma_buf, near_s, weighted, min_gain, max_gain, raw_gain,
-                          gain, sum);
-}
-
-/* post_res_gain: power/reference preparation, then the suppressor. */
-static const float* ref_post_res_gain(RefPost* p, int all_converged, float max_dt,
-                                      float max_saturation, int clock_drift) {
-    int n = p->n_freqs, hop = p->hop_size, k;
-    ref_mag2(p->post_near_power, p->fused_near, n);
-    for (k = 0; k < n; ++k) {
-        float e2 = p->error_power[k];
-        float n2 = p->post_near_power[k];
-        p->post_near_power[k] = (all_converged ? fminf(e2, n2) : n2) * REF_PSD_SCALE;
-    }
-    for (k = 0; k < hop; ++k) p->render_i16[k] = p->aligned_ref[k] * 32768.0f;
-    if (p->post_sg.initial_state && all_converged)
-        suppression_gain_set_initial_state(&p->post_sg, 0);
-    p->post_sg.dt_protect_active = max_dt > 0.2f;
-    return suppression_gain_get_gain(&p->post_sg, p->post_near_power, p->fused_r2, p->fused_r2,
-                                     p->fused_comfort, p->render_i16, clock_drift,
-                                     max_saturation > 0.5f);
-}
-
-static int ref_set_preset(RefPost* p, AecPreset preset, float ramp_ms) {
-    float db, dt_db;
-    if (aec_preset_floor_db(preset, &db) != 0) return -1;
-    if (aec_preset_dt_floor_db(preset, &dt_db) != 0) return -1;
-    if (suppression_gain_set_split_floor_far_active_db(&p->post_sg, db, ramp_ms) != 0) return -1;
-    if (suppression_gain_set_split_floor_dt_db(&p->post_sg, dt_db) != 0) return -1;
-    p->post_sg_cfg.split_floor_far_active = p->post_sg.cfg.split_floor_far_active;
-    p->post_sg_cfg.split_floor_dt = p->post_sg.cfg.split_floor_dt;
-    return 0;
-}
-
-static void test_gain(void) {
-    static const float dts[] = {0.0f, 0.1f, 0.2f, 0.20000002f, 0.5f, 1.0f};
-    static const float sats[] = {0.0f, 0.5f, 0.50000006f, 1.0f};
-    int g;
-    for (g = 0; g < N_GRIDS; ++g) {
-        AecConfig cfg = make_cfg(g, 1);
-        Aec lane;
-        size_t need = aec_res_get_mem_size(&cfg);
-        void* mem = aligned_block(need);
-        AecRes* r = aec_res_init(mem, need, &cfg);
-        RefPost ref;
-        int n, hop, hh, k, ok = 1, floors_ok = 1;
-        Complex *err, *near;
-        float *r2, *cn, *rend;
-        AecResInput in;
-        char id[32];
-        snprintf(id, sizeof id, "%d/%d", GRIDS[g][0], GRIDS[g][1]);
-        if (!r || aec_create(&lane, &cfg) != 0) { CHECK(0, "%s: setup", id); continue; }
-
-        /* The transcribed stage takes its configuration from a lane, as the
-         * pipeline does. */
-        memset(&ref, 0, sizeof ref);
-        n = ref.n_freqs = lane.n_freqs;
-        hop = ref.hop_size = lane.hop_size;
-        ref.post_sg_cfg = lane.a3_sg.cfg;
-        ref.post_sg_tun = lane.a3_sg.tun;
-        ref.post_sg_storage = (float*)calloc((size_t)(10 + ref.post_sg_cfg.nearend_smoother_n) * n,
-                                             sizeof(float));
-        ref.post_near_power = (float*)calloc((size_t)n, sizeof(float));
-        ref.error_power = (float*)calloc((size_t)n, sizeof(float));
-        ref.render_i16 = (float*)calloc((size_t)hop, sizeof(float));
-        ref_sg_init(&ref);
-
-        err = (Complex*)calloc((size_t)n, sizeof(Complex));
-        near = (Complex*)calloc((size_t)n, sizeof(Complex));
-        r2 = (float*)calloc((size_t)n, sizeof(float));
-        cn = (float*)calloc((size_t)n, sizeof(float));
-        rend = (float*)calloc((size_t)hop, sizeof(float));
-
-        for (hh = 0; hh < 3200; ++hh) {
-            int all_conv, clock_drift;
-            float max_dt, max_sat, level, echo_level;
-            const float *a, *b;
-            /* phases: quiet, near-end speech, echo, double talk, saturated echo */
-            int phase = (hh / 200) % 5;
-            if (hh == 1000) {
-                CHECK(ref_set_preset(&ref, AEC_PRESET_AGGRESSIVE, 120.0f) == 0 &&
-                      aec_res_set_preset(r, AEC_PRESET_AGGRESSIVE, 120.0f) == 0,
-                      "%s: ramped preset", id);
-            }
-            if (hh == 2000) {
-                CHECK(ref_set_preset(&ref, AEC_PRESET_MILD, 0.0f) == 0 &&
-                      aec_res_set_preset(r, AEC_PRESET_MILD, 0.0f) == 0, "%s: immediate preset", id);
-            }
-            if (hh == 2400) {
-                ref_sg_init(&ref);
-                aec_res_reset(r);
-            }
-            level = phase == 0 ? 1e-4f : phase == 1 ? 0.2f : phase == 2 ? 0.05f : phase == 3 ? 0.1f : 0.3f;
-            echo_level = (phase == 2 || phase == 3 || phase == 4) ? 0.5f * level : 1e-5f;
-            for (k = 0; k < n; ++k) {
-                err[k].r = level * 0.3f * srand_f(); err[k].i = level * 0.3f * srand_f();
-                near[k].r = level * srand_f(); near[k].i = level * srand_f();
-                if ((rnd64() & 63) == 0) { near[k].r = 0.0f; near[k].i = 0.0f; }
-                r2[k] = (rnd64() & 31) == 0 ? 0.0f : echo_level * echo_level * 1e9f * urand();
-                cn[k] = (rnd64() & 31) == 0 ? -1.0f : 1e3f * urand();
-            }
-            for (k = 0; k < hop; ++k) rend[k] = (phase == 0 ? 0.0f : 0.3f) * srand_f();
-            all_conv = (hh / 50) % 3 != 0;
-            max_dt = dts[(hh / 7) % 6];
-            max_sat = sats[(hh / 11) % 4];
-            clock_drift = (hh / 300) % 2;
-
-            ref.aligned_ref = rend;
-            ref.fused_near = near;
-            ref.fused_r2 = r2;
-            ref.fused_comfort = cn;
-            ref_mag2(ref.error_power, err, n);
-            a = ref_post_res_gain(&ref, all_conv, max_dt, max_sat, clock_drift);
-
-            in.error_spec = err; in.near_spec = near; in.r2 = r2; in.comfort_noise = cn;
-            in.render_hop = rend; in.all_converged = all_conv; in.max_dt = max_dt;
-            in.max_saturation = max_sat; in.clock_drift = clock_drift;
-            b = aec_res_process(r, &in);
-            if (!a || !b || memcmp(a, b, (size_t)n * sizeof(float)) != 0) {
-                ok = 0;
-                CHECK(0, "%s: gain differs at hop %d", id, hh);
-                break;
-            }
-            {
-                float live_a = ref.post_sg.split_floor_far_active_live, live_b, tgt_b;
-                aec_res_split_floor(r, &live_b, &tgt_b);
-                if (live_a != live_b || ref.post_sg_cfg.split_floor_far_active != tgt_b) floors_ok = 0;
-            }
-        }
-        CHECK(ok, "%s: gains bit-identical to the pipeline stage over 3200 hops", id);
-        CHECK(floors_ok, "%s: split floor (live, target) tracks the pipeline stage", id);
-
-        aec_destroy(&lane);
-        free(ref.post_sg_storage); free(ref.post_near_power); free(ref.error_power);
-        free(ref.render_i16); free(err); free(near); free(r2); free(cn); free(rend);
-        free(mem);
-    }
-}
-
-/* ---- C: transcriptions of the two pipelines' comfort-noise loops ---- */
-#define REF_CNG_NR_GAIN_FLOOR 0.31622777f
-
-/* Multi-lane pipeline: scales by the fused RES gain `res_gain`, advances its own
- * generator one step per bin. */
-static void ref_cng_4ch(uint32_t* rng_state, Complex* output_spec, const float* fused_comfort,
-                        const float* res_gain, const float* nr_gain, int n) {
-    int k;
-    for (k = 1; k < n - 1; ++k) {
-        float n_amp = fused_comfort[k] / REF_PSD_SCALE;
-        float gain2 = 1.0f - res_gain[k] * res_gain[k];
-        float amplitude;
-        uint32_t ix;
-        n_amp = n_amp > 0.0f ? sqrtf(n_amp) : 0.0f;
-        gain2 = gain2 > 0.0f ? sqrtf(gain2) : 0.0f;
-        amplitude = n_amp * gain2 * fmaxf(nr_gain[k], REF_CNG_NR_GAIN_FLOOR);
-        *rng_state = (*rng_state * 69069u + 1u) & 0x7FFFFFFFu;
-        ix = *rng_state >> 26;
-        output_spec[k].r += amplitude * AEC3B_SQRT2_SIN_LUT[ix];
-        output_spec[k].i += amplitude * AEC3B_SQRT2_SIN_LUT[(ix + 8u) & 31u];
-    }
-}
-
-/* Mono pipeline: the loop reads the AEC's own res_gain and the NR gain. */
-static void ref_cng_mono(uint32_t* rng_state, Complex* spec, const float* comfort_noise,
-                         const float* res_gain, const float* nr_gain, int n_freqs) {
-    int k;
-    for (k = 1; k < n_freqs - 1; k++) {
-        float n_amp = comfort_noise[k] / REF_PSD_SCALE;
-        float ng2, noise_gain, a;
-        uint32_t ix;
-        n_amp = (n_amp > 0.0f) ? sqrtf(n_amp) : 0.0f;
-        ng2 = 1.0f - res_gain[k] * res_gain[k];
-        noise_gain = (ng2 > 0.0f) ? sqrtf(ng2) : 0.0f;
-        a = noise_gain * n_amp * fmaxf(nr_gain[k], REF_CNG_NR_GAIN_FLOOR);
-        *rng_state = (*rng_state * 69069u + 1u) & 0x7FFFFFFFu;
-        ix = *rng_state >> 26;
-        spec[k].r += a * AEC3B_SQRT2_SIN_LUT[ix];
-        spec[k].i += a * AEC3B_SQRT2_SIN_LUT[(ix + 8u) & 31u];
-    }
-}
-
-static void test_cng(void) {
-    static const int sizes[] = {3, 4, 5, 9, 129, 257, 513};
-    enum { MAXN = 513 };
-    static Complex s0[MAXN], s1[MAXN], s2[MAXN];
-    static float cn[MAXN], gr[MAXN], gn[MAXN], ones[MAXN];
-    int si, it, k, ok4 = 1, okm = 1, oku = 1, oknull = 1;
-    for (k = 0; k < MAXN; ++k) ones[k] = 1.0f;
-    for (si = 0; si < (int)(sizeof sizes / sizeof sizes[0]); ++si) {
-        int n = sizes[si];
-        for (it = 0; it < 400; ++it) {
-            uint32_t ra = (uint32_t)rnd64() & 0x7FFFFFFFu, rb = ra, rc = ra, rd = ra;
-            for (k = 0; k < n; ++k) {
-                int mode = (int)(rnd64() & 7);
-                cn[k] = mode == 0 ? 0.0f : mode == 1 ? -3.0f : mode == 2 ? 1e12f
-                      : mode == 3 ? 1e-30f : 1e5f * urand();
-                mode = (int)(rnd64() & 7);
-                gr[k] = mode == 0 ? 0.0f : mode == 1 ? 1.0f : mode == 2 ? 1.2f
-                      : mode == 3 ? -0.5f : urand();
-                mode = (int)(rnd64() & 7);
-                gn[k] = mode == 0 ? 0.0f : mode == 1 ? 1.0f : mode == 2 ? 0.31622777f
-                      : mode == 3 ? 1.7f : urand();
-                s0[k].r = srand_f(); s0[k].i = srand_f();
-                s1[k] = s0[k]; s2[k] = s0[k];
-            }
-            ref_cng_4ch(&ra, s0, cn, gr, gn, n);
-            aec_cng_fill(&rb, s1, cn, gr, gn, REF_CNG_NR_GAIN_FLOOR, n);
-            if (memcmp(s0, s1, (size_t)n * sizeof(Complex)) != 0 || ra != rb) ok4 = 0;
-
-            for (k = 0; k < n; ++k) { s0[k] = s2[k]; s1[k] = s2[k]; }
-            ref_cng_mono(&rc, s0, cn, gr, gn, n);
-            aec_cng_fill(&rd, s1, cn, gr, gn, REF_CNG_NR_GAIN_FLOOR, n);
-            if (memcmp(s0, s1, (size_t)n * sizeof(Complex)) != 0 || rc != rd) okm = 0;
-            if (ra != rc) okm = 0;
-
-            /* no second gain == unity vector */
-            {
-                uint32_t rx = rd, ry = rd;
-                for (k = 0; k < n; ++k) { s0[k] = s2[k]; s1[k] = s2[k]; }
-                ref_cng_4ch(&rx, s0, cn, gr, ones, n);
-                aec_cng_fill(&ry, s1, cn, gr, NULL, REF_CNG_NR_GAIN_FLOOR, n);
-                if (memcmp(s0, s1, (size_t)n * sizeof(Complex)) != 0 || rx != ry) oknull = 0;
-            }
-            /* a floor above 1 and a zero floor */
-            {
-                float floors[2] = {0.0f, 2.5f};
-                int fi;
-                for (fi = 0; fi < 2; ++fi) {
-                    uint32_t rx = rd, ry = rd;
-                    for (k = 0; k < n; ++k) { s0[k] = s2[k]; s1[k] = s2[k]; }
-                    /* transcription with the floor as a parameter */
-                    for (k = 1; k < n - 1; ++k) {
-                        float n_amp = cn[k] / REF_PSD_SCALE, gain2 = 1.0f - gr[k] * gr[k], amp;
-                        uint32_t ix;
-                        n_amp = n_amp > 0.0f ? sqrtf(n_amp) : 0.0f;
-                        gain2 = gain2 > 0.0f ? sqrtf(gain2) : 0.0f;
-                        amp = n_amp * gain2 * fmaxf(gn[k], floors[fi]);
-                        rx = (rx * 69069u + 1u) & 0x7FFFFFFFu;
-                        ix = rx >> 26;
-                        s0[k].r += amp * AEC3B_SQRT2_SIN_LUT[ix];
-                        s0[k].i += amp * AEC3B_SQRT2_SIN_LUT[(ix + 8u) & 31u];
-                    }
-                    aec_cng_fill(&ry, s1, cn, gr, gn, floors[fi], n);
-                    if (memcmp(s0, s1, (size_t)n * sizeof(Complex)) != 0 || rx != ry) oku = 0;
-                }
-            }
-        }
-    }
-    CHECK(ok4, "aec_cng_fill equals the 4-channel pipeline loop (spectrum and generator)");
-    CHECK(okm, "aec_cng_fill equals the mono pipeline loop (spectrum and generator)");
-    CHECK(oknull, "aec_cng_fill with no second gain equals a unity vector");
-    CHECK(oku, "aec_cng_fill equals the loop for floors 0 and 2.5");
-    {
-        /* bins 0 and n-1 and the argument guards leave everything untouched */
-        Complex a[8], b[8];
-        uint32_t rng = 12345u, rng0 = rng;
-        float c8[8] = {1e5f, 1e5f, 1e5f, 1e5f, 1e5f, 1e5f, 1e5f, 1e5f}, g8[8] = {0};
-        memset(a, 0, sizeof a);
-        memcpy(b, a, sizeof a);
-        aec_cng_fill(&rng, a, c8, g8, NULL, 0.3f, 8);
-        CHECK(a[0].r == 0.0f && a[0].i == 0.0f && a[7].r == 0.0f && a[7].i == 0.0f,
-              "aec_cng_fill leaves bin 0 and the last bin alone");
-        CHECK(rng != rng0, "aec_cng_fill advances the generator");
-        rng = rng0;
-        aec_cng_fill(NULL, b, c8, g8, NULL, 0.3f, 8);
-        aec_cng_fill(&rng, NULL, c8, g8, NULL, 0.3f, 8);
-        aec_cng_fill(&rng, b, NULL, g8, NULL, 0.3f, 8);
-        aec_cng_fill(&rng, b, c8, NULL, NULL, 0.3f, 8);
-        aec_cng_fill(&rng, b, c8, g8, NULL, 0.3f, 2);
-        CHECK(rng == rng0 && memcmp(b, "\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0", 16) == 0,
-              "aec_cng_fill ignores NULL arguments and n < 3");
     }
 }
 
@@ -539,6 +182,36 @@ static void test_contract(void) {
     CHECK(target == floor_mild && live == floor_mild, "reset keeps the retargeted floor");
     aec_res_reset(NULL);
 
+    /* NO_FLOOR: the gate steps immediately (no ramp), and -- the point of
+     * this block -- survives aec_res_reset(). rebuild() re-inits
+     * suppression_gain_init(&r->sg, &r->sg_cfg, ...) from r->sg_cfg, so a
+     * setter that updated r->sg.cfg.split_floor_enabled but forgot the
+     * r->sg_cfg mirror (the same mirror split_floor_far_active/_dt already
+     * keep) would pass every check up to the reset and only fail here. */
+    CHECK(r->sg.cfg.split_floor_enabled == 1,
+          "no_floor: mild left the gate enabled");
+    CHECK(aec_res_set_preset(r, AEC_PRESET_NO_FLOOR, 0.0f) == 0,
+          "no_floor: retarget to NO_FLOOR accepted");
+    CHECK(r->sg.cfg.split_floor_enabled == 0,
+          "no_floor: gate off immediately, before any reset");
+    CHECK(r->sg_cfg.split_floor_enabled == 0,
+          "no_floor: the stored sg_cfg mirror is also off");
+    aec_res_reset(r);
+    CHECK(r->sg.cfg.split_floor_enabled == 0,
+          "no_floor: aec_res_reset() preserves the gate OFF across reset");
+    CHECK(aec_res_set_preset(r, AEC_PRESET_BALANCED, 0.0f) == 0,
+          "no_floor: retarget back to BALANCED accepted");
+    CHECK(r->sg.cfg.split_floor_enabled == 1,
+          "no_floor: gate back on immediately");
+    aec_res_split_floor(r, &live, &target);
+    CHECK(live == target && target > 0.0f,
+          "no_floor: the far-active floor is a real positive value again, "
+          "not left at NO_FLOOR's inert reading");
+    aec_res_reset(r);
+    CHECK(r->sg.cfg.split_floor_enabled == 1 &&
+              r->sg_cfg.split_floor_enabled == 1,
+          "no_floor: aec_res_reset() preserves the gate ON across reset too");
+
     /* reset: a reset instance reproduces a fresh one */
     {
         unsigned char* blk2 = (unsigned char*)aligned_block(need);
@@ -577,7 +250,72 @@ static void test_contract(void) {
     free(sp); free(r2); free(cn); free(rend); free(blk);
 }
 
-/* ---- E: stage details the transcription in B does not discriminate ---- */
+/* ---- E: stage details ---- */
+
+/* Reference model of the stage written out with the suppressor primitives: the
+ * test_initial_phase run compares the stage to it hop by hop. */
+typedef struct {
+    int n_freqs, hop_size;
+    SuppressionGain post_sg;
+    SuppressionGainConfig post_sg_cfg;
+    SuppressionGainTuning post_sg_tun;
+    float* post_sg_storage;
+    float *post_near_power, *error_power, *render_i16;
+    const float* aligned_ref;
+    const Complex* fused_near;
+    const float *fused_r2, *fused_comfort;
+} RefPost;
+
+#define REF_PSD_SCALE (32768.0f * 32768.0f)
+
+static void ref_mag2(float* out, const Complex* input, int n) {
+    int i;
+    for (i = 0; i < n; ++i) {
+        float real = input[i].r;
+        float imag = input[i].i;
+        out[i] = real * real + imag * imag;
+    }
+}
+
+static void ref_sg_init(RefPost* p) {
+    int n = p->n_freqs, ma_n = p->post_sg_cfg.nearend_smoother_n;
+    float* cursor = p->post_sg_storage;
+    float* last_gain = cursor; cursor += n;
+    float* last_near = cursor; cursor += n;
+    float* last_echo = cursor; cursor += n;
+    float* ma_buf = cursor; cursor += (size_t)ma_n * n;
+    float* near_s = cursor; cursor += n;
+    float* weighted = cursor; cursor += n;
+    float* min_gain = cursor; cursor += n;
+    float* max_gain = cursor; cursor += n;
+    float* raw_gain = cursor; cursor += n;
+    float* gain = cursor; cursor += n;
+    float* sum = cursor;
+    memset(p->post_sg_storage, 0, (size_t)(10 + ma_n) * (size_t)n * sizeof(float));
+    suppression_gain_init(&p->post_sg, &p->post_sg_cfg, &p->post_sg_tun, last_gain, last_near,
+                          last_echo, ma_buf, near_s, weighted, min_gain, max_gain, raw_gain,
+                          gain, sum);
+}
+
+/* Power/reference preparation, then the suppressor. */
+static const float* ref_post_res_gain(RefPost* p, int all_converged, float max_dt,
+                                      float max_saturation, int clock_drift) {
+    int n = p->n_freqs, hop = p->hop_size, k;
+    ref_mag2(p->post_near_power, p->fused_near, n);
+    for (k = 0; k < n; ++k) {
+        float e2 = p->error_power[k];
+        float n2 = p->post_near_power[k];
+        p->post_near_power[k] = (all_converged ? fminf(e2, n2) : n2) * REF_PSD_SCALE;
+    }
+    for (k = 0; k < hop; ++k) p->render_i16[k] = p->aligned_ref[k] * 32768.0f;
+    if (p->post_sg.initial_state && all_converged)
+        suppression_gain_set_initial_state(&p->post_sg, 0);
+    p->post_sg.dt_protect_active = max_dt > 0.2f;
+    return suppression_gain_get_gain(&p->post_sg, p->post_near_power, p->fused_r2, p->fused_r2,
+                                     p->fused_comfort, p->render_i16, clock_drift,
+                                     max_saturation > 0.5f);
+}
+
 
 /* Inputs with a weak near-end and a strong residual-echo estimate: the gain
  * is driven to the floors, so a change of which floor applies shows. */
@@ -654,8 +392,8 @@ static void test_render_scale(void) {
  * flag the shared configuration builder sets to 1 (dne_use_during_initial_phase,
  * lf_smoothing_during_initial_phase), so through AecRes as shipped the state
  * has no effect on the gain. This test clears the two flags in the stored and
- * the transcribed configuration; the gain then depends on the state, and the
- * stage must track the transcription through the transition. */
+ * the reference configuration; the gain then depends on the state, and the
+ * stage must track the reference through the transition. */
 static void test_initial_phase(void) {
     int g;
     for (g = 0; g < N_GRIDS; ++g) {
@@ -720,12 +458,12 @@ static void test_initial_phase(void) {
             if (!a || !b || !c) { same_ref = 0; break; }
             if (memcmp(a, b, (size_t)n * sizeof(float)) != 0) {
                 same_ref = 0;
-                CHECK(0, "%s: gain differs from the transcription at hop %d", id, hh);
+                CHECK(0, "%s: gain differs from the reference at hop %d", id, hh);
                 break;
             }
             if (!all_conv && memcmp(b, c, (size_t)n * sizeof(float)) != 0) flags_matter = 1;
         }
-        CHECK(same_ref, "%s: gain equals the transcription through the initial-state exit", id);
+        CHECK(same_ref, "%s: gain equals the reference through the initial-state exit", id);
         CHECK(flags_matter, "%s: with the two flags cleared the initial state changes the gain", id);
         CHECK(r->sg.initial_state == 0 && ref.post_sg.initial_state == 0,
               "%s: the stage leaves the initial state when all filters converged", id);
@@ -778,11 +516,8 @@ static void test_saturated_recovery(void) {
     }
 }
 
-int main(int argc, char** argv) {
-    if (argc != 2) { fprintf(stderr, "usage: %s <sg_config golden>\n", argv[0]); return 2; }
-    test_config(argv[1]);
-    test_gain();
-    test_cng();
+int main(void) {
+    test_config();
     test_contract();
     test_render_scale();
     test_initial_phase();

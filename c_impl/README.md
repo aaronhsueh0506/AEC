@@ -45,12 +45,31 @@ builds/compilers (see Precision & regression anchors below), and
 `-fno-math-errno` lets the guarded AArch64 `sqrtf` in `fast_math.h` lower to
 a single `FSQRT` with no errno-checking libm fallback.
 
+The compiler target selects the architecture path; changing source files is
+not required when building for ARM32 or ARM64. Shared handwritten DSP NEON
+kernels currently require AArch64, so ARM32 uses their C fallback even when
+the shared FFT can use ARM32 NEON. `SIMD=0` forces those DSP fallbacks and does
+not select the ABI. Pass a matching CC/CXX/AR/RANLIB toolchain, and obtain static
+pool sizes from the target build rather than copying ARM64 sizes. Heap
+construction explicitly requests a 16-byte arena on both ABIs.
+
+On ARM32 pass `EXTRA_CFLAGS=-mfpu=neon-vfpv4` (`-mfpu=neon-fp-armv8` for AArch32
+ARMv8 cores), not plain `-mfpu=neon`: without hardware FMA every explicit `fmaf()`
+(PBFDKF update, complex multiply-accumulate, FFT power spectrum, `aec_post.c`)
+turns into a libm call. Results are bit-identical, only slower. ARMv7 Advanced
+SIMD flushes subnormals to zero and returns the default NaN, so `SIMD=1` and
+`SIMD=0` can differ on ARM32 for subnormal or NaN-payload values; only the NE10
+NEON FFT and, on cores with fused FMA (`-mfpu=neon-vfpv4`), the delay matched-filter
+kernels (`make test-delay-matched-neon`; `-DDA_DISABLE_ARM32_NEON` forces scalar) are affected.
+On such cores the matched filter is bit-identical to AArch64 NEON for finite,
+non-subnormal inputs; cores without fused FMA keep the scalar path.
+
 ### Unified FP-contraction policy
 
 `-ffp-contract=off -fno-math-errno` is no longer just an AEC convention — it is a **repo-wide
-policy spanning all four repos** (`audio_common`, `NR/c_impl`, `AEC/c_impl`,
+policy spanning all four repos** (`audiolib`, `NR/c_impl`, `AEC/c_impl`,
 `Audio_ALG/pipelines`): every translation unit any of their Makefiles compile
-— each repo's own sources *and* the vendored KISS/NE10 C and C++ TUs alike —
+— each repo's own sources *and* the vendored NE10 C and C++ TUs alike —
 builds with both flags. In every one of the four Makefiles the flags are
 appended **last** in the CFLAGS/CXXFLAGS assembly (after `EXTRA_CFLAGS`, after
 any BACKEND-conditional append, after `WERROR`/`NO_STDIO`), so nothing a
@@ -78,11 +97,11 @@ $ make CFLAGS=-O3
 Makefile:119: *** CFLAGS cannot be overridden (origin: command line) -- it would silently drop this Makefile's own flag appends (FP policy, NO_STDIO, include paths); use EXTRA_CFLAGS / EXTRA_LDFLAGS instead.  Stop.
 ```
 
-`audio_common/scripts/audit_fp_contract.sh` is the disassembly-level proof
+`audiolib/common/scripts/audit_fp_contract.sh` is the disassembly-level proof
 the flag actually bites: it disassembles a fixed list of TUs expected to be
-genuinely scalar (audio_common's `hpf.o`/`kiss_fft.o`/NE10's scalar-C
+genuinely scalar (audiolib's `hpf.o`/NE10's scalar-C
 objects, NR's three core objects) and fails if any fmadd/fmsub/fnmadd/
-fnmsub/fmla/fmls instruction shows up. AEC's own `aec_simd_kernels.h` — with
+fnmsub/fmla/fmls instruction shows up. Shared AEC kernels in `utility/simd_aec.h` — with
 its explicit `vfmaq_f32`-family intrinsics, consumed by AEC's TUs — is the
 same "legitimate explicit fusion, not compiler contraction" exemption
 category that script documents for its own audit list (see that script's
@@ -108,9 +127,7 @@ images that link `libaec.a` without a hosted stdio should build with
 NO_STDIO=1 archive, `ar -t`s it for the excluded debug object, `nm -A`s it and
 a minimal linked stdio-free consumer for stdio symbols, then runs that
 consumer) — see the Makefile comment above that target for the full
-calibration (on this host, `BACKEND=ne10` links a fully stdio-free
-executable; `BACKEND=kiss` retains a small, out-of-scope residual from
-audio_common's vendored KISS FFT's own error-log macro).
+calibration (the linked executable is fully stdio-free).
 
 ## Run
 
@@ -119,9 +136,12 @@ BIN="$(make -s print-bin-dir)"
 "$BIN"/aec_wav mic.wav ref.wav out.wav --preset balanced --cng
 ```
 
-Presets (single residual-echo strength axis `min_gain_floor_far_active_db`):
+Presets (single residual-echo strength axis `min_gain_floor_far_active_db`,
+plus `no_floor`'s separate boolean gate `min_gain_split_floor_enabled`):
 `mild` (−20, near-priority) / `balanced` (−28, production) /
-`aggressive` (−38, echo-priority). Other flags: `--cng`,
+`aggressive` (−38, echo-priority) / `no_floor` (floor mechanism off
+entirely — `--preset 3` or `--preset no_floor`, deepest point on the axis,
+most near-end loss). Other flags: `--cng`,
 `--debug-level <n>` / `--debug-log <path>` (level-gated trace),
 `--debug-trace <path>` (opt-in per-frame CSV of post-filter internals —
 `usable_linear`, `fullband_erle`, `r2_mean`, `gain_mean`, `comfort_noise_mean`,
@@ -146,32 +166,24 @@ Lockstep (`analyze_render` then `process_capture`) is **byte-identical** to
 
 **Float32 campaign (2026-07-15): Python bit-exact parity is retired
 repo-wide.** All production C is now float32 end-to-end — delay chain,
-orchestrator scalars, post/state modules, `residual_echo_estimator`, HPF
-(`test/support/reverb_decay_estimator.c` is the sole remaining `double` file;
-it is test-only and is not linked into `libaec.a`). The Python reference (`python/aec.py`,
+orchestrator scalars, post/state modules, `residual_echo_estimator`, HPF. The Python reference (`python/aec.py`,
 fp64) is now the **algorithm spec**; this C port is the float32
 **implementation**; Python↔C comparison is **tolerance-based** (~−60 dB
 class, correlation 0.99999958) — never 0/0.
 
 The delay-estimator matched filter is the one piece that was already
 float32/fast-math/duty-cycled *unconditionally* before the wider campaign
-(intentional, sampled at zero AECMOS cost; see `include/delay_aec3.h`).
+(intentional, sampled at zero AECMOS cost; see `include/delay_aec.h`).
 
-The production **FFT backend is NE10 (ARM NEON, float32)** — the FFT wrapper,
-KISS FFT, and NE10 backend now live in the shared `audio_common` layer
-(a sibling repo); select one via `make BACKEND=ne10` (default everywhere,
-embedded deliverable, caller pool via `aec_get_mem_size`/`aec_init`) or `make
-BACKEND=kiss` (explicitly-selectable, portable/bit-reproducible reference
-backend, malloc) — which differs from numpy's fp64 `np.fft` by
-float32 precision. NE10 vs KISS output is not bit-identical to each other
-(pre-existing, expected); each backend's static path is byte-equal to its own
-malloc path (`test_static_aec.c`).
+The **FFT backend is NE10 (ARM NEON, float32)** — the FFT wrapper and the
+NE10 backend live in the shared `audiolib` layer (a sibling repo); it is
+the only backend (`make BACKEND=ne10`, the default), used by both the malloc
+path and the caller-pool path (`aec_get_mem_size`/`aec_init`), and differs
+from numpy's fp64 `np.fft` by float32 precision. The static path is byte-equal
+to the malloc path (`test_static_aec.c`).
 
 **Maintained regression anchors:**
 
-- `test/parity_delay.c` — a **C-regression golden**, regenerated by
-  `test/gen_delay_c_golden.c` (checks the delay chain against its own prior
-  output, not against Python).
 - `test/parity_aec_e2e.c` — the **authoritative end-to-end gate**: full
   `aec_create` → `aec_process` output within a 2e-2 float32 tolerance
   (correlation 0.99999958, RMS ≈ −60 dB below signal, per-sample max ~6e-3
@@ -187,10 +199,7 @@ malloc path (`test_static_aec.c`).
   cap→cap (no-op), thousands-of-calls-past-cap runaway-proof, and
   decision-invariance (the boolean/comparison the counter feeds is identical
   at the cap vs. a synthetic huge value standing in for the unbounded value
-  the original bug would have produced). `FilterPlateauDetector`'s trio
-  (widened to `int64_t` rather than capped, to avoid corrupting the
-  far_ratio/dt_ratio they feed) gets a dedicated ratio-preservation +
-  no-wraparound-past-`INT32_MAX` case. Replaces the ad hoc/throwaway UBSan
+  the original bug would have produced). Replaces the ad hoc/throwaway UBSan
   probes each prior round wrote to verify these fixes.
   `test/run_counter_saturation_ubsan.sh` builds+runs this same source under
   `-fsanitize=undefined` (same shape as `test/run_selftest_ubsan.sh`).
@@ -206,26 +215,23 @@ malloc path (`test_static_aec.c`).
   frames`/`EPV_FAST_TC`/`EPV_SLOW_TC` cover approximately the same
   wall-clock duration at every grid. 107 checks total.
 - **Kernel gates** (NEON twins against their scalar twins; `sk_max_abs_f32` and
-  `sk_stationary_mask_u8` also against the loop each replaces): `make selftest` (the `sk_` kernels of `aec_simd_kernels.h`),
-  `make test-output-hash`, `make test-aec-res`, `make test-neon-twins` and
-  `make test-delay-kernels`. The last one is the only gate that sees the 48 kHz
-  anti-alias pair kernel of `delay_aec3.c`: one unit in the last place of the
-  filtered stream does not move the integer delay estimate, so no
-  `test-output-hash` digest changes. With `SIMD=0` the NEON twin does not exist
-  and `selftest`, `test-neon-twins` and `test-delay-kernels` compare scalar code
-  with itself. The scalar twins are then held by the checked-in digests of
-  `test-output-hash` only where an output depends on the kernel (the render
-  noise floor, the gain lower bound, the stationary mask); the hop peak magnitude
-  (`sk_max_abs_f32`) and the mask's fold limit are invisible to those digests, so
-  the written-out reference loops in `make selftest` are their gate.
+  `sk_stationary_mask_u8` also against the loop each replaces): `make selftest`
+  (the `sk_` kernels of `utility/simd_aec.h`), `make test-aec-res`,
+  `make test-neon-twins` and `make test-delay-kernels`. The last one is the only
+  gate that sees the 48 kHz anti-alias pair kernel of `delay_aec.c`: one unit in
+  the last place of the filtered stream does not move the integer delay
+  estimate. With `SIMD=0` the NEON twin does not exist and `selftest`,
+  `test-neon-twins` and `test-delay-kernels` compare scalar code with itself;
+  the hop peak magnitude (`sk_max_abs_f32`) and the stationary mask's fold limit
+  are then held by the written-out reference loops in `make selftest`.
   "Bit-identical" for a kernel means the same bits except the payload bits of a
   NaN result.
 
-The remaining per-module `test/historical/parity_*.c` ⟷ `python/diag/gen_*_golden.py`
-harnesses are kept as **historical** diagnostics — they compare against fp64
-Python goldens predating the campaign and may report drift by design now
-that the modules they exercise are float32; some also read f64 golden
-scalars into f32 configs via silent narrowing.
+Module-level Python goldens: `python/diag/gen_detectors_golden.py`
+(`make test-detectors-parity`) and `python/diag/gen_aec_e2e_golden.py`
+(`make test-parity-e2e`) are the generators with a C checker in this tree;
+the other `python/diag/gen_*_golden.py` scripts only dump Python reference
+state, and no C replay harness is shipped for them.
 See `docs/` for the numpy→C idioms (`np.abs(c64)**2` = scaled-hypot-FMA,
 complex×complex FMA, EMA double-coeff) that motivated the original per-module
 harness design.
@@ -239,25 +245,20 @@ size_t bytes = aec_get_mem_size(&cfg);   /* query at runtime; size is backend/co
 void*  pool  = your_static_alloc(bytes); /* MUST be 16-byte aligned (posix_memalign, etc.) */
 Aec*   a     = aec_init(pool, bytes, &cfg);  /* NULL on failure; byte-equal to aec_create output */
 /* ... aec_process(a, ...) ... */
-aec_destroy(a);   /* genuine no-op for pool instances (both backends); idempotent */
+aec_destroy(a);   /* genuine no-op for pool instances; idempotent */
 free(pool);
 ```
 
 `aec_init` returns a pointer into `pool` (not an out-param) and is byte-equal
-to the malloc path (`test_static_aec.c`, 0 mismatches). With the KISS FFT
-backend the FFT is now **fully heap-free too** — the kiss configs are placed
-in the caller pool via `kiss_fft_alloc`'s mem/lenmem API (unlike the old
-pocketfft plans, which had to stay on the heap), so the static path makes no
-heap allocation at all and `aec_destroy` is a genuine no-op on this backend.
-Both memory models ship in the same library: `aec_create` (heap) and
-`aec_get_mem_size`/`aec_init` (caller pool) are always compiled, selected at
-runtime — `USE_EXT_MEM` or similar compile flags are not involved; which
-constructor you call is the only switch. **Under NE10** the three R2C/C2R
-twiddle configs (post-filter + main + shadow) are carved from `pool` too
-(vendored patch P0001, see audio_common/lib/ne10/VENDORED.md), so the static
-path is strictly heap-free on both backends — allocator-hook-verified by
-`test/test_zero_heap_aec.c` — and `aec_destroy` is a genuine, idempotent
-no-op for pool instances on either backend.
+to the malloc path (`test_static_aec.c`, 0 mismatches). Both memory models
+ship in the same library: `aec_create` (heap) and `aec_get_mem_size`/`aec_init`
+(caller pool) are always compiled, selected at runtime — `USE_EXT_MEM` or
+similar compile flags are not involved; which constructor you call is the only
+switch. The three NE10 R2C/C2R twiddle configs (post-filter + main + shadow)
+are carved from `pool` (vendored patch P0001, see
+audiolib/common/lib/ne10/VENDORED.md), so the static path is strictly
+heap-free — allocator-hook-verified by `test/test_zero_heap_aec.c` — and
+`aec_destroy` is a genuine, idempotent no-op for pool instances.
 
 Full CLI options, C API reference, integration rules, runtime resource
 notes, and validation steps:

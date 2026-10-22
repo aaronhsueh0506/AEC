@@ -4,20 +4,20 @@
  * All scalar math float32 (float32-by-design) + ints.
  */
 #include "epc_shadow.h"
-#include "aec3_scale.h"
+#include "aec_scale.h"
 #include <math.h>
 
 /* ── EchoPathChangeDetector ───────────────────────────────────── */
 
 /* Reference-grid EPV time constants (TC ~50 frames / ~1000 frames @
  * hop=160/sample_rate=16000 = 10 ms hop, i.e. ~500 ms / ~10 s wall-clock).
- * Project-native (NOT AEC3-sourced), authored against that grid. Both use the
+ * Project-native (NOT reference-sourced), authored against that grid. Both use the
  * RETENTION convention (epc_update_epv(): ``fast <- EPV_FAST_TC*fast +
  * (1-EPV_FAST_TC)*new`` -- the constant multiplies the OLD state directly),
- * so aec3_growth_rehop (a direct power law), NOT
- * aec3_per_block_ema_alpha_to_per_hop's AEC3-new-sample-weight form, is the
+ * so aec_growth_rehop (a direct power law), NOT
+ * aec_per_block_ema_alpha_to_per_hop's new-sample-weight form, is the
  * correct helper. epc_init() retimes these into each EpcDetector instance's
- * epv_fast_tc/epv_slow_tc via aec3_growth_rehop() so the wall-clock envelopes
+ * epv_fast_tc/epv_slow_tc via aec_growth_rehop() so the wall-clock envelopes
  * match at every grid; epc_update_epv() reads the retimed per-instance
  * fields, NOT these module constants directly. Must match epc.py's
  * EchoPathChangeDetector.EPV_FAST_TC/EPV_SLOW_TC (Python side). */
@@ -37,8 +37,8 @@ void epc_init(EpcDetector* e, int hangover, float total_rise,
     e->epc_total_rise = total_rise;
     e->epc_delta_threshold = delta_threshold;
     if (hop_size > 0 && sample_rate > 0) {
-        e->epv_fast_tc = aec3_growth_rehop(EPV_FAST_TC, 160, 16000, hop_size, sample_rate);
-        e->epv_slow_tc = aec3_growth_rehop(EPV_SLOW_TC, 160, 16000, hop_size, sample_rate);
+        e->epv_fast_tc = aec_growth_rehop(EPV_FAST_TC, 160, 16000, hop_size, sample_rate);
+        e->epv_slow_tc = aec_growth_rehop(EPV_SLOW_TC, 160, 16000, hop_size, sample_rate);
     } else {
         /* Invalid/unrecognized grid: fall back to the unscaled reference-grid
          * literals rather than divide by zero inside the rehop helper -- mirrors
@@ -129,7 +129,7 @@ static const float SC_BASELINE_RETENTION  = 0.995f;
  * stopped completing and the output stayed ~5 dB under the capture; 11 fails
  * too, 10 passes. */
 static const int   SC_HYS_STREAK_MIN      = 10;
-static const int   SC_AEC3_STREAK_FRAMES  = 5;
+static const int   SC_STREAK_FRAMES  = 5;
 
 void shadow_copy_init_for_grid(ShadowCopy* s, ShadowCopyGateMode mode,
                                float threshold, int hysteresis,
@@ -139,7 +139,7 @@ void shadow_copy_init_for_grid(ShadowCopy* s, ShadowCopyGateMode mode,
     s->copy_err_baseline = SC_BASELINE_INIT;
     s->copy_counter = 0;
     if (hop_size > 0 && sample_rate > 0) {
-        s->copy_err_baseline_retention = aec3_growth_rehop(
+        s->copy_err_baseline_retention = aec_growth_rehop(
             SC_BASELINE_RETENTION, 160, 16000, hop_size, sample_rate);
     } else {
         s->copy_err_baseline_retention = SC_BASELINE_RETENTION;
@@ -147,15 +147,15 @@ void shadow_copy_init_for_grid(ShadowCopy* s, ShadowCopyGateMode mode,
     s->main_paused  = 0;
     s->pause_resume = 0;
     s->shadow_copy_threshold  = threshold;
-    /* The two former counters advanced and reset together, so the old
-     * `copy_counter >= hysteresis && streak >= SC_HYS_STREAK_MIN` is one
-     * counter against the larger threshold. */
+    /* `copy_counter >= hysteresis && streak >= SC_HYS_STREAK_MIN` would be
+     * two counters that advance and reset together, so it is one counter
+     * against the larger threshold. */
     s->shadow_copy_hysteresis = hysteresis > SC_HYS_STREAK_MIN
                               ? hysteresis : SC_HYS_STREAK_MIN;
     s->epc_hangover           = epc_hangover;
 }
 
-/* Pre-multirate entry point: the legacy 160/16000 grid, where the retention
+/* Fixed-grid entry point: the legacy 160/16000 grid, where the retention
  * is the authored 0.995. The product AEC calls shadow_copy_init_for_grid(). */
 void shadow_copy_init(ShadowCopy* s, ShadowCopyGateMode mode,
                       float threshold, int hysteresis, int epc_hangover) {
@@ -219,7 +219,7 @@ ShadowCopyDecision shadow_copy_update(
     if (s->gate_mode == SC_GATE_STREAK) {
         if (copy_allowed && shadow_err_smooth < main_err_smooth * threshold) {
             s->copy_counter++;
-            if (s->copy_counter >= SC_AEC3_STREAK_FRAMES) {
+            if (s->copy_counter >= SC_STREAK_FRAMES) {
                 s->copy_counter = 0;
                 s->main_paused = 1;
                 s->pause_resume = s->epc_hangover;

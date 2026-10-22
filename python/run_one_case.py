@@ -2,7 +2,7 @@
 """Run AEC on one mic/ref pair, save output WAV + diagnostic plot.
 
 Usage:
-    python3 python/run_one_case.py mic.wav ref.wav out.wav [--preset balanced]
+    python3 python/run_one_case.py mic.wav ref.wav out.wav [--preset 1|balanced]
                                    [--cng] [--filter 832] [--no-res]
                                    [--plot out.png]
     python3 python/run_one_case.py mic.wav ref.wav out.wav --demo
@@ -31,12 +31,14 @@ import soundfile as sf
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from aec import AEC, AecConfig, AecMode, AecPreset
+from preset_arg import PRESET_METAVAR, parse_preset_arg
 
 
 PRESET_MAP = {
     'mild': AecPreset.MILD,
     'balanced': AecPreset.BALANCED,
     'aggressive': AecPreset.AGGRESSIVE,
+    'no_floor': AecPreset.NO_FLOOR,
 }
 
 
@@ -381,7 +383,9 @@ def main():
     p.add_argument('mic')
     p.add_argument('ref')
     p.add_argument('out', help='output WAV path (in --demo, used as base name)')
-    p.add_argument('--preset', choices=PRESET_MAP.keys(), default='balanced')
+    p.add_argument('--preset', type=parse_preset_arg, choices=PRESET_MAP.keys(),
+                   metavar=PRESET_METAVAR, default='balanced',
+                   help='0=mild, 1=balanced (default), 2=aggressive, 3=no_floor; names accepted')
     p.add_argument('--cng', action='store_true', default=True,
                     help='enable comfort noise (default: on)')
     p.add_argument('--no-cng', dest='cng', action='store_false')

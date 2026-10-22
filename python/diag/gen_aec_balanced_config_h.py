@@ -1,4 +1,4 @@
-"""Generate c_impl/include/aec3_balanced_config.h — the baked v3.22 balanced
+"""Generate c_impl/include/aec_balanced_config.h — the baked v3.22 balanced
 AEC3 sub-module construction config.
 
 The orchestrator builds AecState / ResidualEchoEstimator / SuppressionGain /
@@ -17,7 +17,7 @@ aec_config_from_preset — so only the balanced base is baked here.
 M2 (multi-rate campaign) extension: on top of the legacy 16 kHz block (kept
 byte-for-byte, produced by the exact same code path as before), this also
 captures the live balanced instance at 8 kHz and 48 kHz and emits
-``AEC3B_R8K_*`` / ``AEC3B_R48K_*`` blocks + a runtime ``AEC3B_RATE_TABLE``
+``AECB_R8K_*`` / ``AECB_R48K_*`` blocks + a runtime ``AECB_RATE_TABLE``
 lookup. Only genuinely rate-varying quantities are duplicated per-rate; a
 generator-internal cross-rate invariance assertion (``_assert_cross_rate_
 invariance``) diffs the COMPLETE captured value set across 8/16/48 kHz and
@@ -42,7 +42,7 @@ from gen_aec3_post_run_golden import (                        # noqa: E402
     capture_sg_config, capture_state_config, capture_ree_config)
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-OUT = os.path.join(ROOT, 'c_impl', 'include', 'aec3_balanced_config.h')
+OUT = os.path.join(ROOT, 'c_impl', 'include', 'aec_balanced_config.h')
 
 SR = 16000
 DEFAULT_FRAME = 512
@@ -52,9 +52,9 @@ FL = 832
 # auto-policy (None => not passed => dataclass sentinel -1 => 52 ms <44.1kHz
 # / 64 ms >=44.1kHz), NOT hardcoded like the legacy 16 kHz FL=832.
 EXTRA_GRIDS = (
-    (8000, 256, 'R8K', 'AEC3B_ENABLE_8K'),
-    (16000, 256, 'R16K256', 'AEC3B_ENABLE_16K_256'),
-    (48000, 1024, 'R48K', 'AEC3B_ENABLE_48K'),
+    (8000, 256, 'R8K', 'AECB_ENABLE_8K'),
+    (16000, 256, 'R16K256', 'AECB_ENABLE_16K_256'),
+    (48000, 1024, 'R48K', 'AECB_ENABLE_48K'),
 )
 
 
@@ -87,7 +87,7 @@ def _lf_clamp_comment(n_bins, sr, val):
 
 def _capture_all(sr, frame_size, filter_length=None):
     """Instantiate the live Python balanced AEC at `sr` and return every
-    value the header emitter needs, keyed by the AEC3B_* macro name it
+    value the header emitter needs, keyed by the AECB_* macro name it
     feeds (sans prefix/tag). This dict is the SINGLE SOURCE OF TRUTH used by
     both the emitters below and the cross-rate invariance assertion so the
     two can never drift apart.
@@ -181,8 +181,8 @@ def _capture_all(sr, frame_size, filter_length=None):
     values['REE_MODEL_REVERB_IN_NL'] = int(rc['model_reverb_in_nl'])
     values['REE_ERLE_ONSET_COMP'] = int(rc['erle_onset_comp'])
     values['REE_REVERB_ENABLED'] = int(rc['reverb_enabled'])
-    values['REE_USE_AEC3_RESIDUAL_NOISE_GATE'] = int(rc['use_aec3_residual_noise_gate'])
-    values['REE_USE_AEC3_ECHO_GEN_WINDOW'] = int(rc['use_aec3_echo_gen_window'])
+    values['REE_USE_AEC_RESIDUAL_NOISE_GATE'] = int(rc['use_aec3_residual_noise_gate'])
+    values['REE_USE_AEC_ECHO_GEN_WINDOW'] = int(rc['use_aec3_echo_gen_window'])
     values['REE_NL_R2_ENABLED'] = int(rc['nl_r2_enabled'])
     values['REE_NOISE_FLOOR_HOLD_HOPS'] = int(rc['noise_floor_hold_hops'])
     values['REE_USE_FREQ_RESPONSE'] = int(rc['use_freq_response'])
@@ -364,144 +364,144 @@ def emit_legacy_block(w, cap):
 
     # ── geometry ──
     w('/* geometry */\n')
-    w('#define AEC3B_N_BINS        %d\n' % v['N_BINS'])
-    w('#define AEC3B_FFT_SIZE      %d\n' % v['FFT_SIZE'])
-    w('#define AEC3B_BLOCK_SIZE    %d\n' % v['BLOCK_SIZE'])
-    w('#define AEC3B_HOP_SIZE      %d\n' % v['HOP_SIZE'])
-    w('#define AEC3B_N_PARTITIONS  %d\n' % v['N_PARTITIONS'])
-    w('#define AEC3B_FILTER_TAPS_SIZE %d\n\n' % v['FILTER_TAPS_SIZE'])
+    w('#define AECB_N_BINS        %d\n' % v['N_BINS'])
+    w('#define AECB_FFT_SIZE      %d\n' % v['FFT_SIZE'])
+    w('#define AECB_BLOCK_SIZE    %d\n' % v['BLOCK_SIZE'])
+    w('#define AECB_HOP_SIZE      %d\n' % v['HOP_SIZE'])
+    w('#define AECB_N_PARTITIONS  %d\n' % v['N_PARTITIONS'])
+    w('#define AECB_FILTER_TAPS_SIZE %d\n\n' % v['FILTER_TAPS_SIZE'])
 
     # ── driver flags ──
-    w('/* aec3_post driver flags */\n')
-    w('#define AEC3B_ERLE_COH_GATE_ENABLED  %d\n' % v['ERLE_COH_GATE_ENABLED'])
-    w('#define AEC3B_ERLE_WINDOWED_CAPTURE_PSD %d\n' % v['ERLE_WINDOWED_CAPTURE_PSD'])
-    w('#define AEC3B_ERLE_RENDER_X2_PSD_SCALE %d\n' % v['ERLE_RENDER_X2_PSD_SCALE'])
-    w('#define AEC3B_OUTPUT_CAPTURE_WHEN_LINEAR_UNUSABLE %d\n' % v['OUTPUT_CAPTURE_WHEN_LINEAR_UNUSABLE'])
-    w('#define AEC3B_ENABLE_CNG %d\n' % v['ENABLE_CNG'])
-    w('#define AEC3B_USE_STATIONARITY_PROPERTIES %d\n' % v['USE_STATIONARITY_PROPERTIES'])
-    w('#define AEC3B_STATIONARITY_CONVERGE_HOPS %d\n' % v['STATIONARITY_CONVERGE_HOPS'])
-    w('#define AEC3B_ACTIVE_RENDER_THRESHOLD (%s)\n\n' % f64(v['ACTIVE_RENDER_THRESHOLD']))
+    w('/* aec_post driver flags */\n')
+    w('#define AECB_ERLE_COH_GATE_ENABLED  %d\n' % v['ERLE_COH_GATE_ENABLED'])
+    w('#define AECB_ERLE_WINDOWED_CAPTURE_PSD %d\n' % v['ERLE_WINDOWED_CAPTURE_PSD'])
+    w('#define AECB_ERLE_RENDER_X2_PSD_SCALE %d\n' % v['ERLE_RENDER_X2_PSD_SCALE'])
+    w('#define AECB_OUTPUT_CAPTURE_WHEN_LINEAR_UNUSABLE %d\n' % v['OUTPUT_CAPTURE_WHEN_LINEAR_UNUSABLE'])
+    w('#define AECB_ENABLE_CNG %d\n' % v['ENABLE_CNG'])
+    w('#define AECB_USE_STATIONARITY_PROPERTIES %d\n' % v['USE_STATIONARITY_PROPERTIES'])
+    w('#define AECB_STATIONARITY_CONVERGE_HOPS %d\n' % v['STATIONARITY_CONVERGE_HOPS'])
+    w('#define AECB_ACTIVE_RENDER_THRESHOLD (%s)\n\n' % f64(v['ACTIVE_RENDER_THRESHOLD']))
 
     # ── CNG constants ──
     w('/* CNG wall-clock-rescaled constants */\n')
-    w('#define AEC3B_CNG_Y2_ALPHA (%s)\n' % f64(v['CNG_Y2_ALPHA']))
-    w('#define AEC3B_CNG_N2_TRACK_FRESHNESS (%s)\n' % f64(v['CNG_N2_TRACK_FRESHNESS']))
-    w('#define AEC3B_CNG_N2_TRACK_RETENTION (%s)\n' % f64(v['CNG_N2_TRACK_RETENTION']))
-    w('#define AEC3B_CNG_N2_SLOW_UP (%s)\n' % f64(v['CNG_N2_SLOW_UP']))
-    w('#define AEC3B_CNG_N2_INITIAL_ALPHA (%s)\n' % f64(v['CNG_N2_INITIAL_ALPHA']))
-    w('#define AEC3B_CNG_N2_UPDATE_ONSET_HOPS %d\n' % v['CNG_N2_UPDATE_ONSET_HOPS'])
-    w('#define AEC3B_CNG_N2_INITIAL_DURATION_HOPS %d\n' % v['CNG_N2_INITIAL_DURATION_HOPS'])
-    w('#define AEC3B_NOISE_FLOOR_INT16SQ (%s)\n' % f64(v['NOISE_FLOOR_INT16SQ']))
-    w('#define AEC3B_ERLE_COH_GATE_ALPHA (%s)\n' % f64(v['ERLE_COH_GATE_ALPHA']))
-    w('#define AEC3B_ERLE_COH_GATE_THRESHOLD (%s)\n\n' % f64(v['ERLE_COH_GATE_THRESHOLD']))
+    w('#define AECB_CNG_Y2_ALPHA (%s)\n' % f64(v['CNG_Y2_ALPHA']))
+    w('#define AECB_CNG_N2_TRACK_FRESHNESS (%s)\n' % f64(v['CNG_N2_TRACK_FRESHNESS']))
+    w('#define AECB_CNG_N2_TRACK_RETENTION (%s)\n' % f64(v['CNG_N2_TRACK_RETENTION']))
+    w('#define AECB_CNG_N2_SLOW_UP (%s)\n' % f64(v['CNG_N2_SLOW_UP']))
+    w('#define AECB_CNG_N2_INITIAL_ALPHA (%s)\n' % f64(v['CNG_N2_INITIAL_ALPHA']))
+    w('#define AECB_CNG_N2_UPDATE_ONSET_HOPS %d\n' % v['CNG_N2_UPDATE_ONSET_HOPS'])
+    w('#define AECB_CNG_N2_INITIAL_DURATION_HOPS %d\n' % v['CNG_N2_INITIAL_DURATION_HOPS'])
+    w('#define AECB_NOISE_FLOOR_INT16SQ (%s)\n' % f64(v['NOISE_FLOOR_INT16SQ']))
+    w('#define AECB_ERLE_COH_GATE_ALPHA (%s)\n' % f64(v['ERLE_COH_GATE_ALPHA']))
+    w('#define AECB_ERLE_COH_GATE_THRESHOLD (%s)\n\n' % f64(v['ERLE_COH_GATE_THRESHOLD']))
 
     # ── synth window + sqrt2 sin LUT ──
-    w(emit_array('AEC3B_SYNTH_WINDOW', cap['arrays']['SYNTH_WINDOW']))
-    w(emit_array('AEC3B_SQRT2_SIN_LUT', cap['arrays']['SQRT2_SIN_LUT']))
+    w(emit_array('AECB_SYNTH_WINDOW', cap['arrays']['SYNTH_WINDOW']))
+    w(emit_array('AECB_SQRT2_SIN_LUT', cap['arrays']['SQRT2_SIN_LUT']))
     w('\n')
 
     # ── AecState config ──
     w('/* AecState config */\n')
-    w('#define AEC3B_ST_NUM_CAPTURE_CHANNELS %d\n' % v['ST_NUM_CAPTURE_CHANNELS'])
-    w('#define AEC3B_ST_ENABLE_FILTER_ANALYZER %d\n' % v['ST_ENABLE_FILTER_ANALYZER'])
+    w('#define AECB_ST_NUM_CAPTURE_CHANNELS %d\n' % v['ST_NUM_CAPTURE_CHANNELS'])
+    w('#define AECB_ST_ENABLE_FILTER_ANALYZER %d\n' % v['ST_ENABLE_FILTER_ANALYZER'])
     # -1 == AEC_STATE_STARTUP_HOPS_AUTO (aec_state.c): the BALANCED preset
     # never overrides erle_startup_hops/erl_startup_hops, so this is always
     # the "auto" sentinel, resolved live per-grid at aec_state_init() time
     # -- NOT a literal hop count. Must stay the sentinel value (not a real
     # hop count like 200) so aec_create()'s multi-rate (8k/16k/48k) call
     # sites keep auto-scaling instead of freezing at a 16 kHz-only constant.
-    w('#define AEC3B_ST_ERLE_STARTUP_HOPS %d\n' % v['ST_ERLE_STARTUP_HOPS'])
-    w('#define AEC3B_ST_ERL_STARTUP_HOPS %d\n' % v['ST_ERL_STARTUP_HOPS'])
-    w('#define AEC3B_ST_ECHO_CAN_SATURATE %d\n' % v['ST_ECHO_CAN_SATURATE'])
-    w('#define AEC3B_ST_USE_LINEAR_FILTER %d\n' % v['ST_USE_LINEAR_FILTER'])
-    w('#define AEC3B_ST_CONSERVATIVE_INITIAL_PHASE %d\n' % v['ST_CONSERVATIVE_INITIAL_PHASE'])
-    w('#define AEC3B_ST_DELAY_HEADROOM_SAMPLES %d\n' % v['ST_DELAY_HEADROOM_SAMPLES'])
-    w('#define AEC3B_ST_INITIAL_STATE_SECONDS (%s)\n' % f64(v['ST_INITIAL_STATE_SECONDS']))
-    w('#define AEC3B_ST_ERLE_MIN (%s)\n' % f64(v['ST_ERLE_MIN']))
-    w('#define AEC3B_ST_ERLE_MAX_L (%s)\n' % f64(v['ST_ERLE_MAX_L']))
-    w('#define AEC3B_ST_ERLE_MAX_H (%s)\n\n' % f64(v['ST_ERLE_MAX_H']))
+    w('#define AECB_ST_ERLE_STARTUP_HOPS %d\n' % v['ST_ERLE_STARTUP_HOPS'])
+    w('#define AECB_ST_ERL_STARTUP_HOPS %d\n' % v['ST_ERL_STARTUP_HOPS'])
+    w('#define AECB_ST_ECHO_CAN_SATURATE %d\n' % v['ST_ECHO_CAN_SATURATE'])
+    w('#define AECB_ST_USE_LINEAR_FILTER %d\n' % v['ST_USE_LINEAR_FILTER'])
+    w('#define AECB_ST_CONSERVATIVE_INITIAL_PHASE %d\n' % v['ST_CONSERVATIVE_INITIAL_PHASE'])
+    w('#define AECB_ST_DELAY_HEADROOM_SAMPLES %d\n' % v['ST_DELAY_HEADROOM_SAMPLES'])
+    w('#define AECB_ST_INITIAL_STATE_SECONDS (%s)\n' % f64(v['ST_INITIAL_STATE_SECONDS']))
+    w('#define AECB_ST_ERLE_MIN (%s)\n' % f64(v['ST_ERLE_MIN']))
+    w('#define AECB_ST_ERLE_MAX_L (%s)\n' % f64(v['ST_ERLE_MAX_L']))
+    w('#define AECB_ST_ERLE_MAX_H (%s)\n\n' % f64(v['ST_ERLE_MAX_H']))
 
     # ── ResidualEchoEstimator config ──
     w('/* ResidualEchoEstimator config */\n')
-    w('#define AEC3B_REE_HOP_SIZE %d\n' % v['REE_HOP_SIZE'])
-    w('#define AEC3B_REE_MODEL_REVERB_IN_NL %d\n' % v['REE_MODEL_REVERB_IN_NL'])
-    w('#define AEC3B_REE_ERLE_ONSET_COMP %d\n' % v['REE_ERLE_ONSET_COMP'])
-    w('#define AEC3B_REE_REVERB_ENABLED %d\n' % v['REE_REVERB_ENABLED'])
-    w('#define AEC3B_REE_USE_AEC3_RESIDUAL_NOISE_GATE %d\n' % v['REE_USE_AEC3_RESIDUAL_NOISE_GATE'])
-    w('#define AEC3B_REE_USE_AEC3_ECHO_GEN_WINDOW %d\n' % v['REE_USE_AEC3_ECHO_GEN_WINDOW'])
-    w('#define AEC3B_REE_NL_R2_ENABLED %d\n' % v['REE_NL_R2_ENABLED'])
-    w('#define AEC3B_REE_NOISE_FLOOR_HOLD_HOPS %d\n' % v['REE_NOISE_FLOOR_HOLD_HOPS'])
-    w('#define AEC3B_REE_USE_FREQ_RESPONSE %d\n' % v['REE_USE_FREQ_RESPONSE'])
-    w('#define AEC3B_REE_REVERB_USE_CONSERVATIVE %d\n' % v['REE_REVERB_USE_CONSERVATIVE'])
-    w('#define AEC3B_REE_MIN_NOISE_FLOOR_POWER (%s)\n' % f64(v['REE_MIN_NOISE_FLOOR_POWER']))
-    w('#define AEC3B_REE_NOISE_GATE_POWER_LEGACY (%s)\n' % f64(v['REE_NOISE_GATE_POWER_LEGACY']))
-    w('#define AEC3B_REE_NOISE_GATE_SLOPE (%s)\n' % f64(v['REE_NOISE_GATE_SLOPE']))
-    w('#define AEC3B_REE_STATIONARY_GATE_SLOPE (%s)\n' % f64(v['REE_STATIONARY_GATE_SLOPE']))
-    w('#define AEC3B_REE_DEFAULT_GAIN (%s)\n' % f64(v['REE_DEFAULT_GAIN']))
-    w('#define AEC3B_REE_TM_GAIN (%s)\n' % f64(v['REE_TM_GAIN']))
-    w('#define AEC3B_REE_REVERB_DECAY (%s)\n' % f64(v['REE_REVERB_DECAY']))
-    w('#define AEC3B_REE_REVERB_MILD_SCALE (%s)\n' % f64(v['REE_REVERB_MILD_SCALE']))
-    w('#define AEC3B_REE_REVERB_TAIL_STRENGTH (%s)\n' % f64(v['REE_REVERB_TAIL_STRENGTH']))
-    w('#define AEC3B_REE_NL_R2_ALPHA (%s)\n' % f64(v['REE_NL_R2_ALPHA']))
-    w('#define AEC3B_REE_NL_NORM_POWER (%s)\n' % f64(v['REE_NL_NORM_POWER']))
-    w('#define AEC3B_REE_NL_R2_CAP_MULTIPLE (%s)\n' % f64(v['REE_NL_R2_CAP_MULTIPLE']))
-    w('#define AEC3B_REE_RESIDUAL_NOISE_GATE_POWER (%s)\n' % f64(v['REE_RESIDUAL_NOISE_GATE_POWER']))
-    w('#define AEC3B_REE_REVERB_SMOOTHING_BASE (%s)\n\n' % f64(v['REE_REVERB_SMOOTHING_BASE']))
+    w('#define AECB_REE_HOP_SIZE %d\n' % v['REE_HOP_SIZE'])
+    w('#define AECB_REE_MODEL_REVERB_IN_NL %d\n' % v['REE_MODEL_REVERB_IN_NL'])
+    w('#define AECB_REE_ERLE_ONSET_COMP %d\n' % v['REE_ERLE_ONSET_COMP'])
+    w('#define AECB_REE_REVERB_ENABLED %d\n' % v['REE_REVERB_ENABLED'])
+    w('#define AECB_REE_USE_AEC_RESIDUAL_NOISE_GATE %d\n' % v['REE_USE_AEC_RESIDUAL_NOISE_GATE'])
+    w('#define AECB_REE_USE_AEC_ECHO_GEN_WINDOW %d\n' % v['REE_USE_AEC_ECHO_GEN_WINDOW'])
+    w('#define AECB_REE_NL_R2_ENABLED %d\n' % v['REE_NL_R2_ENABLED'])
+    w('#define AECB_REE_NOISE_FLOOR_HOLD_HOPS %d\n' % v['REE_NOISE_FLOOR_HOLD_HOPS'])
+    w('#define AECB_REE_USE_FREQ_RESPONSE %d\n' % v['REE_USE_FREQ_RESPONSE'])
+    w('#define AECB_REE_REVERB_USE_CONSERVATIVE %d\n' % v['REE_REVERB_USE_CONSERVATIVE'])
+    w('#define AECB_REE_MIN_NOISE_FLOOR_POWER (%s)\n' % f64(v['REE_MIN_NOISE_FLOOR_POWER']))
+    w('#define AECB_REE_NOISE_GATE_POWER_LEGACY (%s)\n' % f64(v['REE_NOISE_GATE_POWER_LEGACY']))
+    w('#define AECB_REE_NOISE_GATE_SLOPE (%s)\n' % f64(v['REE_NOISE_GATE_SLOPE']))
+    w('#define AECB_REE_STATIONARY_GATE_SLOPE (%s)\n' % f64(v['REE_STATIONARY_GATE_SLOPE']))
+    w('#define AECB_REE_DEFAULT_GAIN (%s)\n' % f64(v['REE_DEFAULT_GAIN']))
+    w('#define AECB_REE_TM_GAIN (%s)\n' % f64(v['REE_TM_GAIN']))
+    w('#define AECB_REE_REVERB_DECAY (%s)\n' % f64(v['REE_REVERB_DECAY']))
+    w('#define AECB_REE_REVERB_MILD_SCALE (%s)\n' % f64(v['REE_REVERB_MILD_SCALE']))
+    w('#define AECB_REE_REVERB_TAIL_STRENGTH (%s)\n' % f64(v['REE_REVERB_TAIL_STRENGTH']))
+    w('#define AECB_REE_NL_R2_ALPHA (%s)\n' % f64(v['REE_NL_R2_ALPHA']))
+    w('#define AECB_REE_NL_NORM_POWER (%s)\n' % f64(v['REE_NL_NORM_POWER']))
+    w('#define AECB_REE_NL_R2_CAP_MULTIPLE (%s)\n' % f64(v['REE_NL_R2_CAP_MULTIPLE']))
+    w('#define AECB_REE_RESIDUAL_NOISE_GATE_POWER (%s)\n' % f64(v['REE_RESIDUAL_NOISE_GATE_POWER']))
+    w('#define AECB_REE_REVERB_SMOOTHING_BASE (%s)\n\n' % f64(v['REE_REVERB_SMOOTHING_BASE']))
 
     # ── SuppressionGain config ──
     w('/* SuppressionGain config (split_floor_far_active is the preset axis,\n')
     w(' * recomputed at runtime; the baked value is the balanced -28 dB one). */\n')
-    w('#define AEC3B_SG_SPLIT_FLOOR_FAR_ACTIVE (%s)\n' % f64(v['SG_SPLIT_FLOOR_FAR_ACTIVE']))
-    w('#define AEC3B_SG_SPLIT_FLOOR_FAR_SILENT (%s)\n' % f64(v['SG_SPLIT_FLOOR_FAR_SILENT']))
-    w('#define AEC3B_SG_SPLIT_FLOOR_LATCH_POWER (%s)\n' % f64(v['SG_SPLIT_FLOOR_LATCH_POWER']))
-    w('#define AEC3B_SG_LOW_RENDER_THRESHOLD (%s)\n' % f64(v['SG_LOW_RENDER_THRESHOLD']))
-    w('#define AEC3B_SG_MAX_INC (%s)\n' % f64(v['SG_MAX_INC']))
-    w('#define AEC3B_SG_MAX_DEC_LF (%s)\n' % f64(v['SG_MAX_DEC_LF']))
-    w('#define AEC3B_SG_SOFT_BLEND_ENABLED %d\n' % v['SG_SOFT_BLEND_ENABLED'])
-    w('#define AEC3B_SG_SOFT_BLEND_PER_BIN %d\n' % v['SG_SOFT_BLEND_PER_BIN'])
-    w('#define AEC3B_SG_SOFT_BLEND_ENR_THR (%s)\n' % f64(v['SG_SOFT_BLEND_ENR_THR']))
-    w('#define AEC3B_SG_SOFT_BLEND_SOFTNESS (%s)\n' % f64(v['SG_SOFT_BLEND_SOFTNESS']))
-    w('#define AEC3B_SG_LAST_LF_BAND %d\n' % v['SG_LAST_LF_BAND'])
-    w('#define AEC3B_SG_FIRST_HF_BAND %d\n' % v['SG_FIRST_HF_BAND'])
-    w('#define AEC3B_SG_LAST_LF_SMOOTHING_BAND %d\n' % v['SG_LAST_LF_SMOOTHING_BAND'])
-    w('#define AEC3B_SG_LAST_PERMANENT %d\n' % v['SG_LAST_PERMANENT'])
-    w('#define AEC3B_SG_LF_SMOOTHING_INITIAL %d\n' % v['SG_LF_SMOOTHING_INITIAL'])
+    w('#define AECB_SG_SPLIT_FLOOR_FAR_ACTIVE (%s)\n' % f64(v['SG_SPLIT_FLOOR_FAR_ACTIVE']))
+    w('#define AECB_SG_SPLIT_FLOOR_FAR_SILENT (%s)\n' % f64(v['SG_SPLIT_FLOOR_FAR_SILENT']))
+    w('#define AECB_SG_SPLIT_FLOOR_LATCH_POWER (%s)\n' % f64(v['SG_SPLIT_FLOOR_LATCH_POWER']))
+    w('#define AECB_SG_LOW_RENDER_THRESHOLD (%s)\n' % f64(v['SG_LOW_RENDER_THRESHOLD']))
+    w('#define AECB_SG_MAX_INC (%s)\n' % f64(v['SG_MAX_INC']))
+    w('#define AECB_SG_MAX_DEC_LF (%s)\n' % f64(v['SG_MAX_DEC_LF']))
+    w('#define AECB_SG_SOFT_BLEND_ENABLED %d\n' % v['SG_SOFT_BLEND_ENABLED'])
+    w('#define AECB_SG_SOFT_BLEND_PER_BIN %d\n' % v['SG_SOFT_BLEND_PER_BIN'])
+    w('#define AECB_SG_SOFT_BLEND_ENR_THR (%s)\n' % f64(v['SG_SOFT_BLEND_ENR_THR']))
+    w('#define AECB_SG_SOFT_BLEND_SOFTNESS (%s)\n' % f64(v['SG_SOFT_BLEND_SOFTNESS']))
+    w('#define AECB_SG_LAST_LF_BAND %d\n' % v['SG_LAST_LF_BAND'])
+    w('#define AECB_SG_FIRST_HF_BAND %d\n' % v['SG_FIRST_HF_BAND'])
+    w('#define AECB_SG_LAST_LF_SMOOTHING_BAND %d\n' % v['SG_LAST_LF_SMOOTHING_BAND'])
+    w('#define AECB_SG_LAST_PERMANENT %d\n' % v['SG_LAST_PERMANENT'])
+    w('#define AECB_SG_LF_SMOOTHING_INITIAL %d\n' % v['SG_LF_SMOOTHING_INITIAL'])
     w(cap['lf_clamp_comment'])
-    w('#define AEC3B_SG_LF_CLAMP_BIN %d\n' % v['SG_LF_CLAMP_BIN'])
-    w('#define AEC3B_SG_DNE_LF_END %d\n' % v['SG_DNE_LF_END'])
-    w('#define AEC3B_SG_TRIGGER_THRESHOLD_HOPS %d\n' % v['SG_TRIGGER_THRESHOLD_HOPS'])
-    w('#define AEC3B_SG_HOLD_DURATION_HOPS %d\n' % v['SG_HOLD_DURATION_HOPS'])
-    w('#define AEC3B_SG_NEAREND_SMOOTHER_N %d\n' % v['SG_NEAREND_SMOOTHER_N'])
-    w('#define AEC3B_SG_AUD_LF_END_BIN %d\n' % v['SG_AUD_LF_END_BIN'])
-    w('#define AEC3B_SG_AUD_MF_END_BIN %d\n' % v['SG_AUD_MF_END_BIN'])
-    w('#define AEC3B_SG_FLOOR_POWER (%s)\n' % f64(v['SG_FLOOR_POWER']))
-    w('#define AEC3B_SG_AUD_THR_LF (%s)\n' % f64(v['SG_AUD_THR_LF']))
-    w('#define AEC3B_SG_AUD_THR_MF (%s)\n' % f64(v['SG_AUD_THR_MF']))
-    w('#define AEC3B_SG_AUD_THR_HF (%s)\n' % f64(v['SG_AUD_THR_HF']))
-    w('#define AEC3B_SG_LOW_RENDER_LIMIT (%s)\n' % f64(v['SG_LOW_RENDER_LIMIT']))
-    w('#define AEC3B_SG_NORMAL_RENDER_LIMIT (%s)\n' % f64(v['SG_NORMAL_RENDER_LIMIT']))
-    w('#define AEC3B_SG_HF_LGB %d\n' % v['SG_HF_LGB'])
-    w('#define AEC3B_SG_HF_BIQ %d\n' % v['SG_HF_BIQ'])
-    w('#define AEC3B_SG_CONSERVATIVE_HF %d\n' % v['SG_CONSERVATIVE_HF'])
-    w('#define AEC3B_SG_DNE_ENR_THRESHOLD (%s)\n' % f64(v['SG_DNE_ENR_THRESHOLD']))
-    w('#define AEC3B_SG_DNE_ENR_EXIT_THRESHOLD (%s)\n' % f64(v['SG_DNE_ENR_EXIT_THRESHOLD']))
-    w('#define AEC3B_SG_DNE_SNR_THRESHOLD (%s)\n' % f64(v['SG_DNE_SNR_THRESHOLD']))
-    w('#define AEC3B_SG_DNE_USE_DURING_INITIAL_PHASE %d\n' % v['SG_DNE_USE_DURING_INITIAL_PHASE'])
-    w('#define AEC3B_SG_DNE_USE_UNBOUNDED_ECHO %d\n' % v['SG_DNE_USE_UNBOUNDED_ECHO'])
-    w('#define AEC3B_SG_DNE_LF_ENDPOINT_BIN %d\n\n' % v['SG_DNE_LF_ENDPOINT_BIN'])
+    w('#define AECB_SG_LF_CLAMP_BIN %d\n' % v['SG_LF_CLAMP_BIN'])
+    w('#define AECB_SG_DNE_LF_END %d\n' % v['SG_DNE_LF_END'])
+    w('#define AECB_SG_TRIGGER_THRESHOLD_HOPS %d\n' % v['SG_TRIGGER_THRESHOLD_HOPS'])
+    w('#define AECB_SG_HOLD_DURATION_HOPS %d\n' % v['SG_HOLD_DURATION_HOPS'])
+    w('#define AECB_SG_NEAREND_SMOOTHER_N %d\n' % v['SG_NEAREND_SMOOTHER_N'])
+    w('#define AECB_SG_AUD_LF_END_BIN %d\n' % v['SG_AUD_LF_END_BIN'])
+    w('#define AECB_SG_AUD_MF_END_BIN %d\n' % v['SG_AUD_MF_END_BIN'])
+    w('#define AECB_SG_FLOOR_POWER (%s)\n' % f64(v['SG_FLOOR_POWER']))
+    w('#define AECB_SG_AUD_THR_LF (%s)\n' % f64(v['SG_AUD_THR_LF']))
+    w('#define AECB_SG_AUD_THR_MF (%s)\n' % f64(v['SG_AUD_THR_MF']))
+    w('#define AECB_SG_AUD_THR_HF (%s)\n' % f64(v['SG_AUD_THR_HF']))
+    w('#define AECB_SG_LOW_RENDER_LIMIT (%s)\n' % f64(v['SG_LOW_RENDER_LIMIT']))
+    w('#define AECB_SG_NORMAL_RENDER_LIMIT (%s)\n' % f64(v['SG_NORMAL_RENDER_LIMIT']))
+    w('#define AECB_SG_HF_LGB %d\n' % v['SG_HF_LGB'])
+    w('#define AECB_SG_HF_BIQ %d\n' % v['SG_HF_BIQ'])
+    w('#define AECB_SG_CONSERVATIVE_HF %d\n' % v['SG_CONSERVATIVE_HF'])
+    w('#define AECB_SG_DNE_ENR_THRESHOLD (%s)\n' % f64(v['SG_DNE_ENR_THRESHOLD']))
+    w('#define AECB_SG_DNE_ENR_EXIT_THRESHOLD (%s)\n' % f64(v['SG_DNE_ENR_EXIT_THRESHOLD']))
+    w('#define AECB_SG_DNE_SNR_THRESHOLD (%s)\n' % f64(v['SG_DNE_SNR_THRESHOLD']))
+    w('#define AECB_SG_DNE_USE_DURING_INITIAL_PHASE %d\n' % v['SG_DNE_USE_DURING_INITIAL_PHASE'])
+    w('#define AECB_SG_DNE_USE_UNBOUNDED_ECHO %d\n' % v['SG_DNE_USE_UNBOUNDED_ECHO'])
+    w('#define AECB_SG_DNE_LF_ENDPOINT_BIN %d\n\n' % v['SG_DNE_LF_ENDPOINT_BIN'])
 
     # ── per-bin tuning arrays ──
     w('/* SuppressionGain per-bin tuning arrays (LF/HF interpolated). */\n')
-    w(emit_array('AEC3B_SG_NEAREND_ENR_TR', cap['arrays']['SG_NEAREND_ENR_TR']))
-    w(emit_array('AEC3B_SG_NEAREND_ENR_SU', cap['arrays']['SG_NEAREND_ENR_SU']))
-    w(emit_array('AEC3B_SG_NEAREND_EMR_TR', cap['arrays']['SG_NEAREND_EMR_TR']))
-    w(emit_array('AEC3B_SG_NORMAL_ENR_TR', cap['arrays']['SG_NORMAL_ENR_TR']))
-    w(emit_array('AEC3B_SG_NORMAL_ENR_SU', cap['arrays']['SG_NORMAL_ENR_SU']))
-    w(emit_array('AEC3B_SG_NORMAL_EMR_TR', cap['arrays']['SG_NORMAL_EMR_TR']))
+    w(emit_array('AECB_SG_NEAREND_ENR_TR', cap['arrays']['SG_NEAREND_ENR_TR']))
+    w(emit_array('AECB_SG_NEAREND_ENR_SU', cap['arrays']['SG_NEAREND_ENR_SU']))
+    w(emit_array('AECB_SG_NEAREND_EMR_TR', cap['arrays']['SG_NEAREND_EMR_TR']))
+    w(emit_array('AECB_SG_NORMAL_ENR_TR', cap['arrays']['SG_NORMAL_ENR_TR']))
+    w(emit_array('AECB_SG_NORMAL_ENR_SU', cap['arrays']['SG_NORMAL_ENR_SU']))
+    w(emit_array('AECB_SG_NORMAL_EMR_TR', cap['arrays']['SG_NORMAL_EMR_TR']))
 
 
 def emit_rate_block(w, tag, enable_flag, cap):
-    """Emits the AEC3B_<tag>_* block for one extra rate (8k/48k): ONLY the
+    """Emits the AECB_<tag>_* block for one extra rate (8k/48k): ONLY the
     rate-varying subset (geometry, synth window, REE hop, Hz-anchored SG bin
     indices, and the extra density-scaled constants the invariance
     assertion found), guarded by `enable_flag` so firmware can strip it."""
@@ -520,69 +520,69 @@ def emit_rate_block(w, tag, enable_flag, cap):
     w(' * (verified equal by this generator\'s cross-rate invariance\n')
     w(' * assertion -- see RATE_VARYING_MACROS/RATE_VARYING_ARRAYS). */\n')
 
-    w('#define AEC3B_%s_N_BINS        %d\n' % (tag, v['N_BINS']))
-    w('#define AEC3B_%s_FFT_SIZE      %d\n' % (tag, v['FFT_SIZE']))
-    w('#define AEC3B_%s_BLOCK_SIZE    %d\n' % (tag, v['BLOCK_SIZE']))
-    w('#define AEC3B_%s_HOP_SIZE      %d\n' % (tag, v['HOP_SIZE']))
-    w('#define AEC3B_%s_N_PARTITIONS  %d\n' % (tag, v['N_PARTITIONS']))
-    w('#define AEC3B_%s_FILTER_TAPS_SIZE %d\n' % (tag, v['FILTER_TAPS_SIZE']))
-    w('#define AEC3B_%s_FILTER_LENGTH %d\n\n' % (tag, v['FILTER_LENGTH']))
+    w('#define AECB_%s_N_BINS        %d\n' % (tag, v['N_BINS']))
+    w('#define AECB_%s_FFT_SIZE      %d\n' % (tag, v['FFT_SIZE']))
+    w('#define AECB_%s_BLOCK_SIZE    %d\n' % (tag, v['BLOCK_SIZE']))
+    w('#define AECB_%s_HOP_SIZE      %d\n' % (tag, v['HOP_SIZE']))
+    w('#define AECB_%s_N_PARTITIONS  %d\n' % (tag, v['N_PARTITIONS']))
+    w('#define AECB_%s_FILTER_TAPS_SIZE %d\n' % (tag, v['FILTER_TAPS_SIZE']))
+    w('#define AECB_%s_FILTER_LENGTH %d\n\n' % (tag, v['FILTER_LENGTH']))
 
-    w(emit_array('AEC3B_%s_SYNTH_WINDOW' % tag, cap['arrays']['SYNTH_WINDOW']))
-    w('#define AEC3B_%s_SYNTH_WINDOW_LEN %d\n\n' % (tag, len(cap['arrays']['SYNTH_WINDOW'])))
+    w(emit_array('AECB_%s_SYNTH_WINDOW' % tag, cap['arrays']['SYNTH_WINDOW']))
+    w('#define AECB_%s_SYNTH_WINDOW_LEN %d\n\n' % (tag, len(cap['arrays']['SYNTH_WINDOW'])))
 
-    w('#define AEC3B_%s_REE_HOP_SIZE %d\n\n' % (tag, v['REE_HOP_SIZE']))
+    w('#define AECB_%s_REE_HOP_SIZE %d\n\n' % (tag, v['REE_HOP_SIZE']))
 
     w('/* Hz-anchored SuppressionGain bin indices (rate-varying). */\n')
-    w('#define AEC3B_%s_SG_LAST_LF_BAND %d\n' % (tag, v['SG_LAST_LF_BAND']))
-    w('#define AEC3B_%s_SG_FIRST_HF_BAND %d\n' % (tag, v['SG_FIRST_HF_BAND']))
-    w('#define AEC3B_%s_SG_LAST_LF_SMOOTHING_BAND %d\n' % (tag, v['SG_LAST_LF_SMOOTHING_BAND']))
+    w('#define AECB_%s_SG_LAST_LF_BAND %d\n' % (tag, v['SG_LAST_LF_BAND']))
+    w('#define AECB_%s_SG_FIRST_HF_BAND %d\n' % (tag, v['SG_FIRST_HF_BAND']))
+    w('#define AECB_%s_SG_LAST_LF_SMOOTHING_BAND %d\n' % (tag, v['SG_LAST_LF_SMOOTHING_BAND']))
     w(_lf_clamp_comment(v['N_BINS'], sr, v['SG_LF_CLAMP_BIN']))
-    w('#define AEC3B_%s_SG_LF_CLAMP_BIN %d\n' % (tag, v['SG_LF_CLAMP_BIN']))
-    w('#define AEC3B_%s_SG_DNE_LF_END %d\n' % (tag, v['SG_DNE_LF_END']))
-    w('#define AEC3B_%s_SG_DNE_LF_ENDPOINT_BIN %d\n' % (tag, v['SG_DNE_LF_ENDPOINT_BIN']))
-    w('#define AEC3B_%s_SG_AUD_LF_END_BIN %d\n' % (tag, v['SG_AUD_LF_END_BIN']))
-    w('#define AEC3B_%s_SG_AUD_MF_END_BIN %d\n' % (tag, v['SG_AUD_MF_END_BIN']))
-    w('#define AEC3B_%s_SG_HF_LGB %d\n\n' % (tag, v['SG_HF_LGB']))
+    w('#define AECB_%s_SG_LF_CLAMP_BIN %d\n' % (tag, v['SG_LF_CLAMP_BIN']))
+    w('#define AECB_%s_SG_DNE_LF_END %d\n' % (tag, v['SG_DNE_LF_END']))
+    w('#define AECB_%s_SG_DNE_LF_ENDPOINT_BIN %d\n' % (tag, v['SG_DNE_LF_ENDPOINT_BIN']))
+    w('#define AECB_%s_SG_AUD_LF_END_BIN %d\n' % (tag, v['SG_AUD_LF_END_BIN']))
+    w('#define AECB_%s_SG_AUD_MF_END_BIN %d\n' % (tag, v['SG_AUD_MF_END_BIN']))
+    w('#define AECB_%s_SG_HF_LGB %d\n\n' % (tag, v['SG_HF_LGB']))
 
     w('/* Density-scaled absolute-power constants -- genuinely rate-varying, found\n')
     w(' * by the cross-rate invariance assertion. */\n')
-    w('#define AEC3B_%s_SG_LOW_RENDER_THRESHOLD (%s)\n' % (tag, f64(v['SG_LOW_RENDER_THRESHOLD'])))
-    w('#define AEC3B_%s_SG_FLOOR_POWER (%s)\n' % (tag, f64(v['SG_FLOOR_POWER'])))
-    w('#define AEC3B_%s_SG_LOW_RENDER_LIMIT (%s)\n' % (tag, f64(v['SG_LOW_RENDER_LIMIT'])))
-    w('#define AEC3B_%s_SG_NORMAL_RENDER_LIMIT (%s)\n' % (tag, f64(v['SG_NORMAL_RENDER_LIMIT'])))
-    w('#define AEC3B_%s_REE_MIN_NOISE_FLOOR_POWER (%s)\n' % (tag, f64(v['REE_MIN_NOISE_FLOOR_POWER'])))
-    w('#define AEC3B_%s_REE_NL_NORM_POWER (%s)\n' % (tag, f64(v['REE_NL_NORM_POWER'])))
-    w('#define AEC3B_%s_REE_RESIDUAL_NOISE_GATE_POWER (%s)\n' % (tag, f64(v['REE_RESIDUAL_NOISE_GATE_POWER'])))
-    w('#define AEC3B_%s_NOISE_FLOOR_INT16SQ (%s)\n\n' % (tag, f64(v['NOISE_FLOOR_INT16SQ'])))
+    w('#define AECB_%s_SG_LOW_RENDER_THRESHOLD (%s)\n' % (tag, f64(v['SG_LOW_RENDER_THRESHOLD'])))
+    w('#define AECB_%s_SG_FLOOR_POWER (%s)\n' % (tag, f64(v['SG_FLOOR_POWER'])))
+    w('#define AECB_%s_SG_LOW_RENDER_LIMIT (%s)\n' % (tag, f64(v['SG_LOW_RENDER_LIMIT'])))
+    w('#define AECB_%s_SG_NORMAL_RENDER_LIMIT (%s)\n' % (tag, f64(v['SG_NORMAL_RENDER_LIMIT'])))
+    w('#define AECB_%s_REE_MIN_NOISE_FLOOR_POWER (%s)\n' % (tag, f64(v['REE_MIN_NOISE_FLOOR_POWER'])))
+    w('#define AECB_%s_REE_NL_NORM_POWER (%s)\n' % (tag, f64(v['REE_NL_NORM_POWER'])))
+    w('#define AECB_%s_REE_RESIDUAL_NOISE_GATE_POWER (%s)\n' % (tag, f64(v['REE_RESIDUAL_NOISE_GATE_POWER'])))
+    w('#define AECB_%s_NOISE_FLOOR_INT16SQ (%s)\n\n' % (tag, f64(v['NOISE_FLOOR_INT16SQ'])))
 
     w('/* Wall-clock-rescaled constants for this exact hop duration. */\n')
     for name in ('STATIONARITY_CONVERGE_HOPS',
                  'CNG_N2_UPDATE_ONSET_HOPS', 'CNG_N2_INITIAL_DURATION_HOPS',
                  'REE_NOISE_FLOOR_HOLD_HOPS', 'SG_TRIGGER_THRESHOLD_HOPS',
                  'SG_HOLD_DURATION_HOPS', 'SG_NEAREND_SMOOTHER_N'):
-        w('#define AEC3B_%s_%s %d\n' % (tag, name, v[name]))
+        w('#define AECB_%s_%s %d\n' % (tag, name, v[name]))
     for name in ('CNG_Y2_ALPHA', 'CNG_N2_TRACK_FRESHNESS',
                  'CNG_N2_TRACK_RETENTION', 'CNG_N2_SLOW_UP',
                  'CNG_N2_INITIAL_ALPHA', 'REE_REVERB_SMOOTHING_BASE',
                  'SG_MAX_INC', 'SG_MAX_DEC_LF'):
-        w('#define AEC3B_%s_%s (%s)\n' % (tag, name, f64(v[name])))
+        w('#define AECB_%s_%s (%s)\n' % (tag, name, f64(v[name])))
     w('\n')
 
     w('/* SuppressionGain per-bin tuning arrays at %d Hz (length = n_bins). */\n' % sr)
-    w(emit_array('AEC3B_%s_SG_NEAREND_ENR_TR' % tag, cap['arrays']['SG_NEAREND_ENR_TR']))
-    w(emit_array('AEC3B_%s_SG_NEAREND_ENR_SU' % tag, cap['arrays']['SG_NEAREND_ENR_SU']))
-    w(emit_array('AEC3B_%s_SG_NEAREND_EMR_TR' % tag, cap['arrays']['SG_NEAREND_EMR_TR']))
-    w(emit_array('AEC3B_%s_SG_NORMAL_ENR_TR' % tag, cap['arrays']['SG_NORMAL_ENR_TR']))
-    w(emit_array('AEC3B_%s_SG_NORMAL_ENR_SU' % tag, cap['arrays']['SG_NORMAL_ENR_SU']))
-    w(emit_array('AEC3B_%s_SG_NORMAL_EMR_TR' % tag, cap['arrays']['SG_NORMAL_EMR_TR']))
-    w('#define AEC3B_%s_SG_TABLE_LEN %d\n' % (tag, v['N_BINS']))
+    w(emit_array('AECB_%s_SG_NEAREND_ENR_TR' % tag, cap['arrays']['SG_NEAREND_ENR_TR']))
+    w(emit_array('AECB_%s_SG_NEAREND_ENR_SU' % tag, cap['arrays']['SG_NEAREND_ENR_SU']))
+    w(emit_array('AECB_%s_SG_NEAREND_EMR_TR' % tag, cap['arrays']['SG_NEAREND_EMR_TR']))
+    w(emit_array('AECB_%s_SG_NORMAL_ENR_TR' % tag, cap['arrays']['SG_NORMAL_ENR_TR']))
+    w(emit_array('AECB_%s_SG_NORMAL_ENR_SU' % tag, cap['arrays']['SG_NORMAL_ENR_SU']))
+    w(emit_array('AECB_%s_SG_NORMAL_EMR_TR' % tag, cap['arrays']['SG_NORMAL_EMR_TR']))
+    w('#define AECB_%s_SG_TABLE_LEN %d\n' % (tag, v['N_BINS']))
     w('#endif /* %s */\n\n' % enable_flag)
 
 
 def emit_rate_table(w):
-    """Emits the Aec3BalancedRateDims struct + AEC3B_RATE_TABLE lookup array
-    + aec3b_rate_cfg() accessor. The 16 kHz row references the LEGACY
+    """Emits the AecBalancedRateDims struct + AECB_RATE_TABLE lookup array
+    + aecb_rate_cfg() accessor. The 16 kHz row references the LEGACY
     unsuffixed macros/arrays directly (pointer/value identity with the data
     already baked above -- nothing new is derived for 16 kHz)."""
     w('/* ------------------------------------------------------------------\n')
@@ -651,83 +651,83 @@ def emit_rate_table(w):
     w('    int sg_trigger_threshold_hops;\n')
     w('    int sg_hold_duration_hops;\n')
     w('    int sg_nearend_smoother_n;\n')
-    w('} Aec3BalancedRateDims;\n\n')
+    w('} AecBalancedRateDims;\n\n')
 
-    w('static const Aec3BalancedRateDims AEC3B_RATE_TABLE[] __attribute__((unused)) = {\n')
+    w('static const AecBalancedRateDims AECB_RATE_TABLE[] __attribute__((unused)) = {\n')
     w('    { /* 16000 Hz -- the legacy unsuffixed block above (pointer/value\n')
     w('       * identity with today\'s data; nothing re-derived). */\n')
     w('      16000,\n')
-    w('      AEC3B_N_BINS, AEC3B_FFT_SIZE, AEC3B_BLOCK_SIZE, AEC3B_HOP_SIZE,\n')
-    w('      AEC3B_N_PARTITIONS, AEC3B_FILTER_TAPS_SIZE, 832,\n')
-    w('      AEC3B_SYNTH_WINDOW, AEC3B_BLOCK_SIZE,\n')
-    w('      AEC3B_SG_NEAREND_ENR_TR, AEC3B_SG_NEAREND_ENR_SU, AEC3B_SG_NEAREND_EMR_TR,\n')
-    w('      AEC3B_SG_NORMAL_ENR_TR, AEC3B_SG_NORMAL_ENR_SU, AEC3B_SG_NORMAL_EMR_TR,\n')
-    w('      AEC3B_N_BINS,\n')
-    w('      AEC3B_SG_LAST_LF_BAND, AEC3B_SG_FIRST_HF_BAND, AEC3B_SG_LAST_LF_SMOOTHING_BAND,\n')
-    w('      AEC3B_SG_LF_CLAMP_BIN, AEC3B_SG_DNE_LF_END, AEC3B_SG_DNE_LF_ENDPOINT_BIN,\n')
-    w('      AEC3B_SG_AUD_LF_END_BIN, AEC3B_SG_AUD_MF_END_BIN, AEC3B_SG_HF_LGB,\n')
-    w('      AEC3B_REE_HOP_SIZE,\n')
-    w('      AEC3B_SG_LOW_RENDER_THRESHOLD, AEC3B_SG_FLOOR_POWER, AEC3B_SG_LOW_RENDER_LIMIT,\n')
-    w('      AEC3B_SG_NORMAL_RENDER_LIMIT, AEC3B_REE_MIN_NOISE_FLOOR_POWER,\n')
-    w('      AEC3B_REE_NL_NORM_POWER, AEC3B_REE_RESIDUAL_NOISE_GATE_POWER,\n')
-    w('      AEC3B_NOISE_FLOOR_INT16SQ,\n')
-    w('      AEC3B_STATIONARITY_CONVERGE_HOPS, AEC3B_CNG_Y2_ALPHA,\n')
-    w('      AEC3B_CNG_N2_TRACK_FRESHNESS, AEC3B_CNG_N2_TRACK_RETENTION,\n')
-    w('      AEC3B_CNG_N2_SLOW_UP, AEC3B_CNG_N2_INITIAL_ALPHA,\n')
-    w('      AEC3B_CNG_N2_UPDATE_ONSET_HOPS, AEC3B_CNG_N2_INITIAL_DURATION_HOPS,\n')
-    w('      AEC3B_REE_NOISE_FLOOR_HOLD_HOPS, AEC3B_REE_REVERB_SMOOTHING_BASE,\n')
-    w('      AEC3B_SG_MAX_INC, AEC3B_SG_MAX_DEC_LF,\n')
-    w('      AEC3B_SG_TRIGGER_THRESHOLD_HOPS, AEC3B_SG_HOLD_DURATION_HOPS,\n')
-    w('      AEC3B_SG_NEAREND_SMOOTHER_N },\n')
+    w('      AECB_N_BINS, AECB_FFT_SIZE, AECB_BLOCK_SIZE, AECB_HOP_SIZE,\n')
+    w('      AECB_N_PARTITIONS, AECB_FILTER_TAPS_SIZE, 832,\n')
+    w('      AECB_SYNTH_WINDOW, AECB_BLOCK_SIZE,\n')
+    w('      AECB_SG_NEAREND_ENR_TR, AECB_SG_NEAREND_ENR_SU, AECB_SG_NEAREND_EMR_TR,\n')
+    w('      AECB_SG_NORMAL_ENR_TR, AECB_SG_NORMAL_ENR_SU, AECB_SG_NORMAL_EMR_TR,\n')
+    w('      AECB_N_BINS,\n')
+    w('      AECB_SG_LAST_LF_BAND, AECB_SG_FIRST_HF_BAND, AECB_SG_LAST_LF_SMOOTHING_BAND,\n')
+    w('      AECB_SG_LF_CLAMP_BIN, AECB_SG_DNE_LF_END, AECB_SG_DNE_LF_ENDPOINT_BIN,\n')
+    w('      AECB_SG_AUD_LF_END_BIN, AECB_SG_AUD_MF_END_BIN, AECB_SG_HF_LGB,\n')
+    w('      AECB_REE_HOP_SIZE,\n')
+    w('      AECB_SG_LOW_RENDER_THRESHOLD, AECB_SG_FLOOR_POWER, AECB_SG_LOW_RENDER_LIMIT,\n')
+    w('      AECB_SG_NORMAL_RENDER_LIMIT, AECB_REE_MIN_NOISE_FLOOR_POWER,\n')
+    w('      AECB_REE_NL_NORM_POWER, AECB_REE_RESIDUAL_NOISE_GATE_POWER,\n')
+    w('      AECB_NOISE_FLOOR_INT16SQ,\n')
+    w('      AECB_STATIONARITY_CONVERGE_HOPS, AECB_CNG_Y2_ALPHA,\n')
+    w('      AECB_CNG_N2_TRACK_FRESHNESS, AECB_CNG_N2_TRACK_RETENTION,\n')
+    w('      AECB_CNG_N2_SLOW_UP, AECB_CNG_N2_INITIAL_ALPHA,\n')
+    w('      AECB_CNG_N2_UPDATE_ONSET_HOPS, AECB_CNG_N2_INITIAL_DURATION_HOPS,\n')
+    w('      AECB_REE_NOISE_FLOOR_HOLD_HOPS, AECB_REE_REVERB_SMOOTHING_BASE,\n')
+    w('      AECB_SG_MAX_INC, AECB_SG_MAX_DEC_LF,\n')
+    w('      AECB_SG_TRIGGER_THRESHOLD_HOPS, AECB_SG_HOLD_DURATION_HOPS,\n')
+    w('      AECB_SG_NEAREND_SMOOTHER_N },\n')
 
     for sr, fft_size, tag, flag in EXTRA_GRIDS:
         w('#if %s\n' % flag)
         w('    { /* %d Hz */\n' % sr)
         w('      %d,\n' % sr)
-        w('      AEC3B_%s_N_BINS, AEC3B_%s_FFT_SIZE, AEC3B_%s_BLOCK_SIZE, AEC3B_%s_HOP_SIZE,\n'
+        w('      AECB_%s_N_BINS, AECB_%s_FFT_SIZE, AECB_%s_BLOCK_SIZE, AECB_%s_HOP_SIZE,\n'
           % (tag, tag, tag, tag))
-        w('      AEC3B_%s_N_PARTITIONS, AEC3B_%s_FILTER_TAPS_SIZE, AEC3B_%s_FILTER_LENGTH,\n'
+        w('      AECB_%s_N_PARTITIONS, AECB_%s_FILTER_TAPS_SIZE, AECB_%s_FILTER_LENGTH,\n'
           % (tag, tag, tag))
-        w('      AEC3B_%s_SYNTH_WINDOW, AEC3B_%s_SYNTH_WINDOW_LEN,\n' % (tag, tag))
-        w('      AEC3B_%s_SG_NEAREND_ENR_TR, AEC3B_%s_SG_NEAREND_ENR_SU, AEC3B_%s_SG_NEAREND_EMR_TR,\n'
+        w('      AECB_%s_SYNTH_WINDOW, AECB_%s_SYNTH_WINDOW_LEN,\n' % (tag, tag))
+        w('      AECB_%s_SG_NEAREND_ENR_TR, AECB_%s_SG_NEAREND_ENR_SU, AECB_%s_SG_NEAREND_EMR_TR,\n'
           % (tag, tag, tag))
-        w('      AEC3B_%s_SG_NORMAL_ENR_TR, AEC3B_%s_SG_NORMAL_ENR_SU, AEC3B_%s_SG_NORMAL_EMR_TR,\n'
+        w('      AECB_%s_SG_NORMAL_ENR_TR, AECB_%s_SG_NORMAL_ENR_SU, AECB_%s_SG_NORMAL_EMR_TR,\n'
           % (tag, tag, tag))
-        w('      AEC3B_%s_SG_TABLE_LEN,\n' % tag)
-        w('      AEC3B_%s_SG_LAST_LF_BAND, AEC3B_%s_SG_FIRST_HF_BAND, AEC3B_%s_SG_LAST_LF_SMOOTHING_BAND,\n'
+        w('      AECB_%s_SG_TABLE_LEN,\n' % tag)
+        w('      AECB_%s_SG_LAST_LF_BAND, AECB_%s_SG_FIRST_HF_BAND, AECB_%s_SG_LAST_LF_SMOOTHING_BAND,\n'
           % (tag, tag, tag))
-        w('      AEC3B_%s_SG_LF_CLAMP_BIN, AEC3B_%s_SG_DNE_LF_END, AEC3B_%s_SG_DNE_LF_ENDPOINT_BIN,\n'
+        w('      AECB_%s_SG_LF_CLAMP_BIN, AECB_%s_SG_DNE_LF_END, AECB_%s_SG_DNE_LF_ENDPOINT_BIN,\n'
           % (tag, tag, tag))
-        w('      AEC3B_%s_SG_AUD_LF_END_BIN, AEC3B_%s_SG_AUD_MF_END_BIN, AEC3B_%s_SG_HF_LGB,\n'
+        w('      AECB_%s_SG_AUD_LF_END_BIN, AECB_%s_SG_AUD_MF_END_BIN, AECB_%s_SG_HF_LGB,\n'
           % (tag, tag, tag))
-        w('      AEC3B_%s_REE_HOP_SIZE,\n' % tag)
-        w('      AEC3B_%s_SG_LOW_RENDER_THRESHOLD, AEC3B_%s_SG_FLOOR_POWER, AEC3B_%s_SG_LOW_RENDER_LIMIT,\n'
+        w('      AECB_%s_REE_HOP_SIZE,\n' % tag)
+        w('      AECB_%s_SG_LOW_RENDER_THRESHOLD, AECB_%s_SG_FLOOR_POWER, AECB_%s_SG_LOW_RENDER_LIMIT,\n'
           % (tag, tag, tag))
-        w('      AEC3B_%s_SG_NORMAL_RENDER_LIMIT, AEC3B_%s_REE_MIN_NOISE_FLOOR_POWER,\n' % (tag, tag))
-        w('      AEC3B_%s_REE_NL_NORM_POWER, AEC3B_%s_REE_RESIDUAL_NOISE_GATE_POWER,\n' % (tag, tag))
-        w('      AEC3B_%s_NOISE_FLOOR_INT16SQ,\n' % tag)
-        w('      AEC3B_%s_STATIONARITY_CONVERGE_HOPS, AEC3B_%s_CNG_Y2_ALPHA,\n' % (tag, tag))
-        w('      AEC3B_%s_CNG_N2_TRACK_FRESHNESS, AEC3B_%s_CNG_N2_TRACK_RETENTION,\n' % (tag, tag))
-        w('      AEC3B_%s_CNG_N2_SLOW_UP, AEC3B_%s_CNG_N2_INITIAL_ALPHA,\n' % (tag, tag))
-        w('      AEC3B_%s_CNG_N2_UPDATE_ONSET_HOPS, AEC3B_%s_CNG_N2_INITIAL_DURATION_HOPS,\n' % (tag, tag))
-        w('      AEC3B_%s_REE_NOISE_FLOOR_HOLD_HOPS, AEC3B_%s_REE_REVERB_SMOOTHING_BASE,\n' % (tag, tag))
-        w('      AEC3B_%s_SG_MAX_INC, AEC3B_%s_SG_MAX_DEC_LF,\n' % (tag, tag))
-        w('      AEC3B_%s_SG_TRIGGER_THRESHOLD_HOPS, AEC3B_%s_SG_HOLD_DURATION_HOPS,\n' % (tag, tag))
-        w('      AEC3B_%s_SG_NEAREND_SMOOTHER_N },\n' % tag)
+        w('      AECB_%s_SG_NORMAL_RENDER_LIMIT, AECB_%s_REE_MIN_NOISE_FLOOR_POWER,\n' % (tag, tag))
+        w('      AECB_%s_REE_NL_NORM_POWER, AECB_%s_REE_RESIDUAL_NOISE_GATE_POWER,\n' % (tag, tag))
+        w('      AECB_%s_NOISE_FLOOR_INT16SQ,\n' % tag)
+        w('      AECB_%s_STATIONARITY_CONVERGE_HOPS, AECB_%s_CNG_Y2_ALPHA,\n' % (tag, tag))
+        w('      AECB_%s_CNG_N2_TRACK_FRESHNESS, AECB_%s_CNG_N2_TRACK_RETENTION,\n' % (tag, tag))
+        w('      AECB_%s_CNG_N2_SLOW_UP, AECB_%s_CNG_N2_INITIAL_ALPHA,\n' % (tag, tag))
+        w('      AECB_%s_CNG_N2_UPDATE_ONSET_HOPS, AECB_%s_CNG_N2_INITIAL_DURATION_HOPS,\n' % (tag, tag))
+        w('      AECB_%s_REE_NOISE_FLOOR_HOLD_HOPS, AECB_%s_REE_REVERB_SMOOTHING_BASE,\n' % (tag, tag))
+        w('      AECB_%s_SG_MAX_INC, AECB_%s_SG_MAX_DEC_LF,\n' % (tag, tag))
+        w('      AECB_%s_SG_TRIGGER_THRESHOLD_HOPS, AECB_%s_SG_HOLD_DURATION_HOPS,\n' % (tag, tag))
+        w('      AECB_%s_SG_NEAREND_SMOOTHER_N },\n' % tag)
         w('#endif /* %s */\n' % flag)
 
     w('};\n\n')
 
-    w('static inline const Aec3BalancedRateDims* aec3b_rate_cfg(int sample_rate, int fft_size) {\n')
+    w('static inline const AecBalancedRateDims* aecb_rate_cfg(int sample_rate, int fft_size) {\n')
     w('    int i;\n')
-    w('    int n = (int)(sizeof(AEC3B_RATE_TABLE) / sizeof(AEC3B_RATE_TABLE[0]));\n')
+    w('    int n = (int)(sizeof(AECB_RATE_TABLE) / sizeof(AECB_RATE_TABLE[0]));\n')
     w('    for (i = 0; i < n; ++i) {\n')
-    w('        if (AEC3B_RATE_TABLE[i].sample_rate == sample_rate &&\n')
-    w('            AEC3B_RATE_TABLE[i].fft_size == fft_size) {\n')
-    w('            return &AEC3B_RATE_TABLE[i];\n')
+    w('        if (AECB_RATE_TABLE[i].sample_rate == sample_rate &&\n')
+    w('            AECB_RATE_TABLE[i].fft_size == fft_size) {\n')
+    w('            return &AECB_RATE_TABLE[i];\n')
     w('        }\n')
     w('    }\n')
-    w('    return (const Aec3BalancedRateDims*)0;\n')
+    w('    return (const AecBalancedRateDims*)0;\n')
     w('}\n')
 
 
@@ -744,18 +744,18 @@ def main():
 
     lines = []
     w = lines.append
-    w('/* aec3_balanced_config.h — AUTO-GENERATED by\n')
+    w('/* aec_balanced_config.h — AUTO-GENERATED by\n')
     w(' * python/diag/gen_aec_balanced_config_h.py. DO NOT EDIT BY HAND.\n')
     w(' *\n')
-    w(' * Baked BALANCED AEC3 sub-module construction config, captured from the\n')
+    w(' * Baked BALANCED post-filter sub-module construction config, captured from the\n')
     w(' * live Python balanced instance (bit-exact source of truth).\n')
     w(' *\n')
     w(' * Multi-rate: the block below is 16 kHz only (unsuffixed macros/arrays).\n')
-    w(' * The R8K- and R48K-prefixed blocks + the AEC3B_RATE_TABLE lookup extend\n')
+    w(' * The R8K- and R48K-prefixed blocks + the AECB_RATE_TABLE lookup extend\n')
     w(' * this to 8 kHz / 48 kHz -- see the generator\'s cross-rate invariance\n')
     w(' * assertion for the complete rate-varying field list.\n')
     w(' */\n')
-    w('#ifndef AEC3_BALANCED_CONFIG_H\n#define AEC3_BALANCED_CONFIG_H\n\n')
+    w('#ifndef AEC_BALANCED_CONFIG_H\n#define AEC_BALANCED_CONFIG_H\n\n')
 
     emit_legacy_block(w, cap16)
     w('\n')
@@ -765,7 +765,7 @@ def main():
 
     emit_rate_table(w)
 
-    w('\n#endif /* AEC3_BALANCED_CONFIG_H */\n')
+    w('\n#endif /* AEC_BALANCED_CONFIG_H */\n')
 
     with open(OUT, 'w') as fh:
         fh.writelines(lines)

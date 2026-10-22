@@ -1,9 +1,9 @@
 /* linear_filter_output.h — C port of
- * AEC._aec3_select_linear_filter_output (python/modules/orchestrator.py):
- * AEC3 UseRefinedOutput + FormLinearFilterOutput parity.
+ * the orchestrator's linear-filter output selector (python/modules/orchestrator.py):
+ * UseRefinedOutput + FormLinearFilterOutput parity.
  *
  * Per hop it picks the cleaner of the refined (main) / coarse (shadow) linear
- * filter time-domain residuals via the AEC3 UseRefinedOutput predicate, runs a
+ * filter time-domain residuals via the UseRefinedOutput predicate, runs a
  * 30-sample SignalTransition crossfade on selection change, OLA-windows the
  * formed output through the analysis sqrt-Hann + WindowedPaddedFft, and emits
  * the selected windowed error spectrum + selected echo spectrum that feed RES +
@@ -12,7 +12,7 @@
  * Numerical fidelity (float32; drift versus Python accepted):
  *  - the e2/y2/s2 block sum-of-squares are np.sum over float32 (each f32
  *    sample squared in float32) → PAIRWISE-summed in float32
- *    (pairwise_sum_f32, matching pbfdkf.c's pairwise_sum_f32 tree shape).
+ *    (sk_pairwise_sum_tailfold_f32, also the tree of pbfdkf.c's far-end energy).
  *  - thresholds are float32 expressions.
  *  - the crossfade ramp stays float32 (s = (k+1)/(kT+1) is f32_array / pyfloat
  *    → f32; (1-s) is pyfloat - f32_array → f32; products/sum f32).
@@ -68,19 +68,8 @@ typedef struct {
     float   *scr_tin;        /* length fft_size: zero-padded rfft input */
 } LinearFilterSelect;
 
-/* Allocate scratch + persistent buffers; sets state to Python init
- * (_form_prev_output_time=None, _form_last_selection=True,
- *  _refined_filter_output_last_selected=True). Returns 0 on success, -1 on OOM.
- */
-int  linear_filter_select_init(LinearFilterSelect *s,
-                               int hop, int block_size, int fft_size,
-                               int n_freqs);
-
-/* Reset persistent state to Python init (does not free buffers). */
+/* Reset persistent state to Python init. */
 void linear_filter_select_reset(LinearFilterSelect *s);
-
-/* Free owned buffers. */
-void linear_filter_select_free(LinearFilterSelect *s);
 
 /* One hop of UseRefinedOutput + FormLinearFilterOutput.
  *

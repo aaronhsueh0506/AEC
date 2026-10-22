@@ -1,5 +1,5 @@
 /* fullband_erle.h — C port of python/modules/state/fullband_erle.py
- * (which mirrors AEC3 fullband_erle_estimator.{cc,h}, single-channel).
+ * (the reference fullband ERLE estimator, single-channel).
  *
  * Fullband ERLE accumulator in log2 units. Two public reads:
  *   - fb_erle_log2()              : EMA in log2 domain (erle_time_domain_log2)
@@ -8,8 +8,8 @@
  * PRECISION: float32 (drift versus Python accepted):
  *   - The per-bin inputs x2 / y2 / e2 are float32 arrays (length n_freqs=257).
  *   - np.sum-equivalent over a float32 array is numpy PAIRWISE summation in
- *     float32 (NOT naive left-to-right). fb_erle_pairwise_sum() below
- *     replicates that tree shape.
+ *     float32 (NOT naive left-to-right). sk_pairwise_sum_tailfold_b_f32
+ *     (utility/simd_aec.h) replicates that tree shape.
  *   - Every downstream scalar op (acum +=, ratio, log2, EMA, max/min,
  *     quality) is float32 end-to-end; log2() is log2f() (fast_log2 takes and
  *     returns float).
@@ -19,8 +19,8 @@
  *   - get_quality_estimate() returns None while erle_log2 is NULL; the C side
  *     exposes a *valid flag so the caller can mirror the None.
  *   - x2_band_energy_threshold's SOURCE constant (FBERLE_X2_BAND_ENERGY_THRESHOLD)
- *     is only ever an argument to the shared aec3_per_bin_psd_threshold()
- *     helper (aec3_scale.h/.c, float32-typed); the float32 result is stored
+ *     is only ever an argument to the shared aec_per_bin_psd_threshold()
+ *     helper (aec_scale.h/.c, float32-typed); the float32 result is stored
  *     directly in fb_erle_init().
  *
  * Built with -ffp-contract=off so the per-op float rounding matches across
@@ -29,30 +29,25 @@
  * Time constants (see fullband_erle.py docstring):
  *   POINTS_TO_ACCUMULATE = 6 (a count, NOT rescaled).
  *   BLOCKS_TO_HOLD_ERLE  = int(0.4 * HOPS_PER_SECOND) = 40 hops.
- *   0.0004 max/min envelope forget step — AEC3-native (verbatim literal
- *   + comment in fullband_erle_estimator.cc's UpdateMaxMin(), same 6-point
- *   cadence as quality_alpha/td_alpha); rescaled live like its siblings.
+ *   0.0004 max/min envelope forget step — reference-native (the literal of
+ *   the reference max/min update, same 6-point cadence as
+ *   quality_alpha/td_alpha); rescaled live like its siblings.
  */
 #ifndef FULLBAND_ERLE_H
 #define FULLBAND_ERLE_H
 
 #include <stddef.h>
 
-/* numpy 1.26 pairwise sum over float32, accumulated in float32. Shared copy of
- * the verified implementation in reverb_frequency_response.c (declared here so
- * parity replay links a single definition from fullband_erle.c). */
-float fb_erle_pairwise_sum(const float *a, size_t n);
-
 /* ── Constants mirrored from fullband_erle.py ───────────────────────────────── */
 #define FBERLE_EPSILON              1.0e-3f
 #define FBERLE_POINTS_TO_ACCUMULATE 6
-/* AEC3 source value; per_bin_psd_threshold(.., hop=160, ref=160) is a no-op.
- * Passed to the shared aec3_per_bin_psd_threshold() helper (aec3_scale.h/.c,
+/* Reference source value; per_bin_psd_threshold(.., hop=160, ref=160) is a no-op.
+ * Passed to the shared aec_per_bin_psd_threshold() helper (aec_scale.h/.c,
  * itself float32-typed and outside this conversion's file set). */
 #define FBERLE_X2_BAND_ENERGY_THRESHOLD 44015068.0f
-/* AEC3-native forget-step literal (see header comment above); rescaled live
+/* Reference-native forget-step literal (see header comment above); rescaled live
  * in fb_erle_init() and stored into ErleInstantaneous.maxmin_forget below,
- * not used directly at the point of use any more. */
+ * so the literal is not used directly at the point of use. */
 #define FBERLE_MAXMIN_FORGET        0.0004f
 /* blocks_to_hold_erle/quality_alpha/td_alpha are computed live in
  * fb_erle_init() from hop_size/sample_rate (40 hops, 0.07f and 0.05f at the
@@ -63,7 +58,7 @@ typedef struct {
     int    clamp_zero;          /* _clamp_zero */
     int    clamp_one;           /* _clamp_one  */
     float  quality_alpha;       /* _quality_alpha */
-    float  maxmin_forget;       /* live-computed AEC3-native forget step */
+    float  maxmin_forget;       /* live-computed reference-native forget step */
     int    has_erle_log2;       /* _erle_log2 is not None */
     float  erle_log2;           /* _erle_log2 (valid only when has_erle_log2) */
     float  inst_quality_estimate; /* _inst_quality_estimate */

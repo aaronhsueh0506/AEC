@@ -29,11 +29,12 @@
  *
  * Build (standalone, from c_impl/ — mirrors test_process_context.c's
  * documented recipe):
- *   make -C ../../audio_common BACKEND=ne10 lib
+ *   make -C ../../audiolib/common BACKEND=ne10 lib
  *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=gnu99 -Iinclude -Iexample \
- *       -I../../audio_common/include \
+ *       -I../../audiolib/common/include \
+ *       -I../../audiolib/common \
  *       test/test_shared_fft_handle.c $(find src -name '*.c') \
- *       $(make -s -C ../../audio_common BACKEND=ne10 print-lib-path) -lm \
+ *       $(make -s -C ../../audiolib/common BACKEND=ne10 print-lib-path) -lm \
  *       -o bin/test_shared_fft_handle
  * Run:
  *   ./bin/test_shared_fft_handle

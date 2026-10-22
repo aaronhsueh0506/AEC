@@ -1,15 +1,15 @@
 /*
  * test_wav_io_shim.c - smoke test for THIS repo's
- * example/wav_io.h shim onto the shared audio_common/include/wav_io.h.
+ * example/wav_io.h shim onto the shared audiolib/common/include/wav_io.h.
  *
  * The exhaustive negative-corpus coverage (malformed headers, odd-chunk
  * padding, bounds checks, float32 NaN/Inf sanitize, etc.) lives once in
- * audio_common/test/test_wav_io.c and is not duplicated here. This test
+ * audiolib/common/test/test_wav_io.c and is not duplicated here. This test
  * only checks the two things specific to THIS repo's shim:
  *   1. #include "wav_io.h" from this repo's include paths actually reaches
- *      the canonical audio_common header (not a stale/duplicate copy).
+ *      the canonical audiolib header (not a stale/duplicate copy).
  *   2. WAV_IO_WRITER_STYLE resolves to WAV_IO_WRITER_AEC here, and both of
- *      AEC's historical writer paths (PCM16 round-half-away by default,
+ *      AEC's established writer paths (PCM16 round-half-away by default,
  *      IEEE float32 via the AEC_OUT_FLOAT=1 env var) still work end to end
  *      through the shim.
  *
@@ -18,9 +18,10 @@
  * independently of the rest of this repo's C sources. Not wired into the
  * Makefile; build directly, e.g.:
  *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=gnu99 \
- *       -I./include -I./example -I../../audio_common/include \
- *       -o /tmp/test_wav_io_shim test/test_wav_io_shim.c -lm
- *   /tmp/test_wav_io_shim
+ *       -I./include -I./example -I../../audiolib/common/include \
+ *       -I../../audiolib/common \
+ *       -o bin/test_wav_io_shim test/test_wav_io_shim.c -lm
+ *   bin/test_wav_io_shim
  */
 #include "wav_io.h"
 

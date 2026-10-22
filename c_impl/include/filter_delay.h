@@ -1,6 +1,6 @@
 /* filter_delay.h — C port of python/modules/state/filter_delay.py
- * (AecState::FilterDelay; mirrors AEC3 aec_state.cc:355-388 with hop-rescaled
- * threshold).
+ * (AecState::FilterDelay; the reference filter-delay logic with a
+ * hop-rescaled threshold).
  *
  * Caches the external (RenderDelayController) delay plus the per-channel
  * direct-path filter delays reported by the filter analyzer, in OUR hop units.
@@ -18,7 +18,7 @@
  *   update(analyzer, external, blocks_with_proper_filter_adaptation):
  *     if external is reported:            external_delay = external   (cached)
  *     unconverged = blocks_with_proper_filter_adaptation
- *                   < FILTER_ADAPTATION_THRESHOLD_HOPS (200)
+ *                   < filter_adaptation_threshold_hops (200 at 16 kHz/160)
  *     if unconverged AND external_delay reported:
  *         filter_delays_blocks[*] = delay_headroom_blocks
  *     elif analyzer provided:
@@ -37,8 +37,8 @@
 
 /* delay_headroom_blocks and filter_adaptation_threshold_hops are computed
  * live in filter_delay_init() from hop_size/sample_rate (a hop=160/sr=16000
- * assumption would give FILTER_DELAY_HOP_SAMPLES=160,
- * FILTER_ADAPTATION_THRESHOLD_HOPS=200) -- see the struct fields. */
+ * grid gives a hop of 160 samples and an adaptation threshold of 200 hops)
+ * -- see the struct fields. */
 
 /* DelayEstimate POD (python modules/delay/delay_types.DelayEstimate).
  * `quality` is DelayQuality (0=COARSE, 1=REFINED); `delay` is in samples.
@@ -55,7 +55,7 @@ typedef struct {
     int *filter_delays_blocks;   /* caller-owned storage; length num_channels */
     int min_filter_delay;        /* min(filter_delays_blocks)                 */
     FilterDelayEstimate external_delay;  /* cached external delay (.reported)  */
-    int filter_adaptation_threshold_hops; /* live-computed, was frozen at 200 */
+    int filter_adaptation_threshold_hops; /* derived from the live grid; 200 hops at 16 kHz/160 */
 } FilterDelay;
 
 /* delays_storage must point to num_capture_channels ints; ownership stays with
@@ -82,7 +82,6 @@ int filter_delay_update(FilterDelay *fd, const int *analyzer, int analyzer_len,
                         int blocks_with_proper_filter_adaptation);
 
 /* Accessors (mirror the Python methods). */
-int filter_delay_external_reported(const FilterDelay *fd);
 int filter_delay_min_direct_path(const FilterDelay *fd);
 
 #endif /* FILTER_DELAY_H */

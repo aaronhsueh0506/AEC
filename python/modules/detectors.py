@@ -312,12 +312,10 @@ class FilterPlateauDetector:
     After 2nd attempt fails to converge, give up gracefully.
     """
 
-    # NOTE: this class is currently instantiated NOWHERE in the repo (the C
-    # trio filter_plateau_{init,reset,update} is called only from
-    # test_counter_saturation.c). The durations below are retimed for
-    # consistency with the rest of the module, but that retiming is
-    # unexercised by any production path -- treat it as unverified until the
-    # detector is actually wired in.
+    # NOTE: this class is currently instantiated NOWHERE in the repo. The
+    # durations below are retimed for consistency with the rest of the
+    # module, but that retiming is unexercised by any production path --
+    # treat it as unverified until the detector is actually wired in.
     GRACE_FRAMES_MS = 4000.0           # "~4 s at 100 fps"; 100 fps IS a 10 ms hop
     POST_RESET_GRACE_MS = 2000.0       # don't re-arm within this window after a reset
     # Dimensionless ratio/level gates and a retry budget -- all grid-invariant.

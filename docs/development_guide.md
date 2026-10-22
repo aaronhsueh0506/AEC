@@ -28,28 +28,21 @@ pre-echo fix + DT-deg recovery stack — see CHANGELOG).
 
 **Float32 campaign (2026-07-15): all production C is now float32
 end-to-end** — delay chain, orchestrator scalars, post/state modules,
-`residual_echo_estimator`, and the mic-path HPF. The optional double-precision
-reverb-decay reference port is test-only under `c_impl/test/support/` and is
-not part of `libaec.a`. **Python bit-exact parity is retired repo-wide**: the Python
+`residual_echo_estimator`, and the mic-path HPF. **Python bit-exact parity is retired repo-wide**: the Python
 reference (fp64) is now the **algorithm spec**, C is the float32
 **implementation**, and Python↔C comparison is **tolerance-based** (~−60 dB
 class, correlation 0.99999958) — never 0/0. The regression anchors are now:
 
-- **C-goldens** — `c_impl/test/parity_delay.c` regenerated against its own
-  prior output via `c_impl/test/gen_delay_c_golden.c` (the delay chain's
-  fast-math/duty-cycled matched filter is checked against itself, not
-  Python), and the end-to-end tolerance gate `c_impl/test/parity_aec_e2e.c`.
+- **End-to-end tolerance gate** — `c_impl/test/parity_aec_e2e.c`.
 - **Staged gates vs the `fp64-baseline` git tag** — 60-case stratified
   AECMOS (worst per-case delta −0.021 echo, all bucket means ≤0.002, within
   the established noise bar), waveform drift median −95 dB, and a 1-hour
   soak (delay trajectory identical, power-EMA worst rel diff 1.3e-5, final
   ERLE matching to 4 digits).
 
-The production **FFT backend is KISS FFT (float32)** (host/reference build:
-malloc + KISS, `make`, default). The embedded deployment (caller pool + NE10,
-`make BACKEND=ne10` + `aec_get_mem_size`/`aec_init`) ships from the same main
-branch; NE10 vs KISS output is not bit-identical to each other (pre-existing,
-expected), but each backend's static path is byte-equal to its own malloc
+The **FFT backend is NE10 (float32, ARM NEON)** for both the malloc build
+(`make`) and the embedded deployment (caller pool via
+`aec_get_mem_size`/`aec_init`); the static path is byte-equal to the malloc
 path. Canonical algorithm reference: [aec_methods.md](aec_methods.md).
 
 ## Common commands
@@ -96,7 +89,7 @@ byte-equal (see "What this repo is" above).
 **C-side gate** (render with `aec_wav` before/after, compare with `cmp`).
 `aec_wav` now lands in a config-hashed `bin/<backend>-<config-hash>/`
 directory — resolve the exact path with `make
-print-bin-dir` (same flags as your build), or use the stable `dist/kiss/
+print-bin-dir` (same flags as your build), or use the stable `dist/ne10/
 current/` path after `make publish`:
 
 ```bash
@@ -152,8 +145,8 @@ bin="$(make -s print-bin-dir)"
 stability (no FMA reassociation drift between compilers/builds) — retained
 post-campaign even though Python↔C is no longer a byte-equal target. As of
 the build hardening work this is a **unified policy across all four repos**
-(`audio_common`, `NR/c_impl`, `AEC/c_impl`, `Audio_ALG/pipelines`): every TU
-each Makefile compiles, own code and vendored KISS/NE10 alike, builds with
+(`audiolib`, `NR/c_impl`, `AEC/c_impl`, `Audio_ALG/pipelines`): every TU
+each Makefile compiles, own code and vendored NE10 alike, builds with
 the flags appended LAST (after `EXTRA_CFLAGS`/`BACKEND`/`WERROR`/`NO_STDIO`)
 so nothing can override it, with parse-time rejection of an `EXTRA_CFLAGS`
 containing `-Ofast`/`-ffast-math`/`-ffp-contract=<anything>`, and
@@ -161,7 +154,7 @@ outright rejection of any command-line `CFLAGS=`/`CXXFLAGS=`/`LDFLAGS=`
 override (which would silently disable the Makefile's own appends —
 `EXTRA_CFLAGS`/`EXTRA_LDFLAGS` are the supported hooks). See
 `c_impl/README.md`'s "Unified FP-contraction policy" section and
-`audio_common/scripts/audit_fp_contract.sh` (the disassembly-level PASS/
+`audiolib/common/scripts/audit_fp_contract.sh` (the disassembly-level PASS/
 EXEMPT audit gate) for the full writeup.
 Output WAV defaults to fp32 PCM (`AEC_OUT_FLOAT=0` for 16-bit).
 
@@ -259,7 +252,7 @@ aggressive differ from balanced **only** in that one floor field.
 - Audio dataset (800 cases): `wav/aec_challenge_blind/{doubletalk,farend_singletalk,nearend_singletalk}/<stem>_{mic,lpb}.wav`.
 - Per-case CNG determinism: `np.random.seed(0)` before each `AEC(cfg)` instantiation (see `eval_aec_challenge.py:run_ours`).
 - HPF defaults locked: far-end (ref) HPF=OFF, mic-path HPF=ON.
-- macOS: use `python3` (not `python`); kiss_fft symlink in `c_impl/lib/kiss_fft` → `../../../lib/nr/c_impl/lib/kiss_fft` in the Audio_ALG integration repo.
+- macOS: use `python3` (not `python`).
 - `active_render` threshold is **5.96e-4**, empirically tuned — the strict-AEC3
   value 9.31e-6 was validated as a regression; do not "align" it to the reference.
 

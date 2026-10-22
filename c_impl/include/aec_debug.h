@@ -1,8 +1,6 @@
-/* aec_debug.h — Timestamped debug log infrastructure.
+/* aec_debug.h — Debug trace infrastructure.
  *
  * Build switches:
- *   AEC_DEBUG    : enable debug log call sites (compile-time)
- *   NDEBUG       : strip log call sites entirely
  *   AEC_NO_STDIO : board/no-stdio builds — this header
  *                  does not include <stdio.h> and exposes no FILE*-based API
  *                  at all; every aec_debug_* symbol a LIBRARY TU could call
@@ -20,14 +18,7 @@
  *                  default (NO_STDIO=0) builds are byte-identical to before
  *                  this switch existed.
  *
- * Runtime: aec_debug_set_level() sets per-call gate
- *   0 = off
- *   1 = summary every 100 frames
- *   2 = per-frame
- *   3 = per-frame per-module (everything)
- *
- * Format:
- *   [AEC][t=  1.234s][f=  154][PBFDKF] mu_mean=0.823 P_mean=0.0124 ...
+ * Runtime: aec_debug_set_trace() arms the per-frame CSV trace.
  */
 #ifndef AEC_DEBUG_H
 #define AEC_DEBUG_H
@@ -35,7 +26,6 @@
 #ifndef AEC_NO_STDIO
 #include <stdio.h>
 #endif
-#include <stdarg.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -47,11 +37,6 @@ extern "C" {
 void aec_debug_set_level(int level);
 void aec_debug_set_log(FILE* fp);                /* NULL → stderr */
 void aec_debug_set_frame(int frame_idx, int hop, int sample_rate);
-int  aec_debug_level(void);
-
-/* Core emit. Module is a short tag like "PBFDKF" / "ResFilter" / "State". */
-void aec_debug_logf(const char* module, const char* fmt, ...)
-    __attribute__((format(printf, 2, 3)));
 #else
 /* AEC_NO_STDIO stubs — zero-cost (static inline, always unused in a library
  * build since the one library call site, aec.c's trace block, is itself
@@ -65,18 +50,13 @@ static inline void aec_debug_set_level(int level) { (void)level; }
 static inline void aec_debug_set_frame(int frame_idx, int hop, int sample_rate) {
     (void)frame_idx; (void)hop; (void)sample_rate;
 }
-static inline int aec_debug_level(void) { return 0; }
-static inline void aec_debug_logf(const char* module, const char* fmt, ...) {
-    (void)module; (void)fmt;
-}
 #endif
 
 /* ── Per-frame structured trace ("logr") ──────────────────────────────────────
  * A separate, runtime-gated CSV stream that captures the post-filter internals
- * once per hop (mirrors the Python per-frame diagnostic schema). Independent of
- * the level-gated AEC_DEBUG_LOG path above: it is enabled solely by handing a
- * non-NULL FILE* to aec_debug_set_trace(), so when no trace file is set the
- * hot path pays nothing (a single NULL-pointer test).
+ * once per hop (mirrors the Python per-frame diagnostic schema). It is enabled
+ * solely by handing a non-NULL FILE* to aec_debug_set_trace(), so when no
+ * trace file is set the hot path pays nothing (a single NULL-pointer test).
  *
  * Schema (one row per hop):
  *   frame,delay,far_active,saturated_echo,usable_linear,dominant_nearend,
@@ -89,7 +69,7 @@ typedef struct AecDebugTraceRow {
     int    saturated_echo;      /* aec_state.saturated_echo()                 */
     int    usable_linear;       /* aec_state.usable_linear_estimate()         */
     int    dominant_nearend;    /* suppression_gain dominant-nearend          */
-    int    filter_converged;    /* AEC3 per-frame aec3_converged              */
+    int    filter_converged;    /* per-frame aec_converged                    */
     float  fullband_erle;       /* aec_state.fullband_erle_log2()             */
     float  erle_mean;           /* mean of per-bin subband ERLE               */
     float  r2_mean;             /* mean of per-bin residual-echo R^2          */
@@ -114,16 +94,6 @@ void aec_debug_trace_row(const AecDebugTraceRow* row);  /* emit one CSV row   */
  * relied on directly. */
 static inline int  aec_debug_trace_active(void) { return 0; }
 static inline void aec_debug_trace_row(const AecDebugTraceRow* row) { (void)row; }
-#endif
-
-/* Compile-time gate. In NDEBUG release builds the call site collapses to
- * nothing — no string literal is emitted, no branch is generated. */
-#if defined(AEC_DEBUG) && !defined(NDEBUG)
-  #define AEC_DEBUG_LOG(min_level, module, ...) \
-      do { if (aec_debug_level() >= (min_level)) \
-               aec_debug_logf((module), __VA_ARGS__); } while (0)
-#else
-  #define AEC_DEBUG_LOG(min_level, module, ...) ((void)0)
 #endif
 
 #ifdef __cplusplus

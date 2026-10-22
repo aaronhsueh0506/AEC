@@ -8,7 +8,7 @@
  * Built with -ffp-contract=off so nothing fuses.
  */
 #include "saturation_detector.h"
-#include "aec_simd_kernels.h"
+#include "utility/simd_aec.h"
 
 void saturation_detector_init(SaturationDetector *d) {
     d->saturated_echo = 0;

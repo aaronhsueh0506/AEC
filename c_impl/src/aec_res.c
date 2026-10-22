@@ -1,9 +1,9 @@
 /* aec_res.c -- standalone residual-echo suppression gain; see aec_res.h. */
 #include "aec_res.h"
 #include "aec_config_build.h"
-#include "aec3_balanced_config.h" /* AEC3B_SQRT2_SIN_LUT only */
-#include "aec_simd_kernels.h"
-#include "mem_align.h"
+#include "aec_balanced_config.h" /* AECB_SQRT2_SIN_LUT only */
+#include "utility/simd_aec.h"
+#include "utility/mem_align.h"
 #include "suppression_gain.h"
 
 #include <math.h>
@@ -148,19 +148,26 @@ const float* aec_res_process(AecRes* r, const AecResInput* in) {
 
 int aec_res_set_preset(AecRes* r, AecPreset preset, float ramp_ms) {
     float db, dt_db;
+    int en;
     if (!r) return -1;
     if (aec_preset_floor_db(preset, &db) != 0) return -1;
     if (aec_preset_dt_floor_db(preset, &dt_db) != 0) return -1;
+    /* NO_FLOOR runtime switching allowed, same as aec_set_preset() (see its
+     * comment). Looked up before any write. */
+    if (aec_preset_split_floor_enabled(preset, &en) != 0) return -1;
     /* The suppressor validates and applies first and writes nothing on refusal,
      * so a rejected ramp leaves the stored configuration untouched. Same
      * documented semantics as aec_set_preset(): ramp_ms governs far-active
-     * only, the DT floor steps immediately. */
+     * only, the DT floor and the split-floor gate step immediately. */
     if (suppression_gain_set_split_floor_far_active_db(&r->sg, db, ramp_ms) != 0)
         return -1;
     if (suppression_gain_set_split_floor_dt_db(&r->sg, dt_db) != 0)
         return -1;
+    if (suppression_gain_set_split_floor_enabled(&r->sg, en) != 0)
+        return -1;
     r->sg_cfg.split_floor_far_active = r->sg.cfg.split_floor_far_active;
     r->sg_cfg.split_floor_dt = r->sg.cfg.split_floor_dt;
+    r->sg_cfg.split_floor_enabled = r->sg.cfg.split_floor_enabled;
     return 0;
 }
 
@@ -186,7 +193,7 @@ void aec_cng_fill(uint32_t* rng, Complex* spec, const float* cn,
         amplitude = n_amp * gain2 * fmaxf(nr, nr_floor);
         *rng = (*rng * 69069u + 1u) & 0x7FFFFFFFu;
         ix = *rng >> 26;
-        spec[k].r += amplitude * AEC3B_SQRT2_SIN_LUT[ix];
-        spec[k].i += amplitude * AEC3B_SQRT2_SIN_LUT[(ix + 8u) & 31u];
+        spec[k].r += amplitude * AECB_SQRT2_SIN_LUT[ix];
+        spec[k].i += amplitude * AECB_SQRT2_SIN_LUT[(ix + 8u) & 31u];
     }
 }

@@ -1,5 +1,5 @@
-/* Permanent NEON-vs-scalar equivalence gates for delay_aec3.c's two local
- * kernels. Committed rather than left as throwaway sweeps because the
+/* Permanent kernel and state equivalence gates for delay_aec.c.
+ * Committed rather than left as throwaway sweeps because the
  * argmax's tie-order semantics are invisible to every other check in the
  * repo: real audio never produces an exact h^2 tie inside a 16-lane group,
  * so the E2E dumps and the delay golden pass even with last-match-wins
@@ -11,19 +11,25 @@
  *
  * On builds without the NEON body (non-aarch64, or
  * SIMD_KERNELS_FORCE_SCALAR) the argmax half degenerates to comparing the
- * scalar walk against itself; it still runs -- and says so -- rather than
- * failing, so one `make test-delay-kernels` invocation is valid everywhere.
- * Includes the SHIPPED translation unit so both halves exercise the real
- * source text, not a transcription. */
-#include "src/delay_aec3.c"
+ * scalar walk against itself, and the two pair sweeps compare the single-call
+ * fallback (the only body that build has) against the generic walks; they
+ * still run -- and say so -- rather than failing, so one
+ * `make test-delay-kernels` invocation is valid everywhere. The
+ * coefficient-equality helper (da_decimator_same_coefficients) exists only
+ * in the NEON body, so the decimator pair sweep calls it, and checks its
+ * verdict per variant, only there; a scalar build has no such helper to
+ * check, and its pair function discards the flag.
+ * The matched-core sweep checks the shipped core against separate update
+ * and dot passes, including first-only, last-only and no-update gates. Its
+ * kernels have their own gate (DA_MF_NEON), so it also runs the NEON body on
+ * 32-bit ARM with fused FMA; test_delay_matched_neon holds their bit-exact
+ * contract.
+ * Includes the SHIPPED translation unit so the sweeps exercise real source. */
+#include "src/delay_aec.c"
 
 #include <stdio.h>
 
-#if defined(__ARM_NEON) && defined(__aarch64__) && !defined(SIMD_KERNELS_FORCE_SCALAR)
-#define SWEEP_HAS_NEON_BODY 1
-#else
-#define SWEEP_HAS_NEON_BODY 0
-#endif
+#define SWEEP_HAS_NEON_BODY SK_HAVE_NEON
 
 
 #define NMAX 600
@@ -36,7 +42,7 @@ static long cases = 0, neon_body_cases = 0, tie_cases = 0, fails = 0;
 
 static void check(const char *what, const float *h, int n) {
     int a = da_max_square_peak_index(h, n);
-    int b = da_max_square_peak_scan(h, n);
+    int b = sk_argmax_sq_f32_scalar(h, n);
     int i, hits = 0;
     float m;
     cases++;
@@ -182,7 +188,7 @@ static int run_decimator_sweep(void) {
     rs = 0x9E3779B97F4A7C15ULL;  /* fresh deterministic stream for this half */
     fails = 0;
     DaDecimator spec, gen;
-    float in[DA_AEC3_BLOCK_SIZE], o1[DA_SUB_BLOCK_SIZE], o2[DA_SUB_BLOCK_SIZE];
+    float in[DA_BLOCK_SIZE], o1[DA_SUB_BLOCK_SIZE], o2[DA_SUB_BLOCK_SIZE];
     int b, i;
 
     da_decimator_init(&spec);
@@ -190,7 +196,7 @@ static int run_decimator_sweep(void) {
     /* 2000 blocks of mixed regimes; state carries across all of them. */
     for (b = 0; b < 2000; ++b) {
         float scale = (b % 5 == 0) ? 1.0e-30f : (b % 7 == 0) ? 0.98f : 0.2f;
-        for (i = 0; i < DA_AEC3_BLOCK_SIZE; ++i) {
+        for (i = 0; i < DA_BLOCK_SIZE; ++i) {
             if (b % 11 == 3) in[i] = (i & 1) ? scale : -scale;   /* nyquist tone */
             else if (b % 13 == 5) in[i] = 0.0f;                  /* silence */
             else in[i] = rnd_f(scale);
@@ -215,7 +221,7 @@ static int run_decimator_sweep(void) {
         odd.anti_alias.n_sections = 2;    /* not the 3-LP + 1-HP shape */
         ref.anti_alias.n_sections = 2;
         for (b = 0; b < 200; ++b) {
-            for (i = 0; i < DA_AEC3_BLOCK_SIZE; ++i) in[i] = rnd_f(0.5f);
+            for (i = 0; i < DA_BLOCK_SIZE; ++i) in[i] = rnd_f(0.5f);
             da_decimator_decimate(&odd, in, o1);
             da_decimator_decimate_generic(&ref, in, o2);
             if (memcmp(o1, o2, sizeof o1) != 0) agree = 0;
@@ -236,8 +242,15 @@ static int run_decimator_sweep(void) {
 static int run_decimator_pair_sweep(void) {
     rs = 0xD1B54A32D192ED03ULL;
     long pfails = 0, pblocks = 0;
+    /* What da_decimator_same_coefficients() must answer for each variant
+     * below: 0 = identical cascades, 1 = one coefficient differs, 2 = the
+     * cascades have different section counts. A helper that wrongly said
+     * "same" corrupts variant 1 (caught by the output comparison); one that
+     * always said "different" would only silently cost the fast path, so
+     * the verdict itself is asserted too. */
+    static const int expect_same[3] = { 1, 0, 0 };
     DaDecimator pa, pb, ga, gb;
-    float ina[DA_AEC3_BLOCK_SIZE], inb[DA_AEC3_BLOCK_SIZE];
+    float ina[DA_BLOCK_SIZE], inb[DA_BLOCK_SIZE];
     float oa[DA_SUB_BLOCK_SIZE], ob[DA_SUB_BLOCK_SIZE], ra[DA_SUB_BLOCK_SIZE], rb[DA_SUB_BLOCK_SIZE];
     int b, i, variant;
     for (variant = 0; variant < 3; ++variant) {
@@ -251,12 +264,22 @@ static int run_decimator_pair_sweep(void) {
         for (b = 0; b < 2000; ++b) {
             float sa = (b % 5 == 0) ? 1.0e-30f : (b % 7 == 0) ? 0.98f : 0.2f;
             float sb = (b % 3 == 0) ? 0.5f : (b % 11 == 0) ? 1.0e-30f : 0.05f;
-            for (i = 0; i < DA_AEC3_BLOCK_SIZE; ++i) {
+            for (i = 0; i < DA_BLOCK_SIZE; ++i) {
                 ina[i] = (b % 11 == 3) ? ((i & 1) ? sa : -sa) : (b % 13 == 5) ? 0.0f : rnd_f(sa);
                 inb[i] = (b % 17 == 4) ? 0.0f : rnd_f(sb);
             }
-            da_decimator_decimate_pair(&pa, ina, oa, &pb, inb, ob,
-                                        da_decimator_same_coefficients(&pa, &pb));
+#if SWEEP_HAS_NEON_BODY
+            const int same = da_decimator_same_coefficients(&pa, &pb);
+            if (same != expect_same[variant]) {
+                if (++pfails <= 5)
+                    printf("  MISMATCH same-coefficients verdict %d, expected %d, variant %d block %d\n",
+                           same, expect_same[variant], variant, b);
+            }
+#else
+            /* no helper in this build; the scalar pair function discards it */
+            const int same = expect_same[variant];
+#endif
+            da_decimator_decimate_pair(&pa, ina, oa, &pb, inb, ob, same);
             da_decimator_decimate_generic(&ga, ina, ra);
             da_decimator_decimate_generic(&gb, inb, rb);
             pblocks++;
@@ -334,14 +357,100 @@ static int run_resample48_pair_sweep(void) {
     return rfails ? 1 : 0;
 }
 
+/* Separate update/dot passes are the reference for the fused matched core. */
+static int matched_core_unfused(const DaRing *ring, int shift, float threshold,
+                                float smoothing, const float *y, float *h,
+                                float *error_out, int *update_count) {
+    float span[DA_FILTER_SIZE + DA_SUB_BLOCK_SIZE - 1];
+    float error_sum = 0.0f;
+    da_ring_gather_back(ring, shift, DA_FILTER_SIZE + DA_SUB_BLOCK_SIZE - 1, span);
+    float x2 = da_dot_f32(span + DA_SUB_BLOCK_SIZE - 1,
+                         span + DA_SUB_BLOCK_SIZE - 1, DA_FILTER_SIZE);
+    *update_count = 0;
+    for (int i = 0; i < DA_SUB_BLOCK_SIZE; ++i) {
+        const float *x = span + DA_SUB_BLOCK_SIZE - 1 - i;
+        if (i > 0) x2 += x[0] * x[0] - x[DA_FILTER_SIZE] * x[DA_FILTER_SIZE];
+        float e = y[i] - da_dot_f32(h, x, DA_FILTER_SIZE);
+        int saturated = y[i] >= DA_SATURATION_LIMIT || y[i] <= -DA_SATURATION_LIMIT;
+        error_sum += e * e;
+        if (x2 > threshold && !saturated) {
+            da_nlms_update_f32(h, x, smoothing * e / x2, DA_FILTER_SIZE);
+            ++*update_count;
+        }
+    }
+    *error_out = error_sum;
+    return *update_count != 0;
+}
+
+static int run_matched_core_sweep(void) {
+    float ring[DA_RING_CAPACITY_FOR(DA_NUM_FILTERS)];
+    float h[DA_FILTER_SIZE], ref[DA_FILTER_SIZE], y[DA_SUB_BLOCK_SIZE];
+    int first_only = 0, last_only = 0, no_update = 0;
+    int nan_payload_only = 0;
+    const float gate = (float)DA_FILTER_SIZE * DA_EXCITATION_LIMIT * DA_EXCITATION_LIMIT;
+    for (int trial = 0; trial < 10000; ++trial) {
+        int variant = trial % 10;
+        for (int i = 0; i < (int)(sizeof ring / sizeof ring[0]); ++i) ring[i] = rnd_f(0.1f);
+        for (int i = 0; i < DA_FILTER_SIZE; ++i) h[i] = rnd_f(0.01f);
+        for (int i = 0; i < DA_SUB_BLOCK_SIZE; ++i) y[i] = rnd_f(0.1f);
+        if (variant == 0) memset(ring, 0, sizeof ring);
+        if (variant == 1) for (int i = 0; i < DA_SUB_BLOCK_SIZE; ++i) y[i] = (i & 1) ? 1.0f : -1.0f;
+        if (variant == 2) for (int i = 0; i < DA_SUB_BLOCK_SIZE; ++i) y[i] = i == DA_SUB_BLOCK_SIZE - 1 ? 0.1f : 1.0f;
+        if (variant == 3) for (int i = 0; i < DA_SUB_BLOCK_SIZE; ++i) y[i] = i == 0 ? 0.1f : -1.0f;
+        if (variant == 4) for (int i = 0; i < (int)(sizeof ring / sizeof ring[0]); ++i) ring[i] *= 1.0e-20f;
+        if (variant == 5) for (int i = 0; i < (int)(sizeof ring / sizeof ring[0]); ++i) ring[i] = (i & 1) ? 0.0f : -0.0f;
+        if (variant == 6) y[trial % DA_SUB_BLOCK_SIZE] = NAN;
+        if (variant == 7) y[trial % DA_SUB_BLOCK_SIZE] = INFINITY;
+        if (variant == 8) h[trial % DA_FILTER_SIZE] = nanf("123");
+        DaRing r = { .buffer = ring, .capacity = (int)(sizeof ring / sizeof ring[0]),
+                     .write = (trial * 71) % (int)(sizeof ring / sizeof ring[0]) };
+        int shift = (trial % DA_NUM_FILTERS) * DA_FILTER_INTRA_SHIFT;
+        float threshold = variant == 9 ? 1.0e20f : gate;
+        float smoothing = (trial & 1) ? DA_SMOOTHING_FAST : DA_SMOOTHING_SLOW;
+        float a, b;
+        int updates;
+        memcpy(ref, h, sizeof h);
+        int actual = da_matched_filter_core(&r, shift, threshold, smoothing, y, h, &a);
+        int expected = matched_core_unfused(&r, shift, threshold, smoothing, y, ref, &b, &updates);
+        int mismatch = actual != expected;
+        if (memcmp(&a, &b, sizeof a)) {
+            if (isnan(a) && isnan(b)) ++nan_payload_only;
+            else mismatch = 1;
+        }
+        for (int i = 0; i < DA_FILTER_SIZE; ++i) {
+            if (memcmp(h + i, ref + i, sizeof h[i])) {
+                if (isnan(h[i]) && isnan(ref[i])) ++nan_payload_only;
+                else mismatch = 1;
+            }
+        }
+        if (mismatch) {
+            printf("  MISMATCH matched core trial %d variant %d\n", trial, variant);
+            return 1;
+        }
+        if (variant == 2 && updates == 1) ++last_only;
+        if (variant == 3 && updates == 1) ++first_only;
+        if (updates == 0) ++no_update;
+    }
+    if (first_only != 1000 || last_only != 1000 || no_update < 4000) {
+        printf("  FAIL matched core premises: first=%d last=%d none=%d\n", first_only, last_only, no_update);
+        return 1;
+    }
+    printf("matched core sweep: 10000 cases, first/last/no-update gates, full taps + error sum,"
+           " %d NaN payload-only differences -> PASS\n", nan_payload_only);
+    return 0;
+}
+
 int main(void) {
     int rc = 0;
     if (!SWEEP_HAS_NEON_BODY)
-        printf("note: scalar build -- argmax sweep degenerates to an identity check\n");
+        printf("note: scalar build -- argmax sweep degenerates to an identity check;"
+               " the decimator and 48 kHz pair sweeps check the single-call fallback"
+               " against the generic walks (no pair kernel, no coefficient-equality helper)\n");
     rc |= run_argmax_sweep();
     rc |= run_decimator_sweep();
     rc |= run_decimator_pair_sweep();
     rc |= run_resample48_pair_sweep();
+    rc |= run_matched_core_sweep();
     if (rc == 0) printf("test_delay_kernels: PASS\n");
     return rc;
 }

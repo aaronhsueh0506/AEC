@@ -1,14 +1,15 @@
 /* suppression_gain.h — C port of python/modules/residual/suppression_gain.py
- * Single-channel + single-band AEC3 SuppressionGain.
+ * Single-channel + single-band SuppressionGain.
  *
  * PRECISION: float32 (drift versus Python accepted). Produces gain[n_bins]
  * (amplitude domain, sqrt'd) at float32 precision throughout:
  * ENR/EMR/min/max/CNG math and every per-bin array (gain, tuning tables) are
  * float32, single rounding per op. Pairwise float32 sums (np.sum /
- * np.mean-equivalent) replicated by f32_pairwise_sum().
+ * np.mean-equivalent) replicated by sk_pairwise_sum_tailfold_b_f32
+ * (utility/simd_aec.h).
  *
  * Build: gcc -Wall -Wextra -O2 -ffp-contract=off -std=gnu99 -Ic_impl/include
- *   link: suppression_gain.c freq_utils.c aec3_scale.c reverb_frequency_response.c
+ *   link: suppression_gain.c aec_scale.c reverb_frequency_response.c
  *
  * The caller owns all per-bin storage (passed at init) to keep the port
  * malloc-free in the audio path, matching the other state modules.
@@ -111,7 +112,7 @@ typedef struct {
     const float *normal_emr_tr;
 
     /* Length the caller's per-rate lookup row baked the six arrays above at
-     * (aec3b_rate_cfg(sr)->sg_table_len -- pointer-identical to AEC3B_N_BINS at
+     * (aecb_rate_cfg(sr)->sg_table_len -- pointer-identical to AECB_N_BINS at
      * 16 kHz). suppression_gain_init asserts this == cfg->n_bins; appended here
      * (not inserted above) so existing field offsets are unchanged. */
     int table_len;
@@ -194,7 +195,7 @@ void suppression_gain_set_initial_state(SuppressionGain *sg, int state);
  * step per get_gain() call, geometrically in the power domain -- which is
  * linearly in dB, so no logarithm is evaluated per hop. The walk lands on the
  * target exactly rather than approaching it asymptotically. ramp_ms is bounded
- * at 60 s: aec3_ms_to_hops() ends in a float->int conversion that is undefined
+ * at 60 s: aec_ms_to_hops() ends in a float->int conversion that is undefined
  * for a large finite input, so the hop count is computed and range-checked in
  * a wider type here before that helper is ever reached.
  *
@@ -219,6 +220,19 @@ int suppression_gain_set_split_floor_far_active_db(SuppressionGain *sg,
  * Returns 0 on success, -1 on a NULL instance or an out-of-range db, in
  * which case nothing is written. */
 int suppression_gain_set_split_floor_dt_db(SuppressionGain *sg, float db);
+
+/* The gate's own runtime retarget. split_floor_enabled is a boolean --
+ * there is no continuous path for a ramp to walk, so unlike the far-active
+ * floor it STEPS immediately, same discipline as the DT setter above (see
+ * its comment). Gates all three floor variants in get_min_gain (far-active,
+ * far-silent/pure-NE, DT-lifted): going False->True re-enables all three at
+ * once; going True->False disables all three at once. Does NOT reset
+ * _far_active_latched -- a latch that could not arm while disabled resumes
+ * from wherever it was, not from scratch.
+ *
+ * Returns 0 on success, -1 on a NULL instance (coerces `enabled` to 0/1, so
+ * no other input is rejected). */
+int suppression_gain_set_split_floor_enabled(SuppressionGain *sg, int enabled);
 
 /* is_dominant_nearend — returns the RAW DominantNearendDetector hold state
  * (== _dominant_nearend.is_nearend_state()). The orchestrator reads this BEFORE
@@ -251,9 +265,6 @@ const float *suppression_gain_get_gain(
     const float *render_block,            /* [hop_size] time-domain render */
     int          clock_drift,             /* bool */
     int          saturated_echo);         /* bool (aec_state.saturated_echo) */
-
-/* numpy-1.26-bit-exact pairwise float32 sum (from reverb_frequency_response.c). */
-float f32_pairwise_sum(const float *a, size_t n);
 
 #ifdef __cplusplus
 }

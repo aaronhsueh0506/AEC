@@ -90,7 +90,7 @@ different hop:
 
 | `delay_mode` | `delay_samples` | reaches `LOCKED` |
 |---|---|---|
-| `MATCHED` (default) | −1 before acquisition, else the estimated ring offset | once the matched filter acquires — needs far activity and `delay_aec3_n_updates() ≥ 3` solid updates; never, if the true delay is outside the ~509 ms reliable-peak bound |
+| `MATCHED` (default) | −1 before acquisition, else the estimated ring offset | once the matched filter acquires — needs far activity and `delay_aec_n_updates() ≥ 3` solid updates; never, if the true delay is outside the ~509 ms reliable-peak bound |
 | `FIXED` | always `cfg.fixed_delay_samples` (never −1) | once the ring can serve the offset, not hop 0: the first `ceil(fixed_delay_samples / hop)` hops report `UNLOCKED` over RAW far, and the next process call reports `LOCKED` |
 | `EXTERNAL_ALIGNED` | always `0` | **hop 0** — the caller has contracted that `ref` is already aligned, so there is nothing to wait for |
 

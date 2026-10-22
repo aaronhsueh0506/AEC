@@ -63,3 +63,41 @@ def test_res_context_is_reconstructing_wola(
         ola[:-hop] = ola[hop:]
         ola[-hop:] = 0.0
         previous = formed.copy()
+
+
+def test_res_context_filter_converged_tracks_this_hop_not_last() -> None:
+    """S-05: AecResContext.filter_converged must reflect THIS hop's
+    update_convergence() result, not the value from before it ran. The gap
+    only showed up on the rising-edge hop (the single hop where convergence
+    flips False -> True), since self._convergence.converged does not change
+    on any other hop. Oracle: AEC.get_stats().filter_converged reads
+    self._filter_converged, which by the time the caller can observe it (the
+    hop's process() call has already returned) always reflects the post-
+    update_convergence state for that hop -- exactly the C twin's contract,
+    since aec_get_res_context() is a separate pull the caller makes only
+    after aec_process() returns. The two must therefore always agree."""
+    config = AecConfig.from_preset(AecPreset.BALANCED, sample_rate=16000, frame_size=512)
+    config.return_res_context = True
+    aec = AEC(config)
+    hop = aec.hop_size
+    rng = np.random.RandomState(0x53303500)
+    saw_rising_edge = False
+    prev_converged = False
+    for _ in range(2000):
+        far = (0.3 * rng.uniform(-1.0, 1.0, hop)).astype(np.float32)
+        # Near-perfect echo coupling (no near-end, no noise) so the filter
+        # actually reaches the ERLE>5dB/10-consecutive-frame convergence
+        # rule within the loop and the rising edge is exercised for real.
+        near = (0.5 * far).astype(np.float32)
+        _output, context = aec.process(near, far)
+        now_converged = bool(aec.get_stats().filter_converged)
+        assert context.filter_converged == now_converged, (
+            "AecResContext.filter_converged (%r) disagrees with this hop's "
+            "post-update_convergence state (%r) -- S-05 regression"
+            % (context.filter_converged, now_converged))
+        if now_converged and not prev_converged:
+            saw_rising_edge = True
+        prev_converged = now_converged
+    assert saw_rising_edge, (
+        "scene never converged -- strengthen the echo coupling so this test "
+        "actually exercises the S-05 rising edge")

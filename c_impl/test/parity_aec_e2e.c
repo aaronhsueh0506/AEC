@@ -1,83 +1,68 @@
 /* parity_aec_e2e.c — replay the END-TO-END golden from
  * python/diag/gen_aec_e2e_golden.py through the FULL top-level C aec_process
  * (aec_create(balanced) → per-hop aec_process) and assert out[hop] matches
- * Python within the float32-FFT tolerance over the whole doubletalk case
+ * Python within the float32 tolerance over the whole doubletalk case
  * (~4186 hops, at whatever rate the golden's own header records — this
  * checker is rate-parametric, reading hop/sr straight back out of the file).
  *
- * NOTE: with the KISS FFT backend (float32) the FFT is NOT bit-exact to numpy's
- * fp64 np.fft, so the end-to-end output differs by ~float32 precision
- * (measured at 16 kHz: RMS Δ ≈ -91 dB below signal, correlation 0.99999999+,
- * per-sample max ~9e-5 over 4186 recursive hops — inaudible). The non-FFT C
- * logic stays bit-exact; only the FFT layer carries this documented
- * tolerance. PASS = both the linear and final output stay under TOL_E2E(sr).
+ * The C chain is float32 end to end and its FFT is the float32 NE10 backend,
+ * while the golden comes from the fp64 Python spec (numpy np.fft). The two
+ * therefore differ by float32 precision, amplified through the recursive
+ * adaptive filter and the steep suppression-gain gates; the non-FFT logic is
+ * not bit-exact to Python either. PASS = both the linear and the
+ * final output stay under TOL_E2E(sr).
  *
- * Per-rate tolerance:
- * at 8 kHz the same case measures EVEN SMALLER (max ~3.5e-5) — the smaller
- * FFT_SIZE=256 accumulates less float32 rounding. At 48 kHz (FFT_SIZE=1024,
- * n_partitions=7, filter_taps=3360) the measured max jumps to ~6.4e-2,
- * ~3x over the 16k-tuned 2e-2 ceiling. Investigated before raising it
- * (a big jump can mean a real porting bug, not a tolerance gap) — findings:
- *   - delay estimate is stable at the correct value for the whole file (no
- *     misalignment / no re-acquire thrash);
- *   - raw_output (pre-suppression-gain linear residual) itself grows to
- *     ~1.9e-2 as the filter converges — i.e. the float32-FFT/Kalman-update
- *     precision gap scales with the much larger transform (FFT 256->1024,
- *     4x) and filter length (3360 vs 832 taps, 4x), well beyond what added
- *     butterfly stages alone would predict — consistent with mu/delta/
- *     kalman_q (AecConfig scalars, NOT part of the per-rate table —
- *     Python uses the identical untuned constants at 48k) giving relatively
- *     less regularization at the larger transform size, so ordinary
- *     float32-vs-float64 rounding gets amplified more through the adaptive
- *     recursion — a genuine numerical-sensitivity property of running
- *     rate-invariant tuning constants at a 4x-bigger transform, not a wrong
- *     index/size/formula (structural per-rate sizing is covered separately
- *     by test_config_validation / test_static_aec / test_rate_structural,
- *     all passing at 48k);
- *   - out[hop] then occasionally amplifies that larger raw gap further at a
- *     handful of individual hops (suppression_gain.c's near/far sigmoid
- *     gates + hold-timer thresholds are continuous but steep, so a bigger
- *     raw-input gap crosses them at a slightly different hop between
- *     Python/C) — bounded, self-correcting spikes (14 hops out of 4186 saw
- *     >1e-2, decaying back down within 1-3 hops each time), never a
- *     sustained runaway;
- *   - whole-file correlation stays 0.999977 (out) / 0.999990 (raw) and RMS Δ
- *     stays 6.4e-4 (out) — both still excellent by any ordinary DSP
- *     standard, just materially wider than 16k/8k's ~1e-6-level RMS Δ.
- * Net: no NaN/Inf, no delay/structural defect found — a measured, explained,
- * bounded widening driven by genuine float32 sensitivity at a 4x-bigger
- * transform. TOL_E2E_48K reflects the measured 6.4e-2 max with ~55% headroom
- * (mirrors the original 2e-2-vs-~6e-3-ish 16k headroom ratio), not a bare
- * "make it pass" bump.
+ * Measured (NE10 backend, 4186-hop doubletalk case; SIMD=1 and SIMD=0 give the
+ * same maxima to the digits shown):
  *
- * Build (standalone, from c_impl/; the FFT wrapper + fast_math now live in the
- * shared audio_common archive, built once for BACKEND=kiss and linked in):
- *   make -C ../../audio_common BACKEND=kiss lib
- *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=gnu99 -Iinclude -I../../audio_common/include \
+ *   rate    preset                linear max   out max     tolerance
+ *   16 kHz  mild/balanced/aggr.   1.6e-4       4.3e-3      TOL_E2E     2e-2
+ *   16 kHz  balanced --no-res     1.3e-5       1.3e-5      TOL_E2E     2e-2
+ *   48 kHz  mild/balanced         1.2e-2       6.2e-2      TOL_E2E_48K 1e-1
+ *   48 kHz  aggressive            1.2e-2       8.9e-2      TOL_E2E_48K 1e-1
+ *    8 kHz  balanced/aggressive   1.3e-2       1.3e-1/1.6e-1   FAILS TOL_E2E 2e-2
+ *
+ * The 48 kHz row is wider because the transform and the filter are 4x larger
+ * (FFT 1024, 3360 taps), so the rate-invariant tuning constants regularise
+ * less and ordinary float32 rounding is amplified more through the adaptive
+ * recursion. When the ceiling was set the delay estimate was confirmed stable
+ * and the extra error was confined to bounded, self-correcting spikes with no
+ * NaN/Inf, so TOL_E2E_48K is a measured ceiling, not a bare "make it pass"
+ * bump.
+ *
+ * The 8 kHz (legacy grid) golden exceeds TOL_E2E from the first hop of the
+ * linear output. A portable (non-NE10) FFT backend gave the same maxima
+ * too, so this is not an FFT-backend effect; it is a standing C/Python
+ * difference of the legacy grid, recorded here rather than hidden by loosening
+ * the constant.
+ *
+ * Build (standalone, from c_impl/; the FFT wrapper + fast_math live in the
+ * shared audiolib archive):
+ *   make -C ../../audiolib/common lib
+ *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=gnu99 -Iinclude -I../../audiolib/common/include \
+ *       -I../../audiolib/common \
  *       $(find src -name '*.c') test/parity_aec_e2e.c \
- *       $(make -s -C ../../audio_common BACKEND=kiss print-lib-path) -lm -o /tmp/p_e2e
- *   python3 ../python/diag/gen_aec_e2e_golden.py /tmp/aec_e2e_golden.bin balanced --sr 16000
- *   /tmp/p_e2e /tmp/aec_e2e_golden.bin [preset]      # preset: balanced|mild|aggressive
+ *       $(make -s -C ../../audiolib/common print-lib-path) -lm -o bin/p_e2e
+ *   python3 ../python/diag/gen_aec_e2e_golden.py bin/aec_e2e_golden.bin balanced --sr 16000
+ *   bin/p_e2e bin/aec_e2e_golden.bin [preset]      # preset: 1|0|2|3 or balanced|mild|aggressive|no_floor
  *   # 8k/48k: --sr 8000 / --sr 48000 on the generator; this checker
  *   # reads sr back out of the golden header and applies the matching
  *   # tolerance automatically -- no extra argv needed.
- *   # Linear-filter-only case (no AEC3 post block on either side) -- pass
+ *   # Linear-filter-only case (no post-filter block on either side) -- pass
  *   # --no-res to BOTH, or the golden and the replay disagree about which
  *   # branch produced it:
- *   python3 ../python/diag/gen_aec_e2e_golden.py /tmp/g.bin balanced --sr 16000 --no-res
- *   /tmp/p_e2e /tmp/g.bin balanced --no-res
- *   # A21 Stage 2 live observer (default off either side) -- same "pass to
+ *   python3 ../python/diag/gen_aec_e2e_golden.py bin/g.bin balanced --sr 16000 --no-res
+ *   bin/p_e2e bin/g.bin balanced --no-res
+ *   # live observer (default off either side) -- same "pass to
  *   # BOTH" rule, and composes with --no-res (argv[4] when argv[3] is
  *   # --no-res):
- *   python3 ../python/diag/gen_aec_e2e_golden.py /tmp/g.bin balanced --sr 16000 --live-observer
- *   /tmp/p_e2e /tmp/g.bin balanced --live-observer
+ *   python3 ../python/diag/gen_aec_e2e_golden.py bin/g.bin balanced --sr 16000 --live-observer
+ *   bin/p_e2e bin/g.bin balanced --live-observer
  */
 #include "aec.h"
 
-/* Max allowed |C - Python| per sample. 16k/8k measured max is ~1e-4 (tons of
- * headroom under 2e-2); 48k's much bigger FFT/filter measures ~6.4e-2 (see
- * the file banner's per-rate tolerance note) -- TOL_E2E_48K carries that rate's own,
- * separately-justified ceiling rather than loosening the shared constant. */
+/* Max allowed |C - Python| per sample, per rate class (see the table in the
+ * file header for the measured maxima each ceiling sits above). */
 #define TOL_E2E      2.0e-2
 #define TOL_E2E_48K  1.0e-1
 
@@ -102,24 +87,18 @@ int main(int argc, char **argv) {
 
     AecPreset preset = AEC_PRESET_BALANCED;
     if (argc > 2) {
-        if (!strcmp(argv[2], "mild")) preset = AEC_PRESET_MILD;
-        else if (!strcmp(argv[2], "aggressive")) preset = AEC_PRESET_AGGRESSIVE;
-        else if (strcmp(argv[2], "balanced") != 0) {
-            /* Fail loud, not silently-balanced: the C AecPreset enum has no
-             * NO_FLOOR member (Python-only by design), so a golden generated
-             * with gen_aec_e2e_golden.py's `no_floor` would otherwise get
-             * silently replayed against a BALANCED instance here -- a
-             * confusing, guaranteed false "parity regression" rather than
-             * the clear "unsupported preset" this is. */
-            fprintf(stderr, "unknown or unsupported preset '%s' (mild/"
-                            "balanced/aggressive only -- no_floor has no C "
-                            "enum member)\n", argv[2]);
+        if (!strcmp(argv[2], "0") || !strcmp(argv[2], "mild")) preset = AEC_PRESET_MILD;
+        else if (!strcmp(argv[2], "2") || !strcmp(argv[2], "aggressive")) preset = AEC_PRESET_AGGRESSIVE;
+        else if (!strcmp(argv[2], "3") || !strcmp(argv[2], "no_floor")) preset = AEC_PRESET_NO_FLOOR;
+        else if (strcmp(argv[2], "1") != 0 && strcmp(argv[2], "balanced") != 0) {
+            fprintf(stderr, "unknown preset '%s' (0|1|2|3 or "
+                            "mild|balanced|aggressive|no_floor)\n", argv[2]);
             return 2;
         }
     }
     AecConfig cfg;
     aec_config_from_preset(&cfg, preset, sr);
-    /* Golden produced with --no-res: the AEC3 post block never runs, so the
+    /* Golden produced with --no-res: the post-filter block never runs, so the
      * quantities that steer the filter from outside it are what this case
      * checks. `out` is then the linear residual, i.e. equal to raw. */
     /* Scan every remaining arg rather than hard-coding argv[3]/argv[4]

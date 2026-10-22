@@ -18,20 +18,11 @@
  *                      (no-longer-reachable) unbounded value the original
  *                      buggy code would eventually have produced.
  *
- * FilterPlateauDetector gets its own dedicated section (see
- * section_filter_plateau below):
- * frame_count/far_active_count/dt_signal_count were widened to int64_t
- * rather than saturated (a per-field saturating cap would corrupt the
- * far_ratio/dt_ratio these three feed -- see include/detectors.h's struct
- * comment), so its test proves ratio-preservation in the pre-terminal
- * region and correct (non-wrapping) behaviour past where a 32-bit counter
- * would have overflowed, rather than a "settles at a cap" transition.
- *
  * Build: `make test-counter-saturation` (wired the same way `bench`/`all`
- * are -- needs the audio_common archive for the full-Aec sections; see the
+ * are -- needs the audiolib archive for the full-Aec sections; see the
  * Makefile's test-counter-saturation target). Run:
  *   ./bin/<backend>-<hash>/test_counter_saturation
- * (from c_impl/ -- the delay_aec3 section reads a checked-in fixture at the
+ * (from c_impl/ -- the delay_aec section reads a checked-in fixture at the
  * relative path ../wav/aec_record/aec_record_{mic,ref}_10s.wav, matching
  * this repo's other cwd-relative test/example conventions).
  *
@@ -40,7 +31,7 @@
  * shape as test/run_selftest_ubsan.sh) and must exit 0 with no diagnostic.
  */
 #include "aec.h"
-#include "aec3_scale.h"
+#include "aec_scale.h"
 #include "delay_pool_test_util.h"
 #include "wav_io.h"
 
@@ -62,176 +53,6 @@ static long g_fails  = 0;
             fprintf(stderr, "FAIL [%s:%d] %s\n", __FILE__, __LINE__, (msg)); \
         } \
     } while (0)
-
-/* ════════════════════════════════════════════════════════════════════
- * FilterPlateauDetector (detectors.h) -- dedicated section (widened
- * frame_count/far_active_count/dt_signal_count int -> int64_t).
- * ════════════════════════════════════════════════════════════════════ */
-static void section_filter_plateau(void) {
-    FilterPlateauDetector p;
-    int i;
-
-    /* --- Case A: pre-terminal region -- the widened counters must track
-     * an independently-kept int64_t tally EXACTLY, frame for frame, proving
-     * the widening introduces no drift (and, by construction, the
-     * far_ratio/dt_ratio the source derives from them stays correct --
-     * those ratios are pure functions of frame_count/far_active_count/
-     * dt_signal_count, so exact-tally agreement on the raw counters implies
-     * exact ratio agreement too). erle_windowed_db is held high (10.0 >
-     * erle_max_db=6.0) so criteria_met is always false regardless of the
-     * ratios -- this section is about the COUNTERS, not about firing. */
-    filter_plateau_init(&p);
-    {
-        int64_t exp_far = 0, exp_dt = 0;
-        for (i = 0; i < p.grace_frames + 30; i++) {
-            int far_active = (i % 3) != 0;   /* 2/3 of frames        */
-            int dt_present = (i % 2) == 0;   /* 1/2 of frames        */
-            int fired;
-            if (far_active) exp_far++;
-            if (dt_present) exp_dt++;
-            fired = filter_plateau_update(&p, far_active, dt_present, 10.0f, 0);
-            CHECK(!fired, "plateau pre-terminal: high ERLE never fires");
-            CHECK(p.frame_count == (int64_t)(i + 1),
-                  "plateau pre-terminal: frame_count == call index exactly");
-            CHECK(p.far_active_count == exp_far,
-                  "plateau pre-terminal: far_active_count matches independent tally");
-            CHECK(p.dt_signal_count == exp_dt,
-                  "plateau pre-terminal: dt_signal_count matches independent tally");
-        }
-    }
-
-    /* --- Case B: terminal state via once_converged=1. Every call after
-     * this latches must (a) never fire, (b) reset consecutive_match to 0,
-     * (c) leave attempts/cooldown untouched, and (d) keep incrementing the
-     * three widened counters by exactly 1/call with NO wraparound -- proven
-     * by starting them just past where a plain `int` would already have
-     * wrapped (INT32_MAX), using direct assignment rather than an actual
-     * 2^31-iteration loop (impractical and unnecessary: the guard being
-     * tested is "does int64_t arithmetic wrap here", which direct
-     * assignment exercises identically to arriving there by increments). */
-    filter_plateau_reset(&p);
-    p.frame_count      = (int64_t)INT32_MAX + 1000;
-    p.far_active_count = 5;
-    p.dt_signal_count  = 5;
-    p.attempts         = 0;
-    {
-        int fired = filter_plateau_update(&p, 1, 1, 10.0f, /*once_converged=*/1);
-        CHECK(!fired, "plateau terminal(once_converged): never fires");
-        CHECK(p.frame_count == (int64_t)INT32_MAX + 1001,
-              "plateau terminal: frame_count keeps incrementing past INT32_MAX, no wrap");
-        CHECK(p.consecutive_match == 0,
-              "plateau terminal: consecutive_match reset by the once_converged branch");
-    }
-    /* Sanity check that the OLD `int` field type really would have wrapped
-     * at this exact point -- emulated via well-defined unsigned wraparound
-     * (never invokes real signed-overflow UB, so this stays clean under
-     * -fsanitize=undefined) rather than executing genuine UB to "prove" it. */
-    {
-        uint32_t shadow_u = (uint32_t)INT32_MAX;
-        shadow_u += 1001u;
-        {
-            int32_t shadow_i32;
-            memcpy(&shadow_i32, &shadow_u, sizeof shadow_i32);
-            CHECK(shadow_i32 < 0,
-                  "sanity: a plain int32 counter would have gone negative at this exact point"
-                  " (the bug class this widening fixes)");
-        }
-        CHECK(p.frame_count > 0,
-              "fixed: the widened int64_t field stays positive/sane at the same point");
-    }
-    for (i = 0; i < 2000; i++) {
-        int64_t before = p.frame_count;
-        int fired = filter_plateau_update(&p, 1, 1, 10.0f, 1);
-        CHECK(!fired, "plateau terminal(once_converged): still never fires after many calls");
-        CHECK(p.frame_count == before + 1,
-              "plateau terminal: frame_count still +1/call, no acceleration/corruption");
-    }
-
-    /* --- Case C: the OTHER terminal gate, attempts>=max_attempts (already
-     * safe pre-existing threshold-gate -- confirm it still locks out the
-     * ratio path even with otherwise-favorable inputs, and that it composes
-     * cleanly with the widened counters). */
-    filter_plateau_reset(&p);
-    p.attempts = p.max_attempts;
-    p.frame_count = 12345;
-    {
-        int fired = filter_plateau_update(&p, 1, 1, /*erle low=*/0.0f, /*once_converged=*/0);
-        CHECK(!fired, "plateau terminal(attempts>=max_attempts): never fires even with favorable erle");
-        CHECK(p.frame_count == 12346, "plateau terminal(attempts): frame_count still increments");
-        CHECK(p.attempts == p.max_attempts, "plateau terminal(attempts): attempts itself stays capped");
-    }
-
-    /* --- Case D: functional smoke test -- the widening must not have
-     * broken the real fire path under ordinary, small, in-range counts. */
-    filter_plateau_init(&p);
-    {
-        int fired_at = -1;
-        int limit = p.grace_frames + FILTER_PLATEAU_CONSECUTIVE_REQUIRED + 10;
-        for (i = 0; i < limit; i++) {
-            int fired = filter_plateau_update(&p, 1, 1, 0.0f, 0);
-            if (fired) { fired_at = i; break; }
-        }
-        CHECK(fired_at >= 0, "plateau fires under sustained qualifying conditions");
-        CHECK(p.frame_count == 0 && p.far_active_count == 0 && p.dt_signal_count == 0,
-              "plateau fire path resets all three widened counters to 0 exactly as before");
-        CHECK(p.attempts == 1, "plateau fire path increments attempts");
-        CHECK(p.cooldown_remaining == FILTER_PLATEAU_POST_RESET_GRACE_FRAMES,
-              "plateau fire path arms cooldown");
-    }
-
-    /* --- Case E: the actual fire path from a frame_count value that would
-     * have silently narrowed/wrapped under the OLD 32-bit `last_reset_frame`
-     * (widened to int64_t alongside the other three counters).
-     * far_active_count/dt_signal_count are seeded EQUAL to frame_count so
-     * far_ratio/dt_ratio are exactly 1.0 (comfortably clearing their
-     * 0.5/0.10 gates) on every call regardless of frame_count's magnitude --
-     * the huge seed only needs to clear criteria_met, not participate in
-     * some elaborate proportion, so this is the simplest input that
-     * reliably satisfies every gate every call (mirrors this file's
-     * established "poke state directly, then drive real calls" style, e.g.
-     * section_aec_level's blocks_with_active_render poke followed by real
-     * aec_process() calls). */
-    filter_plateau_reset(&p);
-    {
-        const int64_t seed = (int64_t)INT_MAX + 1000; /* > INT_MAX: the exact
-            bug window a plain `int` last_reset_frame would have wrapped in */
-        int fired = 0;
-        int call_count;
-        int64_t expected_last_reset;
-
-        p.frame_count        = seed;
-        p.far_active_count   = seed;
-        p.dt_signal_count    = seed;
-        p.attempts           = 0;
-        p.cooldown_remaining = 0;
-        p.consecutive_match  = 0;
-
-        for (call_count = 1; call_count <= FILTER_PLATEAU_CONSECUTIVE_REQUIRED + 5; call_count++) {
-            fired = filter_plateau_update(&p, /*far_active=*/1, /*dt_signal_present=*/1,
-                                           /*erle_windowed_db=*/0.0f, /*once_converged=*/0);
-            if (fired) break;
-        }
-        expected_last_reset = seed + call_count;
-
-        CHECK(fired,
-              "plateau huge-frame_count: fires within FILTER_PLATEAU_CONSECUTIVE_REQUIRED calls"
-              " when far_ratio/dt_ratio/erle criteria hold true every call");
-        CHECK(call_count == FILTER_PLATEAU_CONSECUTIVE_REQUIRED,
-              "plateau huge-frame_count: fires on exactly the FILTER_PLATEAU_CONSECUTIVE_REQUIRED'th"
-              " call (far_ratio/dt_ratio pinned to exactly 1.0 every call by construction)");
-        CHECK(expected_last_reset > (int64_t)INT_MAX,
-              "sanity: the frame_count value captured at fire time genuinely exceeds INT_MAX"
-              " (this case actually exercises the narrowing/wraparound bug window, not vacuously)");
-        CHECK(p.last_reset_frame == expected_last_reset,
-              "plateau huge-frame_count: last_reset_frame equals the EXACT int64_t frame_count"
-              " value at the moment of firing -- last_reset_frame is widened int -> int64_t;"
-              " a plain `int` would have silently narrowed/wrapped this same assignment");
-        CHECK(p.frame_count == 0 && p.far_active_count == 0 && p.dt_signal_count == 0,
-              "plateau huge-frame_count: fire path still resets all three widened counters to 0"
-              " exactly as in Case D, even starting from a value past INT_MAX");
-    }
-    printf("section_filter_plateau: done (%ld checks so far, %ld fails)\n", g_checks, g_fails);
-}
 
 /* ════════════════════════════════════════════════════════════════════
  * aec.c-embedded fixes: misadj_stable_count, ne_above,
@@ -353,7 +174,7 @@ static void section_aec_level(void) {
     }
 
     /* --- stationarity_active_hops: off-by-one fix. cap = EXACTLY
-     * a.stationarity_converge_hops (post-fix; pre-fix settled one past it).
+     * a.stationarity_converge_hops (exactly, not one past it).
      * non_zero_render_seen latches permanently once set, so the branch runs
      * unconditionally on every subsequent hop without re-poking. */
     {
@@ -385,15 +206,14 @@ static void section_aec_level(void) {
      * strong_not_saturated_render_blocks (cap = live filter_adaptation_threshold_hops,
      * reader is strict "<"). aec_state_update()'s internal wiring is deep
      * (filter_analyzer/filter_delay/etc.), so rather than reverse-engineer
-     * every input aec3_post_run threads into it, this poke-then-run-many
+     * every input aec_post_run threads into it, this poke-then-run-many
      * form checks the property that actually matters: the field never moves
      * past its cap no matter how many more real hops run, PLUS a direct
      * decision-invariance check against a synthetic huge value. */
     {
-        /* AEC_STATE_ACTIVE_RENDER_BLOCKS / FILTER_ADAPTATION_THRESHOLD_HOPS
-         * are gone (live-computed per instance now, not compile-time
-         * constants) -- read the equivalent live fields off the already-
-         * constructed `a` instance instead. */
+        /* active_render_blocks / filter_adaptation_threshold_hops are
+         * live-computed per instance, not compile-time constants -- read
+         * them off the already-constructed `a` instance. */
         int active_render_blocks = a.a3_state.active_render_blocks;
         int filter_adaptation_threshold_hops =
             a.a3_state.delay_state.filter_adaptation_threshold_hops;
@@ -433,17 +253,17 @@ static void section_aec_level(void) {
 }
 
 /* ════════════════════════════════════════════════════════════════════
- * delay_aec3.c: number_pre_echo_updates driven through the
+ * delay_aec.c: number_pre_echo_updates driven through the
  * REAL production per-hop API with a checked-in real audio fixture (not a
  * synthetic reimplementation) -- plus a bonus invariant check on
  * pending_count (already-safe cyclic counter, same driven loop).
  * ════════════════════════════════════════════════════════════════════ */
-static void section_delay_aec3(void) {
+static void section_delay_aec(void) {
     const char *mic_path = "../wav/aec_record/aec_record_mic_10s.wav";
     const char *ref_path = "../wav/aec_record/aec_record_ref_10s.wav";
     WavReader *mr = wav_open_read(mic_path);
     WavReader *rr = wav_open_read(ref_path);
-    DelayAec3 d;
+    DelayAec d;
     void *delay_pool = NULL;
     int hop = 160;
     float mic[160], ref[160];
@@ -451,23 +271,20 @@ static void section_delay_aec3(void) {
     long hops_read = 0;
     long expected_min_hops;
 
-    /* A missing/unreadable fixture used to
-     * silently `return` here with NO CHECK() and NO g_fails increment --
-     * this whole section's ~2000+ checks would vanish from the run (e.g. if
-     * ever invoked from the wrong cwd) while main()'s final tally still
+    /* A missing/unreadable fixture must FAIL the whole binary via CHECK():
+     * a silent `return` here would drop this section's ~2000+ checks (e.g.
+     * when invoked from the wrong cwd) while main()'s final tally still
      * showed 0 fails and printed PASS, just with a smaller total-checks
-     * count. A missing fixture must FAIL the whole binary now, via the same
-     * CHECK() macro every other assertion in this file uses -- not reduce
-     * scope silently. */
+     * count. */
     if (!mr || !rr) {
         CHECK(0,
-              "section_delay_aec3: FIXTURE MISSING -- could not open "
+              "section_delay_aec: FIXTURE MISSING -- could not open "
               "'../wav/aec_record/aec_record_mic_10s.wav' / "
               "'../wav/aec_record/aec_record_ref_10s.wav' (must run from c_impl/); "
               "a missing/unreadable fixture must FAIL the whole test binary, not "
               "silently reduce its scope");
         fprintf(stderr,
-                "section_delay_aec3: could not open fixture "
+                "section_delay_aec: could not open fixture "
                 "'%s' / '%s' (must run from c_impl/)\n", mic_path, ref_path);
         if (mr) wav_close_read(mr);
         if (rr) wav_close_read(rr);
@@ -503,7 +320,7 @@ static void section_delay_aec3(void) {
           " 1000 hops at hop=160 (confirmed via Python `wave`: num_samples=160000 for"
           " both files); if this fails the fixture changed duration");
 
-    /* Pool-first construction: DelayAec3 is a metadata struct,
+    /* Pool-first construction: DelayAec is a metadata struct,
      * so this section owns the block the estimator's arrays live in.
      * Sized for the exact (16 kHz, hop=160, full bank) triple it drives. */
     {
@@ -511,7 +328,7 @@ static void section_delay_aec3(void) {
         delay_pool = delay_pool_init(&d, 16000, hop, DA_NUM_FILTERS, &why);
         CHECK(delay_pool != NULL,
               why ? why
-                  : "section_delay_aec3: delay_aec3_init on a caller-owned pool");
+                  : "section_delay_aec: delay_aec_init on a caller-owned pool");
         if (!delay_pool) {
             wav_close_read(mr); wav_close_read(rr);
             return;
@@ -523,21 +340,21 @@ static void section_delay_aec3(void) {
         int n_pre;
         if (gm < hop || gr < hop) break;
         hops_read++;
-        delay_aec3_accumulate_ex(&d, mic, ref, hop, 1);
+        delay_aec_accumulate_ex(&d, mic, ref, hop, 1);
 
         n_pre = d.est.matched_filter.number_pre_echo_updates;
         CHECK(n_pre >= 0 && n_pre <= DA_PRE_ECHO_UPDATES_TO_REPORT,
               "number_pre_echo_updates: never exceeds DA_PRE_ECHO_UPDATES_TO_REPORT");
         if (n_pre == DA_PRE_ECHO_UPDATES_TO_REPORT) reached_cap = 1;
 
-        CHECK(d.est.pending_count >= 0 && d.est.pending_count < DA_AEC3_BLOCK_SIZE,
-              "pending_count: stays inside [0, DA_AEC3_BLOCK_SIZE) every hop");
+        CHECK(d.est.pending_count >= 0 && d.est.pending_count < DA_BLOCK_SIZE,
+              "pending_count: stays inside [0, DA_BLOCK_SIZE) every hop");
     }
     wav_close_read(mr);
     wav_close_read(rr);
 
     CHECK(hops_read >= expected_min_hops,
-          "section_delay_aec3: processed fewer hops than the fixture's own WAV header"
+          "section_delay_aec: processed fewer hops than the fixture's own WAV header"
           " implies -- a truncated/short-read fixture must fail loudly here, not"
           " silently pass by running fewer loop iterations");
 
@@ -556,7 +373,7 @@ static void section_delay_aec3(void) {
         CHECK(at_cap == at_huge, "number_pre_echo_updates: '>=' decision identical at cap vs cap+1e6");
     }
     free(delay_pool);
-    printf("section_delay_aec3: done (%ld checks so far, %ld fails)\n", g_checks, g_fails);
+    printf("section_delay_aec: done (%ld checks so far, %ld fails)\n", g_checks, g_fails);
 }
 
 /* ════════════════════════════════════════════════════════════════════
@@ -625,8 +442,8 @@ static void section_epc_shadow(void) {
     CHECK(e.hangover == 0, "EpcDetector: hangover stays at 0, never goes negative");
 
     /* ShadowCopy, SC_GATE_STREAK mode: streak self-fires at
-     * SC_AEC3_STREAK_FRAMES and resets to 0 in the SAME call, so it can
-     * never persist above (SC_AEC3_STREAK_FRAMES - 1) between calls. Force
+     * SC_STREAK_FRAMES and resets to 0 in the SAME call, so it can
+     * never persist above (SC_STREAK_FRAMES - 1) between calls. Force
      * copy_allowed with a direct baseline poke (bypass the slow EMA
      * ramp-up; the increment/self-fire logic under test still runs for
      * real). */
@@ -635,11 +452,11 @@ static void section_epc_shadow(void) {
                               /*hop_size=*/128, /*sample_rate=*/16000);
     s.copy_err_baseline = 10.0f;   /* fast-forward past the EMA ramp */
     {
-        /* Mirrors epc_shadow.c's `static const int SC_AEC3_STREAK_FRAMES = 5`
+        /* Mirrors epc_shadow.c's `static const int SC_STREAK_FRAMES = 5`
          * -- a private tuning constant, deliberately not exposed via
          * epc_shadow.h (this test does not change that; it just needs the
          * same numeric value to state the invariant precisely). */
-        const int SC_AEC3_STREAK_FRAMES_MIRROR = 5;
+        const int SC_STREAK_FRAMES_MIRROR = 5;
         int max_seen = 0;
         for (i = 0; i < 100; i++) {
             ShadowCopyDecision dec = shadow_copy_update(
@@ -651,7 +468,7 @@ static void section_epc_shadow(void) {
                 /*delay_reliable=*/1);
             (void)dec;
             if (s.copy_counter > max_seen) max_seen = s.copy_counter;
-            CHECK(s.copy_counter < SC_AEC3_STREAK_FRAMES_MIRROR,
+            CHECK(s.copy_counter < SC_STREAK_FRAMES_MIRROR,
                   "ShadowCopy(STREAK): streak never reaches/exceeds its own fire threshold"
                   " (self-resets in the same call it would cross it)");
         }
@@ -686,7 +503,7 @@ static void section_epc_shadow(void) {
             const int hop_sizes[] = {128, 128, 256, 512};
             const int sample_rates[] = {8000, 16000, 16000, 48000};
             for (int grid = 0; grid < 4; ++grid) {
-                int warmup_hops = aec3_ms_to_hops(
+                int warmup_hops = aec_ms_to_hops(
                     500.0f, hop_sizes[grid], sample_rates[grid]);
                 ShadowCopy warmup;
                 shadow_copy_init_for_grid(
@@ -820,7 +637,7 @@ static void section_erl_estimator(void) {
      * ULPs above 0.5, so "new_erl(0.5) < erl_time_domain" never goes false
      * and the block re-arms hold_counter_time_domain every single call --
      * a test-setup trap, not a source bug). Keeping x2_sum under the gate
-     * instead means the fullband "arm to ERL_HOLD_HOPS" block never runs at
+     * instead means the fullband "arm to hold_hops" block never runs at
      * all, isolating hold_counter_time_domain as a pure decrement-from-
      * wherever-we-poke-it counter, which is what this specific test needs. */
     for (k = 0; k < nb; k++) { x2[k] = 1.0f; y2[k] = 1.0f; }
@@ -874,7 +691,7 @@ static void section_initial_state(void) {
 
 /* ════════════════════════════════════════════════════════════════════
  * filter_analyzer.c: blocks_since_reset (long, cap =
- * FA_CONVERGENCE_THRESHOLD_HOPS+1, reader is strict ">") + consistent.counter
+ * convergence_threshold_hops+1, reader is strict ">") + consistent.counter
  * (long, LONG_MAX-floored, bit-exact-parity-sensitive) -- both already
  * fixed, confirm.
  * ════════════════════════════════════════════════════════════════════ */
@@ -899,9 +716,9 @@ static void section_filter_analyzer(void) {
      * every call since filter_taps[0] is the only nonzero tap). */
     fa_update(&m, filter_taps, render_block, 160);
 
-    /* FA_CONVERGENCE_THRESHOLD_HOPS is gone (live-computed per instance now,
-     * not a compile-time constant) -- read the equivalent live field off
-     * the already-constructed `m` instance instead. */
+    /* convergence_threshold_hops is live-computed per instance, not a
+     * compile-time constant -- read it off the already-constructed `m`
+     * instance. */
     cap1 = m.convergence_threshold_hops + 1;   /* strict ">" reader downstream */
     m.blocks_since_reset = m.convergence_threshold_hops;
     fa_update(&m, filter_taps, render_block, 160);
@@ -925,9 +742,8 @@ static void section_filter_analyzer(void) {
 }
 
 int main(void) {
-    section_filter_plateau();
     section_aec_level();
-    section_delay_aec3();
+    section_delay_aec();
     section_filter_convergence();
     section_epc_shadow();
     section_filter_quality();

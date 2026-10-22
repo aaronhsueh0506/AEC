@@ -248,38 +248,72 @@ def test_set_preset_rejects_unknown_preset():
     assert aec.config.min_gain_floor_far_active_db == before
 
 
-def test_set_preset_rejects_no_floor():
-    """NO_FLOOR changes min_gain_split_floor_enabled, a boolean this ramped
-    scalar retarget cannot represent -- it must raise, not silently land on
-    balanced's -28 dB while leaving split_floor_enabled untouched (which
-    would look like a successful retarget but change nothing)."""
+def test_set_preset_allows_no_floor():
+    """NO_FLOOR changes min_gain_split_floor_enabled -- a boolean the ramped
+    scalar setters below it cannot represent on their own, which is why this
+    used to be rejected at runtime. Now that the gate has its own explicit
+    setter (set_split_floor_enabled), stepped immediately rather than
+    inferred from the dB setters, the retarget can land correctly: the gate
+    goes False, and the far-active dB value is whatever NO_FLOOR's own config
+    carries (inert once the gate is off, but still tracked in self.config so
+    a later retarget AWAY from NO_FLOOR has a consistent value to read)."""
     aec = AEC(AecConfig.from_preset(AecPreset.BALANCED))
-    before_db = aec.config.min_gain_floor_far_active_db
-    before_live = _live(aec._aec3_sg)
-    with pytest.raises(ValueError):
-        aec.set_preset(AecPreset.NO_FLOOR)
-    assert aec.config.min_gain_floor_far_active_db == before_db
-    assert aec.config.min_gain_split_floor_enabled is True
-    assert _live(aec._aec3_sg) == before_live
+    no_floor_cfg = AecConfig.from_preset(AecPreset.NO_FLOOR)
+    aec.set_preset(AecPreset.NO_FLOOR)
+    assert aec.config.min_gain_split_floor_enabled is False
+    assert aec.config.min_gain_floor_far_active_db == no_floor_cfg.min_gain_floor_far_active_db
+    assert aec.config.min_gain_floor_dt_db == no_floor_cfg.min_gain_floor_dt_db
+    assert aec._aec3_sg._split_floor_enabled is False
 
 
-def test_set_preset_rejects_retargeting_away_from_no_floor():
-    """The symmetric case of the guard above: an instance CONSTRUCTED with
-    NO_FLOOR must also reject retargeting to a ramped preset -- a name check
-    on the incoming preset alone (`preset is AecPreset.NO_FLOOR`) only catches
-    retargeting INTO NO_FLOOR, not away from an instance that already has
-    split_floor_enabled=False baked in. Without this, set_preset(BALANCED)
-    would update the two floor fields while split_floor_enabled stayed False
-    forever, silently keeping no_floor behavior under a 'balanced' label."""
+def test_set_preset_allows_retargeting_away_from_no_floor():
+    """The symmetric direction: an instance CONSTRUCTED with NO_FLOOR can be
+    retargeted back to a ramped preset, and must land on BOTH that preset's
+    gate (True) AND its two dB fields -- not just one of the two, which is
+    exactly the hazard class the old guard was invented to prevent (a caller
+    that fixes only the boolean, or only the scalar, and silently keeps a mix
+    of the two presets' behavior)."""
     aec = AEC(AecConfig.from_preset(AecPreset.NO_FLOOR))
     assert aec.config.min_gain_split_floor_enabled is False
-    before_db = aec.config.min_gain_floor_far_active_db
-    before_dt_db = aec.config.min_gain_floor_dt_db
-    with pytest.raises(ValueError):
-        aec.set_preset(AecPreset.BALANCED)
-    assert aec.config.min_gain_floor_far_active_db == before_db
-    assert aec.config.min_gain_floor_dt_db == before_dt_db
+    balanced_cfg = AecConfig.from_preset(AecPreset.BALANCED)
+    aec.set_preset(AecPreset.BALANCED)
+    assert aec.config.min_gain_split_floor_enabled is True
+    assert aec.config.min_gain_floor_far_active_db == balanced_cfg.min_gain_floor_far_active_db
+    assert aec.config.min_gain_floor_dt_db == balanced_cfg.min_gain_floor_dt_db
+    assert aec._aec3_sg._split_floor_enabled is True
+
+
+def test_set_preset_no_floor_round_trip():
+    """BALANCED -> NO_FLOOR -> AGGRESSIVE, each step checked against a fresh
+    instance of the target preset. Proves the fix covers the hazard the
+    retired guard warned about (gate and scalars never disagree), rather than
+    merely removing the guard and hoping."""
+    aec = AEC(AecConfig.from_preset(AecPreset.BALANCED))
+
+    def _assert_matches(preset):
+        fresh = AecConfig.from_preset(preset)
+        assert aec.config.min_gain_split_floor_enabled == fresh.min_gain_split_floor_enabled
+        assert aec.config.min_gain_floor_far_active_db == fresh.min_gain_floor_far_active_db
+        assert aec.config.min_gain_floor_dt_db == fresh.min_gain_floor_dt_db
+        assert aec._aec3_sg._split_floor_enabled == fresh.min_gain_split_floor_enabled
+
+    aec.set_preset(AecPreset.NO_FLOOR)
+    _assert_matches(AecPreset.NO_FLOOR)
+    aec.set_preset(AecPreset.AGGRESSIVE)
+    _assert_matches(AecPreset.AGGRESSIVE)
+
+
+def test_set_preset_no_floor_gate_steps_without_ramp():
+    """Mutation-style check that the gate is written through its OWN setter,
+    not inferred: if set_preset forgot to call set_split_floor_enabled, the
+    gate would silently stay at whatever it was before (the exact bug this
+    whole fix exists to avoid -- see the behavior-spec investigation's finding
+    that the 4ch pipeline's hand-rolled set_preset has precisely this gap
+    today). ramp_ms must not affect the gate at all -- it is not a scalar."""
+    aec = AEC(AecConfig.from_preset(AecPreset.BALANCED))
+    aec.set_preset(AecPreset.NO_FLOOR, ramp_ms=5000.0)
     assert aec.config.min_gain_split_floor_enabled is False
+    assert aec._aec3_sg._split_floor_enabled is False
 
 
 # ── mutation: the exact-landing branch must be load-bearing ──────────────

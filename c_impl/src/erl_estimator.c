@@ -9,12 +9,13 @@
  *   - max(erl[k], 0.01f) / min(1000.0f, 2.0f*erl[k]) compare directly in
  *     float32.
  *   - Fullband path is all float32; the two np.sum()-equivalent calls are
- *     pairwise f32 sums (f32_pairwise_sum), consumed directly as float32.
+ *     pairwise f32 sums (sk_pairwise_sum_tailfold_b_f32), consumed directly
+ *     as float32.
  */
 #include "erl_estimator.h"
 
-#include "aec3_scale.h"   /* aec3_per_bin_psd_threshold */
-#include "aec_simd_kernels.h"   /* sk_erl_bin_update_f32/sk_dec1_floorintmin_s32/sk_erl_hold_expire_f32 */
+#include "aec_scale.h"   /* aec_per_bin_psd_threshold */
+#include "utility/simd_aec.h"   /* sk_erl_bin_update_f32/sk_dec1_floorintmin_s32/sk_erl_hold_expire_f32 */
 
 #include <limits.h>   /* INT_MIN */
 #include <string.h>
@@ -25,12 +26,12 @@ void erl_estimator_init(ErlEstimator *e, int startup_phase_length_hops,
     int k;
     e->startup_hops = startup_phase_length_hops;
     e->n_bins = n_bins;
-    /* AEC3 1000 blocks (~4 s) hold-after-drop, computed live from hop and
+    /* 1000 blocks (~4 s) hold-after-drop, computed live from hop and
      * sample rate. */
-    e->hold_hops = aec3_ms_to_hops(4000.0f, hop_size, sample_rate);
-    /* self._x2_min = aec3_scale.per_bin_psd_threshold(_AEC3_X2_MIN, hop_size)
+    e->hold_hops = aec_ms_to_hops(4000.0f, hop_size, sample_rate);
+    /* self._x2_min = per_bin_psd_threshold(<reference X2 minimum>, hop_size)
      * (ref_hop default 160; no-op at hop=160); float32 end-to-end. */
-    e->x2_min = aec3_per_bin_psd_threshold(ERL_AEC3_X2_MIN, hop_size, 160);
+    e->x2_min = aec_per_bin_psd_threshold(ERL_X2_MIN, hop_size, 160);
     e->x2_min_total = e->x2_min * (float)n_bins;
     e->erl = erl_storage;
     e->hold_counters = hold_counters_storage;
@@ -59,42 +60,22 @@ void erl_estimator_update(ErlEstimator *e,
     const float *x2 = render_psd;
     const float *y2 = capture_psd;
 
-    /* Ceilinged at startup_hops to avoid signed overflow: the ONLY consumer of
-     * blocks_since_reset in this file/header is the `< startup_hops` comparison
-     * right below. Once the counter reaches startup_hops, further increments can
-     * never change that comparison's outcome (already false, stays false), so
-     * gating the increment on `< startup_hops` is observationally identical to
-     * an unbounded increment for every reachable state (an unbounded one would
-     * wrap after ~248 days of continuous uptime at 10 ms hops). */
+    /* Only the startup comparison reads this counter; saturation preserves it
+     * and prevents signed overflow during long-running streams. */
     if (e->blocks_since_reset < e->startup_hops) e->blocks_since_reset += 1;
     if (e->blocks_since_reset < e->startup_hops || !converged_filter) {
         return;
     }
 
-    /* Per-bin minimum-statistics update for k=1..n_bins-2, fused into one
-     * masked NEON pass (kernel 24): erl/x2/y2 advanced by +1 so lane j lines
-     * up with source index k=j+1; hold_counters passed unshifted since
-     * hold_counters[j] already IS hold_counters[k-1] once erl/x2/y2 are
-     * pre-offset (k-1 = (j+1)-1 = j). See aec_simd_kernels.h kernel 24's
-     * header comment for the fusion-safety/masking argument. */
+    /* Skip DC/Nyquist: erl/x2/y2 start at k=1; hold[j] already maps to
+     * k-1. See utility/simd_aec.h for the masked-update contract. */
     sk_erl_bin_update_f32(e->erl + 1, e->hold_counters, x2 + 1, y2 + 1,
                           e->x2_min, e->hold_hops, ERL_MIN_ERL,
                           e->n_bins - 2);
 
-    /* self._hold_counters -= 1, floored at INT_MIN (all n_bins-2 elements),
-     * kernel 25. Must run strictly after the loop above (reads/writes ALL of
-     * hold_counters, including bins the masked update above did not touch
-     * this hop) and strictly before the loop below (which reads the
-     * just-decremented values) -- three separate sequential kernel calls,
-     * not fused. Floored at INT_MIN, NOT at 0, to avoid signed overflow (same
-     * shape as this function's hold_counter_time_domain below and
-     * fullband_erle.c's hold_counter_inst_erle): floor-at-0 would satisfy kernel
-     * 26's `<= 0` check just below identically to an unbounded decrement, but
-     * hold_counters' raw values are ALSO compared bit-exact against Python by
-     * test/historical/parity_erl_estimator.c, which floor-at-0 desyncs from
-     * almost immediately. See kernel 25's header comment in aec_simd_kernels.h
-     * for the numpy-wraps-vs-C-UB-vs-C-saturates distinction and the flooring's
-     * NEON-wraparound safety at the INT_MIN boundary. */
+    /* Decrement every hold counter after the masked update, before expiry.
+     * Saturate at INT_MIN to avoid C signed overflow while retaining negative
+     * counter state; flooring at zero would change observable raw values. */
     sk_dec1_floorintmin_s32(e->hold_counters, e->n_bins - 2);
 
     /* Bins with hold counter <= 0 double toward _MAX_ERL, kernel 26. Same
@@ -108,9 +89,9 @@ void erl_estimator_update(ErlEstimator *e,
 
     /* Fullband ERL. x2_sum = pairwise f32 sum, consumed directly as float32. */
     {
-        float x2_sum = f32_pairwise_sum(x2, (size_t)e->n_bins);
+        float x2_sum = sk_pairwise_sum_tailfold_b_f32(x2, (size_t)e->n_bins);
         if (x2_sum > e->x2_min_total) {
-            float y2_sum = f32_pairwise_sum(y2, (size_t)e->n_bins);
+            float y2_sum = sk_pairwise_sum_tailfold_b_f32(y2, (size_t)e->n_bins);
             float new_erl = y2_sum / x2_sum;          /* f32 */
             if (new_erl < e->erl_time_domain) {
                 e->hold_counter_time_domain = e->hold_hops;
@@ -128,9 +109,8 @@ void erl_estimator_update(ErlEstimator *e,
      * field is the `<= 0` check immediately below (a level check -- floor-at-0
      * would leave that check's boolean outcome identical to an unbounded
      * decrement for every hop, same argument as hold_counters), BUT this field's
-     * raw integer value is ALSO compared bit-exact by
-     * test/historical/parity_erl_estimator.c, which mirrors
-     * python/modules/state/erl_estimator.py's own
+     * raw integer value is ALSO observable (test_counter_saturation.c reads it)
+     * and must track python/modules/state/erl_estimator.py's own
      * `_hold_counter_time_domain -= 1` (an ordinary Python int -- no floor, no
      * wraparound). Floor-at-0 pins the value the hop after it first goes
      * non-positive, while Python's keeps counting down (-1, -2, -3, ...), so the
@@ -148,10 +128,3 @@ void erl_estimator_update(ErlEstimator *e,
     }
 }
 
-const float *erl_estimator_erl(const ErlEstimator *e) {
-    return e->erl;
-}
-
-float erl_estimator_erl_time_domain(const ErlEstimator *e) {
-    return e->erl_time_domain;
-}

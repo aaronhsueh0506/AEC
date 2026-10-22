@@ -1,15 +1,13 @@
 /* filter_analyzer.h — C port (float32) of
- * python/modules/state/filter_analyzer.py (single-channel AEC3 FilterAnalyzer,
- * mirrors AEC3 filter_analyzer.{cc,h}).
+ * python/modules/state/filter_analyzer.py (single-channel FilterAnalyzer,
+ * the reference filter analyzer).
  *
  * Per-hop ``fa_update(filter_taps, render_block)`` produces:
  *   - fa_min_filter_delay_blocks() -> peak_index // HOP_SAMPLES
- *   - fa_any_filter_consistent()   -> ConsistentFilterDetector verdict
  *   - fa_max_echo_path_gain()      -> |h[peak]| (post 5 s convergence)
- *   - fa_get_adjusted_filters()    -> the high-pass-filtered TD taps
  *
  * The peak-finding region cycles incrementally over the full filter length,
- * processing HOP_SAMPLES samples per call. The HPF is the AEC3 verbatim 3-tap
+ * processing HOP_SAMPLES samples per call. The HPF is the reference 3-tap
  * minimum-phase ~600 Hz cutoff filter.
  *
  * FLOAT32 notes (shapes for preset=balanced fl=832 hop=160; drift versus
@@ -20,11 +18,13 @@
  *   - _gain : float32; _peak_index / _delay_blocks : int.
  *   - ConsistentFilterDetector floor accumulators:
  *       * np.abs(filter_taps_slice).sum()  -> float32 PAIRWISE sum
- *         (f32_pairwise_sum), accumulated directly into _floor_accum (float32).
+ *         (sk_pairwise_sum_tailfold_b_f32), accumulated directly into
+ *         _floor_accum (float32).
  *       * seg.max(initial=0.0)             -> float32 max, stored directly.
  *       * render active power
  *         (render_block**2).sum() -> float32 PAIRWISE sum
- *         (f32_pairwise_sum) compared > _active_render_threshold (float32).
+ *         (sk_sum_sq_pairwise_f32) compared > _active_render_threshold
+ *         (float32).
  *   - peak find: h[k]*h[k] in float32; np.argmax returns FIRST max index.
  *
  * Build with -ffp-contract=off so the float32 multiply/add/compare is not fused.
@@ -57,7 +57,7 @@ typedef struct {
     int    floor_high_limit;
     long   counter;
     int    delay_ref;                /* starts at -10                           */
-    int    consistent_hold_hops;     /* live-computed, was FA_CONSISTENT_HOLD_HOPS=150 */
+    int    consistent_hold_hops;     /* derived from the live grid; 150 hops at 16 kHz/160 */
 } FaConsistentDetector;
 
 typedef struct {
@@ -75,8 +75,8 @@ typedef struct {
     int    delay_blocks;
 
     int    size;                     /* filter length (== filter_taps size)     */
-    int    hop_size;                 /* live grid, was FA_HOP_SAMPLES=160       */
-    int    convergence_threshold_hops; /* live-computed, was FA_CONVERGENCE_THRESHOLD_HOPS=500 */
+    int    hop_size;                 /* live grid (160 at 16 kHz)                */
+    int    convergence_threshold_hops; /* derived from the live grid; 500 hops at 16 kHz/160 */
     float *h_highpass;               /* owned by caller; length `size`, f32     */
 
     /* fa_update() scratch (abs_scratch / render_sq_scratch): kept off the stack,
@@ -139,13 +139,6 @@ void fa_update(FilterAnalyzer *m, const float *filter_taps,
 
 /* Public queries. */
 int    fa_min_filter_delay_blocks(const FilterAnalyzer *m);
-int    fa_any_filter_consistent(const FilterAnalyzer *m);
 float  fa_max_echo_path_gain(const FilterAnalyzer *m);
-int    fa_peak_index(const FilterAnalyzer *m);
-const float *fa_get_adjusted_filters(const FilterAnalyzer *m);
-
-/* float32 pairwise sum (numpy-1.26-shaped reduction tree; exposed for the
- * parity test). */
-float  fa_f32_pairwise_sum(const float *a, size_t n);
 
 #endif /* FILTER_ANALYZER_H */

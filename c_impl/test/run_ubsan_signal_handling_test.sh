@@ -15,7 +15,7 @@
 # ">>> PASS" / "UBSan probe: PASS", exit 0, as if nothing had interrupted
 # it -- exactly what a caller (timeout wrapper, supervisor doing graceful
 # shutdown) must not see. Sending the signal during the earlier
-# audio_common-build phase instead corrupted the run differently: the
+# audiolib-build phase instead corrupted the run differently: the
 # (no-op-for-continuation) trap deleted the scratch dir mid-flight,
 # so the next step's archive-link failed with an "archive not found"-style
 # message and rc=1 -- also not the correct, intentional signal-exit-code
@@ -31,7 +31,7 @@
 #     trap 'exit 143' TERM
 #
 # WHAT THIS TEST DOES, for BOTH scripts, sending SIGINT and separately
-# SIGTERM at two distinct moments -- (i) during the audio_common-build
+# SIGTERM at two distinct moments -- (i) during the audiolib-build
 # phase (run_counter_saturation_ubsan.sh only; run_selftest_ubsan.sh has no
 # such phase) and (ii) while the compiled test binary itself is executing:
 #   - asserts the script's own final exit code is exactly 130 (SIGINT) /
@@ -46,7 +46,7 @@
 # It also re-confirms a normal, uninterrupted run of each script still
 # prints "UBSan probe: PASS" and exits 0 (both default and
 # --use-standard-math), and that this repo's own c_impl/obj + c_impl/bin
-# and audio_common's obj + bin trees are byte-for-byte untouched
+# and audiolib's obj + bin trees are byte-for-byte untouched
 # (sha256 + mtime snapshot before/after) across ALL of the above runs, not
 # just the normal one -- these two UBSan scripts are scratch-isolated
 # specifically so a run (interrupted or not) can never touch a real build
@@ -67,13 +67,13 @@
 #     exits does the (old, buggy or new, fixed) trap actually fire. This is
 #     exactly why the old bug looked like "the run continued to completion
 #     and printed a false PASS" instead of an abrupt kill.
-#   - For the audio_common-build phase specifically, this test overrides
+#   - For the audiolib-build phase specifically, this test overrides
 #     MAKE=<a tiny wrapper> to insert an artificial delay before the real
 #     `make ... lib` call -- both scripts already support MAKE=... as an
 #     explicit override hook, so this needs no edit to either script under
 #     test, and it turns a build phase that is normally too fast (~0.3 s on
 #     this host) to reliably land a signal in in into a wide, deterministic
-#     window, without changing what "during the audio_common-build phase"
+#     window, without changing what "during the audiolib-build phase"
 #     means from the target script's point of view (it is still the same
 #     single foreground `"${MAKE:-make}" ... lib` line, just slower).
 #   - `set -m` (job control) is REQUIRED in this harness. POSIX/bash forces
@@ -271,18 +271,18 @@ set -m
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR/.."   # c_impl/
 
-AC_DIR=${AC_DIR:-}
-if [ -z "$AC_DIR" ]; then
-    if [ -d ../../audio_common ]; then
-        AC_DIR=../../audio_common
-    elif [ -d ../../../../audio_common ]; then
-        AC_DIR=../../../../audio_common
+COMMON_DIR=${COMMON_DIR:-}
+if [ -z "$COMMON_DIR" ]; then
+    if [ -d ../../audiolib/common ]; then
+        COMMON_DIR=../../audiolib/common
+    elif [ -d ../../../../audiolib/common ]; then
+        COMMON_DIR=../../../../audiolib/common
     else
-        echo "FATAL: could not auto-detect audio_common (set AC_DIR=...)" >&2
+        echo "FATAL: could not auto-detect audiolib (set COMMON_DIR=...)" >&2
         exit 1
     fi
 fi
-AC_DIR="$(cd "$AC_DIR" && pwd)"
+COMMON_DIR="$(cd "$COMMON_DIR" && pwd)"
 C_IMPL_DIR="$(pwd)"
 
 PASS_COUNT=0
@@ -354,7 +354,7 @@ sha_line() {
 }
 
 # Tiny MAKE=... wrapper (test-harness-only technique, not a script edit):
-# delays the audio_common "lib" build call so the build-phase trials get a
+# delays the audiolib "lib" build call so the build-phase trials get a
 # wide, deterministic window. Touches SLOWMAKE_MARKER right before the
 # delay so the harness can detect "we are now inside this foreground
 # command" without guessing at timing.
@@ -519,15 +519,15 @@ snapshot_tree_root() {
 snapshot_real_trees() {
     snapshot_tree_root "$C_IMPL_DIR/obj" mtime
     snapshot_tree_root "$C_IMPL_DIR/bin" mtime
-    snapshot_tree_root "$AC_DIR/obj" mtime
-    snapshot_tree_root "$AC_DIR/bin" mtime
+    snapshot_tree_root "$COMMON_DIR/obj" mtime
+    snapshot_tree_root "$COMMON_DIR/bin" mtime
 }
 
 snapshot_real_trees_sha() {
     snapshot_tree_root "$C_IMPL_DIR/obj" sha
     snapshot_tree_root "$C_IMPL_DIR/bin" sha
-    snapshot_tree_root "$AC_DIR/obj" sha
-    snapshot_tree_root "$AC_DIR/bin" sha
+    snapshot_tree_root "$COMMON_DIR/obj" sha
+    snapshot_tree_root "$COMMON_DIR/bin" sha
 }
 
 # --- readiness detection -----------------------------------------------
@@ -1703,15 +1703,15 @@ if [ "$rc" -ne 0 ]; then
 fi
 
 if [ "$SNAP_MTIME_BEFORE" = "$SNAP_MTIME_AFTER" ]; then
-    pass "real c_impl/obj+bin and audio_common obj+bin mtimes unchanged across all runs"
+    pass "real c_impl/obj+bin and audiolib obj+bin mtimes unchanged across all runs"
 else
-    fail "real c_impl/obj+bin and audio_common obj+bin mtimes CHANGED across the runs above"
+    fail "real c_impl/obj+bin and audiolib obj+bin mtimes CHANGED across the runs above"
 fi
 
 if [ "$SNAP_SHA_BEFORE" = "$SNAP_SHA_AFTER" ]; then
-    pass "real c_impl/obj+bin and audio_common obj+bin sha256 unchanged across all runs"
+    pass "real c_impl/obj+bin and audiolib obj+bin sha256 unchanged across all runs"
 else
-    fail "real c_impl/obj+bin and audio_common obj+bin sha256 CHANGED across the runs above"
+    fail "real c_impl/obj+bin and audiolib obj+bin sha256 CHANGED across the runs above"
 fi
 
 # --- Final full-sweep leftover-process check (regression review) -------------

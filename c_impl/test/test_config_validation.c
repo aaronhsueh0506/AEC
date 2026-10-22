@@ -14,21 +14,23 @@
  * `make test-static-aec` release gate; this file deliberately remains a
  * focused config-validation executable. The manual recipe is retained for
  * bring-up environments that do not use this repository's Makefile:
- *   make -C ../../audio_common BACKEND=kiss lib
+ *   make -C ../../audiolib/common lib
  *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=gnu99 -Iinclude -Iexample \
- *       -I../../audio_common/include \
+ *       -I../../audiolib/common/include \
+ *       -I../../audiolib/common \
  *       test/test_config_validation.c $(find src -name '*.c') \
- *       $(make -s -C ../../audio_common BACKEND=kiss print-lib-path) -lm \
+ *       $(make -s -C ../../audiolib/common print-lib-path) -lm \
  *       -o bin/test_config_validation
  * Run:
  *   ./bin/test_config_validation
  */
 #include "aec.h"
-/* AEC3B_RATE_TABLE / aec3b_rate_cfg(): the AEC3 tuning table carries its
+#include "aec_pool_test_util.h"
+/* AECB_RATE_TABLE / aecb_rate_cfg(): the tuning table carries its
  * own {n_bins, fft_size, block_size, hop_size} alongside ~40 tuning
  * constants. test_signal_grid_resolver() pins it against the shared
  * resolver so the instance can never be split across two grids. */
-#include "aec3_balanced_config.h"
+#include "aec_balanced_config.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -74,8 +76,8 @@ static void test_sample_rate(void) {
     AecConfig valid_cfg; base_cfg(&valid_cfg);
     size_t sz = aec_get_mem_size(&valid_cfg);
     CHECK(sz > 0, "sample_rate test setup: valid 16k config sizes > 0");
-    void* mem = malloc(sz);
-    CHECK(mem != NULL, "sample_rate test setup: malloc aligned pool");
+    void* mem = aec_test_pool_alloc(sz);
+    CHECK(mem != NULL, "sample_rate test setup: aligned pool");
 
     /* The whitelist is {8000, 16000, 48000} (see test_multi_rate_valid_smoke
      * below for the positive coverage). 44100 has no per-rate table and is
@@ -94,8 +96,8 @@ static void test_sample_rate(void) {
 static void test_filter_length(void) {
     AecConfig valid_cfg; base_cfg(&valid_cfg);
     size_t sz = aec_get_mem_size(&valid_cfg);
-    void* mem = malloc(sz);
-    CHECK(mem != NULL, "filter_length test setup: malloc aligned pool");
+    void* mem = aec_test_pool_alloc(sz);
+    CHECK(mem != NULL, "filter_length test setup: aligned pool");
 
     int bad_lengths[] = { 0, -1, INT_MAX };
     for (size_t i = 0; i < sizeof(bad_lengths) / sizeof(bad_lengths[0]); ++i) {
@@ -147,7 +149,7 @@ static void test_misaligned_base(void) {
 }
 
 /* highpass_cutoff_hz must be checked against hpf_init()'s rate-relative rule,
- * not a flat, rate-blind [0, 20000] Hz range: hpf_init() (audio_common
+ * not a flat, rate-blind [0, 20000] Hz range: hpf_init() (audiolib
  * hpf.c, called from aec_carve whenever enable_highpass is set) rejects any
  * cutoff_hz that isn't finite, isn't > 0, or isn't < 0.45*sample_rate --
  * silently returning NULL and leaving the AEC instance with no mic-path HPF,
@@ -161,18 +163,18 @@ static void test_highpass_cutoff(void) {
     AecConfig valid_cfg; base_cfg(&valid_cfg);
     size_t sz = aec_get_mem_size(&valid_cfg);
     CHECK(sz > 0, "highpass test setup: valid 16k config sizes > 0");
-    void* mem = malloc(sz);
-    CHECK(mem != NULL, "highpass test setup: malloc aligned pool");
+    void* mem = aec_test_pool_alloc(sz);
+    CHECK(mem != NULL, "highpass test setup: aligned pool");
 
     /* Negative cases: {sample_rate, cutoff_hz} pairs that hpf_params_valid
-     * (audio_common hpf.c) rejects -- includes the exact 0.45*sample_rate
+     * (audiolib hpf.c) rejects -- includes the exact 0.45*sample_rate
      * boundary (rejected: hpf_params_valid uses `>=`) at all three
      * whitelisted rates, plus NaN/0/negative, all with enable_highpass=1. */
     struct { int sr; float cutoff; } bad_hp[] = {
         { 8000,  4000.0f },              /* > 0.45*8000=3600 */
         { 8000,  3600.0f },              /* == 0.45*8000 boundary, rejected */
         { 16000, 7200.0f },              /* == 0.45*16000 boundary, rejected */
-        { 16000, 20000.0f },             /* old flat bound's own ceiling, still way over 0.45*sr */
+        { 16000, 20000.0f },             /* flat ceiling, still way over 0.45*sr */
         { 48000, 21600.0f },             /* == 0.45*48000 boundary, rejected */
         { 8000,  NAN },                  /* NaN */
         { 16000, 0.0f },                 /* not > 0 */
@@ -242,8 +244,8 @@ static void test_highpass_cutoff(void) {
         CHECK(gsz > 0, what);
         if (gsz == 0) continue;
 
-        void* gmem = malloc(gsz);
-        snprintf(what, sizeof(what), "highpass sr=%d cutoff=%g: malloc pool",
+        void* gmem = aec_test_pool_alloc(gsz);
+        snprintf(what, sizeof(what), "highpass sr=%d cutoff=%g: aligned pool",
                  good_hp[i].sr, (double)good_hp[i].cutoff);
         CHECK(gmem != NULL, what);
         if (!gmem) continue;
@@ -286,7 +288,7 @@ static void test_highpass_cutoff(void) {
 static void test_linear_only_level_requires_context_only(void) {
     AecConfig valid_cfg; base_cfg(&valid_cfg);
     size_t sz = aec_get_mem_size(&valid_cfg);
-    void* mem = malloc(sz);
+    void* mem = aec_test_pool_alloc(sz);
     CHECK(sz > 0 && mem != NULL, "linear-only level test setup: pool allocated");
 
     {
@@ -339,17 +341,17 @@ static void test_linear_only_level_requires_context_only(void) {
     free(mem);
 }
 
-/* spatial_linear_context's whole premise (aec3_post_run Step 20/21) is that
+/* spatial_linear_context's whole premise (aec_post_run Step 20/21) is that
  * apply_output() never reads the skipped gain -- true only under
  * context_only (enable_res==0 && return_res_context==1). Every other
  * combination must be rejected by aec_validate_config() itself, not left to
- * the aec3_post_run() debug assert alone. */
+ * the aec_post_run() debug assert alone. */
 static void test_spatial_linear_context_requires_context_only(void) {
     AecConfig valid_cfg; base_cfg(&valid_cfg);
     size_t sz = aec_get_mem_size(&valid_cfg);
     CHECK(sz > 0, "spatial_linear_context test setup: valid 16k config sizes > 0");
-    void* mem = malloc(sz);
-    CHECK(mem != NULL, "spatial_linear_context test setup: malloc aligned pool");
+    void* mem = aec_test_pool_alloc(sz);
+    CHECK(mem != NULL, "spatial_linear_context test setup: aligned pool");
 
     {
         AecConfig cfg; base_cfg(&cfg);
@@ -412,8 +414,8 @@ static void test_valid_config_smoke(void) {
     size_t sz = aec_get_mem_size(&cfg);
     CHECK(sz > 0, "valid 16k balanced: aec_get_mem_size() > 0");
 
-    void* mem = malloc(sz);
-    CHECK(mem != NULL, "valid 16k balanced: malloc pool");
+    void* mem = aec_test_pool_alloc(sz);
+    CHECK(mem != NULL, "valid 16k balanced: aligned pool");
     if (!mem) return;
 
     Aec* a = aec_init(mem, sz, &cfg);
@@ -452,8 +454,8 @@ static void test_multi_rate_valid_smoke(void) {
         snprintf(what, sizeof(what), "sr=%d: aec_get_mem_size() > 0", sr);
         CHECK(sz > 0, what);
 
-        void* mem = malloc(sz);
-        snprintf(what, sizeof(what), "sr=%d: malloc pool", sr);
+        void* mem = aec_test_pool_alloc(sz);
+        snprintf(what, sizeof(what), "sr=%d: aligned pool", sr);
         CHECK(mem != NULL, what);
         if (!mem) continue;
 
@@ -501,7 +503,11 @@ static void test_multi_rate_valid_smoke(void) {
  * it retimes alpha_r/initial_state_threshold_hops and the
  * saturation attack/release pair. An unchecked sample_rate=0 would make
  * hop_seconds infinite and powf() return 0 or NaN, i.e. an EMA that never
- * adapts or a filter full of NaN, reported by nothing. */
+ * adapts or a filter full of NaN, reported by nothing.
+ *
+ * The filters are pool-first (pbfdaf_init_static / pbfdkf_init_static), so
+ * each guard must also leave both the instance and the caller-owned pool
+ * untouched when it refuses. */
 static void test_direct_init_rejects_bad_rate(void) {
     PBFDAF f;
     PBFDAF f_before;
@@ -509,34 +515,6 @@ static void test_direct_init_rejects_bad_rate(void) {
     PBFDKF k_before;
     Saturation s;
 
-    memset(&f, 0xA5, sizeof(f));
-    memcpy(&f_before, &f, sizeof(f));
-    CHECK(pbfdaf_init(&f, 256, 4, 0.3f, 1e-6f, 128, 0, 0) == -1,
-          "pbfdaf_init(sample_rate=0) == -1");
-    CHECK(memcmp(&f, &f_before, sizeof(f)) == 0,
-          "pbfdaf_init(sample_rate=0) writes no instance state");
-    CHECK(pbfdaf_init(&f, 256, 4, 0.3f, 1e-6f, 128, 0, -16000) == -1,
-          "pbfdaf_init(sample_rate<0) == -1");
-    CHECK(pbfdaf_init(&f, 0, 4, 0.3f, 1e-6f, 0, 0, 16000) == -1,
-          "pbfdaf_init(resolved hop=0) == -1");
-    CHECK(pbfdaf_init(NULL, 256, 4, 0.3f, 1e-6f, 128, 0, 16000) == -1,
-          "pbfdaf_init(NULL) == -1");
-
-    memset(&k, 0xA5, sizeof(k));
-    memcpy(&k_before, &k, sizeof(k));
-    CHECK(pbfdkf_init(&k, 256, 4, 0.3f, 1e-6f, 128, 0) == -1,
-          "pbfdkf_init(sample_rate=0) == -1");
-    CHECK(memcmp(&k, &k_before, sizeof(k)) == 0,
-          "pbfdkf_init(sample_rate=0) writes no instance state");
-    CHECK(pbfdkf_init(&k, 0, 4, 0.3f, 1e-6f, 0, 16000) == -1,
-          "pbfdkf_init(resolved hop=0) == -1");
-    CHECK(pbfdkf_init(NULL, 256, 4, 0.3f, 1e-6f, 128, 16000) == -1,
-          "pbfdkf_init(NULL) == -1");
-
-    /* The pool-first variants are separate public entry points. They must
-     * enforce the same grid precondition before touching either the instance
-     * or caller-owned pool; relying on the heap constructor's guard does not
-     * protect these paths. */
     {
         size_t af_bytes = pbfdaf_get_mem_size(256, 4, 128, 0);
         size_t kf_bytes = pbfdkf_get_mem_size(256, 4, 128);
@@ -552,48 +530,71 @@ static void test_direct_init_rejects_bad_rate(void) {
         if (raw && snapshot && shared_fft) {
             memset(pool, 0xA5, pool_bytes);
             memcpy(snapshot, pool, pool_bytes);
-            memset(&f, 0xA5, sizeof(f));
-            memcpy(&f_before, &f, sizeof(f));
+
+/* One refused call: it returns -1 and leaves the instance (pre-filled with a
+ * recognisable pattern) and the pool exactly as they were. */
+#define REFUSED_AF(label, ...) do { \
+        memset(&f, 0xA5, sizeof(f)); \
+        memcpy(&f_before, &f, sizeof(f)); \
+        CHECK(pbfdaf_init_static(__VA_ARGS__) == -1, label " == -1"); \
+        CHECK(memcmp(&f, &f_before, sizeof(f)) == 0 && \
+              memcmp(pool, snapshot, pool_bytes) == 0, \
+              label " writes neither instance nor pool"); \
+    } while (0)
+#define REFUSED_KF(label, ...) do { \
+        memset(&k, 0xA5, sizeof(k)); \
+        memcpy(&k_before, &k, sizeof(k)); \
+        CHECK(pbfdkf_init_static(__VA_ARGS__) == -1, label " == -1"); \
+        CHECK(memcmp(&k, &k_before, sizeof(k)) == 0 && \
+              memcmp(pool, snapshot, pool_bytes) == 0, \
+              label " writes neither instance nor pool"); \
+    } while (0)
+
+            REFUSED_AF("pbfdaf_init_static(sample_rate=0)",
+                       &f, pool, af_bytes, 256, 4, 0.3f, 1e-6f, 128, 0, 0,
+                       shared_fft);
+            REFUSED_AF("pbfdaf_init_static(sample_rate<0)",
+                       &f, pool, af_bytes, 256, 4, 0.3f, 1e-6f, 128, 0, -16000,
+                       shared_fft);
+            REFUSED_AF("pbfdaf_init_static(resolved hop=0)",
+                       &f, pool, af_bytes, 0, 4, 0.3f, 1e-6f, 0, 0, 16000,
+                       shared_fft);
+            REFUSED_AF("pbfdaf_init_static(NULL)",
+                       NULL, pool, af_bytes, 256, 4, 0.3f, 1e-6f, 128, 0, 16000,
+                       shared_fft);
+
+            REFUSED_KF("pbfdkf_init_static(sample_rate=0)",
+                       &k, pool, kf_bytes, 256, 4, 0.3f, 1e-6f, 128, 0,
+                       shared_fft);
+            REFUSED_KF("pbfdkf_init_static(sample_rate<0)",
+                       &k, pool, kf_bytes, 256, 4, 0.3f, 1e-6f, 128, -16000,
+                       shared_fft);
+            REFUSED_KF("pbfdkf_init_static(resolved hop=0)",
+                       &k, pool, kf_bytes, 0, 4, 0.3f, 1e-6f, 0, 16000,
+                       shared_fft);
+            REFUSED_KF("pbfdkf_init_static(NULL)",
+                       NULL, pool, kf_bytes, 256, 4, 0.3f, 1e-6f, 128, 16000,
+                       shared_fft);
+#undef REFUSED_AF
+#undef REFUSED_KF
+
+            /* A valid rate must still succeed -- otherwise the guards above
+             * would be indistinguishable from "always fails". */
             CHECK(pbfdaf_init_static(&f, pool, af_bytes, 256, 4,
-                                     0.3f, 1e-6f, 128, 0, 0,
-                                     shared_fft) == -1,
-                  "pbfdaf_init_static(sample_rate=0) == -1");
-            CHECK(memcmp(&f, &f_before, sizeof(f)) == 0 &&
-                  memcmp(pool, snapshot, pool_bytes) == 0,
-                  "pbfdaf_init_static bad grid writes neither instance nor pool");
-
-            memset(&k, 0xA5, sizeof(k));
-            memcpy(&k_before, &k, sizeof(k));
+                                     0.3f, 1e-6f, 128, 0, 16000,
+                                     shared_fft) == 0,
+                  "pbfdaf_init_static(sample_rate=16000) == 0 (guard is not blanket)");
+            pbfdaf_free(&f);
             CHECK(pbfdkf_init_static(&k, pool, kf_bytes, 256, 4,
-                                     0.3f, 1e-6f, 128, 0,
-                                     shared_fft) == -1,
-                  "pbfdkf_init_static(sample_rate=0) == -1");
-            CHECK(memcmp(&k, &k_before, sizeof(k)) == 0 &&
-                  memcmp(pool, snapshot, pool_bytes) == 0,
-                  "pbfdkf_init_static bad grid writes neither instance nor pool");
-
-            CHECK(pbfdaf_init_static(&f, pool, af_bytes, 0, 4,
-                                     0.3f, 1e-6f, 0, 0, 16000,
-                                     shared_fft) == -1,
-                  "pbfdaf_init_static(resolved hop=0) == -1");
-            CHECK(pbfdkf_init_static(&k, pool, kf_bytes, 0, 4,
-                                     0.3f, 1e-6f, 0, 16000,
-                                     shared_fft) == -1,
-                  "pbfdkf_init_static(resolved hop=0) == -1");
+                                     0.3f, 1e-6f, 128, 16000,
+                                     shared_fft) == 0,
+                  "pbfdkf_init_static(sample_rate=16000) == 0 (guard is not blanket)");
+            pbfdkf_free(&k);
         }
         if (shared_fft) fft_destroy(shared_fft);
         free(snapshot);
         free(raw);
     }
-
-    /* A valid rate must still succeed -- otherwise the guard above would be
-     * indistinguishable from "always fails". */
-    CHECK(pbfdaf_init(&f, 256, 4, 0.3f, 1e-6f, 128, 0, 16000) == 0,
-          "pbfdaf_init(sample_rate=16000) == 0 (guard is not blanket)");
-    pbfdaf_free(&f);
-    CHECK(pbfdkf_init(&k, 256, 4, 0.3f, 1e-6f, 128, 16000) == 0,
-          "pbfdkf_init(sample_rate=16000) == 0 (guard is not blanket)");
-    pbfdkf_free(&k);
 
     /* saturation_init returns void, so the fallback is the observable: the
      * retentions stay at their authoring values instead of going NaN. */
@@ -608,7 +609,7 @@ static void test_direct_init_rejects_bad_rate(void) {
 /* ── shared signal-grid resolver: lockstep across every entry point ───────
  * (sample_rate, fft_size) admissibility (aec_validate_config()), the
  * `hop = fft/2` / `K = fft/2+1` derivation (aec_derive_dims()) and
- * AEC3B_RATE_TABLE's geometry columns all read one resolver, and this section
+ * AECB_RATE_TABLE's geometry columns all read one resolver, and this section
  * is what keeps that true.
  *
  * Proven here, on all four supported grids (the three product grids plus
@@ -620,7 +621,7 @@ static void test_direct_init_rejects_bad_rate(void) {
  *   2. LOCKSTEP — the grid aec_get_mem_size() sized against == the grid
  *      aec_init()/aec_create() initialised against == the hop aec_process()
  *      actually consumes, on BOTH construction paths, AND == the geometry
- *      AEC3B_RATE_TABLE hands the AEC3 post chain.
+ *      AECB_RATE_TABLE hands the post-filter chain.
  *   3. NO GUESSING — fft_size == 0 ("auto") is rejected by all three entry
  *      points; so is every mismatched pair (16k/1024, 48k/256, 8k/512, ...).
  *      16 kHz has TWO production grids, so a library that guessed would
@@ -628,7 +629,7 @@ static void test_direct_init_rejects_bad_rate(void) {
  *
  * Mutation checks:
  *   - editing one AEC_GRID_TABLE row's hop (16k/512: 256 -> 128) turns rows
- *     1 and 2's "as tabled" / "AEC3B_RATE_TABLE agrees" red (2 failures) --
+ *     1 and 2's "as tabled" / "AECB_RATE_TABLE agrees" red (2 failures) --
  *     the table is genuinely load-bearing, not decoration;
  *   - additionally making aec_derive_dims re-derive `hop = fft/2` itself
  *     instead of calling aec_resolve_signal_grid turns the LOCKSTEP rows
@@ -640,14 +641,14 @@ static void test_direct_init_rejects_bad_rate(void) {
  *   - KNOWN GAP: removing the
  *     aec_resolve_signal_grid() call from aec_validate_config() alone does
  *     NOT turn this section red. Rejection still happens one layer later,
- *     because aec3b_rate_cfg() returns NULL for an unsupported pair and
- *     aec_get_mem_size() propagates that as 0 -- i.e. AEC3B_RATE_TABLE is a
+ *     because aecb_rate_cfg() returns NULL for an unsupported pair and
+ *     aec_get_mem_size() propagates that as 0 -- i.e. AECB_RATE_TABLE is a
  *     de facto second admissibility gate today. The observable public
  *     contract (all three entry points reject) is what this section pins,
  *     and it holds either way; collapsing that second gate onto the
- *     resolver means sourcing AEC3B_RATE_TABLE's four grid columns from
+ *     resolver means sourcing AECB_RATE_TABLE's four grid columns from
  *     AEC_GRID_TABLE, which is future work. The
- *     "AEC3B_RATE_TABLE agrees with the resolver" row above is what keeps
+ *     "AECB_RATE_TABLE agrees with the resolver" row above is what keeps
  *     the two honest until then. */
 static void test_signal_grid_resolver(void) {
     struct { int sr, fft, frame, hop, K, legacy; const char* tag; } grids[] = {
@@ -671,12 +672,12 @@ static void test_signal_grid_resolver(void) {
         snprintf(label, sizeof(label), "%s: is_legacy flag", grids[i].tag);
         CHECK(g.is_legacy == grids[i].legacy, label);
 
-        /* The AEC3 tuning table must describe the SAME geometry. It is not
+        /* The tuning table must describe the SAME geometry. It is not
          * a second resolver -- nothing consults it for admissibility -- but
          * it does hand the post chain its own n_bins/fft/block/hop, so a
          * divergence would split the instance across two grids. */
-        const Aec3BalancedRateDims* rd = aec3b_rate_cfg(grids[i].sr, grids[i].fft);
-        snprintf(label, sizeof(label), "%s: AEC3B_RATE_TABLE agrees with the resolver",
+        const AecBalancedRateDims* rd = aecb_rate_cfg(grids[i].sr, grids[i].fft);
+        snprintf(label, sizeof(label), "%s: AECB_RATE_TABLE agrees with the resolver",
                  grids[i].tag);
         CHECK(rd != NULL && rd->fft_size == g.fft_size &&
               rd->block_size == g.frame_size && rd->hop_size == g.hop_size &&
@@ -690,7 +691,7 @@ static void test_signal_grid_resolver(void) {
         snprintf(label, sizeof(label), "%s: aec_get_mem_size() > 0", grids[i].tag);
         CHECK(need > 0, label);
 
-        void* pool = malloc(need);
+        void* pool = aec_test_pool_alloc(need);
         Aec* pa = aec_init(pool, need, &cfg);
         snprintf(label, sizeof(label), "%s: aec_init() != NULL", grids[i].tag);
         CHECK(pa != NULL, label);
@@ -744,7 +745,7 @@ static void test_signal_grid_resolver(void) {
     {
         AecConfig valid_cfg; base_cfg(&valid_cfg);
         size_t sz = aec_get_mem_size(&valid_cfg);
-        void* mem = malloc(sz);
+        void* mem = aec_test_pool_alloc(sz);
         int rates[] = { 8000, 16000, 48000 };
         for (size_t i = 0; i < sizeof(rates) / sizeof(rates[0]); ++i) {
             snprintf(label, sizeof(label),
@@ -809,7 +810,7 @@ static void test_signal_grid_resolver(void) {
                   label);
         }
         /* An unsupported rate gets fft_size 0 -- which the core then
-         * rejects, exactly as the old inline expression did. */
+         * rejects. */
         AecConfig c; aec_config_defaults(&c, 44100);
         CHECK(c.fft_size == 0 && aec_default_fft_size(44100) == 0,
               "aec_config_defaults(sr=44100) leaves fft_size=0 (rejected later)");
@@ -912,8 +913,8 @@ static void test_delay_mode_illegal_combinations(void) {
     AecConfig valid_cfg; base_cfg(&valid_cfg);
     size_t sz = aec_get_mem_size(&valid_cfg);
     CHECK(sz > 0, "delay-mode test setup: valid 16k config sizes > 0");
-    void* mem = malloc(sz);
-    CHECK(mem != NULL, "delay-mode test setup: malloc pool");
+    void* mem = aec_test_pool_alloc(sz);
+    CHECK(mem != NULL, "delay-mode test setup: aligned pool");
 
     /* A fixed delay is meaningless outside FIXED -- rejected, not dropped. */
     {
@@ -1030,7 +1031,7 @@ static void test_delay_mode_illegal_combinations(void) {
             }
             aec_destroy(&a);
             /* Same config through the caller-pool path. */
-            void* pool = malloc(need);
+            void* pool = aec_test_pool_alloc(need);
             snprintf(label, sizeof(label), "%s: aec_init() != NULL", ok[i].tag);
             Aec* pa = aec_init(pool, need, &c);
             CHECK(pa != NULL, label);

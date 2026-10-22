@@ -1,12 +1,12 @@
 /* render_signal_analyzer.h — C port of
- * python/modules/render/render_signal_analyzer.py (which mirrors AEC3
- * render_signal_analyzer.{cc,h}).
+ * python/modules/render/render_signal_analyzer.py (the reference render
+ * signal analyzer).
  *
  * Per-hop render-signal analyser:
  *   1. per-bin tonal narrowband counters → mask_regions_around_narrow_bands()
  *      zeroes mu for ±2 bins around any sustained narrow peak (counter > 5).
  *   2. poor_signal_excitation(): any narrow-band counter > 10 → freeze W.
- *   3. narrow_peak_band(): dominant strong narrow peak (diagnostic).
+ *   3. narrow_peak_band: dominant strong narrow peak (internal state).
  *
  * FLOAT32 parity notes (numpy 1.26 → C):
  *   - render_psd (|X|²) and render_block (time samples) arrive as float32 from
@@ -27,7 +27,9 @@
 
 typedef struct {
     int      n_freqs;        /* spectrum length = fft_size/2 + 1            */
-    int      n_freqs_by2;    /* n_freqs - 1 (AEC3 kFftLengthBy2)            */
+    int      n_freqs_by2;    /* n_freqs - 1 = half THIS instance's FFT
+                              * length (128/256/512 on the 256/512/1024
+                              * grids).                                  */
     int      n_counters;     /* n_freqs_by2 - 1 = n_freqs - 2               */
     int64_t *counters;       /* owned by caller; length n_counters          */
     int      strong_peak_freeze_duration;
@@ -49,9 +51,6 @@ void rsa_update(RenderSignalAnalyzer *m, const float *render_psd,
 
 /* True iff any narrow-band counter > 10. */
 int  rsa_poor_signal_excitation(const RenderSignalAnalyzer *m);
-
-/* -1 == None. */
-int  rsa_narrow_peak_band(const RenderSignalAnalyzer *m);
 
 /* In-place mask: zero mu (float32, length n_freqs) for ±2 bins around any peak
  * with counter > 5. */

@@ -24,9 +24,8 @@
  *      for delay_est_init_s), so "it never armed" is a real failure here,
  *      not a property of the stimulus.
  *   3. The realised engagement lands in the decimated regime rather than at
- *      full rate: with a 0.5 s period (opt-in since AMEND_35, 2026-10-18 --
- *      0.0/full-rate is now the default, matching Python, which never
- *      throttles) at a 128-sample hop, K = 10,
+ *      full rate: with a 0.5 s period (opt-in; the 0.0/full-rate default
+ *      matches Python, which never throttles) at a 128-sample hop, K = 10,
  *      so a machine that arms early and stays armed tends toward ~10%
  *      engagement plus the un-armed warm-up. Asserted as a band (>0%, <60%)
  *      rather than a point value -- the exact figure depends on how fast the
@@ -44,7 +43,7 @@
  *      pre-reset hops across would blend two duty regimes into one ratio --
  *      and counting resumes (not stuck-at-zero) afterwards.
  *   6. AecDebugStatus::delay_confidence is three-state and never reads a
- *      DelayAec3 that was never constructed: MATCHED tracks the estimator
+ *      DelayAec that was never constructed: MATCHED tracks the estimator
  *      (a 5-hop run reports strictly less than a converged 3 s one), while
  *      FIXED and EXTERNAL_ALIGNED both report a constant 1.0 because their
  *      alignment is a caller contract, not a measurement. The same
@@ -65,11 +64,12 @@
  * output bytes.
  *
  * Build (standalone, from c_impl/ -- mirrors test_delay_num_filters.c):
- *   make -C ../../audio_common BACKEND=ne10 lib
+ *   make -C ../../audiolib/common BACKEND=ne10 lib
  *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=gnu99 -Iinclude -Iexample \
- *       -I../../audio_common/include \
+ *       -I../../audiolib/common/include \
+ *       -I../../audiolib/common \
  *       test/test_duty_census.c $(find src -name '*.c') \
- *       $(make -s -C ../../audio_common BACKEND=ne10 print-lib-path) -lm \
+ *       $(make -s -C ../../audiolib/common BACKEND=ne10 print-lib-path) -lm \
  *       -o bin/test_duty_census
  * Run:  ./bin/test_duty_census
  * Also wired into the Makefile: `make test-duty-census`.
@@ -163,10 +163,9 @@ static int run_case(AecDelayMode mode, int fixed_delay_samples, int hops,
     int i;
 
     aec_config_from_preset(&cfg, AEC_PRESET_BALANCED, SR);
-    /* AMEND_35 changed the DEFAULT to 0.0 (full-rate, matches Python). This
-     * test's whole point is measuring the decimation machine itself, which
-     * only engages when opted into explicitly now -- restore the pre-
-     * AMEND_35 default here so the census below still exercises it. */
+    /* The DEFAULT is 0.0 (full-rate, matches Python). This test's whole
+     * point is measuring the decimation machine itself, which only engages
+     * when opted into explicitly, so opt in here for the census below. */
     cfg.delay_est_period_s = 0.5f;
     cfg.delay_mode = mode;
     if (mode == AEC_DELAY_FIXED) cfg.fixed_delay_samples = fixed_delay_samples;
@@ -218,7 +217,7 @@ int main(void) {
 
     /* ---- 6a: MATCHED reports the ESTIMATOR's confidence, and reports it
      *          DYNAMICALLY. After 3 s of a fixed single-tap echo the value is
-     *          on the converged end of delay_aec3_confidence's 0.0/0.5/1.0
+     *          on the converged end of delay_aec_confidence's 0.0/0.5/1.0
      *          ladder; after 5 hops the estimator cannot have got there yet,
      *          so the same query must return strictly less. Pinning the long
      *          run alone would pass just as happily against a helper that had
@@ -271,7 +270,7 @@ int main(void) {
           "(no estimator)");
     /* ---- 6c: the caller CONTRACTED that ref arrives aligned, so there is no
      *          uncertainty to report -- and specifically not the 0.0 a read of
-     *          the never-constructed DelayAec3 would produce. Same value
+     *          the never-constructed DelayAec would produce. Same value
      *          aec_get_linear_context() has always reported for this mode. */
     snprintf(msg, sizeof msg,
              "AEC_DELAY_EXTERNAL_ALIGNED delay_confidence == 1.0 (caller "
@@ -313,9 +312,9 @@ int main(void) {
 
     /* ---- 7: the ERLE watchdog leaks the RETIMED amount, on the audio path.
      *
-     * The leak is the machine's only wall-clock rate, and it was a bare
-     * 0.001f per hop -- 0.1 dB/s only on the 10 ms grid it was calibrated on,
-     * and 0.125 dB/s at this test's 8 ms hop. Aec::duty_erle_leak_db now
+     * The leak is the machine's only wall-clock rate; a bare
+     * 0.001f per hop would be 0.1 dB/s only on the 10 ms grid it was calibrated on,
+     * and 0.125 dB/s at this test's 8 ms hop. Aec::duty_erle_leak_db
      * carries it, derived once at carve time; test_rate_structural (d2)
      * asserts that field's VALUE at all four shipped grids and (d2b) its
      * bit-exactness at the authoring grid.

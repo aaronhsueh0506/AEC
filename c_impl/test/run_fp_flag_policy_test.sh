@@ -26,9 +26,9 @@
 #
 # This repo has no standalone shell-based build-isolation suite of its own
 # (searched for "test_build_isolation" anywhere in this repo; the only hit
-# is a comment in run_counter_saturation_ubsan.sh referencing audio_common's
+# is a comment in run_counter_saturation_ubsan.sh referencing audiolib's
 # suite by name, not a suite of this repo's own), so this script mirrors
-# BOTH audio_common's S23b (quote/escape/response-file bypass) AND S24
+# BOTH audiolib's S23b (quote/escape/response-file bypass) AND S24
 # (allow-list bypass shapes the old deny-list never caught, plus the
 # FP-policy check's own internal-variable override exposure) as one small
 # permanent standalone script, same convention as this repo's other
@@ -74,7 +74,7 @@
 # and is untouched by this change.
 #
 # Cases 11-17 (allow-list bypass shapes the OLD 9-item deny-list never
-# caught -- audio_common S24 equivalent): glob-star, glob-question,
+# caught -- audiolib S24 equivalent): glob-star, glob-question,
 # glob-brackets, tilde, redirect-out, redirect-in, process-subst -- each a
 # REAL, live bypass of the old deny-list (none of these characters were
 # checked for at all before this redesign), each now REJECTED by the
@@ -162,7 +162,7 @@ echo "=== run_fp_flag_policy_test: quote/escape/response-file bypass cases ==="
 
 # Case 1: single-quoted.
 LOG1="$SCRATCH/log_single_quoted"
-if env EXTRA_CFLAGS="'-Ofast'" "$MAKE_BIN" BACKEND=kiss OBJ_ROOT="$OBJ_ROOT" BIN_ROOT="$BIN_ROOT" print-obj-dir >"$LOG1" 2>&1; then
+if env EXTRA_CFLAGS="'-Ofast'" "$MAKE_BIN" BACKEND=ne10 OBJ_ROOT="$OBJ_ROOT" BIN_ROOT="$BIN_ROOT" print-obj-dir >"$LOG1" 2>&1; then
     fail "case 1: env EXTRA_CFLAGS=\"'-Ofast'\" (single-quoted) print-obj-dir unexpectedly SUCCEEDED (must be rejected)"
     cat "$LOG1" >&2
 else
@@ -178,7 +178,7 @@ fi
 # character-class allow-list (not a dedicated "double-quote" deny-list
 # entry any more) -- the reported disallowed-character set is a single '"'.
 LOG2="$SCRATCH/log_double_quoted"
-if env EXTRA_CFLAGS='"-ffast-math"' "$MAKE_BIN" BACKEND=kiss OBJ_ROOT="$OBJ_ROOT" BIN_ROOT="$BIN_ROOT" print-obj-dir >"$LOG2" 2>&1; then
+if env EXTRA_CFLAGS='"-ffast-math"' "$MAKE_BIN" BACKEND=ne10 OBJ_ROOT="$OBJ_ROOT" BIN_ROOT="$BIN_ROOT" print-obj-dir >"$LOG2" 2>&1; then
     fail "case 2: env EXTRA_CFLAGS='\"-ffast-math\"' (double-quoted) print-obj-dir unexpectedly SUCCEEDED (must be rejected)"
     cat "$LOG2" >&2
 else
@@ -192,7 +192,7 @@ fi
 
 # Case 3: quote-split mid-token.
 LOG3="$SCRATCH/log_quote_split"
-if env EXTRA_CFLAGS="-O'f'ast" "$MAKE_BIN" BACKEND=kiss OBJ_ROOT="$OBJ_ROOT" BIN_ROOT="$BIN_ROOT" print-obj-dir >"$LOG3" 2>&1; then
+if env EXTRA_CFLAGS="-O'f'ast" "$MAKE_BIN" BACKEND=ne10 OBJ_ROOT="$OBJ_ROOT" BIN_ROOT="$BIN_ROOT" print-obj-dir >"$LOG3" 2>&1; then
     fail "case 3: env EXTRA_CFLAGS=\"-O'f'ast\" (quote-split mid-token) print-obj-dir unexpectedly SUCCEEDED (must be rejected)"
     cat "$LOG3" >&2
 else
@@ -208,7 +208,7 @@ fi
 # character-class allow-list (it is simply not in the allowed set), not a
 # dedicated "response-file" deny-list entry any more.
 LOG4="$SCRATCH/log_response_file"
-if env EXTRA_CFLAGS='@flags.rsp' "$MAKE_BIN" BACKEND=kiss OBJ_ROOT="$OBJ_ROOT" BIN_ROOT="$BIN_ROOT" print-obj-dir >"$LOG4" 2>&1; then
+if env EXTRA_CFLAGS='@flags.rsp' "$MAKE_BIN" BACKEND=ne10 OBJ_ROOT="$OBJ_ROOT" BIN_ROOT="$BIN_ROOT" print-obj-dir >"$LOG4" 2>&1; then
     fail "case 4: env EXTRA_CFLAGS='@flags.rsp' (response-file) print-obj-dir unexpectedly SUCCEEDED (must be rejected)"
     cat "$LOG4" >&2
 else
@@ -224,7 +224,7 @@ fi
 # CONTAIN -Ofast/ffast-math as a substring of a larger identifier, neither
 # of which is the compiler flag itself; must NOT be rejected.
 LOG5A="$SCRATCH/log_positive_round9_note"
-if env EXTRA_CFLAGS=-DROUND9_NOTE=-Ofastness "$MAKE_BIN" -s BACKEND=kiss OBJ_ROOT="$OBJ_ROOT" BIN_ROOT="$BIN_ROOT" print-obj-dir >"$LOG5A" 2>&1; then
+if env EXTRA_CFLAGS=-DROUND9_NOTE=-Ofastness "$MAKE_BIN" -s BACKEND=ne10 OBJ_ROOT="$OBJ_ROOT" BIN_ROOT="$BIN_ROOT" print-obj-dir >"$LOG5A" 2>&1; then
     pass "case 5a: env EXTRA_CFLAGS=-DROUND9_NOTE=-Ofastness print-obj-dir (positive control, no forbidden characters) succeeds"
 else
     fail "case 5a: env EXTRA_CFLAGS=-DROUND9_NOTE=-Ofastness print-obj-dir unexpectedly FAILED (false-positive on a harmless token)"
@@ -232,7 +232,7 @@ else
 fi
 
 LOG5B="$SCRATCH/log_positive_dtext"
-if env EXTRA_CFLAGS=-DTEXT=ffast-math "$MAKE_BIN" -s BACKEND=kiss OBJ_ROOT="$OBJ_ROOT" BIN_ROOT="$BIN_ROOT" print-obj-dir >"$LOG5B" 2>&1; then
+if env EXTRA_CFLAGS=-DTEXT=ffast-math "$MAKE_BIN" -s BACKEND=ne10 OBJ_ROOT="$OBJ_ROOT" BIN_ROOT="$BIN_ROOT" print-obj-dir >"$LOG5B" 2>&1; then
     pass "case 5b: env EXTRA_CFLAGS=-DTEXT=ffast-math print-obj-dir (positive control, no forbidden characters) succeeds"
 else
     fail "case 5b: env EXTRA_CFLAGS=-DTEXT=ffast-math print-obj-dir unexpectedly FAILED (false-positive on a harmless token)"
@@ -249,7 +249,7 @@ echo "=== run_fp_flag_policy_test: prior behaviour must not regress ==="
 # never touching EXTRA_CFLAGS at all -- see the Makefile's own "CORRECTED
 # UNDERSTANDING" comment).
 LOG6="$SCRATCH/log_plain_ofast_extra_cflags"
-if env EXTRA_CFLAGS=-Ofast "$MAKE_BIN" BACKEND=kiss OBJ_ROOT="$OBJ_ROOT" BIN_ROOT="$BIN_ROOT" print-obj-dir >"$LOG6" 2>&1; then
+if env EXTRA_CFLAGS=-Ofast "$MAKE_BIN" BACKEND=ne10 OBJ_ROOT="$OBJ_ROOT" BIN_ROOT="$BIN_ROOT" print-obj-dir >"$LOG6" 2>&1; then
     fail "case 6: env EXTRA_CFLAGS=-Ofast print-obj-dir unexpectedly SUCCEEDED (must be rejected)"
     cat "$LOG6" >&2
 else
@@ -262,7 +262,7 @@ else
 fi
 
 LOG7="$SCRATCH/log_cxxflags_ofast"
-if env CXXFLAGS=-Ofast "$MAKE_BIN" BACKEND=kiss OBJ_ROOT="$OBJ_ROOT" BIN_ROOT="$BIN_ROOT" print-obj-dir >"$LOG7" 2>&1; then
+if env CXXFLAGS=-Ofast "$MAKE_BIN" BACKEND=ne10 OBJ_ROOT="$OBJ_ROOT" BIN_ROOT="$BIN_ROOT" print-obj-dir >"$LOG7" 2>&1; then
     fail "case 7: env CXXFLAGS=-Ofast print-obj-dir unexpectedly SUCCEEDED (widened CXXFLAGS check regressed)"
     cat "$LOG7" >&2
 else
@@ -275,7 +275,7 @@ else
 fi
 
 LOG8="$SCRATCH/log_cppflags_ffastmath"
-if env CPPFLAGS=-ffast-math "$MAKE_BIN" BACKEND=kiss OBJ_ROOT="$OBJ_ROOT" BIN_ROOT="$BIN_ROOT" print-obj-dir >"$LOG8" 2>&1; then
+if env CPPFLAGS=-ffast-math "$MAKE_BIN" BACKEND=ne10 OBJ_ROOT="$OBJ_ROOT" BIN_ROOT="$BIN_ROOT" print-obj-dir >"$LOG8" 2>&1; then
     fail "case 8: env CPPFLAGS=-ffast-math print-obj-dir unexpectedly SUCCEEDED (widened CPPFLAGS check regressed)"
     cat "$LOG8" >&2
 else
@@ -293,7 +293,7 @@ fi
 # environment, are both still rejected by that separate foreach, never
 # reaching (or being affected by) this fix's own conflict-detection block.
 LOG9="$SCRATCH/log_cmdline_cflags_override"
-if "$MAKE_BIN" CFLAGS=-O3 BACKEND=kiss OBJ_ROOT="$OBJ_ROOT" BIN_ROOT="$BIN_ROOT" print-obj-dir >"$LOG9" 2>&1; then
+if "$MAKE_BIN" CFLAGS=-O3 BACKEND=ne10 OBJ_ROOT="$OBJ_ROOT" BIN_ROOT="$BIN_ROOT" print-obj-dir >"$LOG9" 2>&1; then
     fail "case 9: make CFLAGS=-O3 print-obj-dir unexpectedly SUCCEEDED (command-line override rejection regressed)"
     cat "$LOG9" >&2
 else
@@ -306,7 +306,7 @@ else
 fi
 
 LOG10="$SCRATCH/log_e_fp_policy_override"
-if env FP_POLICY=-ffp-contract=fast "$MAKE_BIN" -e BACKEND=kiss OBJ_ROOT="$OBJ_ROOT" BIN_ROOT="$BIN_ROOT" print-obj-dir >"$LOG10" 2>&1; then
+if env FP_POLICY=-ffp-contract=fast "$MAKE_BIN" -e BACKEND=ne10 OBJ_ROOT="$OBJ_ROOT" BIN_ROOT="$BIN_ROOT" print-obj-dir >"$LOG10" 2>&1; then
     fail "case 10: env FP_POLICY=-ffp-contract=fast make -e print-obj-dir unexpectedly SUCCEEDED (make -e FP_POLICY gap regressed)"
     cat "$LOG10" >&2
 else
@@ -320,7 +320,7 @@ fi
 
 echo
 echo "=== run_fp_flag_policy_test: FP-policy allow-list bypass shapes the OLD"
-echo "=== 9-item deny-list never caught (audio_common S24 equivalent) ==="
+echo "=== 9-item deny-list never caught (audiolib S24 equivalent) ==="
 
 # Cases 11-17: real, live bypasses of the OLD deny-list (verified BEFORE the
 # allow-list fix: none of these characters/constructs were checked for at
@@ -329,7 +329,7 @@ echo "=== 9-item deny-list never caught (audio_common S24 equivalent) ==="
 fp_check_rejected() {
     label="$1"; flag_value="$2"; expect_chars="$3"
     log="$SCRATCH/log_$(printf '%s' "$label" | tr -c 'A-Za-z0-9' '_')"
-    if env EXTRA_CFLAGS="$flag_value" "$MAKE_BIN" BACKEND=kiss OBJ_ROOT="$OBJ_ROOT" BIN_ROOT="$BIN_ROOT" print-obj-dir >"$log" 2>&1; then
+    if env EXTRA_CFLAGS="$flag_value" "$MAKE_BIN" BACKEND=ne10 OBJ_ROOT="$OBJ_ROOT" BIN_ROOT="$BIN_ROOT" print-obj-dir >"$log" 2>&1; then
         fail "case $label: EXTRA_CFLAGS='$flag_value' print-obj-dir unexpectedly SUCCEEDED (must be rejected)"
         cat "$log" >&2
     elif grep -q "FP policy conflict" "$log" && grep -q "outside the allowed set" "$log" && grep -qF "found: \"$expect_chars\"" "$log"; then
@@ -367,7 +367,7 @@ fp_check_rejected "17_process_subst" '<(echo hi)'     '()<'
 # alone still exercises this path.
 export R11_FLAG=-Ofast
 LOG18="$SCRATCH/log_18_r11_dollar_brace"
-if "$MAKE_BIN" -n BACKEND=kiss OBJ_ROOT="$OBJ_ROOT" BIN_ROOT="$BIN_ROOT" 'EXTRA_CFLAGS=${R11_FLAG}' lib >"$LOG18" 2>&1; then
+if "$MAKE_BIN" -n BACKEND=ne10 OBJ_ROOT="$OBJ_ROOT" BIN_ROOT="$BIN_ROOT" 'EXTRA_CFLAGS=${R11_FLAG}' lib >"$LOG18" 2>&1; then
     fail "case 18: R11_FLAG=-Ofast (exported) make -n EXTRA_CFLAGS=\${R11_FLAG} lib unexpectedly SUCCEEDED (must be rejected via the exact-token filter)"
     cat "$LOG18" >&2
 else
@@ -403,7 +403,7 @@ fp_check_override_rejected() {
     varname="$1"; varvalue="$2"; payload="$3"; use_dash_e="$4"
     log="$SCRATCH/log_override_$(printf '%s' "$varname" | tr -c 'A-Za-z0-9' '_')_$use_dash_e"
     if [ "$use_dash_e" = "dashe" ]; then
-        if env "$varname=$varvalue" "$MAKE_BIN" -e BACKEND=kiss OBJ_ROOT="$OBJ_ROOT" BIN_ROOT="$BIN_ROOT" EXTRA_CFLAGS="$payload" print-obj-dir >"$log" 2>&1; then
+        if env "$varname=$varvalue" "$MAKE_BIN" -e BACKEND=ne10 OBJ_ROOT="$OBJ_ROOT" BIN_ROOT="$BIN_ROOT" EXTRA_CFLAGS="$payload" print-obj-dir >"$log" 2>&1; then
             fail "case: env $varname=$varvalue make -e print-obj-dir unexpectedly SUCCEEDED (must be rejected: overriding $varname must not defeat the FP-policy checks)"
             cat "$log" >&2
         elif grep -q "cannot be overridden" "$log" && grep -q "$varname" "$log"; then
@@ -413,7 +413,7 @@ fp_check_override_rejected() {
             cat "$log" >&2
         fi
     else
-        if "$MAKE_BIN" BACKEND=kiss OBJ_ROOT="$OBJ_ROOT" BIN_ROOT="$BIN_ROOT" EXTRA_CFLAGS="$payload" "$varname=$varvalue" print-obj-dir >"$log" 2>&1; then
+        if "$MAKE_BIN" BACKEND=ne10 OBJ_ROOT="$OBJ_ROOT" BIN_ROOT="$BIN_ROOT" EXTRA_CFLAGS="$payload" "$varname=$varvalue" print-obj-dir >"$log" 2>&1; then
             fail "case: make $varname=$varvalue print-obj-dir unexpectedly SUCCEEDED (must be rejected: overriding $varname must not defeat the FP-policy checks)"
             cat "$log" >&2
         elif grep -q "cannot be overridden" "$log" && grep -q "$varname" "$log"; then
@@ -447,7 +447,7 @@ echo "=== character-safety coverage ==="
 ldflags_check_rejected() {
     label="$1"; flag_value="$2"; expect_chars="$3"
     log="$SCRATCH/log_ldflags_$(printf '%s' "$label" | tr -c 'A-Za-z0-9' '_')"
-    if env EXTRA_LDFLAGS="$flag_value" "$MAKE_BIN" BACKEND=kiss OBJ_ROOT="$OBJ_ROOT" BIN_ROOT="$BIN_ROOT" print-obj-dir >"$log" 2>&1; then
+    if env EXTRA_LDFLAGS="$flag_value" "$MAKE_BIN" BACKEND=ne10 OBJ_ROOT="$OBJ_ROOT" BIN_ROOT="$BIN_ROOT" print-obj-dir >"$log" 2>&1; then
         fail "case ldflags-$label: EXTRA_LDFLAGS='$flag_value' print-obj-dir unexpectedly SUCCEEDED (must be rejected)"
         cat "$log" >&2
     elif grep -q "FP policy conflict" "$log" && grep -q "outside the allowed set" "$log" && grep -qF "found: \"$expect_chars\"" "$log"; then
@@ -477,17 +477,17 @@ ldflags_check_rejected "process-subst"    '<(echo hi)'      '()<'
 # working aec_wav binary. Unlike every case above, this exercises a REAL
 # link recipe ($(TARGET), which embeds $(LDFLAGS) directly) rather than the
 # cheap print-obj-dir query target, so -- like every other real build this
-# repo performs -- it needs audio_common present as a sibling checkout
-# (AC_DIR); the query-only cases above never touch audio_common at all.
+# repo performs -- it needs audiolib present as a sibling checkout
+# (COMMON_DIR); the query-only cases above never touch audiolib at all.
 LOG_LDFLAGS_POS="$SCRATCH/log_ldflags_positive_rpath"
 POS_LDFLAGS='-Wl,-rpath,/usr/lib -L/usr/lib'
-if env EXTRA_LDFLAGS="$POS_LDFLAGS" "$MAKE_BIN" BACKEND=kiss OBJ_ROOT="$OBJ_ROOT" BIN_ROOT="$BIN_ROOT" all >"$LOG_LDFLAGS_POS" 2>&1; then
+if env EXTRA_LDFLAGS="$POS_LDFLAGS" "$MAKE_BIN" BACKEND=ne10 OBJ_ROOT="$OBJ_ROOT" BIN_ROOT="$BIN_ROOT" all >"$LOG_LDFLAGS_POS" 2>&1; then
     # Resolve the just-built binary's own path from the build's own
     # "aec_wav [<backend>] -> <path>" echo line (the `all` recipe's last
     # line) rather than a separate `print-bin-dir` query invocation: a
-    # query-only invocation never resolves AC_LIB, so its CFG_SIG folds in
-    # an EMPTY AC_PRODUCER_SIG and resolves to a DIFFERENT (query-only)
-    # bin/ directory than the real build above, which does resolve AC_LIB
+    # query-only invocation never resolves COMMON_LIB, so its CFG_SIG folds in
+    # an EMPTY COMMON_PRODUCER_SIG and resolves to a DIFFERENT (query-only)
+    # bin/ directory than the real build above, which does resolve COMMON_LIB
     # and folds in a real producer signature -- confirmed empirically.
     bin_path="$(sed -n 's/^aec_wav \[[^]]*\] -> //p' "$LOG_LDFLAGS_POS" | tail -1)"
     # `aec_wav --help` is not a recognized option (this binary only takes
@@ -520,7 +520,7 @@ ldflags_check_override_rejected() {
     varname="$1"; varvalue="$2"; payload="$3"; use_dash_e="$4"
     log="$SCRATCH/log_ldflags_override_$(printf '%s' "$varname" | tr -c 'A-Za-z0-9' '_')_$use_dash_e"
     if [ "$use_dash_e" = "dashe" ]; then
-        if env "$varname=$varvalue" "$MAKE_BIN" -e BACKEND=kiss OBJ_ROOT="$OBJ_ROOT" BIN_ROOT="$BIN_ROOT" EXTRA_LDFLAGS="$payload" print-obj-dir >"$log" 2>&1; then
+        if env "$varname=$varvalue" "$MAKE_BIN" -e BACKEND=ne10 OBJ_ROOT="$OBJ_ROOT" BIN_ROOT="$BIN_ROOT" EXTRA_LDFLAGS="$payload" print-obj-dir >"$log" 2>&1; then
             fail "case: env $varname=$varvalue make -e print-obj-dir (EXTRA_LDFLAGS payload) unexpectedly SUCCEEDED (must be rejected: overriding $varname must not defeat the link-flags character-safety check)"
             cat "$log" >&2
         elif grep -q "cannot be overridden" "$log" && grep -q "$varname" "$log"; then
@@ -530,7 +530,7 @@ ldflags_check_override_rejected() {
             cat "$log" >&2
         fi
     else
-        if "$MAKE_BIN" BACKEND=kiss OBJ_ROOT="$OBJ_ROOT" BIN_ROOT="$BIN_ROOT" EXTRA_LDFLAGS="$payload" "$varname=$varvalue" print-obj-dir >"$log" 2>&1; then
+        if "$MAKE_BIN" BACKEND=ne10 OBJ_ROOT="$OBJ_ROOT" BIN_ROOT="$BIN_ROOT" EXTRA_LDFLAGS="$payload" "$varname=$varvalue" print-obj-dir >"$log" 2>&1; then
             fail "case: make $varname=$varvalue print-obj-dir (EXTRA_LDFLAGS payload) unexpectedly SUCCEEDED (must be rejected: overriding $varname must not defeat the link-flags character-safety check)"
             cat "$log" >&2
         elif grep -q "cannot be overridden" "$log" && grep -q "$varname" "$log"; then

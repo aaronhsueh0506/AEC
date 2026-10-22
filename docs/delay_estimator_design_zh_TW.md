@@ -10,7 +10,7 @@ blind-test 語料延遲普查與 48 kHz 適用性稽核的結果。所有數字�
 
 ## 1. 機制總覽
 
-訊號路徑（Python spec：`python/modules/delay/`；C：`c_impl/src/delay_aec3.c`）：
+訊號路徑（Python spec：`python/modules/delay/`；C：`c_impl/src/delay_aec.c`）：
 
 ```
 render/capture（per hop）
@@ -113,15 +113,15 @@ render/capture（per hop）
    收斂」；
    (2) 還原舊節流但把觀察窗拉長到 6000 hop 仍落在新路徑，排除「再等久
    一點就會變」；
-   (3) C 端 `delay_aec3_accumulate_ex` 的內迴圈已用 `DA_AEC3_BLOCK_SIZE=64`
+   (3) C 端 `delay_aec_accumulate_ex` 的內迴圈已用 `DA_BLOCK_SIZE=64`
    分桶，與 `lag_aggregator.py` 的內部 block 節奏完全一致，排除「C／
    Python 呼叫頻率對不上」；
    (4) 翻轉 C 測試自己的 `far_noise()` 種子（32-bit xorshift，均勻分布
    [-0.35, 0.35]，固定種子 `0x5EED1234`）、其餘條件不變，鎖定結果就從
    舊路徑的類別換成新路徑的類別——證實這真的是一個平手，由那一次雜訊
    實現的具體樣本決定，不是必然的偏向。
-   接著比對兩個 port 的 tie-break 規則本身：C 的 `da_argmax_i`／
-   `da_argmax_incremental_update`（`delay_aec3.c`）與 Python
+   接著比對兩個 port 的 tie-break 規則本身：C 的 `sk_argmax_i32`／
+   `da_argmax_incremental_update`（`delay_aec.c`）與 Python
    `lag_aggregator.py` 的 `np.argmax`-based `_HighestPeakAggregator`
    用的是**同一條** tie-break 規則（bin index 最小者勝，且兩邊的
    bin-to-lag 映射方向一致遞增）；pre-echo 直方圖（C 的 `da_pre_echo_*`
@@ -173,22 +173,34 @@ upstream 對 >512 ms 延遲的官方解是**外部 delay hint**（OS 回報音�
 
 ## 5. 算力與縮小方向
 
-C 端實測模型（`delay_aec3.c`；每 filter 每 block 無條件 8704 MAC、
-NLMS 8192 MAC、末端 accumulated-error 常數 8192 MAC；250 block/s；
-鎖定穩定 0.3 s 後 duty-cycle 1-in-10）：
+C 端目前每 filter、每 64-sample block 的 dot／NLMS MAC 上限為
+`512 + 16×512 + 16×512 = 16,896` MAC：一次初始 render 能量、
+16 次 dot，以及全部通過 excitation／saturation gate 時的 16 次 NLMS 更新。
+後續 render 能量用原順序的 sliding recurrence；沒有消費者的
+accumulated-error prefix 不再計算。下表以 250 block/s 計算 bank 上限，
+未含 sliding recurrence、error sum、decimator、peak scan、histogram 與
+scalar bookkeeping；不是 CPU 實測。
+穩態實際分析比例由現有 duty state machine 與 watchdog 決定，不能固定除以 10。
 
-RAM 欄是 `delay_aec3_get_mem_size()` 的**實測**回傳值（不是估計），
+RAM 欄是 `delay_aec_get_mem_size()` 的**實測**回傳值（不是估計），
 16 kHz / hop 128；48 kHz / hop 512 每列再加 1,376 B 的抗混疊 sidechain
 scratch（只有 48 kHz 才配置）。
 
-| n | 可靠覆蓋 | full-rate | duty 穩態 | RAM（估計器，16 kHz 實測） |
-|---|---|---|---|---:|
-| 5（預設） | 509 ms | 23.2 MMAC/s | 2.32 | 33,936 B |
-| 4 | 413 ms | 18.9（−19%） | 1.89 | 28,208 B |
-| 3 | 317 ms | 14.7（−37%） | 1.47 | 22,480 B |
-| 2 | 221 ms | 10.5（−55%） | 1.05 | 16,752 B |
-| 1 | 125 ms | 6.3（−73%） | 0.63 | 11,024 B |
-| estimator OFF（`FIXED` / `EXTERNAL_ALIGNED`） | — | 0 | 0 | 0 B |
+| n | 可靠覆蓋 | full-rate bank 上限 | RAM（估計器，16 kHz 實測） |
+|---|---|---|---:|
+| 5（預設） | 509 ms | 21.120 MMAC/s | 33,936 B |
+| 4 | 413 ms | 16.896 MMAC/s | 28,208 B |
+| 3 | 317 ms | 12.672 MMAC/s | 22,480 B |
+| 2 | 221 ms | 8.448 MMAC/s | 16,752 B |
+| 1 | 125 ms | 4.224 MMAC/s | 11,024 B |
+| estimator OFF（`FIXED` / `EXTERNAL_ALIGNED`） | — | 0 | 0 B |
+
+NEON 路徑把當次 tap update 與下一個 sample 的 dot 合併走訪，直接使用
+剛更新的 tap，減少 coefficient reload。四組 dot accumulator、FMA、
+reduction tree、每個 gate 與更新時序維持原樣；MAC 數、filter 數、duty
+設定和 pool layout 都不變。首筆 dot、末筆 update 及無更新分支各自處理；
+scalar 路徑保留原演算。`make test-delay-kernels` 對照獨立的分開走訪 reference，
+檢查所有 taps、error sum，以及 first-only／last-only／no-update 等 gate。
 
 縮 n 不動 window/shift/threshold（每個窗的統計行為與 upstream 完全一
 致），是偏離最小的縮法。
@@ -196,12 +208,12 @@ scratch（只有 48 kHz 才配置）。
 **Config 通路（2026-08-14 已開通）**：Python `AecConfig.delay_num_filters`
 （1..5，`__post_init__` fail-fast 驗證）→ orchestrator → LegacyDelayShim
 → `EchoPathDelayEstimator(num_filters=…)`；C `AecConfig::delay_num_filters`
-（`aec_validate_config` 拒絕超界）→ `delay_aec3_get_mem_size()` /
-`delay_aec3_init()` → runtime `DaMatchedFilter::num_filters`。預設 5 =
+（`aec_validate_config` 拒絕超界）→ `delay_aec_get_mem_size()` /
+`delay_aec_init()` → runtime `DaMatchedFilter::num_filters`。預設 5 =
 幾何完全不變（byte-equal，測試釘住）。
 
 **RAM 也隨 n 縮（2026-08-16，產品化計畫 step 2 起）**。原本刻意的取捨
-「算力隨 n 縮、RAM 不縮」已撤回：`DelayAec3` 改成 metadata + pool
+「算力隨 n 縮、RAM 不縮」已撤回：`DelayAec` 改成 metadata + pool
 pointers，bank／accumulated error／render ring／兩個 lag histogram 全部
 由 `aec_get_mem_size(cfg)` 依 resolved `(sample_rate, hop, n)` 從呼叫端
 記憶池切出，每少一組 filter 固定省 **5,728 B**（每個格點都一樣），

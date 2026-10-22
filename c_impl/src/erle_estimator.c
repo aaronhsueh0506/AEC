@@ -45,10 +45,8 @@ void erle_estimator_update(ErleEstimator *e,
     /* Ceilinged at startup_hops to avoid signed overflow (same shape as
      * erl_estimator.c's blocks_since_reset): the ONLY consumer of
      * blocks_since_reset in this file/header is the `< startup_hops` comparison
-     * right below (no parity test reads it: neither
-     * test/historical/parity_fullband_erle.c nor
-     * test/historical/parity_subband_erle.c exercises the ErleEstimator wrapper
-     * struct that owns this field). Once the counter reaches startup_hops,
+     * right below (no test exercises the ErleEstimator wrapper struct that owns
+     * this field). Once the counter reaches startup_hops,
      * further increments can never change that comparison's outcome (already
      * false, stays false), so gating the increment on `< startup_hops` is
      * observationally identical to an unbounded increment for every reachable

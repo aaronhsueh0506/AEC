@@ -2,14 +2,15 @@
  * whole-output hash cannot see.
  *
  *  T1  rsa_argmax_first (render_signal_analyzer.c) against its scalar twin
- *      rsa_argmax_scan: tie order (first maximum wins), maxima at every lane
+ *      sk_argmax_f32_scalar: tie order (first maximum wins), maxima at every lane
  *      and tail position, non-finite inputs. Real audio almost never produces
  *      an exact tie in a power spectrum, so the output hash passes even with
  *      last-match-wins semantics.
  *  T2  decrease_erle_for_low_render (subband_erle.c) against a verbatim copy
  *      of its scalar loop: hold-counter values at, one either side of, the
  *      release threshold and zero, which decide the onset re-arm.
- *  T3  rsa_max_abs against rsa_max_abs_scan, bit for bit.
+ *  T3  rsa_max_abs against sk_max_abs_f32_scalar (the sk_max_abs_f32 pair), bit
+ *      for bit, at the call shape render_signal_analyzer.c uses.
  *
  * The shipped translation units are included so the real source text runs.
  * When the NEON body is not compiled in (non-aarch64 or
@@ -42,7 +43,7 @@ static float float_of(unsigned u) { float v; memcpy(&v, &u, 4); return v; }
 #define XMAX 600
 
 static void check_argmax(const char* what, const float* x, int n) {
-    int a = rsa_argmax_first(x, n), b = rsa_argmax_scan(x, n);
+    int a = rsa_argmax_first(x, n), b = sk_argmax_f32_scalar(x, n);
     g_cases++;
     if (a != b) {
         g_fails++;
@@ -51,7 +52,7 @@ static void check_argmax(const char* what, const float* x, int n) {
 }
 
 static void check_max_abs(const char* what, const float* x, int n) {
-    float a = rsa_max_abs(x, n), b = rsa_max_abs_scan(x, n);
+    float a = rsa_max_abs(x, n), b = sk_max_abs_f32_scalar(x, n);
     g_cases++;
     if (bits_of(a) != bits_of(b)) {
         g_fails++;

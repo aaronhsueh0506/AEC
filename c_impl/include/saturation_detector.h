@@ -1,6 +1,6 @@
 /* saturation_detector.h — C port of
  * python/modules/state/saturation_detector.py (AecState::SaturationDetector,
- * mirrors AEC3 aec_state.cc:446-478).
+ * the reference saturation detector).
  *
  * Flags echo saturation. Two paths:
  *   - usable linear estimate → look at the subtractor (refined/coarse) output
@@ -42,7 +42,7 @@ typedef struct {
 /* Constructor: _saturated_echo = False. */
 void saturation_detector_init(SaturationDetector *d);
 
-/* update() — port of saturation_detector.py:22-43.
+/* update() — port of saturation_detector.py update().
  *   render_block : float32 array, length render_block_len (>=0).
  *   saturated_capture / usable_linear_estimate : 0/1.
  *   subtractor_s_refined_max_abs / subtractor_s_coarse_max_abs / echo_path_gain

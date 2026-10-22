@@ -2,7 +2,7 @@
  * Integration / orchestration layer; see aec_state.h for the full spec and the
  * strict update() order. */
 #include "aec_state.h"
-#include "aec3_scale.h"
+#include "aec_scale.h"
 
 #include <assert.h>
 
@@ -24,7 +24,7 @@ static int resolve_startup_hops(int configured_hops, int hop_size, int sample_ra
     if (configured_hops != AEC_STATE_STARTUP_HOPS_AUTO) {
         return configured_hops;
     }
-    return aec3_ms_to_hops(2000.0f, hop_size, sample_rate);
+    return aec_ms_to_hops(2000.0f, hop_size, sample_rate);
 }
 
 void aec_state_config_defaults(AecStateConfig *cfg) {
@@ -96,9 +96,9 @@ void aec_state_init(AecState *s, const AecStateConfig *cfg,
     s->strong_not_saturated_render_blocks = 0;
     s->blocks_with_active_render = 0;
     s->capture_signal_saturation = 0;
-    /* AEC3 200 blocks x 4 ms = 800 ms wall-clock. Was frozen at 80 (correct
+    /* 200 blocks x 4 ms = 800 ms wall-clock. Was frozen at 80 (correct
      * only at hop=160/sr=16000); computed live here. */
-    s->active_render_blocks = aec3_ms_to_hops(800.0f, cfg->hop_size, cfg->sample_rate);
+    s->active_render_blocks = aec_ms_to_hops(800.0f, cfg->hop_size, cfg->sample_rate);
 }
 
 /* ── queries ───────────────────────────────────────────────────────────── */
@@ -108,16 +108,8 @@ int aec_state_usable_linear_estimate(const AecState *s) {
            && s->cfg.use_linear_filter;
 }
 
-int aec_state_active_render(const AecState *s) {
-    return s->blocks_with_active_render > s->active_render_blocks;
-}
-
 int aec_state_saturated_echo(const AecState *s) {
     return saturation_detector_saturated_echo(&s->saturation_detector);
-}
-
-int aec_state_saturated_capture(const AecState *s) {
-    return s->capture_signal_saturation;
 }
 
 int aec_state_transparent_mode_active(const AecState *s) {
@@ -127,10 +119,6 @@ int aec_state_transparent_mode_active(const AecState *s) {
 
 int aec_state_transition_triggered(const AecState *s) {
     return initial_state_transition_triggered(&s->initial_state);
-}
-
-int aec_state_initial_state_active(const AecState *s) {
-    return initial_state_initial_state_active(&s->initial_state);
 }
 
 int aec_state_min_direct_path_filter_delay(const AecState *s) {
@@ -152,29 +140,6 @@ float aec_state_fullband_erle_log2(const AecState *s) {
 float aec_state_get_inst_linear_quality_estimate(const AecState *s, int *valid) {
     return erle_estimator_get_inst_linear_quality_estimate(&s->erle_estimator,
                                                            valid);
-}
-
-const float *aec_state_erl(const AecState *s) {
-    return erl_estimator_erl(&s->erl_estimator);
-}
-
-float aec_state_erl_time_domain(const AecState *s) {
-    return erl_estimator_erl_time_domain(&s->erl_estimator);
-}
-
-int aec_state_filter_analyzer_consistent(const AecState *s) {
-    if (!s->has_filter_analyzer) return 0;
-    return fa_any_filter_consistent(&s->filter_analyzer);
-}
-
-int aec_state_filter_analyzer_peak_index(const AecState *s) {
-    if (!s->has_filter_analyzer) return -1;
-    return fa_peak_index(&s->filter_analyzer);
-}
-
-float aec_state_filter_analyzer_max_echo_path_gain(const AecState *s) {
-    if (!s->has_filter_analyzer) return 0.0;
-    return fa_max_echo_path_gain(&s->filter_analyzer);
 }
 
 /* ── mutators ──────────────────────────────────────────────────────────── */
@@ -273,14 +238,13 @@ void aec_state_update(AecState *s,
      * unbounded original's comparison result identically forever, avoiding
      * signed-integer-overflow UB on a very long streaming session:
      *
-     *   blocks_with_active_render: sole reader is
-     *     aec_state_active_render() -- "> AEC_STATE_ACTIVE_RENDER_BLOCKS"
-     *     above. Cap at AEC_STATE_ACTIVE_RENDER_BLOCKS + 1 (the smallest
+     *   blocks_with_active_render: only ever compared with
+     *     "> active_render_blocks". Cap at active_render_blocks + 1 (the smallest
      *     value still `>` the threshold) by gating the increment on
-     *     `<= AEC_STATE_ACTIVE_RENDER_BLOCKS`.
+     *     `<= active_render_blocks`.
      *   strong_not_saturated_render_blocks: passed into filter_delay_update()
      *     (just below) which only ever tests
-     *     "< FILTER_ADAPTATION_THRESHOLD_HOPS" (filter_delay.h). Cap at
+     *     "< filter_adaptation_threshold_hops" (filter_delay.h). Cap at
      *     exactly that threshold -- once the counter reaches it the "<"
      *     comparison is permanently false either way.
      */
@@ -314,8 +278,8 @@ void aec_state_update(AecState *s,
     erl_estimator_update(&s->erl_estimator, render_psd, capture_psd,
                          any_filter_converged);
 
-    /* 5. SaturationDetector. AEC3-strict echo_path_gain from FilterAnalyzer
-     * (aec_state.cc:258-260) when the analyzer is present. */
+    /* 5. SaturationDetector. Reference echo_path_gain from FilterAnalyzer
+     * when the analyzer is present. */
     float epg = echo_path_gain;
     if (s->has_filter_analyzer) {
         epg = fa_max_echo_path_gain(&s->filter_analyzer);

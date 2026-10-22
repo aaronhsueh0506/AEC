@@ -10,7 +10,7 @@ Dumps, for many input vectors at n=512 (the production fft_size):
     Xin : complex64[n/2+1]            (the spectrum the C feeds in)
     y   : float32[n]                  np.fft.irfft(Xin.astype(complex128), n).astype(float32)
 
-The C side (parity_fft.c) replays fft_forward(x) vs X and fft_inverse(Xin) vs y
+A C-side harness replays fft_forward(x) vs X and fft_inverse(Xin) vs y
 and reports the BIT-EXACT mismatch count (compared as the stored 32-bit values).
 
 The two paths mirror exactly what the AEC pipeline does: the spectra are held

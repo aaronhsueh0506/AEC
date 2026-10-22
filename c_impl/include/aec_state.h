@@ -1,9 +1,9 @@
 /* aec_state.h — C port of python/modules/state/aec_state.py.
  *
- * Top-level AEC3 state machine. INTEGRATION / orchestration layer: the
- * per-bin float math lives in the 9 sub-modules (subband_erle / fullband_erle
+ * Top-level echo-state machine. INTEGRATION / orchestration layer: the
+ * per-bin float math lives in the 8 sub-modules (subband_erle / fullband_erle
  * / erl_estimator / filter_quality / saturation_detector / filter_delay /
- * initial_state / filter_analyzer / filter_state_bridge). This module wires
+ * initial_state / filter_analyzer). This module wires
  * them in the STRICT aec_state.cc order and adds the few AecState-level
  * integer counters.
  *
@@ -58,15 +58,14 @@
  * own. The sub-modules are float32 (drift versus Python accepted):
  *   - erle_estimator / subband_erle / fullband_erle / erl_estimator are
  *     float32; the getters that surface their scalars
- *     (aec_state_fullband_erle_log2, aec_state_get_inst_linear_quality_estimate,
- *     aec_state_erl_time_domain) are float32 here too.
+ *     (aec_state_fullband_erle_log2, aec_state_get_inst_linear_quality_estimate)
+ *     are float32 here too.
  *   - erle_min / erle_max_l / erle_max_h in AecStateConfig feed directly into
  *     erle_estimator_init() (float32 params) and are float32 here as well.
  *   - initial_state_seconds is float32 end-to-end: its only consumer is
  *     initial_state_init() (initial_state.h/.c), which takes a float32 param.
  *   - subtractor_s_refined_max_abs / subtractor_s_coarse_max_abs /
- *     echo_path_gain (aec_state_update params) and
- *     aec_state_filter_analyzer_max_echo_path_gain are float32 too: they are
+ *     echo_path_gain (aec_state_update params) are float32 too: they are
  *     pure pass-through plumbing to saturation_detector.h and
  *     filter_analyzer.h; no arithmetic on them happens in this file, so the
  *     value is carried through unchanged.
@@ -85,7 +84,7 @@
 #include "erl_estimator.h"
 #include "filter_analyzer.h"
 
-/* AEC3 200 blocks x 4 ms = 800 ms wall-clock, computed live in
+/* 200 blocks x 4 ms = 800 ms wall-clock, computed live in
  * aec_state_init() from cfg.hop_size/cfg.sample_rate (80 at
  * hop=160/sr=16000) -- see AecState.active_render_blocks. */
 
@@ -100,7 +99,7 @@ typedef struct {
     int    n_bins;                     /* default 257 */
     /* default -1 == AEC_STATE_STARTUP_HOPS_AUTO (aec_state.c): "not
      * explicitly set" -> resolved live to the grid-correct hop count
-     * (aec3_ms_to_hops(2000ms, hop_size, sample_rate); 200 at the reference
+     * (aec_ms_to_hops(2000ms, hop_size, sample_rate); 200 at the reference
      * hop=160/sr=16000 grid). Any other value, INCLUDING 200 itself, is
      * honored verbatim -- -1 (not a reachable hop count) is used so no
      * legitimate explicit value can ever collide with the "unset" marker. */
@@ -234,22 +233,14 @@ void aec_state_update(AecState *s,
 /* ── public queries (mirror AecState methods) ──────────────────────────── */
 
 int    aec_state_usable_linear_estimate(const AecState *s);
-int    aec_state_active_render(const AecState *s);
 int    aec_state_saturated_echo(const AecState *s);
-int    aec_state_saturated_capture(const AecState *s);
 int    aec_state_transparent_mode_active(const AecState *s);   /* always 0 */
 int    aec_state_transition_triggered(const AecState *s);
-int    aec_state_initial_state_active(const AecState *s);
 int    aec_state_min_direct_path_filter_delay(const AecState *s);
 const float *aec_state_erle(AecState *s, int onset_compensated);
 const float *aec_state_erle_unbounded(const AecState *s);
 float aec_state_fullband_erle_log2(const AecState *s);
 /* get_inst_linear_quality_estimate: *valid==0 mirrors a Python None. */
 float aec_state_get_inst_linear_quality_estimate(const AecState *s, int *valid);
-const float *aec_state_erl(const AecState *s);
-float aec_state_erl_time_domain(const AecState *s);
-int    aec_state_filter_analyzer_consistent(const AecState *s);
-int    aec_state_filter_analyzer_peak_index(const AecState *s);
-float aec_state_filter_analyzer_max_echo_path_gain(const AecState *s);
 
 #endif /* AEC_STATE_H */

@@ -10,7 +10,7 @@
 # Baseline and candidate are separate git WORKTREES, each built from its own
 # checkout. Nothing is swapped in the working tree, so a build cannot pick up
 # the other side's sources. The worktrees must be SIBLINGS of the repo:
-# example/wav_io.h resolves audio_common by relative path.
+# example/wav_io.h resolves audiolib by relative path.
 #
 # NO_PREALIGN is irrelevant here -- that flag gates the Python driver's offline
 # GCC-PHAT crutch. aec_wav has no pre-align path at all and always runs the
@@ -48,13 +48,13 @@ EXTRA=("$@")
 
 AEC=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 SE=$(dirname "$AEC")
-AC_DIR="$SE/audio_common"
+COMMON_DIR="$SE/audiolib/common"
 DATASET="$AEC/wav/aec_challenge_blind"
 STEMS="$AEC/eval/manifest_90case_stems.txt"
 PYBIN="${PYBIN:-$SE/.venv/bin/python3.9}"
 command -v "$PYBIN" >/dev/null 2>&1 || PYBIN=python3
 
-for d in "$AC_DIR" "$DATASET"; do
+for d in "$COMMON_DIR" "$DATASET"; do
   [ -d "$d" ] || { echo "missing: $d" >&2; exit 1; }
 done
 [ -f "$STEMS" ] || { echo "missing manifest: $STEMS" >&2; exit 1; }
@@ -70,14 +70,14 @@ build () {  # build <worktree> -> echoes the aec_wav path
   # WERROR=1: a warning introduced by the candidate is a difference between the
   # two builds and must stop the run, not decorate its log.
   make -C "$wt/c_impl" clean >/dev/null 2>&1 || true
-  make -C "$wt/c_impl" BACKEND=kiss SIMD=1 WERROR=1 AC_DIR="$AC_DIR" \
+  make -C "$wt/c_impl" SIMD=1 WERROR=1 COMMON_DIR="$COMMON_DIR" \
       >"$OUT/build_$(basename "$wt").log" 2>&1 || {
     echo "make failed in $wt -- see $OUT/build_$(basename "$wt").log" >&2
     exit 1; }
   # `make clean` is not optional here: a stale .o from an incremental build has
   # produced spurious segfaults in this tree before.
   local bin
-  bin=$(ls -t "$wt"/c_impl/bin/kiss-*/aec_wav 2>/dev/null | head -1)
+  bin=$(ls -t "$wt"/c_impl/bin/ne10-*/aec_wav 2>/dev/null | head -1)
   [ -n "$bin" ] && [ -x "$bin" ] || { echo "no aec_wav under $wt" >&2; exit 1; }
   echo "$bin"
 }
