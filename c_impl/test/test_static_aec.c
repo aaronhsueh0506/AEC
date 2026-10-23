@@ -90,16 +90,18 @@ int main(int argc, char** argv) {
     else
         printf("FAIL: %d/%d samples differ\n", diffs, frames * hop);
 
-    /* aec_destroy() must also run on the static instance (it tears down the
-     * FFT handle); the caller-owned pool itself is freed by the caller. */
+    /* aec_destroy() must also run on the static instance: it tears down the
+     * single shared FFT handle, whose NE10 twiddle config is allocated outside
+     * the pool. The caller-owned pool itself is freed by the caller. */
     aec_destroy(aec_st);
     free(out_dyn); free(out_st); free(pool);
 
     /* Leak-loop: repeat init -> process -> destroy so a leak checker
      * (`leaks --atExit -- ./bin/test_static_aec ...`) can see whether
      * anything grows with iteration count. A real leak (e.g. aec_destroy()
-     * skipping the fft_destroy() calls above on the static path) shows up
-     * here as N-times-repeated allocations; a correct teardown stays flat. */
+     * skipping the shared FFT handle's fft_destroy() on the static path)
+     * shows up here as N-times-repeated allocations; a correct teardown
+     * stays flat. */
     {
         const int kIters = 50;
         const int loop_frames = frames < 20 ? frames : 20; /* keep it fast */

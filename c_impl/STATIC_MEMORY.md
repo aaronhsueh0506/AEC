@@ -85,8 +85,8 @@ host at the default `delay_mode = MATCHED` / `delay_num_filters = 5`, is:
 
 | FFT / hop | Pool size |
 |---:|---:|
-| 256 / 128 | 398,768 B |
-| 512 / 256 | 527,488 B |
+| 256 / 128 | 397,744 B |
+| 512 / 256 | 525,440 B |
 
 These figures move with `Aec`/`AecConfig`'s own struct size whenever a
 field is added or removed, so they are re-measured fresh at each revision

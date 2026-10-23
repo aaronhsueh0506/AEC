@@ -31,10 +31,10 @@ pre code{background:none;padding:0}
 <p>沒有任何 NN/NPU 成分:本函式庫是純 DSP,跨 hop 的 state 全部由 C struct 保存,host 不需另存任何 state。<code>AecResContext</code> / <code>AecLinearContext</code> 兩個 seam 是外接 NN 後級(RES/NR)時的接點,見 <code>lib/aec/docs/nn_integration_interface.md</code>。</p>
 <div class="tblwrap"><table>
 <tr><th>sr</th><th>fft_size</th><th>hop</th><th>hop 時長</th><th>n_freqs</th><th>filter_length</th><th>n_partitions</th><th>aec_get_mem_size(balanced, MATCHED n=5, NE10 後端實測)</th></tr>
-<tr><td>8000</td><td>256(legacy)</td><td>128</td><td>16 ms</td><td>129</td><td>416(52 ms)</td><td>4</td><td>285,376 B</td></tr>
-<tr><td>16000</td><td>256(預設)</td><td>128</td><td>8 ms</td><td>129</td><td>832(52 ms)</td><td>7</td><td>398,768 B</td></tr>
-<tr><td>16000</td><td>512</td><td>256</td><td>16 ms</td><td>257</td><td>832(52 ms)</td><td>4</td><td>527,488 B</td></tr>
-<tr><td>48000</td><td>1024</td><td>512</td><td>10.667 ms</td><td>513</td><td>3072(64 ms)</td><td>6</td><td>1,228,272 B</td></tr>
+<tr><td>8000</td><td>256(legacy)</td><td>128</td><td>16 ms</td><td>129</td><td>416(52 ms)</td><td>4</td><td>284,352 B</td></tr>
+<tr><td>16000</td><td>256(預設)</td><td>128</td><td>8 ms</td><td>129</td><td>832(52 ms)</td><td>7</td><td>397,744 B</td></tr>
+<tr><td>16000</td><td>512</td><td>256</td><td>16 ms</td><td>257</td><td>832(52 ms)</td><td>4</td><td>525,440 B</td></tr>
+<tr><td>48000</td><td>1024</td><td>512</td><td>10.667 ms</td><td>513</td><td>3072(64 ms)</td><td>6</td><td>1,224,176 B</td></tr>
 </table></div>
 <p class="small">取樣率白名單 = {8000, 16000, 48000}(<code>aec_is_valid_sample_rate()</code>);sr/fft 配對由 <code>aec_resolve_signal_grid()</code> 強制(上表四組;8 kHz 為 legacy grid,只有本函式庫與 mono pipeline 支援,4 聲道 pipeline 不收)。hop = fft_size/2,n_freqs = fft_size/2+1。上表 bytes 是 <code>cfg.delay_mode = AEC_DELAY_MATCHED、delay_num_filters = 5</code>(預設)的總量;三態 delay mode 與 n 如何改變這個數字見下方「Delay mode / 記憶體」節。這些絕對值會隨 <code>Aec</code>/<code>AecConfig</code> 的結構大小整批移動(<code>sizeof(AecConfig)</code> = 224 B,NO_FLOOR preset 支援新增的 <code>min_gain_split_floor_enabled</code> 使其從 220 B 多 4 B;記憶池總量整批多 16 B,是記憶池 carve 對齊到 16-byte 邊界的結果),而所有 delta(每 filter 5,728 B、mode 間差值)不變——結構一動就必須重新查 <code>aec_get_mem_size()</code> 並重新 init,不可沿用先前記下的常數。</p>
 
@@ -70,10 +70,10 @@ aec_destroy(a);   /* aec_init 實例為 no-op;pool 由呼叫端釋放 */</code><
 <p class="small"><code>delay_num_filters</code>(僅 <code>MATCHED</code>)主要是**記憶體旋鈕、其次才是算力旋鈕**:每少一個 filter 省 ~4.2 MMAC/s 的「全速搜尋」算力,但出貨的 duty-cycle 讓 bank 只在 8-30% 的 hop 實跑,且每 hop 的 decimator/ring 地板與 n 無關——實測 n=5→1 的攤提成本只差 ~0.3-0.7µs/hop。**且在四個格點上都固定省 5,728 B**(bank/render ring/兩個 histogram 皆依 n 從 pool 切出 —— 這是 pool-first 重構後的行為;RAM 不再是編譯期上限)。<code>aec_get_mem_size(balanced, 16k/256)</code> 實測:</p>
 <div class="tblwrap"><table>
 <tr><th>delay_mode</th><th>記憶池</th><th>相對 MATCHED n=5</th></tr>
-<tr><td><code>MATCHED</code> n=5(預設)</td><td>398,768 B</td><td>—</td></tr>
-<tr><td><code>MATCHED</code> n=1</td><td>375,856 B</td><td>−22,912 B</td></tr>
-<tr><td><code>FIXED</code>,fixed=1600(100 ms)</td><td>240,672 B</td><td>−158,096 B</td></tr>
-<tr><td><code>EXTERNAL_ALIGNED</code></td><td>233,760 B</td><td>−165,008 B</td></tr>
+<tr><td><code>MATCHED</code> n=5(預設)</td><td>397,744 B</td><td>—</td></tr>
+<tr><td><code>MATCHED</code> n=1</td><td>374,832 B</td><td>−22,912 B</td></tr>
+<tr><td><code>FIXED</code>,fixed=1600(100 ms)</td><td>239,648 B</td><td>−158,096 B</td></tr>
+<tr><td><code>EXTERNAL_ALIGNED</code></td><td>232,736 B</td><td>−165,008 B</td></tr>
 </table></div>
 <p class="small">記憶體拆解用 <code>aec_get_mem_breakdown(&amp;cfg, &amp;out)</code>,細節收在 <a href="aec_detail.html">aec_detail</a>。</p>
 
@@ -198,7 +198,7 @@ seam 讀者     ctx(N-1) 有效至 ↘       ctx(N) 有效至 ↘         ctx(N+
 <tr><td>AEC3 post 鏈(<code>a3_state/a3_ree/a3_sg/a3_stat/a3_lfs/a3_sc/post</code>)</td><td>數十條 float32[n_freqs] + OLA float32[fft_size]</td><td>ERLE/ERL 表、R² 歷史、SuppressionGain 平滑、stationarity 噪聲底、LinearFilterSelect 交叉淡化、CNG</td></tr>
 <tr><td><code>render_fifo</code></td><td>float32[fifo_cap_hops×hop];cap = 2 的冪(320 ms → 32 或 64 hop,依格點)</td><td>僅串流 API 使用;lockstep 直通</td></tr>
 <tr><td>純量/計數器</td><td>~60 個 int/float 欄位</td><td>EMA 功率、ERLE 視窗、DT/EPC/warm-up/misadjustment 計數器(皆於 <code>aec_carve()</code> 依實際 hop 重定時)</td></tr>
-<tr><td><b>合計</b></td><td colspan="2">見概要表 <code>aec_get_mem_size</code> 欄(實測);與 <code>test_static_aec</code> 印出的 Pool 398,768 B @16k/256(MATCHED n=5)一致</td></tr>
+<tr><td><b>合計</b></td><td colspan="2">見概要表 <code>aec_get_mem_size</code> 欄(實測);與 <code>test_static_aec</code> 印出的 Pool 397,744 B @16k/256(MATCHED n=5)一致</td></tr>
 </table></div>
 
 <h2>延遲與 warm-up</h2>

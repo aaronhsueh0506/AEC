@@ -67,7 +67,7 @@ pre code{background:none;padding:0}
 <tr><td>延遲</td><td>8 ms/hop,<b>較低</b></td><td>16 ms/hop</td></tr>
 <tr><td>頻率解析度</td><td>129 bins</td><td>257 bins,<b>較高</b>——長混響與 tonal echo 分得更開</td></tr>
 <tr><td>每秒運算次數</td><td>加倍 → CPU 較高</td><td>減半 → CPU 較低</td></tr>
-<tr><td>記憶體(balanced/MATCHED n=5)</td><td>398,768 B</td><td>527,488 B</td></tr>
+<tr><td>記憶體(balanced/MATCHED n=5)</td><td>397,744 B</td><td>525,440 B</td></tr>
 <tr><td>partition 數</td><td><code>filter_length 832 / 128</code> → 7</td><td><code>832 / 256</code> → 4</td></tr>
 </table></div>
 <p class="small">所有以「10 ms 為單位」撰寫的時間常數,都會在 <code>aec_carve()</code> 依實際 hop 自動 retime(<code>aec.c:1448-1455</code>),換 grid 不需要手動換算 tuning。</p>
@@ -134,10 +134,10 @@ aec_destroy(&amp;aec);                        /* 會 free 內部 arena */</pre>
 <h3>四個 grid 的 pool 實測(balanced、MATCHED n=5)</h3>
 <div class="tblwrap"><table>
 <tr><th>sr / fft</th><th><code>aec_get_mem_size()</code></th><th>其中 estimator</th><th>其中 ring</th></tr>
-<tr><td>16000 / 256</td><td>398,768</td><td>33,936</td><td>131,072</td></tr>
-<tr><td>16000 / 512</td><td>527,488</td><td>33,936</td><td>131,072</td></tr>
-<tr><td>48000 / 1024</td><td>1,228,272</td><td>35,312</td><td>393,216</td></tr>
-<tr><td>8000 / 256(legacy)</td><td>285,376</td><td>33,936</td><td>65,536</td></tr>
+<tr><td>16000 / 256</td><td>397,744</td><td>33,936</td><td>131,072</td></tr>
+<tr><td>16000 / 512</td><td>525,440</td><td>33,936</td><td>131,072</td></tr>
+<tr><td>48000 / 1024</td><td>1,224,176</td><td>35,312</td><td>393,216</td></tr>
+<tr><td>8000 / 256(legacy)</td><td>284,352</td><td>33,936</td><td>65,536</td></tr>
 </table></div>
 <p class="small">此表為 <code>aec_get_mem_size()</code>／<code>aec_get_mem_breakdown()</code> 的實測輸出(<code>sizeof(Aec)</code> = 6440、<code>sizeof(AecConfig)</code> = 224,NO_FLOOR preset 支援新增的 <code>min_gain_split_floor_enabled</code> 使 <code>AecConfig</code> 從 220 B 多 4 B)。<b>這些絕對值會隨 <code>Aec</code>／<code>AecConfig</code> 結構大小整批移動</b>——結構一動就必須重新查 <code>aec_get_mem_size()</code>,不可沿用先前記下的常數。相對地,每 filter 的 5,728 B delta 不隨結構改變。</p>
 

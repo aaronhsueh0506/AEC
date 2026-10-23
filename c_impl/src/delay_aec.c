@@ -1285,21 +1285,45 @@ static int da_estimator_process_inner_block(DaEstimator *e, const float *render_
     return 0;
 }
 
+/* True when the n floats at `in` share bytes with the array `pend`; such an
+ * input must not go through memcpy. */
+#define DA_OVERLAPS(in, n, pend)                                             \
+    ((n) > 0 && (uintptr_t)(in) < (uintptr_t)(pend) + sizeof(pend) &&       \
+     (uintptr_t)(pend) < (uintptr_t)(in) + (size_t)(n) * sizeof(float))
+
 /* estimate_delay: buffer raw hop into the edge-chunker, drain 64-sample
  * blocks.  Returns 1 if ANY estimate was produced during the drain (writes
- * the LATEST such estimate into *quality / *delay). */
+ * the LATEST such estimate into *quality / *delay). The hop is appended in
+ * runs up to the next block boundary; an input that overlaps either pending
+ * array is appended one sample at a time so each store still sees the earlier
+ * ones. */
 static int da_estimator_estimate_delay(DaEstimator *e, const float *render_hop,
                                        const float *capture_hop, int hop,
                                        int run_matched_filter,
                                        DelayQuality *quality_out, int *delay_out) {
     int produced_any = 0;
-    int i;
+    int i = 0;
     DelayQuality q = DELAY_QUALITY_COARSE;
     int delay = 0;
-    for (i = 0; i < hop; ++i) {
-        e->render_pending[e->pending_count] = render_hop[i];
-        e->capture_pending[e->pending_count] = capture_hop[i];
-        e->pending_count += 1;
+    const int aliased =
+        DA_OVERLAPS(render_hop, hop, e->render_pending) ||
+        DA_OVERLAPS(render_hop, hop, e->capture_pending) ||
+        DA_OVERLAPS(capture_hop, hop, e->render_pending) ||
+        DA_OVERLAPS(capture_hop, hop, e->capture_pending);
+    while (i < hop) {
+        int n = aliased ? 1 : DA_BLOCK_SIZE - e->pending_count;
+        if (n > hop - i) n = hop - i;
+        if (aliased) {
+            e->render_pending[e->pending_count] = render_hop[i];
+            e->capture_pending[e->pending_count] = capture_hop[i];
+        } else {
+            memcpy(e->render_pending + e->pending_count, render_hop + i,
+                   (size_t)n * sizeof(float));
+            memcpy(e->capture_pending + e->pending_count, capture_hop + i,
+                   (size_t)n * sizeof(float));
+        }
+        e->pending_count += n;
+        i += n;
         if (e->pending_count == DA_BLOCK_SIZE) {
             DelayQuality bq;
             int bd;
@@ -1319,6 +1343,8 @@ static int da_estimator_estimate_delay(DaEstimator *e, const float *render_hop,
     }
     return 0;
 }
+
+#undef DA_OVERLAPS
 
 /* ====================== LegacyDelayShim (public API) ====================== */
 

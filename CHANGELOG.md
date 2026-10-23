@@ -41,6 +41,16 @@ when verdict requires it.
 
 ---
 
+## [Unreleased] — 2026-10-23 — Smaller pool, fewer copies in the weight constraint and the delay chunker
+
+- `aec_get_mem_size()` is 1,024 / 2,048 / 4,096 B smaller on the 256 / 512 / 1024 grids (the FFT handle
+  stages its preserving transforms in one block); the NLMS/Kalman time-domain constraint hands the weight
+  row to `fft_inverse_scratch()` (the forward transform that follows rewrites it) and the delay estimator's
+  64-sample input chunker appends in `memcpy` runs, keeping the one-sample path for an input that overlaps
+  a pending array. Output and all state are bit-identical; the C user manual, `STATIC_MEMORY.md` and the
+  HTML pages carry the re-measured byte counts, and `test_delay_reset` gains split-invariance and overlap
+  checks.
+
 ## [Unreleased] — 2026-10-23 — Forwarding wrappers removed; 32-bit ARM test builds clean
 
 - The one-line wrappers over the shared pairwise-sum and magnitude kernels are gone and their callers

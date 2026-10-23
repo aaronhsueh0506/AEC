@@ -346,10 +346,10 @@ filter bank、降取樣 render ring 與兩個 lag histogram 都是依 init 設�
 
 | 格點 | n=1 | n=2 | n=3 | n=4 | n=5（預設） |
 |---|---:|---:|---:|---:|---:|
-| 8 kHz / 256（legacy） | 262,464 B | 268,192 B | 273,920 B | 279,648 B | 285,376 B |
-| 16 kHz / 256 | 375,856 B | 381,584 B | 387,312 B | 393,040 B | 398,768 B |
-| 16 kHz / 512 | 504,576 B | 510,304 B | 516,032 B | 521,760 B | 527,488 B |
-| 48 kHz / 1024 | 1,205,360 B | 1,211,088 B | 1,216,816 B | 1,222,544 B | 1,228,272 B |
+| 8 kHz / 256（legacy） | 261,440 B | 267,168 B | 272,896 B | 278,624 B | 284,352 B |
+| 16 kHz / 256 | 374,832 B | 380,560 B | 386,288 B | 392,016 B | 397,744 B |
+| 16 kHz / 512 | 502,528 B | 508,256 B | 513,984 B | 519,712 B | 525,440 B |
+| 48 kHz / 1024 | 1,201,264 B | 1,206,992 B | 1,212,720 B | 1,218,448 B | 1,224,176 B |
 
 > **這些絕對值會隨 `Aec` / `AecConfig` 的結構大小整批移動；`sizeof(AecConfig)`
 > 目前是 224 B（NO_FLOOR preset 支援新增的 `min_gain_split_floor_enabled`
@@ -373,13 +373,13 @@ histogram 1,536 B ＋ pre-echo histogram 96 B。所以 `n=1` 相對預設 `n=5` 
 
 | `delay_mode` | 記憶池 | 相對 `MATCHED n=5` |
 |---|---:|---:|
-| `MATCHED` n=5（預設） | 398,768 B | — |
-| `MATCHED` n=1 | 375,856 B | −22,912 B |
-| `FIXED`，`fixed_delay_samples = 0` | 234,272 B | −164,496 B |
-| `FIXED`，`fixed_delay_samples = 400`（25 ms） | 235,872 B | −162,896 B |
-| `FIXED`，`fixed_delay_samples = 1600`（100 ms） | 240,672 B | −158,096 B |
-| `FIXED`，`fixed_delay_samples = 8000`（500 ms） | 266,272 B | −132,496 B |
-| `EXTERNAL_ALIGNED` | 233,760 B | −165,008 B |
+| `MATCHED` n=5（預設） | 397,744 B | — |
+| `MATCHED` n=1 | 374,832 B | −22,912 B |
+| `FIXED`，`fixed_delay_samples = 0` | 233,248 B | −164,496 B |
+| `FIXED`，`fixed_delay_samples = 400`（25 ms） | 234,848 B | −162,896 B |
+| `FIXED`，`fixed_delay_samples = 1600`（100 ms） | 239,648 B | −158,096 B |
+| `FIXED`，`fixed_delay_samples = 8000`（500 ms） | 265,248 B | −132,496 B |
+| `EXTERNAL_ALIGNED` | 232,736 B | −165,008 B |
 
 #### 環形緩衝大小公式
 
@@ -415,20 +415,20 @@ histogram 1,536 B ＋ pre-echo histogram 96 B。所以 `n=1` 相對預設 `n=5` 
 
 | 格點 | fixed=0 | 25 ms | 100 ms | 500 ms |
 |---|---:|---:|---:|---:|
-| 16 kHz / 256 | 234,272 B | 235,872 B | 240,672 B | 266,272 B |
-| 16 kHz / 512 | 363,504 B | 365,104 B | 369,904 B | 395,504 B |
-| 48 kHz / 1024 | 801,792 B | 806,592 B | 820,992 B | 897,792 B |
+| 16 kHz / 256 | 233,248 B | 234,848 B | 239,648 B | 265,248 B |
+| 16 kHz / 512 | 361,456 B | 363,056 B | 367,856 B | 393,456 B |
+| 48 kHz / 1024 | 797,696 B | 802,496 B | 816,896 B | 893,696 B |
 
 > **注意**：`fixed_delay_samples` 很大時 `FIXED` 也可能比 `MATCHED n=5` 更
-> 耗記憶體（48 kHz/1024、2500 ms 為 1,281,792 B，高於 `MATCHED n=5` 的
-> 1,228,272 B）——環形緩衝終究要放得下那個延遲。要用大 fixed delay 又要省
+> 耗記憶體（48 kHz/1024、2500 ms 為 1,277,696 B，高於 `MATCHED n=5` 的
+> 1,224,176 B）——環形緩衝終究要放得下那個延遲。要用大 fixed delay 又要省
 > 記憶體，正確作法是讓呼叫端自己補償掉大延遲後改用 `EXTERNAL_ALIGNED`。
 
-另外一個明顯的開關（16 kHz/256，相對 398,768 B）：
+另外一個明顯的開關（16 kHz/256，相對 397,744 B）：
 
 | 設定 | 記憶池 | 差異 |
 |---|---:|---:|
-| `enable_shadow = 0` | 355,888 B | −42,880 B |
+| `enable_shadow = 0` | 354,864 B | −42,880 B |
 
 `enable_res` 與 `enable_cng` **不影響**記憶池大小（相關緩衝區一律配置）。
 
@@ -1319,7 +1319,7 @@ BIN="$(make -s -C c_impl print-bin-dir)"
 （§6.7）後印一行到 **stdout**（其餘旗標一律印到 stderr）：
 
 ```text
-mem: sr=16000 fft=256 hop=128 mode=matched n=5 fixed_delay_samples=-1 total_bytes=398768 estimator_bytes=33936 ring_bytes=131072
+mem: sr=16000 fft=256 hop=128 mode=matched n=5 fixed_delay_samples=-1 total_bytes=397744 estimator_bytes=33936 ring_bytes=131072
 ```
 
 欄位依序：resolved 後的 `sample_rate`／`fft_size`／`hop_size`、`delay_mode`、

@@ -479,7 +479,10 @@ void pbfdaf_process_with_far_cmag2(PBFDAF* p,
             sk_wupdate_nlms_f32(Wp, Xp, p->error_spec, mu_eff, K);
             if (p->enable_td_constraint &&
                 (!p->constraint_round_robin || part == p->partition_to_constrain)) {
-                fft_inverse(p->fft, Wp, p->time_scratch);
+                /* Wp is rewritten in full by the forward transform below and
+                 * nothing reads it in between, so the inverse may consume it
+                 * instead of staging a private copy. */
+                fft_inverse_scratch(p->fft, Wp, p->time_scratch);
                 /* td_window[i]==1.0f for i<hop_size (pbfdaf_fill_windows) --
                  * x*1.0f leaves every float bit pattern unchanged, so only the
                  * [hop_size, fft_size) half (where td_window==0.0f) needs the
@@ -882,7 +885,9 @@ static void pbfdkf_update_weights(PBFDKF* p, int curr_p,
         sk_wupdate_kf_f32(Wp, Xp, b->error_spec, mu_aec, mu_scale_arr, K);
         if (b->enable_td_constraint &&
             (!b->constraint_round_robin || part == b->partition_to_constrain)) {
-            fft_inverse(b->fft, Wp, b->time_scratch);
+            /* Wp is rewritten in full by the forward transform below (see the
+             * PBFDAF constraint), so the inverse may consume it. */
+            fft_inverse_scratch(b->fft, Wp, b->time_scratch);
             for (int i = b->hop_size; i < b->fft_size; ++i) b->time_scratch[i] *= b->td_window[i];
             fft_forward_scratch(b->fft, b->time_scratch, Wp);
         }
