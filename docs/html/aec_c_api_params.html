@@ -63,7 +63,7 @@ pre code{background:none;padding:0}
 <div class="note"><b>far(ref)路徑沒有 HPF,連實例都不存在</b>——整個 lib 只有一個 <code>hp_mic</code>。這是刻意的設定,不要試圖用 config 打開 far HPF。若 ref 需要 HPF,請在餵進 AEC <b>之前</b>用 audiolib 的 <code>hpf.h</code> 自己做,但先確認你真的需要。</div>
 
 <h3>8.3 輸入電平 / gain</h3>
-<p><b>AEC 的 <code>AecConfig</code> 沒有任何 gain 欄位</b>。輸入電平調整屬於 AEC <b>之前</b>的前級,由 audiolib 或 pipeline 層負責:</p>
+<p><b>AEC 的 <code>AecConfig</code> 沒有任何 gain 欄位</b>。輸入電平調整屬於 AEC <b>之前</b>的前級,由 audiolib 或整合端負責:</p>
 <div class="tblwrap"><table>
 <tr><th>模組</th><th>位置</th><th>特性</th></tr>
 <tr><td><code>AudioPreGain</code></td><td><code>audiolib/common/include/audio_pre_gain.h</code></td><td>mono、<b>振幅</b> dB(<code>10^(db/20)</code>)、<b>不做 clipping</b>、有 runtime <code>audio_pre_gain_set_db()</code></td></tr>

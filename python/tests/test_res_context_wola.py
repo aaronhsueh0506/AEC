@@ -82,6 +82,8 @@ def test_res_context_filter_converged_tracks_this_hop_not_last() -> None:
     rng = np.random.RandomState(0x53303500)
     saw_rising_edge = False
     prev_converged = False
+    hops_after_edge = 0
+    # The rising edge lands within about a hundred hops; the cap only bounds a scene that never converges.
     for _ in range(2000):
         far = (0.3 * rng.uniform(-1.0, 1.0, hop)).astype(np.float32)
         # Near-perfect echo coupling (no near-end, no noise) so the filter
@@ -97,6 +99,11 @@ def test_res_context_filter_converged_tracks_this_hop_not_last() -> None:
         if now_converged and not prev_converged:
             saw_rising_edge = True
         prev_converged = now_converged
+        if saw_rising_edge:
+            # The hops after the edge keep the per-hop agreement under test; nothing later can differ.
+            hops_after_edge += 1
+            if hops_after_edge > 20:
+                break
     assert saw_rising_edge, (
         "scene never converged -- strengthen the echo coupling so this test "
         "actually exercises the S-05 rising edge")

@@ -151,11 +151,36 @@ caller-pool path (`aec_get_mem_size`/`aec_init`), and differs from numpy's fp64
 `np.fft` by float32 precision. The static path is byte-equal to the malloc path
 (`test_static_aec.c`).
 
+**Test tiers** (run from `c_impl/`; failures are collected and listed at the end):
+
+- `make test` — the default tier: every `test-*` target below in sequence, the
+  build gates (`test-no-testing-symbols`, `audit-no-stdio`, `audit-profile`), the
+  pytest suite (`test-python`), the lean Python↔C parity suite (10 scenes, one
+  per mechanism a planted regression is known to move) and the UBSan wrappers
+  `test/run_counter_saturation_ubsan.sh` and `test/run_selftest_ubsan.sh`.
+  Members whose result cannot differ between SIMD settings (`TEST_SIMD_INDEP` in
+  the Makefile, and `audit-profile`) and members that build their own
+  configurations (pytest, the parity suite, the sanitizer wrappers) run only
+  under `SIMD=1`. The complete default tier is therefore `make test SIMD=1`
+  plus `make test SIMD=0`.
+- `make test-full` — the default tier plus what is slow or rarely changes: the
+  full parity matrix (`make test-pyc-parity PYC_ARGS=--full`, 46 scenes), the
+  end-to-end gate `make test-parity-e2e`, the SIMD-independent targets under
+  `SIMD=0` too, the UBSan `--use-standard-math` variants,
+  `test/run_fp_flag_policy_test.sh` (negative cases of the Makefile flag policy)
+  and `test/run_ubsan_signal_handling_test.sh` (the traps of the two UBSan
+  wrappers). Under `SIMD=0` it does not repeat the members that take no SIMD
+  input.
+- Not in either tier, still runnable on their own: `test-detectors-parity`
+  (single grid; `test-detectors-parity-all` is a superset), `test/docs_smoke.sh`,
+  `test/test_fifo_spsc.c`, `test/test_lifecycle.c` and `test/test_wav_io_shim.c`
+  (the last three have no Makefile target; their build lines are in the files).
+
 **Regression gates:**
 
-- `test/parity_aec_e2e.c` (`make test-parity-e2e`) — the end-to-end gate: full
-  `aec_create` → `aec_process` output against the Python golden within 2e-2
-  (1e-1 at 48 kHz) over the ~4186-hop doubletalk case.
+- `test/parity_aec_e2e.c` (`make test-parity-e2e`, part of `make test-full`) —
+  the end-to-end gate: full `aec_create` → `aec_process` output against the
+  Python golden within 2e-2 (1e-1 at 48 kHz) over the ~4186-hop doubletalk case.
 - `test/test_counter_saturation.c` (`make test-counter-saturation`) — every
   unbounded hop/call counter stops at its cap: cap-1 → cap, cap → cap,
   no runaway past the cap, and the comparison the counter feeds gives the same

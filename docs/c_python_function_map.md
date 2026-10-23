@@ -72,7 +72,7 @@
 
 ### 0.7 與 `pyc_parity_aec.sh` 的關係
 
-`c_impl/test/pyc_parity_aec.sh`（`make test-pyc-parity`）是 Python↔C 數值對拍腳本；端到端閘門是 `make test-parity-e2e`。分工是：
+`c_impl/test/pyc_parity_aec.sh`（`make test-pyc-parity`）是 Python↔C 數值對拍腳本；端到端閘門是 `make test-parity-e2e`（只在 `make test-full` 執行）。`make test-pyc-parity` 預設跑 10 個場景的精簡集，`PYC_ARGS=--full` 跑全部場景。分工是：
 該腳本以「情境」為單位量 C 對 Python 的數值差，兩層標準（std-math 建置貼近 Python、出貨建置落在固定近似預算內），並以 `EXPECTED_RED(S-xx)` 標記已知落差（登記在 `c_impl/test/pyc_parity/pyc_parity.py`）；本表以「函式」為單位回答「這段 C 對應 Python 哪裡、有哪些已登記落差」。情境紅燈時用本表由 C 函式反查 Python 符號，`EXPECTED_RED(S-xx)` 的編號則引用本表「已知落差」欄與附錄 A。本表不量任何數值，也不取代該腳本。
 
 ---
@@ -215,7 +215,7 @@
 
 ### 1.3 `aec_res.c`　aec_res.c（獨立 RES 增益模組，供 4ch 後波束 lane 使用）
 
-依據：本檔是 `SuppressionGain` 的獨立包裝，供 `Audio_ALG` 的 4ch 管線使用；範圍內（`AEC/python`）沒有對應的 Python 類別。Python 孿生在 `Audio_ALG/pipelines/4ch_aec_bf_nr_res/pipeline.py` 的 `PostBeamResidualSuppressor`（範圍外，不在本表驗證；落差見 S-26）。`aec_cng_fill` 的孿生是 `Audio_ALG/pipelines/cng_aec3.py`（範圍外）。
+依據：本檔是 `SuppressionGain` 的獨立包裝，供 `Audio_ALG` 的 4ch 線性 AEC + BF 之後的 RES 使用；範圍內（`AEC/python`）沒有對應的 Python 類別。Python 孿生在 `Audio_ALG/pipelines/4ch_aec_bf_nr_res/pipeline.py` 的 `PostBeamResidualSuppressor`（範圍外，不在本表驗證；落差見 S-26）。`aec_cng_fill` 的孿生是 `Audio_ALG/pipelines/cng_aec3.py`（範圍外）。
 
 | C 檔:函式 | Python 檔:符號 | 關係 | 已知落差 | 對拍工具／測試 |
 |---|---|---|---| --- |

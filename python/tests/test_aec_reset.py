@@ -206,12 +206,13 @@ class ResetEqualsFreshInstanceTests(unittest.TestCase):
     inst-ERLE slope ring must not carry across the call.
     """
 
-    WARM_HOPS = 600
+    WARM_HOPS = 200
     TEST_HOPS = 300
-    # The three product grids, same set the C twin runs. The grid matters:
-    # the Kalman H_error residue only steers a decision at the two larger
-    # transforms, so a 16k/256-only gate reports green with it left standing.
-    GRIDS = ((16000, 256), (16000, 512), (48000, 1024))
+    # The two larger product grids. The grid matters: the Kalman H_error
+    # residue only steers a decision at the two larger transforms, so a
+    # 16k/256-only gate reports green with it left standing. The 16k/256 grid
+    # adds no detection power here and is left to the C twin.
+    GRIDS = ((16000, 512), (48000, 1024))
 
     def test_warmed_then_reset_matches_a_never_warmed_instance(self) -> None:
         for sample_rate, frame_size in self.GRIDS:

@@ -12,12 +12,15 @@
 # Known gaps are registered as EXPECTED_RED in test/pyc_parity/pyc_parity.py; an expected-red cell that turns green FAILS
 # the run (remove the marker). Tolerances are frozen there, and every cell prints the measured numbers beside them.
 #
-#   usage: pyc_parity_aec.sh [--quick] [--only SUBSTR[,SUBSTR]] [--skip-static] [--json FILE] [--work DIR]
+#   usage: pyc_parity_aec.sh [--full | --quick] [--only SUBSTR[,SUBSTR]] [--skip-static] [--json FILE] [--work DIR]
 #                            [--keep-work] [--aec-root DIR] [--repeat-check] [--write-pins]
-#          make test-pyc-parity [PYC_ARGS="--quick"]
+#          make test-pyc-parity [PYC_ARGS="--full"]
 #   env  : PYTHON  interpreter with numpy, scipy, soundfile (default python3)
 #
-#   --quick         a subset of the scenarios (a few minutes) instead of the full matrix
+#   (default)       the lean suite: 10 scenes, one per mechanism a planted regression is known to move
+#   --full          every scenario (the full matrix; `make test-full` runs this)
+#   --quick         an older, narrower subset; no aggressive-preset scene and its observer scene misses a +1 hop shift
+#   --only          substring filter over the full matrix (comma separated = any)
 #   --repeat-check  run the whole evaluation twice from fresh run directories and require byte-identical JSON
 #   --write-pins    (maintainers) rewrite test/pyc_parity/inputs.sha256 from the current environment
 #
@@ -28,10 +31,11 @@ set -u
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 AEC_ROOT=$(cd "$SCRIPT_DIR/../.." && pwd)
 PYTHON=${PYTHON:-python3}
-QUICK=""; ONLY=""; JSON=""; WORK=""; KEEP=0; REPEAT=0; WRITEPINS=""; SKIPSTATIC=""
+QUICK=""; FULL=""; ONLY=""; JSON=""; WORK=""; KEEP=0; REPEAT=0; WRITEPINS=""; SKIPSTATIC=""
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --quick) QUICK="--quick" ;;
+        --full) FULL="--full" ;;
         --only) ONLY=$2; shift ;;
         --json) JSON=$2; shift ;;
         --work) WORK=$2; KEEP=1; shift ;;
@@ -78,7 +82,7 @@ echo "   ship build    : SIMD=1 (Makefile defaults)"
 
 drive() {   # $1 work subdir, $2 json path
     "$PYTHON" "$DRV" --aec-root "$AEC_ROOT" --work "$1" --std-bin "$STD_BIN" --ship-bin "$SHIP_BIN" \
-        ${QUICK:+$QUICK} ${ONLY:+--only "$ONLY"} ${WRITEPINS:+$WRITEPINS} ${SKIPSTATIC:+$SKIPSTATIC} ${2:+--json "$2"}
+        ${QUICK:+$QUICK} ${FULL:+$FULL} ${ONLY:+--only "$ONLY"} ${WRITEPINS:+$WRITEPINS} ${SKIPSTATIC:+$SKIPSTATIC} ${2:+--json "$2"}
 }
 
 if [ "$REPEAT" -eq 1 ]; then

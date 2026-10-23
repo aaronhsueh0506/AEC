@@ -41,6 +41,27 @@ when verdict requires it.
 
 ---
 
+## [Unreleased] — 2026-10-24 — Test tiers: lean default, `make test`, `make test-full`
+
+### Changed
+- `make test` (previously a no-op, because the `test/` directory exists) now runs the default test tier and
+  `make test-full` the complete one. Members run in sequence, failures are listed at the end, and audiolib is
+  resolved once. SIMD-independent C targets, `audit-profile`, pytest, the lean pyc suite and the UBSan wrappers run only
+  under `SIMD=1`, so the default tier is `make test SIMD=1` plus `make test SIMD=0`. `test-full` adds the full pyc
+  matrix, `test-parity-e2e`, the SIMD-independent targets under `SIMD=0`, the UBSan `--use-standard-math` variants,
+  `run_fp_flag_policy_test.sh` and `run_ubsan_signal_handling_test.sh`. New target `test-python` runs `python/tests`.
+- `make test-pyc-parity` defaults to a 10-scene lean suite (one scene per mechanism a planted regression is known to
+  move, including `dtb.16k256.agg` for the aggressive preset and `preecho.16k256.bal.obs_noguard` for the observer
+  shift); `PYC_ARGS=--full` (or `pyc_parity_aec.sh --full`) runs all 46 scenes. `--quick` is unchanged.
+- `test_res_context_wola` stops 20 hops after the first `filter_converged` rising edge instead of running 2000 hops, and
+  `test_aec_reset` warms 200 hops on the two larger grids; both keep their assertions and still fail when the code they
+  guard is broken.
+- `docs/c_user_manual_zh_TW.md`, `docs/html/aec.html`, `aec_detail.html`, `aec_c_api.html`, `aec_c_api_params.html`,
+  `aec_res.html` and `docs/c_python_function_map.md` no longer name the Audio_ALG complete-pipeline wrappers
+  (`audio_pipeline_4ch_set_aec_preset()`, `AUDIO_PIPELINE_NOW_US`, the mono pipeline). The residual-floor strength
+  of a multi-lane integration is set with `aec_res_set_preset()` on the integrator's own `AecRes`; the mono chain
+  keeps using `aec_set_preset()` because its gain is the library's own `res_gain`. No code or output change.
+
 ## [Unreleased] — 2026-10-23 — Seam and validation fixes; sources and docs condensed
 
 ### Fixed

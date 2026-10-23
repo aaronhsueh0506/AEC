@@ -418,7 +418,13 @@ python3 python/bench_aecmos.py out_python/ results/ --baseline /path/to/baseline
 # All presets at once (Python rendering only)
 python3 python/eval_aec_challenge.py wav/aec_challenge_blind/ --all-presets
 
-# C-side release gates (including real-WAV heap/pool byte equality)
+# C-side test tiers. SIMD-independent members run only under SIMD=1, so the default tier is both runs
+make -C c_impl test SIMD=1
+make -C c_impl test SIMD=0
+# adds the full parity matrix, the end-to-end gate and the slow script tests
+make -C c_impl test-full SIMD=1
+
+# single gates (including real-WAV heap/pool byte equality)
 make -C c_impl test-static-aec
 make -C c_impl test-rate-structural test-process-context test-avg-reverb-slots
 ```

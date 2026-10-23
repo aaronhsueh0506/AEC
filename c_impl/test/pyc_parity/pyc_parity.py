@@ -46,6 +46,9 @@ Resolution (measured 2026-10-20 by planting constant changes in scratch copies; 
   rec.16k256 input carry an S-01 effect (8e-3) smaller than that input's own chaos distance (2.9e-2), so their audio numbers
   do not quantify S-01 (the marker rests on the call_counter evidence; preecho/dtb cells quantify it).
 
+Suites: the default is the lean suite (10 scenes, one per mechanism a planted regression is known to move); --full runs
+every scenario; --quick is an older, narrower subset; --only SUBSTR selects from the full set.
+
 Exit: 0 all as expected; 1 a cell failed; 2 setup error.
 """
 import argparse
@@ -179,7 +182,7 @@ def sha256_file(p):
 # ----------------------------------------------------------------------------------------------
 class Scn(object):
     def __init__(self, sid, kind, grid, preset='balanced', hpf='f32', obs=False, guard_off=False, res=True,
-                 ctx=False, cng=True, red=(), quick=False, info='', v0_only=False):
+                 ctx=False, cng=True, red=(), quick=False, lean=False, info='', v0_only=False):
         self.id = sid
         self.kind = kind
         self.grid = grid
@@ -195,6 +198,7 @@ class Scn(object):
         self.cng = cng
         self.red = tuple(red)        # S-ids this scenario is expected to show
         self.quick = quick
+        self.lean = lean             # member of the default suite (see build_scenarios)
         self.info = info             # observation, never a gate (e.g. a chaos-fragile finding that is not an audit S-id)
 
     @property
@@ -231,25 +235,37 @@ class Scn(object):
 
 
 def build_scenarios():
+    # Suites: the default (lean, 10 scenes) keeps one scene per mechanism that a planted regression is known to move;
+    # --full runs every scene. Lean membership is an exact id list (the scenes marked lean=True below), so a new
+    # variant never joins it by accident. Chosen from planted-regression runs (each of these was caught by the named scene):
+    #   H_error decay constant           rec.8k256.bal, rec.16k256.bal, dtb.16k256.bal, speechdt.16k256.bal, echo.16k512.bal
+    #   48 kHz resampler phase           dtb.48k1024.bal
+    #   observer shift (+1 hop)          preecho.16k256.bal.obs_noguard (the 16k/512 observer scene and the dtb obs scenes miss it)
+    #   aggressive-preset floor          dtb.16k256.agg (the rec.* aggressive scenes miss it)
+    #   context-seam filter_converged    dtb.16k256.bal.ctx
+    #   startup-hops sentinel            rec.16k256.bal, dtb.16k256.bal
+    #   mic HPF off path                 recdc.16k256.bal.nohpf
+    # --quick is the older, narrower subset; it has no aggressive scene and its observer scene misses the +1 hop shift.
     S = []
     add = S.append
     short = {'balanced': 'bal', 'aggressive': 'agg', 'mild': 'mild', 'no_floor': 'nofloor'}
     # A. default configuration (observer off, mic HPF on): real recording and synthetic scenes
     for g in GRIDS:
         for p in ('balanced', 'aggressive'):
-            add(Scn('rec.%s.%s' % (g, short[p]), 'rec', g, p, quick=(p == 'balanced' and g in ('16k256', '8k256'))))
+            add(Scn('rec.%s.%s' % (g, short[p]), 'rec', g, p, quick=(p == 'balanced' and g in ('16k256', '8k256')),
+                lean=(p == 'balanced' and g in ('16k256', '8k256'))))
     for g in GRIDS:
-        add(Scn('dtb.%s.bal' % g, 'dtb', g, quick=(g in ('16k256', '48k1024'))))
-        add(Scn('speechdt.%s.bal' % g, 'speechdt', g, quick=(g == '16k256')))
-        add(Scn('echo.%s.bal' % g, 'echo', g, quick=(g == '16k512')))
-    add(Scn('dtb.16k256.agg', 'dtb', '16k256', 'aggressive'))
+        add(Scn('dtb.%s.bal' % g, 'dtb', g, quick=(g in ('16k256', '48k1024')), lean=(g in ('16k256', '48k1024'))))
+        add(Scn('speechdt.%s.bal' % g, 'speechdt', g, quick=(g == '16k256'), lean=(g == '16k256')))
+        add(Scn('echo.%s.bal' % g, 'echo', g, quick=(g == '16k512'), lean=(g == '16k512')))
+    add(Scn('dtb.16k256.agg', 'dtb', '16k256', 'aggressive', lean=True))
     add(Scn('dtb.48k1024.agg', 'dtb', '48k1024', 'aggressive'))
     add(Scn('rec.16k256.mild', 'rec', '16k256', 'mild'))
     add(Scn('dtb.48k1024.mild', 'dtb', '48k1024', 'mild'))
     # B. mic HPF disabled on both sides. recdc = the recording with its DC offset removed (what the HPF would
     # have delivered as far as DC goes); the raw-DC 48k case is the registered N-01.
     for g in ('8k256', '16k256', '48k1024'):
-        add(Scn('recdc.%s.bal.nohpf' % g, 'recdc', g, hpf='off', quick=(g == '16k256')))
+        add(Scn('recdc.%s.bal.nohpf' % g, 'recdc', g, hpf='off', quick=(g == '16k256'), lean=(g == '16k256')))
     add(Scn('dtb.16k256.bal.nohpf', 'dtb', '16k256', hpf='off'))
     add(Scn('rec.48k1024.bal.nohpf', 'rec', '48k1024', hpf='off', info='N-01'))
     # E. informational: the SHIPPED Python mic HPF (fp64) against the float32 C filter, vs unperturbed Python (D-01)
@@ -263,7 +279,8 @@ def build_scenarios():
     # recording at 8k/16k256 (Python's guard blocks nothing in it); S-02 (injection guard, still open)
     # needs short near-end bursts (dtb) so that Python's guard actually blocks.
     for g in ('16k256', '16k512'):
-        add(Scn('preecho.%s.bal.obs_noguard' % g, 'preecho', g, obs=True, guard_off=True, quick=(g == '16k512')))
+        add(Scn('preecho.%s.bal.obs_noguard' % g, 'preecho', g, obs=True, guard_off=True, quick=(g == '16k512'),
+                lean=(g == '16k256')))
     # 48k1024 WAS an S-01 case before the fix (obs_cc_mismatch_hops=1855, L1 max_abs=1.75e-2, 58x
     # TOL_L1); the S-01 fix closed that (its observer call_counter now agrees with Python on every
     # hop). What remains AFTER the S-01 fix is a separate, smaller LAYER 1 finding (std-math C vs
@@ -286,7 +303,7 @@ def build_scenarios():
     # late on the rising edge) was fixed 2026-10-20: Python now patches the
     # field after update_convergence runs for the hop, matching C's
     # aec_get_res_context() post-update pull contract. No marker needed.
-    add(Scn('dtb.16k256.bal.ctx', 'dtb', '16k256', ctx=True, quick=True))
+    add(Scn('dtb.16k256.bal.ctx', 'dtb', '16k256', ctx=True, quick=True, lean=True))
     add(Scn('dtb.48k1024.bal.ctx', 'dtb', '48k1024', ctx=True))
     add(Scn('speechdt.16k256.bal.ctx_nores', 'speechdt', '16k256', ctx=True, res=False))
     # F. NO_FLOOR (AecPreset value 3 / "no_floor"): construction-time-only on both sides today (the
@@ -878,8 +895,10 @@ def main():
     ap.add_argument('--std-bin', required=True)
     ap.add_argument('--ship-bin', required=True)
     ap.add_argument('--json', default=None)
-    ap.add_argument('--quick', action='store_true')
-    ap.add_argument('--only', default=None, help='substring filter on scenario ids (comma separated = any)')
+    grp = ap.add_mutually_exclusive_group()
+    grp.add_argument('--quick', action='store_true', help='older narrow subset (no aggressive scene, weak observer scene)')
+    grp.add_argument('--full', action='store_true', help='every scenario (default: the lean suite)')
+    ap.add_argument('--only', default=None, help='substring filter on scenario ids over the full set (comma separated = any)')
     ap.add_argument('--write-pins', action='store_true')
     ap.add_argument('--skip-static', action='store_true')
     a = ap.parse_args()
@@ -888,8 +907,12 @@ def main():
     os.makedirs(a.work, exist_ok=True)
 
     scn_list = build_scenarios()
-    if a.quick:
+    # --only and --write-pins address scenes outside the lean suite, so they select from the full set.
+    suite = 'quick' if a.quick else 'full' if (a.full or a.only or a.write_pins) else 'lean'
+    if suite == 'quick':
         scn_list = [s for s in scn_list if s.quick]
+    elif suite == 'lean':
+        scn_list = [s for s in scn_list if s.lean]
     if a.only:
         pats = a.only.split(',')
         scn_list = [s for s in scn_list if any(p in s.id for p in pats)]
@@ -934,7 +957,7 @@ def main():
         'python_variant_runs_beyond_v0': sum(r['py_variants_run'] - 1 for r in results),
         'failed_ids': fails,
     }
-    doc = {'suite': 'quick' if a.quick else 'full', 'tolerances': TOL, 'env': env, 'expected_red_registry': EXPECTED_RED_INFO,
+    doc = {'suite': suite, 'tolerances': TOL, 'env': env, 'expected_red_registry': EXPECTED_RED_INFO,
            'inputs': infos, 'hpf_fidelity': hpfc, 'scenarios': results, 'static': statics, 'summary': summ}
     if a.json:
         with open(a.json, 'w') as f:

@@ -130,7 +130,7 @@ t              各 lane 線性 AEC 完成
 <tr><td>設定 <code>SuppressionGainConfig</code>(含 far-active 地板目標)</td><td>一個結構</td><td><code>AecRes</code></td><td>保留;<code>aec_res_set_preset</code> 會更新它</td></tr>
 <tr><td>ramp 進度(live 地板)</td><td>2 個 float</td><td><code>AecRes</code></td><td>丟棄,live = target</td></tr>
 <tr><td>近端功率／縮放後參考暫存</td><td>n_bins + hop_size floats</td><td><code>AecRes</code></td><td>每 hop 覆寫</td></tr>
-<tr><td><code>aec_cng_fill</code> 的亂數狀態 <code>rng</code></td><td>uint32_t</td><td><b>呼叫端</b></td><td>由呼叫端決定(mono 與 4ch 兩條 pipeline 的種子都是 <code>0x9e3779b9</code>)</td></tr>
+<tr><td><code>aec_cng_fill</code> 的亂數狀態 <code>rng</code></td><td>uint32_t</td><td><b>呼叫端</b></td><td>由呼叫端決定(Audio_ALG 範例碼的種子是 <code>0x9e3779b9</code>,即 <code>SE_CNG_RNG_SEED</code>)</td></tr>
 </table></div>
 <p class="small">記憶體(balanced):16k/256 = 7,904 B、16k/512 = 14,048 B、48k/1024 = 29,408 B、8k/256 = 7,392 B(<code>aec_res_get_mem_size()</code> 實測;不隨 BACKEND／SIMD 改變,但會隨 <code>AecRes</code> 結構大小改變,請以函式回傳值為準)。</p>
 
@@ -138,7 +138,7 @@ t              各 lane 線性 AEC 完成
 <p>無演算法延遲(同 hop 內回傳)。實例以 <code>initial_state = 1</code> 起始:初始階段是否啟用 DominantNearend 觸發與低頻平滑,由設定中的 <code>dne_use_during_initial_phase</code>／<code>lf_smoothing_during_initial_phase</code> 決定;第一次 <code>all_converged</code> 為真的 hop 離開初始狀態,之後不會回去,直到 <code>aec_res_reset()</code>。設定來自 <code>AecConfig</code> 的共同建構函式,其中這兩個旗標固定為 1,所以經由本介面,初始狀態對增益沒有影響;離開初始狀態的判斷與狀態仍保留,供旗標被關閉的設定使用。</p>
 
 <h2>8. 與 Aec 內部舒適噪音的差異</h2>
-<div class="note"><code>aec_cng_fill</code> 與 <code>Aec</code> 自己的舒適噪音(<code>aec_post.c</code>)<b>同配方、不同算式</b>:同一個亂數遞推與查表,但本函式用 libm 的 <code>sqrtf</code>／除法,與兩條 pipeline 的迴圈逐位元相同;<code>Aec</code> 內部則是批次化的 <code>inv_psd_scale</code>＋<code>sk_fast_sqrt_f32</code>。兩者不要混用在要求位元一致的比對中。</div>
+<div class="note"><code>aec_cng_fill</code> 與 <code>Aec</code> 自己的舒適噪音(<code>aec_post.c</code>)<b>同配方、不同算式</b>:同一個亂數遞推與查表,但本函式用 libm 的 <code>sqrtf</code>／除法,與 Audio_ALG 範例碼(<code>pipelines/samples/se_sample_chain.h</code>)的迴圈逐位元相同;<code>Aec</code> 內部則是批次化的 <code>inv_psd_scale</code>＋<code>sk_fast_sqrt_f32</code>。兩者不要混用在要求位元一致的比對中。</div>
 
 <h2>9. 相關檔案與測試</h2>
 <ul class="small">

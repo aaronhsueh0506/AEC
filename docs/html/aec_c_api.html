@@ -212,7 +212,7 @@ aec_get_linear_context(aec, &amp;lin);      /* 時域 seam:線性殘差 + 已對
 <tr><td><code>aec_reset(a)</code></td><td>回到「全新 instance」狀態。會重啟 WOLA → spectrogram 上會有垂直線。若只是外部對齊改變,<b>請用上一個函式而不是這個</b></td><td><code>void</code>,<b>⚠ 無 NULL 檢查</b></td></tr>
 </table></div>
 <div class="warn"><code>aec_set_preset()</code> 對非法 preset 是<b>拒絕</b>(回 −1),與 <code>aec_config_from_preset()</code> 靜默退回 balanced 的行為<b>相反</b>。<code>ramp_ms</code> 範圍 <code>[0, 60000]</code>,<code>ramp_ms==0</code> <b>不是</b>錯誤。ramp 進行中再呼叫 → 從當前 live 值重新起走。<br>全部必須<b>在 hop 之間</b>呼叫、與 <code>process()</code> 序列化;<b>非 thread-safe</b>。<code>aec_reset()</code> 另外要求 render/capture thread 已靜止。</div>
-<div class="note">若 lane 是用 <code>spatial_linear_context=1</code> 建立的(4ch),<code>aec_set_preset()</code> <b>依構造為 inert</b>——該 lane 根本不跑 suppressor 的 gain path。4ch 要改強度請用 <code>audio_pipeline_4ch_set_aec_preset()</code>,它針對的是 pipeline 自己持有的共用 post 級抑制器;該抑制器就是 <a href="aec_res.html"><code>AecRes</code></a>,自行組合多 lane 時用 <code>aec_res_set_preset()</code>。</div>
+<div class="note">若 lane 是用 <code>spatial_linear_context=1</code> 建立的(4ch),<code>aec_set_preset()</code> <b>依構造為 inert</b>——該 lane 根本不跑 suppressor 的 gain path。4ch 要改強度請對整合者自己持有的共用 post 級抑制器——<a href="aec_res.html"><code>AecRes</code></a>——呼叫 <code>aec_res_set_preset()</code>。</div>
 
 <h2>10. 狀態查詢與診斷</h2>
 <div class="tblwrap"><table>
@@ -257,7 +257,7 @@ aec_get_linear_context(aec, &amp;lin);      /* 時域 seam:線性殘差 + 已對
 <tr><td><code>AEC_TESTING</code></td><td><code>0</code></td><td>編入內部測試 hook</td><td class="dead"><b>絕不可出貨</b></td></tr>
 </table></div>
 <p><code>-ffp-contract=off</code> 是<b>強制</b>的,在所有 caller 旗標<b>之後</b>才 append,無法被覆蓋。Makefile 在 parse 時就<b>拒絕</b> <code>EXTRA_CFLAGS</code> 內出現 <code>-Ofast</code>／<code>-ffast-math</code>／<code>-ffp-contract=</code>,也拒絕覆寫 <code>CFLAGS</code> 等變數;唯二 hook 是 <code>EXTRA_CFLAGS</code>／<code>EXTRA_LDFLAGS</code>。</p>
-<p class="small">輸出目錄由 config hash 決定(<code>bin/&lt;backend&gt;-&lt;hash&gt;/</code>),切換旗標不會產生 stale object。用 <code>make print-lib-path</code>(帶相同旗標)取路徑,<b>不要自行拼 <code>bin/</code> 路徑</b>。AEC 的測試要<b>逐 <code>test-*</code> target 跑</b>——<code>make test</code> 是 no-op 陷阱。</p>
+<p class="small">輸出目錄由 config hash 決定(<code>bin/&lt;backend&gt;-&lt;hash&gt;/</code>),切換旗標不會產生 stale object。用 <code>make print-lib-path</code>(帶相同旗標)取路徑,<b>不要自行拼 <code>bin/</code> 路徑</b>。AEC 的測試：<code>make test</code> 跑預設層(全部 <code>test-*</code> target、建置 gate、pytest、精簡的 Python↔C 對拍與 UBSan 包裝腳本;與 SIMD 無關的成員只在 <code>SIMD=1</code> 跑,所以要各跑一次 <code>SIMD=1</code> 與 <code>SIMD=0</code>);<code>make test-full</code> 另加完整對拍矩陣、端到端 gate 與較慢的腳本測試。單一 target 仍可個別執行。</p>
 
 <h2>12. 整合檢查清單</h2>
 <ul>

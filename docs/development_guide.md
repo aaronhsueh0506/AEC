@@ -141,6 +141,19 @@ Output WAV defaults to fp32 PCM (`AEC_OUT_FLOAT=0` for 16-bit).
 python3 -m pytest python/tests
 ```
 
+### C tests
+
+```bash
+cd c_impl
+make test SIMD=1      # default tier; SIMD-independent members run only under SIMD=1
+make test SIMD=0
+make test-full        # + full Python<->C parity matrix, end-to-end gate, slow script tests
+```
+
+`make test` also runs the pytest suite and the lean parity suite
+(`make test-pyc-parity`; `PYC_ARGS=--full` for every scenario). The tiers and
+their members are listed in `c_impl/README.md`.
+
 ## Architecture — what to read before changing things
 
 ### Pipeline
