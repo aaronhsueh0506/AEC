@@ -1,4 +1,4 @@
-"""Generate a binary golden for the C filter_quality port (WS5 Phase 5.2).
+"""Generate a binary golden for the C filter_quality port.
 
 Runs the Python FilteringQualityAnalyzer over a deterministic multi-frame
 boolean/int input sequence and writes, for each per-hop step, the inputs plus
@@ -9,14 +9,15 @@ the full observable state after the update:
 
 This module is PURE INTEGER COUNTERS + bool gates (no float math), so byte-equal
 means exact int/bool agreement. The sequence deliberately exercises:
-  - counter accumulation past _STARTUP_HOPS (40) and _RESET_HOPS (20),
+  - counter accumulation past the startup (400 ms) and reset (200 ms) thresholds
+    (40 and 20 hops at hop=160),
   - filter_update gating (active_render && not saturated_capture),
   - transparent_mode masking the final usable result,
   - gate3 via external_delay presence vs convergence_seen latch,
   - reset() semantics: blocks_since_start NOT reset, blocks_since_reset cleared,
     convergence_seen latches across reset.
 
-REAL input semantics (captured from aec_state.py:375 call site, balanced
+REAL input semantics (captured from aec_state.py call site, balanced
 16 kHz / fl=832 pipeline). All inputs are Python bools / Optional[DelayEstimate]
 (consumed by presence only) — there are no float arrays in this module:
     active_render          : bool

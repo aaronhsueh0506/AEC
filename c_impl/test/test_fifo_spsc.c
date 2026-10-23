@@ -1,57 +1,23 @@
-/* test_fifo_spsc.c — regression test (async render/capture FIFO data
- * race). Exercises the streaming API (aec_analyze_render() / aec_process_
- * capture(), aec.h doc block) under real SPSC concurrency: one render
- * thread, one capture thread, both hammering the same Aec instance with no
- * external lock, exactly the shape aec.h's threading contract promises is
- * safe.
- *
- * This test targets the drop-new + consumer catch-up FIFO
- * (see aec.h/aec.c): fifo_write is written ONLY by the render
- * thread and fifo_read is written ONLY by the capture thread (each a plain
- * monotonic unsigned cursor, published with a single acquire/release pair —
- * no RMW anywhere). This test PASSES ThreadSanitizer with ZERO suppressions
- * (see the TSan build recipe below) —
- * that is the proof artifact for the redesign's race-freedom claim.
+/* test_fifo_spsc.c -- streaming-API test under real SPSC concurrency: one render thread calling aec_analyze_render()
+ * and one capture thread calling aec_process_capture() on the same Aec with no external lock, the shape aec.h's
+ * threading contract promises is safe. It targets the drop-new + consumer catch-up FIFO: fifo_write is written only by
+ * the render thread and fifo_read only by the capture thread (plain monotonic unsigned cursors, one acquire/release
+ * pair, no RMW). The test passes ThreadSanitizer with zero suppressions.
  *
  * Two modes:
- *   (no args)              — threaded SPSC PAYLOAD-INTEGRITY stress test:
- *                             producer pushes N_HOPS deterministic hops via
- *                             aec_analyze_render(), where every hop's full
- *                             content is a pure function of a monotonic
- *                             `call_seq` (the producer's own loop index) —
- *                             see stamp_hop() below. The consumer decodes
- *                             call_seq back out of a->far_hop after every
- *                             aec_process_capture() and REGENERATES the
- *                             expected hop independently, then requires a
- *                             bit-exact memcmp — this is what would catch a
- *                             torn/partial hop (two different call_seqs'
- *                             bytes mixed in one buffer) under a broken
- *                             SPSC implementation, not just "no crash".
- *                             Jitter (LCG-driven nanosleep on both sides,
- *                             plus a zero-jitter consumer "sprint" phase)
- *                             perturbs relative producer/consumer speed so
- *                             both the drop-new/catch-up (overrun) and
- *                             underrun paths are reliably exercised.
- *                             Asserts no crash, every output sample finite,
- *                             full payload integrity, strict call_seq
- *                             monotonicity, bounded staleness, and that the
- *                             FIFO's own bookkeeping (fifo_write/fifo_read/
- *                             fifo_count) matches the derived
- *                             produced/consumed/skipped arithmetic exactly
- *                             once both threads have joined.
- *   --singlethread <path>  — single-thread reference run: strict lockstep
- *                             (analyze_render immediately followed by
- *                             process_capture, alternating, same thread) on
- *                             a deterministic LCG signal (same
- *                             lcg_next()/fill_hop(), same n_hops=4000 across
- *                             revisions, so dumps from different builds can
- *                             be `cmp`'d: the streaming API's lockstep
- *                             behaviour must not change, aec.h's documented
- *                             lockstep-equivalence contract), dumping raw
- *                             float32 output to <path>.
+ *   (no args)              threaded payload-integrity stress test. The producer pushes N_HOPS hops whose full content
+ *                          is a pure function of a monotonic call_seq (stamp_hop()); the consumer decodes call_seq from
+ *                          a->far_hop after every aec_process_capture(), regenerates the expected hop and requires a
+ *                          bit-exact memcmp, which catches a torn hop. LCG-driven nanosleep jitter (plus a zero-jitter
+ *                          consumer "sprint" phase) exercises both overrun and underrun. Asserts no crash, finite
+ *                          output, payload integrity, strictly increasing call_seq, bounded staleness, and that
+ *                          fifo_write/fifo_read/fifo_count match the produced/consumed/skipped arithmetic once both
+ *                          threads have joined.
+ *   --singlethread <path>  single-thread reference run in strict lockstep (analyze_render then process_capture) on a
+ *                          deterministic LCG signal (lcg_next()/fill_hop(), n_hops = 4000), dumping raw float32 output
+ *                          to <path>; dumps from different builds can be `cmp`'d (lockstep equals aec_process()).
  *
- * Build (standalone, from c_impl/ — mirrors test_lifecycle.c's documented
- * recipe, plus -pthread for the two worker threads):
+ * Build (standalone, from c_impl/; -pthread for the two worker threads):
  *   make -C ../../audiolib/common lib
  *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=gnu99 -pthread \
  *       -Iinclude -Iexample -I../../audiolib/common/include -I../../audiolib/common \
@@ -62,8 +28,8 @@
  *   ./bin/test_fifo_spsc
  *   ./bin/test_fifo_spsc --singlethread bin/out.bin
  *
- * ThreadSanitizer (same recipe, add -fsanitize=thread to BOTH compile and
- * link, -O1 recommended so TSan's stack traces stay readable):
+ * ThreadSanitizer (same recipe, add -fsanitize=thread to BOTH compile and link, -O1 recommended so TSan's stack traces
+ * stay readable):
  *   gcc -Wall -Wextra -O1 -ffp-contract=off -std=gnu99 -pthread \
  *       -fsanitize=thread -Iinclude -Iexample -I../../audiolib/common/include \
  *       -I../../audiolib/common \
@@ -89,15 +55,11 @@ static int g_pass = 0;
         else         { printf("pass: %s\n", (msg)); g_pass++; } \
     } while (0)
 
-/* ── deterministic LCG signal source (--singlethread dump mode + this
- * test's mic/near-end content) ───────────────────────────────────────────
- * Two independent streams (far-end / near-end) so the mic and ref hops
- * aren't identical. Small amplitude (±0.1) — this test is about the FIFO
- * mechanism, not echo-cancellation quality, so any bounded, non-degenerate
- * signal is enough to keep aec_process()'s DSP well away from saturation/
- * NaN territory while still doing real (non-trivial) work per hop.
- * run_singlethread_dump() below drives both ref and mic from these two
- * functions, so dumps from different builds remain comparable. */
+/* ── deterministic LCG signal source (--singlethread dump mode + this test's mic/near-end content)
+ * ── Two independent streams (far-end / near-end) so the mic and ref hops differ. Small amplitude
+ * (+-0.1): the test is about the FIFO mechanism, so any bounded, non-degenerate signal that keeps
+ * aec_process() away from saturation/NaN will do. run_singlethread_dump() drives both ref and mic
+ * from these two functions, so dumps from different builds stay comparable. */
 static unsigned int lcg_state_far = 0x9E3779B9u;
 static unsigned int lcg_state_near = 0x2545F491u;
 
@@ -114,39 +76,25 @@ static void fill_hop(float* buf, int hop, unsigned int* state) {
  */
 #define N_HOPS 100000
 
-/* Bounded-staleness slack (assertion 5): g_enq_watermark is a SEPARATE
- * test-side atomic from the FIFO's own fifo_write/fifo_read handshake (see
- * producer_main below) — there is no cross-variable ordering guarantee
- * between two independent atomics, so the watermark the consumer observes
- * for a given hop's enq_seq can lag very slightly behind that hop's own
- * publish. A few hops of slack absorbs that without weakening the check
- * (which is fundamentally about the ring's `cap` bound, not this slack). */
+/* Bounded-staleness slack (assertion 5): g_enq_watermark is a separate test-side atomic from the
+ * FIFO's own handshake, with no cross-variable ordering guarantee, so the watermark the consumer
+ * sees for a hop's enq_seq can lag slightly behind that hop's publish. A few hops of slack absorb
+ * that; the check itself is about the ring's `cap` bound. */
 #define STALENESS_SLACK 8
 
-/* Test-side diagnostic counter: mirrors the producer's own successful-push
- * ordinal (see ProducerArgs.enq_count) so the consumer can sanity-check how
- * stale a given hop is relative to total progress. NOT part of the FIFO's
- * correctness contract (aec.c's fifo_write/fifo_read ACQUIRE/RELEASE pair
- * is what actually guarantees the payload's visibility) — this is purely an
- * additional, independent assertion this test layers on top. */
+/* Test-side diagnostic counter mirroring the producer's successful-push ordinal
+ * (ProducerArgs.enq_count), so the consumer can check how stale a hop is relative to total
+ * progress. It is not part of the FIFO's correctness contract (aec.c's acquire/release pair is); it
+ * is an extra, independent assertion. */
 static unsigned int g_enq_watermark = 0;
 
-/* ── payload-integrity hop generator ──────────────────────────────────────
- * A pure function of call_seq — deliberately NOT the running lcg_state_far/
- * lcg_state_near streams above (those are reserved for run_singlethread_
- * dump()'s byte-identity contract, untouched by anything in this section).
- * f[0]/f[1] hold small non-negative integers (call_seq / enq_seq, both
- * N_HOPS=100000 << 2^24) scaled by 2^-24: an EXACT float32 round-trip
- * (multiplying/dividing by a power of two only moves the exponent, and any
- * integer < 2^24 is exactly representable in a float32's 24-bit mantissa),
- * so decode_seq() below recovers the exact integer, not an approximation.
- * f[2..hop-1] is LCG noise reseeded from call_seq alone, amplitude ±0.012 —
- * comparable magnitude to f[0]/f[1] and well inside aec_process()'s normal
- * operating range (no saturation/NaN risk). Because the WHOLE hop is a
- * deterministic function of call_seq (and, for f[1] only, enq_seq), the
- * consumer can independently regenerate the exact expected hop from a
- * decoded call_seq/enq_seq pair and catch a torn/partial hop (bytes from
- * two different pushes mixed in one buffer) with a bit-exact memcmp. */
+/* ── payload-integrity hop generator ── A pure function of call_seq, deliberately not the running
+ * lcg_state_far/lcg_state_near streams above (reserved for the --singlethread dump's byte
+ * identity). f[0]/f[1] hold call_seq / enq_seq (both < 2^24) scaled by 2^-24, an exact float32
+ * round trip, so decode_seq() recovers the exact integer. f[2..hop-1] is LCG noise reseeded from
+ * call_seq, amplitude +-0.012, inside aec_process()'s normal operating range. The consumer
+ * regenerates the expected hop from the decoded call_seq/enq_seq pair and catches a torn hop (bytes
+ * of two pushes) with a bit-exact memcmp. */
 static void stamp_hop(float* buf, int hop, long call_seq, long enq_seq) {
     buf[0] = (float)call_seq * 0x1p-24f;
     buf[1] = (float)enq_seq  * 0x1p-24f;
@@ -157,19 +105,14 @@ static void stamp_hop(float* buf, int hop, long call_seq, long enq_seq) {
     }
 }
 
-/* Decode an integer stamped by stamp_hop() back out of its scaled float
- * representation. The round-trip is exact for any value < 2^24 (see
- * stamp_hop's comment); lrintf is defensive rounding, not a correction for
- * an inexact conversion. */
+/* Decode an integer stamped by stamp_hop() back out of its scaled float. The round trip is exact
+ * for any value < 2^24; lrintf is defensive rounding. */
 static long decode_seq(float scaled) {
     return (long)lrintf(scaled * 16777216.0f);   /* undo the *0x1p-24f scale */
 }
 
-/* ── LCG-driven jitter (nanosleep) ────────────────────────────────────────
- * Perturbs relative producer/consumer speed so both the overrun (drop-new /
- * catch-up) and underrun paths get exercised reliably, rather than relying
- * entirely on whichever one the raw, unthrottled per-call DSP-cost gap
- * happens to produce on a given host. */
+/* ── LCG-driven jitter (nanosleep) ── Perturbs the relative producer/consumer speed so both overrun
+ * (drop-new / catch-up) and underrun paths are exercised reliably on any host. */
 static void jitter_sleep_us(unsigned int* state, unsigned int max_us) {
     if (max_us == 0) return;
     *state = (*state) * 1103515245u + 12345u;
@@ -292,11 +235,10 @@ static void* consumer_main(void* arg) {
             ca->last_consumed_call_seq = call_seq;
             ca->have_consumed = 1;
 
-            /* Assertion 5: bounded staleness. watermark_snapshot can only
-             * lag the true current successful-push count (see
-             * g_enq_watermark's comment), so it can only UNDER-report how
-             * far ahead the producer has gotten -- STALENESS_SLACK absorbs
-             * that lag on top of the ring-derived `cap` bound. */
+            /* Assertion 5: bounded staleness. The watermark snapshot can only lag the true
+             * successful-push count (see g_enq_watermark's comment), so it can only under-report
+             * how far ahead the producer is; STALENESS_SLACK absorbs that lag on top of the
+             * ring-derived `cap` bound. */
             unsigned wm = __atomic_load_n(&g_enq_watermark, __ATOMIC_ACQUIRE);
             long staleness = (long)wm - enq_seq;
             if (staleness > (long)cap + STALENESS_SLACK) ca->staleness_ok = 0;
@@ -334,13 +276,9 @@ static void run_stress_test(void) {
     ProducerArgs pa; memset(&pa, 0, sizeof(pa)); pa.a = &a; pa.hop = hop;
     ConsumerArgs ca; memset(&ca, 0, sizeof(ca)); ca.a = &a; ca.hop = hop;
 
-    /* Explicit large stack (16 MiB), not the platform default (512 KiB on
-     * macOS pthreads): aec_process()'s call chain runs through the entire
-     * post-filter stack (FFTs, ResidualEchoEstimator, SuppressionGain,
-     * ...), and instrumented builds (ThreadSanitizer in particular) inflate
-     * per-frame stack usage well past what the default budget survives with
-     * plain, uninstrumented builds — a stack overflow there is an artifact
-     * of the test's default pthread attrs, not of the FIFO fix under test. */
+    /* Explicit large stack (16 MiB), not the platform default (512 KiB on macOS pthreads):
+     * aec_process() runs through the whole post-filter stack, and instrumented builds
+     * (ThreadSanitizer in particular) inflate stack use beyond the default budget. */
     pthread_attr_t attr;
     pthread_attr_init(&attr);
     pthread_attr_setstacksize(&attr, 16u * 1024u * 1024u);
@@ -354,10 +292,7 @@ static void run_stress_test(void) {
     pthread_join(t_prod, NULL);
     pthread_join(t_cons, NULL);
 
-    /* Everything below runs single-threaded again (both workers joined), so
-     * plain reads of the Aec's internal fields are race-free here — this is
-     * the test harness inspecting final state after synchronization, not a
-     * third concurrent actor. */
+    /* Both workers have joined, so plain reads of the Aec's internal fields are race-free here. */
     unsigned final_w = *(unsigned*)&a.fifo_write;
     unsigned final_r = *(unsigned*)&a.fifo_read;
     unsigned cap_u   = (unsigned)a.fifo_cap_hops;
@@ -377,15 +312,11 @@ static void run_stress_test(void) {
     CHECK(ca.underrun_zero_ok, "stress: every UNDERRUN hop's far_hop is exactly all-zero");
     CHECK(ca.staleness_ok, "stress: bounded-staleness check never violated");
 
-    /* Both buffering-event paths must actually be exercised (not just
-     * "possible in theory") — an unthrottled producer racing a full-DSP
-     * consumer fills the ring almost immediately (drop-new), then the
-     * producer's fixed N_HOPS budget runs out long before the consumer's
-     * does, so the ring drains and the consumer runs dry for the rest
-     * (underrun); the jitter above makes both outcomes robust to exact
-     * relative thread speed on whatever host runs this. The CONSUMER also has
-     * its own overrun path (catch-up, fired when it finds the ring completely
-     * full) alongside the producer's. */
+    /* Both buffering-event paths must actually be exercised: an unthrottled producer racing a
+     * full-DSP consumer fills the ring at once (drop-new), then its fixed N_HOPS budget ends long
+     * before the consumer's, so the ring drains and the consumer runs dry (underrun); the jitter
+     * above makes both outcomes robust to thread speed. The consumer also has its own overrun path
+     * (catch-up, when it finds the ring completely full). */
     CHECK(pa.overrun_count >= 1, "stress: drop-new (producer overrun) path was exercised");
     CHECK(ca.underrun_count >= 1, "stress: underrun path was exercised");
     CHECK(ca.overrun_count >= 1, "stress: catch-up (consumer overrun) path was exercised");
@@ -403,39 +334,20 @@ static void run_stress_test(void) {
     CHECK((long)final_w == a.render_call_count - pa.overrun_count,
           "stress: fifo_write == renders - producer_drop_count");
 
-    /* fifo_read identity: a NORMAL consume advances it by 1; an UNDERRUN
-     * touches it not at all; a CATCH-UP jumps it by exactly `cap` in one
-     * call (r=w-1 then released to w, i.e. +cap from the pre-call r, since
-     * catch-up only fires when w-r==cap). So the final value is
-     *   (normal consumes)*1 + (catch-ups)*cap
-     * = (captures - underrun - catchups)*1 + catchups*cap
-     * = captures - underrun + catchups*(cap-1)
-     * This is exact and timing-independent (unlike the call_seq-domain
-     * gaps_total reconciliation below, it needs no residual correction). */
+    /* fifo_read identity: a normal consume advances it by 1, an underrun not at all, and a catch-up
+     * by exactly `cap` (r = w-1, then released to w; it fires only when w-r == cap). So the final
+     * value is captures - underrun + catchups*(cap-1), exact and timing-independent. */
     long skip_totals = ca.overrun_count * (long)(cap_u - 1);
     CHECK((long)final_r == a.capture_call_count - ca.underrun_count + skip_totals,
           "stress: fifo_read == captures - underrun_count + skip_totals (skip_totals = catchup_count*(cap-1))");
 
-    /* Reconcile the call_seq-domain gap accumulator (assertion 4 in the
-     * per-hop oracle) against the ring-domain counters above. gaps_total,
-     * by construction, only sums gaps STRICTLY BETWEEN consumed call_seq
-     * values -- it cannot see (a) producer drops that happen AFTER the
-     * globally last-consumed call_seq (nothing subsequent creates a gap to
-     * reveal them), or (b) hops still sitting unconsumed in the ring at
-     * join time (the final fifo_write - fifo_read leftover, drained by
-     * neither a normal consume nor a catch-up before the test ended).
-     * Both of those together are exactly "every call_seq value greater
-     * than last_consumed_call_seq that is not itself part of the
-     * leftover-in-ring tail":
+    /* Reconcile the call_seq-domain gap accumulator (assertion 4) against the ring counters. gaps_total only sums gaps
+     * strictly between consumed call_seq values, so it cannot see producer drops after the last consumed call_seq, nor
+     * hops still unconsumed in the ring at join time. Those are
      *   trailing_drops = (N_HOPS - 1 - last_consumed_call_seq) - leftover
-     * Accounting for that residual, the identity that always holds exactly
-     * (regardless of relative thread speed / scheduling) is:
-     *   gaps_total + trailing_drops == producer_drops + skip_totals
-     * In the overwhelmingly likely case for this stress shape (the ring
-     * drains completely and the very last render call of the whole run
-     * happens to succeed), trailing_drops == 0 and this reduces to the
-     * simple gaps_total == producer_drops + skip_totals; the general form
-     * below holds unconditionally. */
+     * and the identity that always holds is gaps_total + trailing_drops == producer_drops + skip_totals. When the ring
+     * drains and the last render call succeeds, trailing_drops == 0 and it reduces to
+     * gaps_total == producer_drops + skip_totals. */
     long leftover = (long)final_w - (long)final_r;
     long trailing_drops = (N_HOPS - 1 - ca.last_consumed_call_seq) - leftover;
     printf("gaps_total=%ld trailing_drops=%ld leftover=%ld last_consumed_call_seq=%ld\n",
@@ -447,13 +359,10 @@ static void run_stress_test(void) {
     aec_destroy(&a);
 }
 
-/* ── single-thread lockstep reference dump (byte-identity check) ─────────
- * Strict alternation on ONE thread: aec_analyze_render(ref) immediately
- * followed by aec_process_capture(mic, out) — the FIFO stays pass-through
- * (aec.h's documented lockstep equivalence), so this must produce identical
- * output on any build of aec.c; the signal is fixed (same
- * lcg_next()/fill_hop(), same n_hops=4000) so dumps from different builds can
- * be `cmp`'d directly. */
+/* ── single-thread lockstep reference dump (byte-identity check) ── Strict alternation on one
+ * thread (aec_analyze_render(ref) then aec_process_capture(mic, out)): the FIFO stays pass-through,
+ * so any build of aec.c must produce identical output for the fixed signal (same
+ * lcg_next()/fill_hop(), n_hops = 4000), and dumps can be `cmp`'d directly. */
 static void run_singlethread_dump(const char* path) {
     AecConfig cfg;
     aec_config_from_preset(&cfg, AEC_PRESET_BALANCED, 16000);

@@ -1,37 +1,16 @@
-/* linear_filter_output.h — C port of
- * the orchestrator's linear-filter output selector (python/modules/orchestrator.py):
- * UseRefinedOutput + FormLinearFilterOutput parity.
- *
- * Per hop it picks the cleaner of the refined (main) / coarse (shadow) linear
- * filter time-domain residuals via the UseRefinedOutput predicate, runs a
- * 30-sample SignalTransition crossfade on selection change, OLA-windows the
- * formed output through the analysis sqrt-Hann + WindowedPaddedFft, and emits
- * the selected windowed error spectrum + selected echo spectrum that feed RES +
- * SuppressionGain.
- *
- * Numerical fidelity (float32; drift versus Python accepted):
- *  - the e2/y2/s2 block sum-of-squares are np.sum over float32 (each f32
- *    sample squared in float32) → PAIRWISE-summed in float32
- *    (sk_pairwise_sum_tailfold_f32, also the tree of pbfdkf.c's far-end energy).
- *  - thresholds are float32 expressions.
- *  - the crossfade ramp stays float32 (s = (k+1)/(kT+1) is f32_array / pyfloat
- *    → f32; (1-s) is pyfloat - f32_array → f32; products/sum f32).
- *  - the rfft of [e_old | e_form]·sqrt_hann (length block_size, zero-padded to
- *    fft_size) goes through the library FFT (fft_forward).
- *  - complex64 add / subtract are elementwise (no FMA needed).
- *  - built with -ffp-contract=off so each float op rounds separately.
- *
- * When no shadow filter is present, the caller passes e_refined_time for both
- * candidates; the selector then becomes the stateful WOLA formatter required
- * by RES/NR. Heap and caller-pool construction paths are both supported by the
- * owning AEC instance.
- */
+/* Linear-filter output selector. Per hop it picks the cleaner of the refined (main) and coarse
+ * (shadow) time-domain residuals, crossfades over 30 samples on a selection change, applies the
+ * analysis sqrt-Hann window over [previous | current] hops, and emits the selected windowed
+ * error spectrum and echo spectrum for RES and SuppressionGain. Float32 throughout.
+ * Without a shadow filter the caller passes the refined residual for both candidates and the
+ * selector acts as the stateful WOLA formatter. Python reference: modules/orchestrator.py
+ * (UseRefinedOutput, FormLinearFilterOutput). */
 #ifndef LINEAR_FILTER_OUTPUT_H
 #define LINEAR_FILTER_OUTPUT_H
 
 #include "fft_wrapper.h"
 
-/* Output candidates, in the order the crossfade indexes them. */
+/* Candidates, in crossfade index order. */
 #define LFS_SEL_COARSE  0
 #define LFS_SEL_REFINED 1
 #define LFS_SEL_CAPTURE 2
@@ -42,54 +21,31 @@ typedef struct {
     int   fft_size;
     int   n_freqs;
 
-    /* persistent selection state (matches Python init) */
-    float *prev_output_time;   /* owned; length hop. _form_prev_output_time */
-    int    prev_output_valid;  /* 0 ⇒ Python None ⇒ use zeros(hop) */
-    /* Which candidate the previous hop published; the crossfade runs
-     * between any two of them. */
-    int    form_last_selection;       /* LFS_SEL_*, init LFS_SEL_REFINED */
-    int    refined_last_selected;     /* _refined_filter_output_last_selected */
+    float *prev_output_time;
+    int    prev_output_valid;
+    int    form_last_selection;       /* LFS_SEL_* published by the previous hop (init LFS_SEL_REFINED) */
+    int    refined_last_selected;
 
-    /* scratch (owned) */
-    float   *e_form;        /* length hop */
-    float   *block_win;     /* length block_size */
-    Complex *sel_esw;       /* length n_freqs (selected_esw, also returned) */
+    float   *e_form;
+    float   *block_win;
+    Complex *sel_esw;
 
-    /* Per-hop scratch, instance storage (not stack) — these were float[8192]
-     * locals in linear_filter_select() (stack-overflow hazard on small
-     * embedded task stacks). Each gets its own field: sq is reused
-     * sequentially across several sum_sq_f32() calls (safe, since each call
-     * fully consumes it before the next), but sref/scoa/tin are separate
-     * because sq is read again (as scratch) while sref's/scoa's own values
-     * are still needed by the caller in the surrounding scope. */
-    float   *scr_sq;         /* length hop:      sum_sq_f32 scratch (e2/y2/s2) */
-    float   *scr_sref;       /* length hop:      s_refined_time = near - e_refined */
-    float   *scr_scoa;       /* length hop:      s_coarse_time  = near - e_coarse */
-    float   *scr_tin;        /* length fft_size: zero-padded rfft input */
+    float   *scr_sq;
+    float   *scr_sref;
+    float   *scr_scoa;
+    float   *scr_tin;
 } LinearFilterSelect;
 
-/* Reset persistent state to Python init. */
+/* Resets the persistent selection state. */
 void linear_filter_select_reset(LinearFilterSelect *s);
 
-/* One hop of UseRefinedOutput + FormLinearFilterOutput.
- *
- *   e_refined_time      : raw_output, float32[hop]
- *   near_end            : near_end_block, float32[hop]
- *   e_coarse_time       : _last_shadow_output_time, float32[hop]
- *   error_spec_windowed : filter.error_spec_windowed, complex64[n_freqs]
- *   echo_spec           : filter.echo_spec, complex64[n_freqs]
- *   sqrt_hann           : filter._sqrt_hann_analysis, float32[block_size]
- *   fft                 : FFT handle for fft_size
- *   linear_unusable     : the filtering-quality verdict as of the PREVIOUS
- *                         hop -- this step runs before AecState is updated
- *   capture_fallback_enabled : config's output_capture_when_linear_unusable;
- *                         with linear_unusable it admits LFS_SEL_CAPTURE
- *   out_sel_esw         : selected_esw,        complex64[n_freqs]
- *   out_sel_echo        : selected_echo_spec,  complex64[n_freqs]
- *
- * Updates persistent state (prev_output_time, form_last_selection,
- * refined_last_selected) exactly as the Python tail does.
- */
+/* One hop of selection and output formation.
+ * e_refined_time, near_end, e_coarse_time: float32[hop].
+ * error_spec_windowed, echo_spec: Complex[n_freqs] from the filter.
+ * sqrt_hann: float32[block_size]. fft: handle for fft_size.
+ * linear_unusable: filtering-quality verdict from the previous hop; with
+ * capture_fallback_enabled it admits LFS_SEL_CAPTURE.
+ * out_sel_esw, out_sel_echo: Complex[n_freqs] selected error and echo spectra. */
 void linear_filter_select(LinearFilterSelect *s,
                           const float *e_refined_time,
                           const float *near_end,
@@ -103,4 +59,4 @@ void linear_filter_select(LinearFilterSelect *s,
                           Complex *out_sel_esw,
                           Complex *out_sel_echo);
 
-#endif /* LINEAR_FILTER_OUTPUT_H */
+#endif

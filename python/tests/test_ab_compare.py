@@ -1,18 +1,14 @@
 """Mutation tests for the A/B completeness gate (`eval/ab_compare.py`).
 
-Every guard here exists because its absence already let a broken run be reported
-as a result:
+Each guard is mutation-tested: break the run in one specific way and require
+the gate to fail. The failure modes covered:
 
-  * the first C harness printed "rendered 90" while all 90 renders had exited 2
-    on an invalid CLI flag -- it counted loop iterations, not successes;
-  * `bench_aecmos.py` writes a well-formed `scores.json` for "Scoring 0 cases",
-    so an empty scoring pass still produces a file that reads like a result;
-  * the follow-up guard rejected only ZERO scored cases, so 1..89 still passed;
-  * two evidence READMEs concluded "byte-identical" from every AECMOS delta
-    being exactly +0.0000 -- which is also what a broken harness produces.
-
-So each guard is mutation-tested: break the run in one specific way and require
-the gate to fail. A gate that cannot fail is the defect it was written to catch.
+  * a harness that counts loop iterations instead of successful renders;
+  * an empty scoring pass, for which `bench_aecmos.py` still writes a
+    well-formed `scores.json`;
+  * a partial scoring pass (1..N-1 cases) read as complete;
+  * "byte-identical" inferred from every AECMOS delta being exactly +0.0000,
+    which a broken harness produces too.
 """
 from __future__ import annotations
 
@@ -44,12 +40,10 @@ def _write_wav(path, samples, rate=16000):
 
 
 def _write_wav_f32(path, samples, rate=16000):
-    """WAVE_FORMAT_IEEE_FLOAT, which is what `aec_wav` actually writes.
+    """WAVE_FORMAT_IEEE_FLOAT, which is what `aec_wav` writes.
 
-    The stdlib `wave` module cannot write (or read) it -- that is why the gate
-    carries its own RIFF reader, and why these cases exist: the first run of the
-    hardened harness died on `wave.Error: unknown format: 3` against real
-    output, having passed every PCM16 test here.
+    The stdlib `wave` module cannot read it, which is why the gate carries its own
+    RIFF reader and why these cases exist alongside the PCM16 ones.
     """
     data = array.array("f", samples).tobytes()
     header = struct.pack(
@@ -113,7 +107,7 @@ def test_a_complete_run_passes_and_reports_byte_equality(run):
 # ── MUTATION: the run is incomplete ─────────────────────────────────────────
 
 def test_a_missing_output_wav_fails(run):
-    """The failure the original harness reported as 'rendered 90'."""
+    """A candidate render directory missing one case's output must fail."""
     os.remove(os.path.join(run["cand"], STEMS[2] + ab_compare.SUFFIX))
     with pytest.raises(ab_compare.AbError) as exc:
         _compare(run)
@@ -121,7 +115,7 @@ def test_a_missing_output_wav_fails(run):
 
 
 def test_a_missing_score_entry_fails(run):
-    """1..89 scored cases used to pass; only 0 was rejected."""
+    """A scores file missing one manifest case must fail, not only an empty one."""
     doc = json.loads(open(run["scores_cand"]).read())
     del doc["scores"][STEMS[4]]
     open(run["scores_cand"], "w").write(json.dumps(doc))
@@ -131,7 +125,7 @@ def test_a_missing_score_entry_fails(run):
 
 
 def test_an_empty_scores_file_fails(run):
-    """bench_aecmos.py writes this file happily for 'Scoring 0 cases'."""
+    """An empty scores file (what bench_aecmos.py writes for 'Scoring 0 cases') must fail."""
     open(run["scores_base"], "w").write(json.dumps({"label": "x",
                                                     "scores": {}}))
     with pytest.raises(ab_compare.AbError):
@@ -139,8 +133,9 @@ def test_an_empty_scores_file_fails(run):
 
 
 def test_a_substituted_stem_fails_even_though_the_count_is_right(run):
-    """THE case a count check cannot catch: render one case twice and another
-    never, and the total is still exactly right."""
+    """Render one case twice and another never: the count is right but the sets
+    differ, which a count check cannot catch.
+    """
     src = os.path.join(run["cand"], STEMS[0] + ab_compare.SUFFIX)
     victim = os.path.join(run["cand"], STEMS[1] + ab_compare.SUFFIX)
     os.remove(victim)
@@ -276,8 +271,9 @@ def test_float32_output_is_read_and_compared(f32_run):
 
 
 def test_float32_difference_is_measured_not_rounded_away(f32_run):
-    """A 1e-6 difference is invisible to a 16-bit comparison and is exactly the
-    size of difference a retiming change produces."""
+    """A 1e-6 difference is invisible to a 16-bit comparison and must still be
+    reported.
+    """
     path = os.path.join(f32_run["cand"], STEMS[2] + ab_compare.SUFFIX)
     wav = ab_compare._read_wav(path)
     samples = list(wav.samples)

@@ -1,8 +1,4 @@
-/* aec_config_build.h -- configuration builders shared by aec.c and aec_res.c.
- *
- * Library-internal: not part of the public API. Both entry points exist so a
- * lane inside Aec and a standalone residual-echo suppressor (aec_res.h) derive
- * their suppression-gain configuration from the same code. */
+/* aec_config_build.h -- configuration builders shared by aec.c and aec_res.c (library-internal). */
 #ifndef AEC_CONFIG_BUILD_H
 #define AEC_CONFIG_BUILD_H
 

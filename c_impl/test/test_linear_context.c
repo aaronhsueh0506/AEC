@@ -1,79 +1,36 @@
-/* test_linear_context.c — permanent regression test for the AecLinearContext
- * seam (aec_get_linear_context): the read-only view an external neural
- * post-filter uses to consume the formed linear error plus the SAME
- * time-domain aligned far the PBFDKF consumed.
+/* test_linear_context.c -- regression test for the AecLinearContext seam (aec_get_linear_context): the read-only view an
+ * external neural post-filter uses to consume the formed linear error plus the same time-domain aligned far the PBFDKF
+ * consumed.
  *
  * What only this test proves (the byte-equal WAV gate cannot):
- *   1. aligned_far_hop aliases a->far_hop and, once LOCKED, its content is
- *      byte-identical to the caller's own raw far delayed by the reported
- *      delay_samples — i.e. the exposed pointer really is the hop the linear
- *      filter read, not a copy or a different tap point.
- *   2. generation bumps exactly at ring-offset changes: first acquisition,
- *      confirmed shift, aec_reset — and at no other time. CHANGED is
- *      reported precisely on the hop whose processing bumped it.
- *   3. delay_state never claims alignment it does not have: UNLOCKED before
- *      acquisition in MATCHED, and UNLOCKED for the ring-fill window in
- *      FIXED, even though the applied delay is known from hop 0 there.
- *   4. ref_ring_filled saturates at ref_ring_size instead of growing without
- *      bound (its unbounded form is signed-overflow UB after ~37 h of
- *      continuous 16 kHz audio; the INT_MAX-seeded UBSan variant of this
- *      property lives in test_counter_saturation.c).
- *   5. The PER-MODE seam semantics (AecDelayMode) — each of MATCHED / FIXED / EXTERNAL_ALIGNED reports
- *      exactly one story about delay_samples / confidence / state /
- *      generation, and the far content it exposes matches that story:
- *        MATCHED           unchanged (scenarios 1-2 above)
- *        FIXED             delay_samples == the configured delay, always;
- *                          confidence 1.0; generation frozen while
- *                          processing; LOCKED once the ring can serve the
- *                          offset, and the exposed far is then byte-equal
- *                          to the caller's far delayed by exactly that many
- *                          samples
- *        EXTERNAL_ALIGNED  the exposed far IS the caller's own far (byte
- *                          for byte, every hop); delay_samples == 0;
- *                          LOCKED from hop 0; generation frozen
- *   6. The PER-MODE reference-ring SIZING:
- *      FIXED carves exactly `fixed_delay_samples + hop` -- so
- *      max_delay_ms/delay_buffer_ms are inert there -- and still serves the
- *      caller's far delayed by exactly that many samples across hundreds of
- *      wraps of the small ring, including through aec_reset()'s
- *      refill. EXTERNAL_ALIGNED carries no ring at all, and its pool is
- *      FIXED(0)'s minus exactly one hop-sized array.
+ *   1. aligned_far_hop aliases a->far_hop and, once LOCKED, is byte-identical to the caller's raw far delayed by the
+ *      reported delay_samples.
+ *   2. generation bumps exactly at ring-offset changes (first acquisition, confirmed shift, aec_reset) and at no other
+ *      time; CHANGED is reported on the hop whose processing bumped it.
+ *   3. delay_state never claims alignment it does not have: UNLOCKED before acquisition in MATCHED, and for the ring-fill
+ *      window in FIXED even though the applied delay is known from hop 0.
+ *   4. ref_ring_filled saturates at ref_ring_size (its unbounded form is signed-overflow UB after ~37 h of 16 kHz audio;
+ *      the INT_MAX-seeded UBSan variant is in test_counter_saturation.c).
+ *   5. Per-mode seam semantics (AecDelayMode). MATCHED as in 1-2. FIXED reports delay_samples == the configured delay,
+ *      confidence 1.0, frozen generation, LOCKED once the ring can serve the offset, and the exposed far is byte-equal to
+ *      the caller's far delayed by exactly that many samples. EXTERNAL_ALIGNED exposes the caller's own far byte for byte
+ *      every hop, with delay_samples 0, LOCKED from hop 0, frozen generation.
+ *   6. Per-mode reference-ring sizing. FIXED carves exactly `fixed_delay_samples + hop` (max_delay_ms/delay_buffer_ms are
+ *      inert there) and serves the caller's far delayed by exactly that many samples across hundreds of wraps, including
+ *      through aec_reset()'s refill. EXTERNAL_ALIGNED carries no ring, and its pool is FIXED(0)'s minus one hop-sized
+ *      array.
  *
- * Mutation checks (each reverts one line of the fix and must go red here):
- *   - drop the Path-A generation bump  -> "first lock: CHANGED on the lock
- *     hop" and "generation == g0+1" fail;
- *   - drop the Path-B generation bump  -> "shift: generation advanced" fails;
- *   - drop the aec_reset bump          -> "reset: generation advanced" fails;
- *   - report far_hop_aligned=1 unconditionally -> "pre-lock hops stay
- *     UNLOCKED" and "fixed: UNLOCKED until the ring can serve" fail;
- *   - serve the ring read one hop early or late -> the per-hop content rows
- *     ("exposed far is raw while UNLOCKED and far[t-delay] once locked" and
- *     "fixed: aligned far is the caller far") fail on the boundary hop;
- *   - remove the ref_ring_filled clamp -> "filled saturates at ring size"
- *     fails;
- *   - seed FIXED's current_delay from anything but cfg.fixed_delay_samples
- *     -> "fixed: aligned far is the caller far" fails;
- *   - run the ring write/read under the estimator gate instead of the
- *     ring gate -> every "fixed: ..." alignment row fails;
- *   - report EXTERNAL_ALIGNED as UNLOCKED/-1 (its pre-delay_mode reading)
- *     -> the external-aligned rows fail;
- *   - drop the `+ hop` from aec_ref_ring_samples()'s FIXED arm -> the
- *     "ring == fixed + hop" rows fail (and the wrap scenarios read stale
- *     far);
- *   - shift the ring read offset by one hop/sample -> every
- *     "aligned far byte-equal to far[t-N]" row fails;
- *   - give EXTERNAL_ALIGNED a ring (return the MATCHED size for it) ->
- *     "external: no ring, no estimator" and the pool-difference row fail;
- *   - drop the capture candidate from linear_filter_select() -> the
- *     far-active/no-echo rows fail.
+ * Mutation checks (each reverts one thing and must go red here): drop the Path-A, Path-B or aec_reset generation bump;
+ * report far_hop_aligned=1 unconditionally; serve the ring read one hop early or late; remove the ref_ring_filled clamp;
+ * seed FIXED's current_delay from anything but cfg.fixed_delay_samples; run the ring write/read under the estimator gate
+ * instead of the ring gate; report EXTERNAL_ALIGNED as UNLOCKED/-1; drop the `+ hop` from aec_ref_ring_samples()'s FIXED
+ * arm; give EXTERNAL_ALIGNED a ring; drop the capture candidate from linear_filter_select().
  *
- * The direct selector scenario below separately proves the gate stands down
- * once the analyzer calls the filter usable. This cannot be delegated to a
- * C/Python parity gate: two ports with the same missing predicate would agree
- * while both were wrong. The end-to-end far-active/no-echo scenario then
- * proves the same selector protects the public seam.
+ * The direct selector scenario separately proves the gate stands down once the analyzer calls the filter usable. A
+ * C/Python parity gate cannot cover this: two ports with the same missing predicate would agree while both were wrong.
+ * The end-to-end far-active/no-echo scenario proves the same selector protects the public seam.
  *
- * Build (standalone, from c_impl/ — mirrors test_process_context.c):
+ * Build (standalone, from c_impl/):
  *   make -C ../../audiolib/common lib
  *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=gnu99 -Iinclude -Iexample \
  *       -I../../audiolib/common/include \
@@ -119,28 +76,19 @@ static float rng_uniform(float amp) {
 /* One long shared far history so the test can reconstruct, from the CALLER
  * side, exactly which raw samples an aligned far_hop must contain.  Sized
  * for the largest scenario (48 kHz: 1500 hops x 512). */
-/* Sized for the largest scenario: 500 acquisition + 5000 shift hops at
- * 48 kHz/hop 512. The generous shift budget is deliberate: even with the
- * ERLE watchdog LIVE in this enable_res=0 context-only config (the
- * last_erle_windowed cache condition is enable_res || return_res_context --
- * see the note above that cache write in aec.c), a
- * confirmed delay shift still needs seconds of audio to re-lock (ERLE
- * collapse resumes full-rate matched-filter analysis, then consensus must
- * rebuild). The measured re-lock hop count is printed as info. */
+/* Sized for the largest scenario: 500 acquisition + 5000 shift hops at 48 kHz/hop 512. The generous
+ * shift budget is deliberate: with the ERLE watchdog live in this enable_res=0 context-only config
+ * (the last_erle_windowed cache condition is enable_res || return_res_context), a confirmed delay
+ * shift still needs seconds of audio to re-lock (ERLE collapse resumes full-rate matched-filter
+ * analysis, then consensus must rebuild). The measured re-lock hop count is printed as info. */
 #define MAX_SAMPLES (5600 * 512 + 8192)
 static float g_far_hist[MAX_SAMPLES];
 
-/* ONE definition of this file's stimulus: drive a single hop of far noise
- * with mic = 0.5 * far[t - true_delay], appending the far to g_far_hist so
- * every scenario can byte-compare the aligned far it gets back against the
- * history. Returns the new `pushed` cursor, or `pushed` unchanged after
- * reporting a history overflow.
- *
- * Per-hop rather than per-run because most scenarios inspect their own
- * locals between hops (fill windows, lock transitions, wrap classification)
- * and threading those through run_hops' void* callback is more machinery
- * than the loop it would replace -- so they call this directly and keep
- * their loop body, instead of each re-deriving the stimulus. */
+/* ONE definition of this file's stimulus: drive a single hop of far noise with mic = 0.5 * far[t -
+ * true_delay], appending the far to g_far_hist so every scenario can byte-compare the aligned far
+ * it gets back against the history. Returns the new `pushed` cursor, or `pushed` unchanged after
+ * reporting a history overflow. It is per-hop rather than per-run because most scenarios inspect
+ * their own locals between hops (fill windows, lock transitions, wrap classification). */
 static long drive_hop(Aec* a, long pushed, int true_delay) {
     int hop = a->hop_size;
     float mic[1024], out[1024];
@@ -191,16 +139,11 @@ static void watch_hop(Aec* a, long pushed, void* user) {
     long start;
     aec_get_linear_context(a, &ctx);
     w->hops_seen++;
-    /* Content proof on EVERY hop, not only at lock: UNLOCKED promises the
-     * caller's RAW far, and from the first hop the ring can serve the offset
-     * the seam promises far[t - delay_samples]. Byte-compared against the
-     * history this test just pushed (amplitude 0.05 never soft-clips, so the
-     * ring holds the caller's exact samples).
-     *
-     * Byte-compared rather than merely non-NULL: aec_get_linear_context()
-     * assigns aligned_far_hop = a->far_hop unconditionally, so a NULL test
-     * can never fail and would not notice raw far served under a LOCKED
-     * seam, nor a ring read one hop early or late. */
+    /* Content proof on EVERY hop, not only at lock: UNLOCKED promises the caller's RAW far, and
+     * from the first hop the ring can serve the offset the seam promises far[t - delay_samples].
+     * Byte-compared against the history just pushed (amplitude 0.05 never soft-clips), not merely
+     * non-NULL: aec_get_linear_context() assigns aligned_far_hop = a->far_hop unconditionally, so a
+     * NULL test can never fail. */
     start = pushed - hop -
             (ctx.delay_state == AEC_LINEAR_DELAY_UNLOCKED ? 0 : ctx.delay_samples);
     if (start < 0 || memcmp(ctx.aligned_far_hop, g_far_hist + start,
@@ -324,15 +267,11 @@ static void scenario_acquire_and_verify(int sample_rate, int fft_size,
     g_rng_state = 0x11EC5EEDu;  /* keep scenarios independent of ordering */
 }
 
-/* EXTERNAL_ALIGNED (and its legacy spelling, enable_delay_est=0): no
- * estimator, no ring. The caller CONTRACTED that far is already aligned, so
- * the seam says so -- delay_samples 0, LOCKED from the first hop, frozen
- * generation -- and the exposed far must be the caller's own hop byte for
- * byte, every hop, never a ring read.
- *
- * `legacy` drives the SAME assertions through the deprecated
- * enable_delay_est=0 spelling, proving the translation layer lands on this
- * mode rather than merely compiling. */
+/* EXTERNAL_ALIGNED (and its deprecated spelling, enable_delay_est=0): no estimator, no ring. The
+ * caller contracted that far is already aligned, so the seam reports delay_samples 0, LOCKED from
+ * the first hop, frozen generation, and exposes the caller's own hop byte for byte, never a ring
+ * read. `legacy` drives the same assertions through the deprecated enable_delay_est=0 spelling,
+ * proving the translation lands on this mode. */
 static void scenario_external_aligned(int legacy) {
     const char* tag = legacy ? "external-aligned(legacy est=0)"
                              : "external-aligned";
@@ -501,17 +440,13 @@ static void scenario_fixed_zero_delay(void) {
 
 /* ── the FIXED ring is sized for the delay, not for a search ──────────── */
 
-/* FIXED carves exactly `fixed_delay_samples + hop` samples -- the tight bound
- * derived in aec_ref_ring_samples() -- instead of the MATCHED search ring
- * (max(delay_buffer_ms, max_delay_ms + 4096)). Two separable claims:
- *   a) the size IS that expression, on every grid and across the interesting
- *      fixed values (0, sub-hop, exact hop multiple, non-multiple, and one
- *      past the max_delay_ms budget), and
- *   b) max_delay_ms / delay_buffer_ms are now INERT here -- a config that
- *      differs only in those two fields must produce the identical ring and
- *      the identical pool size. (b) is what fails if a future edit
- *      reintroduces the max() against the search budget: (a) alone would
- *      still pass for every fixed value larger than that budget. */
+/* FIXED carves exactly `fixed_delay_samples + hop` samples (the tight bound derived in
+ * aec_ref_ring_samples()), not the MATCHED search ring (max(delay_buffer_ms, max_delay_ms + 4096)).
+ * Two claims: a) the size is that expression on every grid and across the interesting fixed values
+ * (0, sub-hop, exact hop multiple, non-multiple, one past the max_delay_ms budget); b) max_delay_ms
+ * / delay_buffer_ms are inert here: a config differing only in those two fields produces the
+ * identical ring and pool size. (b) fails if an edit reintroduces the max() against the search
+ * budget; (a) alone would still pass for every fixed value above that budget. */
 static void scenario_fixed_ring_exact_size(void) {
     static const struct { int sr, fft, fixed; const char* tag; } rows[] = {
         { 16000,  256,     0, "16k/256 fixed=0 (degenerate, write-only ring)" },
@@ -573,11 +508,9 @@ static void scenario_fixed_ring_exact_size(void) {
     }
 }
 
-/* An exact-fit ring wraps constantly, so the delay-compensating read is a
- * two-part (split) memcpy on most hops rather than the rare edge case it was
- * against a 32768-sample ring. This walks a small and a large FIXED delay for
- * long enough to wrap many times and demands byte-equality with the caller's
- * own far on EVERY post-fill hop -- and asserts that the split path was
+/* An exact-fit ring wraps constantly, so the delay-compensating read is a two-part (split) memcpy
+ * on most hops. This walks a small and a large FIXED delay long enough to wrap many times, demands
+ * byte-equality with the caller's far on every post-fill hop, and asserts that the split path was
  * actually taken, so the test cannot pass by never reaching the boundary. */
 static void scenario_fixed_ring_wraps(int sr, int fft, int fixed, int hops,
                                       const char* tag) {
@@ -693,12 +626,9 @@ static void scenario_fixed_reset_refill(void) {
     g_rng_state = 0x11EC5EEDu;
 }
 
-/* EXTERNAL_ALIGNED carries NO delay-attached allocation at all: no estimator,
- * no ring, and no ring-shaped remnant of one. scenario_external_aligned()
- * already proves the far passthrough; this pins the absence of state, so a
- * future edit that quietly hands this mode a ring (the cheapest way to
- * "simplify" the mode branch) is caught even though the audio would not
- * change. */
+/* EXTERNAL_ALIGNED carries no delay-attached allocation: no estimator, no ring, no ring-shaped
+ * remnant. scenario_external_aligned() proves the far passthrough; this pins the absence of state,
+ * so an edit that quietly hands this mode a ring is caught even though the audio would not change. */
 static void scenario_external_has_no_delay_state(void) {
     static const struct { int sr, fft; const char* tag; } grids[] = {
         { 16000,  256, "16k/256"  },
@@ -739,13 +669,11 @@ static void scenario_external_has_no_delay_state(void) {
     }
 }
 
-/* The honest-UNLOCKED window: current_delay >= 0 but the ring does not yet
- * hold delay+hop samples, so far_hop stays RAW. Unreachable through natural
- * acquisition (locking takes ~0.3 s, by which time the ring holds far more
- * than any in-range delay), so poke the state directly, counter-saturation
- * style. This is the ONLY scenario that observes far_hop_aligned=0 with a
- * non-negative delay -- the mutation "report aligned unconditionally" is
- * caught here and nowhere else. */
+/* The honest-UNLOCKED window: current_delay >= 0 but the ring does not yet hold delay+hop samples,
+ * so far_hop stays RAW. It is unreachable through natural acquisition (locking takes ~0.3 s, by
+ * which time the ring holds more than any in-range delay), so the state is poked directly. It is
+ * the only scenario that observes far_hop_aligned=0 with a non-negative delay, so the mutation
+ * "report aligned unconditionally" is caught here only. */
 static void scenario_unfilled_ring_reads_unlocked(void) {
     AecConfig cfg;
     context_only_config(&cfg, 16000, 0);
@@ -818,14 +746,11 @@ static void scenario_ring_filled_saturates(void) {
 }
 
 
-/* far ACTIVE with NO echo path -- the near-end single-talk case the corpus
- * has no scenario for and the test suite only ever covered as "far silent,
- * mic silent". A reference this loud with nothing of it in the capture gives
- * the matched filter no peak to lock, so the delay never becomes solid and
- * the filtering-quality analyzer never calls the linear estimate usable;
- * meanwhile the adaptive filter happily fits far-shaped noise onto the near
- * speech and subtracts something that was never there. The formed seam must
- * not carry more energy than the capture it came from. */
+/* far ACTIVE with NO echo path (near-end single talk). A reference this loud with nothing of it in
+ * the capture gives the matched filter no peak to lock, so the delay never becomes solid and the
+ * filtering-quality analyzer never calls the linear estimate usable; meanwhile the adaptive filter
+ * fits far-shaped noise onto the near speech and subtracts something that was never there. The
+ * formed seam must not carry more energy than the capture it came from. */
 static void scenario_far_active_no_echo(int silent_mic, const char *label) {
     AecConfig cfg;
     Aec a;

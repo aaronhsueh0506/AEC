@@ -1,38 +1,15 @@
 #!/usr/bin/env bash
 #
-# docs_smoke.sh — compile-and-run smoke test for the C sample embedded in
-# ../STATIC_MEMORY.md ("## Top-level usage"), so that snippet cannot silently
-# rot out of sync with the real aec_get_mem_size()/aec_init()/aec_destroy()
-# signatures declared in ../include/aec.h (this bit us before: the doc used
-# to show a stale 4-arg `aec_init(&aec, pool, pool_bytes, &cfg)` while the
-# real API is 3-arg and pointer-returning — `Aec* aec_init(void* mem,
-# size_t mem_size, const AecConfig* cfg)`).
+# docs_smoke.sh -- compile-and-run smoke test for the C sample embedded in ../STATIC_MEMORY.md, so the snippet cannot drift
+# from the aec_get_mem_size()/aec_init()/aec_destroy() signatures declared in ../include/aec.h.
 #
-# How it works:
-#   STATIC_MEMORY.md wraps the sample in HTML comment markers:
-#       <!-- docs-smoke:begin -->
-#       ```c
-#       ... the sample ...
-#       ```
-#       <!-- docs-smoke:end -->
-#   This script greps out everything between the markers, strips the ```c
-#   fence lines, drops it into a generated main() that supplies the small
-#   helpers the doc snippet assumes exist (read_block/write_block), compiles
-#   it against the real AEC sources + the shared audiolib archive (the
-#   same gcc invocation documented in STATIC_MEMORY.md's "Verification"
-#   section), and runs the result on ~1 second of silence.
+# STATIC_MEMORY.md wraps the sample in HTML comment markers (<!-- docs-smoke:begin --> ... <!-- docs-smoke:end -->). This
+# script extracts what lies between them, strips the ```c fence lines, drops it into a generated main() that supplies the
+# helpers the snippet assumes (read_block/write_block), compiles it against the real AEC sources and the audiolib archive,
+# and runs it on about 1 second of silence.
 #
-# This is a documentation regression check, not part of `make`/CI wiring —
-# no Makefile is touched or required. Run it by hand:
-#
-#   cd c_impl/test && ./docs_smoke.sh
-#
-# (or from anywhere: /path/to/c_impl/test/docs_smoke.sh — paths are resolved
-# relative to this script's own location, not $PWD).
-#
-# Exit code 0 + "docs_smoke: PASS" on stdout means the doc sample still
-# compiles clean against the current aec.h and runs to completion without
-# aec_init() returning NULL or crashing.
+# Not part of `make`; run by hand: cd c_impl/test && ./docs_smoke.sh   (paths resolve from the script's location).
+# Exit 0 and "docs_smoke: PASS" mean the sample compiles against the current aec.h and runs to completion.
 
 set -euo pipefail
 
@@ -53,9 +30,7 @@ trap 'rm -rf "$WORK"' EXIT
 
 echo "== docs_smoke: extracting '## Top-level usage' sample from $DOC =="
 
-# Pull everything between the markers, then keep only the lines strictly
-# between the ```c fence and the closing ``` fence (i.e. drop the fences
-# themselves so what's left is pure C).
+# Keep only the lines strictly between the ```c fence and the closing ``` fence, so what is left is pure C.
 awk '/<!-- docs-smoke:begin -->/{flag=1; next} /<!-- docs-smoke:end -->/{flag=0} flag' "$DOC" \
     | awk '/^```c$/{incode=1; next} /^```$/{incode=0; next} incode' \
     > "$WORK/sample.c.inc"
@@ -114,19 +89,13 @@ FOOTER_EOF
 echo "== docs_smoke: building audiolib (BACKEND=$BACKEND) =="
 make -C "$COMMON_DIR" BACKEND="$BACKEND" lib
 
-# Resolve the exact archive path for THIS build (audiolib's bin/ is
-# keyed bin/<backend>-<config-hash>/, not a flat
-# bin/$BACKEND/ -- print-lib-path is queried with the SAME BACKEND= this
-# script's own `make -C "$COMMON_DIR" BACKEND="$BACKEND" lib` line just used, so
-# the two can never point at different configs).
+# Resolve the archive path for THIS build: print-lib-path is queried with the same BACKEND= as the `lib` build above, so
+# the two cannot point at different configs.
 COMMON_LIB_PATH="$(make -s -C "$COMMON_DIR" BACKEND="$BACKEND" print-lib-path)"
 
 echo "== docs_smoke: compiling extracted sample against aec.h + libaudio_common ($BACKEND) =="
-# Compile as C with the C driver, then LINK with the C++ driver: the NE10
-# archive carries one C++ TU, and the C++ driver supplies the correct C++
-# runtime itself (libc++ on macOS/clang, libstdc++ on GNU/Linux gcc) -- no
-# hardcoded -lc++ (a macOS-ism that fails to link on GNU/Linux), mirroring the
-# Makefiles' own LINK=$(CXX) pattern.
+# Compile as C, then link with the C++ driver: the NE10 archive carries one C++ TU, and the C++ driver supplies the C++
+# runtime without a hardcoded -lc++, like the Makefiles' LINK=$(CXX).
 LINK_DRV=c++
 
 SOURCES=("$WORK/docs_smoke_main.c")

@@ -1,12 +1,4 @@
-/* initial_state.c — C port of python/modules/state/initial_state.py.
- *
- * Cold-start state machine (initial-phase counter). No float arithmetic in the
- * update path; the sole numeric op is the constructor threshold
- *   int(initial_state_seconds * HOPS_PER_SECOND)
- * = a float32 multiply (float32-by-design; converted for uniformity, drift
- * accepted) then truncate-toward-zero (Python int()), reproduced as
- * (int)((float)seconds * HOPS_PER_SECOND). All run-time state is integer/bool.
- */
+/* initial_state.c -- see initial_state.h. No float arithmetic in the update path. */
 #include "initial_state.h"
 #include "aec_scale.h"
 
@@ -14,9 +6,8 @@ void initial_state_init(InitialState *s, int conservative_initial_phase,
                         float initial_state_seconds,
                         int hop_size, int sample_rate) {
     s->conservative = conservative_initial_phase ? 1 : 0;
-    /* Computed via aec_ms_to_hops rather than a fixed 100 hops per second
-     * (hop=160/sr=16000) so the window stays initial_state_seconds at any
-     * grid. */
+    /* Thresholds are derived from the live grid, so the window is initial_state_seconds at any
+     * rate. */
     s->initial_state_hops = aec_ms_to_hops(
         initial_state_seconds * 1000.0f, hop_size, sample_rate);
     /* 5 s conservative threshold. */
@@ -39,15 +30,7 @@ void initial_state_reset(InitialState *s) {
 void initial_state_update(InitialState *s, int active_render, int saturated_capture) {
     int prev_initial;
     if (active_render && !saturated_capture) {
-        /* Threshold-gate counter: the only two readers below each test
-         * "< threshold" against exactly one of conservative_hops (fixed
-         * per-instance since s->conservative never changes post-construction)
-         * or initial_state_hops (config-derived, not a hardcoded compile-time
-         * constant). Saturate at the larger of the two -- always >= the one
-         * branch actually evaluated for this instance's lifetime -- so the
-         * comparison result matches the unbounded counter identically
-         * forever, without ever risking signed-integer-overflow UB on a very
-         * long streaming session. */
+        /* The counter saturates at the larger threshold so it cannot overflow. */
         if (s->strong_not_saturated_render_blocks < s->cap_hops) {
             s->strong_not_saturated_render_blocks += 1;
         }

@@ -1,25 +1,6 @@
-/* erle_estimator.h — C port of python/modules/state/erle_estimator.py.
- *
- * Thin wrapper over FullBandErleEstimator + SubbandErleEstimator with a
- * startup gate. NO float math of its own: it owns the two sub-estimators plus
- * an integer _blocks_since_reset counter and does the startup gating.
- *
- *   update(x2,y2,e2,converged_filter,coh_gate_mask):
- *     blocks_since_reset += 1
- *     if blocks_since_reset < startup_hops: return       (gate; sub-modules
- *                                                          untouched)
- *     subband.update(x2,y2,e2,converged_filter,coh_gate_mask)
- *     fullband.update(x2,y2,e2,converged_filter)
- *
- *   reset(delay_change):
- *     fullband.reset(); subband.reset()
- *     if delay_change: blocks_since_reset = 0
- *
- * No new parity surface here — it composes the two already-bit-exact ports;
- * the ordering (subband BEFORE fullband) is preserved verbatim from the .py
- * but neither reads the other, so order is observationally inert. Storage for
- * the two sub-estimators' per-bin arrays is caller-owned (see *_init).
- */
+/* Startup-gated wrapper over FullBandErleEstimator and SubbandErle: updates are ignored until
+ * startup_hops blocks have elapsed since a reset with delay_change=1.
+ * Per-bin storage is caller-owned (see init). Python reference: modules/state/erle_estimator.py. */
 #ifndef ERLE_ESTIMATOR_H
 #define ERLE_ESTIMATOR_H
 
@@ -29,20 +10,15 @@
 #include "fullband_erle.h"
 
 typedef struct {
-    int               startup_hops;       /* _startup_hops              */
-    int               blocks_since_reset;  /* _blocks_since_reset        */
-    FullBandErleEstimator fullband;        /* _fullband                  */
-    SubbandErle           subband;         /* _subband                   */
+    int               startup_hops;
+    int               blocks_since_reset;
+    FullBandErleEstimator fullband;
+    SubbandErle           subband;
 } ErleEstimator;
 
-/* Mirrors ErleEstimator.__init__. The caller supplies the SubbandErle per-bin
- * backing arrays (all length n_bins, same set subband_erle_init wants):
- *   max_erle, erle, erle_oc, erle_unb, erle_during, y2_acc, e2_acc : float
- *   coming_onset, low_render                                       : uchar
- *   hold                                                           : int32_t
- *
- * Sub-estimator kwargs match the Python ErleEstimator ctor defaults:
- *   use_onset_detection=1, use_min_erle_during_onsets=1. */
+/* Per-bin backing arrays, each of length n_bins: max_erle, erle, erle_oc, erle_unb, erle_during,
+ * y2_acc, e2_acc (float); coming_onset, low_render (uchar); hold (int32_t).
+ * The subband estimator is created with use_min_erle_during_onsets = 1. */
 void erle_estimator_init(ErleEstimator *e,
                          int startup_phase_length_hops,
                          int n_bins,
@@ -57,18 +33,18 @@ void erle_estimator_init(ErleEstimator *e,
 
 void erle_estimator_reset(ErleEstimator *e, int delay_change);
 
-/* update(x2,y2,e2,converged_filter,coh_gate_mask).
- * coh_gate_mask may be NULL (matches Python coh_gate_mask=None). */
+/* coh_gate_mask may be NULL. */
 void erle_estimator_update(ErleEstimator *e,
                            const float *x2, const float *y2, const float *e2,
                            int converged_filter,
                            const unsigned char *coh_gate_mask);
 
-/* erle(onset_compensated) -> subband.erle(onset_compensated). */
+/* Accessors: subband ERLE (onset_compensated selects the compensated array), unbounded ERLE,
+ * fullband log2 ERLE. */
 const float *erle_estimator_erle(const ErleEstimator *e, int onset_compensated);
 const float *erle_estimator_erle_unbounded(const ErleEstimator *e);
 float erle_estimator_fullband_erle_log2(const ErleEstimator *e);
-/* get_inst_linear_quality_estimate(): *valid==0 mirrors a Python None. */
+/* Instantaneous linear quality estimate; *valid == 0 when there is no estimate. */
 float erle_estimator_get_inst_linear_quality_estimate(const ErleEstimator *e,
                                                        int *valid);
 

@@ -9,14 +9,14 @@ sample for sample:
                                        ctx_filter_converged epc_render_forced_remaining
                                        lo_trustworthy lo_corroborated lo_injected dt_from_energy
                                        (first 6 columns == the C trace; the rest are Python-only
-                                       evidence for the live-observer injection guard, audit S-02)
+                                       evidence for the live-observer injection guard)
     <pre>.ctx.f32 (with --ctx)         per hop: 9 scalars, error_spec, echo_spec, res_gain, r2,
                                        comfort_noise -- same order as the C dump
 
 Mic-path HPF (--hpf)
     fp64  the shipped Python HighPassFilter (float64 coefficients and state). The C library runs the
           audiolib float32 DF2T filter, so a fp64-vs-f32 comparison carries an HPF-precision
-          gap that the adaptive loop amplifies to -35..-63 dB (audit D-01 / S-19). Informational.
+          gap that the adaptive loop amplifies. Informational.
     f32   a bit-faithful float32 emulation of audiolib hpf.c (coefficients and DF2T state in
           float32, evaluation order b1*x - a1*y + z2, no FMA) swapped in for
           modules.orchestrator.HighPassFilter before the AEC is constructed. This is what the
@@ -30,10 +30,10 @@ The patch lives only in this process; nothing under python/modules is modified.
           (the C side always reads the unperturbed file). A large EPS (1e-4) probes how sensitive a
           scene is to approximation-sized noise, which is what separates a fast-math budget excess
           from a branch flip. The adaptive loop has hard decision points (e.g. a single-bin
-          e2_main <= e2_shadow compare) at which a 1e-7 relative nudge selects a different but
-          equally valid branch (the two outcomes can differ by -30 dB for tens of hops), so the
-          harness treats the unperturbed run and a few perturbed runs as the set of branches the
-          Python reference can legitimately take, and asks whether C matches one of them tightly.
+          e2_main <= e2_shadow compare) at which a tiny relative nudge selects a different but
+          equally valid branch, so the harness treats the unperturbed run and a few perturbed runs
+          as the set of branches the Python reference can legitimately take, and asks whether C
+          matches one of them tightly.
 
     usage: pyc_parity_aec_run.py mic.f32 ref.f32 outprefix sr fft preset
                 [--hpf fp64|f32|off] [--obs] [--no-res] [--no-cng] [--ctx] [--guard X]

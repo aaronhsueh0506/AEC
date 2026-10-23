@@ -1,19 +1,13 @@
-/* test_config_validation.c — negative-input tests: aec_validate_config() (aec.c) is the single source of truth
- * for AecConfig bounds-checking, wired into all three public entry points
- * that derive sizes/state from a config. This test proves each entry point
- * actually rejects a bad config through its OWN existing failure
- * convention — no release-path asserts:
+/* test_config_validation.c -- negative-input tests: aec_validate_config() (aec.c) is the single source of truth for
+ * AecConfig bounds-checking, wired into all three public entry points that derive sizes/state from a config. This test
+ * proves each entry point rejects a bad config through its own failure convention (no release-path asserts):
  *   - aec_get_mem_size(cfg)        -> 0
  *   - aec_init(mem, mem_size, cfg) -> NULL
  *   - aec_create(&a, cfg)          -> nonzero
- * plus the misaligned-pool-base guard in aec_init(), and a smoke test
- * that the otherwise-valid 16 kHz balanced config still works end to end
- * (byte-identical-output gate lives elsewhere; this is just "didn't break").
+ * plus the misaligned-pool-base guard in aec_init(), and a smoke test that the otherwise-valid 16 kHz balanced config
+ * still works end to end.
  *
- * Build (standalone, from c_impl/). `test/test_static_aec.c` has its own
- * `make test-static-aec` release gate; this file deliberately remains a
- * focused config-validation executable. The manual recipe is retained for
- * bring-up environments that do not use this repository's Makefile:
+ * Build (standalone, from c_impl/; `make test-config-validation` does the same):
  *   make -C ../../audiolib/common lib
  *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=gnu99 -Iinclude -Iexample \
  *       -I../../audiolib/common/include \
@@ -148,17 +142,13 @@ static void test_misaligned_base(void) {
     free(raw);
 }
 
-/* highpass_cutoff_hz must be checked against hpf_init()'s rate-relative rule,
- * not a flat, rate-blind [0, 20000] Hz range: hpf_init() (audiolib
- * hpf.c, called from aec_carve whenever enable_highpass is set) rejects any
- * cutoff_hz that isn't finite, isn't > 0, or isn't < 0.45*sample_rate --
- * silently returning NULL and leaving the AEC instance with no mic-path HPF,
- * with no error surfaced anywhere. E.g. {sample_rate=8000,
- * highpass_cutoff_hz=4000} would pass a flat range and then silently drop the
- * HPF underneath. aec_validate_config mirrors hpf_params_valid exactly when
- * enable_highpass=1, so every combination below that hpf_init would reject
- * must now be rejected here too (all three public entry points), and every
- * combination hpf_init would accept must still sail through end-to-end. */
+/* highpass_cutoff_hz must be checked against hpf_init()'s rate-relative rule, not a flat [0, 20000]
+ * Hz range: hpf_init() (audiolib hpf.c, called from aec_carve whenever enable_highpass is set)
+ * rejects any cutoff_hz that is not finite, not > 0, or not < 0.45*sample_rate, silently returning
+ * NULL and leaving the instance without a mic-path HPF. E.g. {sample_rate=8000,
+ * highpass_cutoff_hz=4000} would pass a flat range. aec_validate_config mirrors hpf_params_valid
+ * when enable_highpass=1, so every combination hpf_init rejects is rejected here too (all three
+ * entry points) and every combination it accepts still works end to end. */
 static void test_highpass_cutoff(void) {
     AecConfig valid_cfg; base_cfg(&valid_cfg);
     size_t sz = aec_get_mem_size(&valid_cfg);
@@ -191,15 +181,11 @@ static void test_highpass_cutoff(void) {
         check_rejected(what, &cfg, mem, sz);
     }
 
-    /* Same bad cutoff values must NOT be rejected when enable_highpass=0 --
-     * the field is inert (aec_carve never reaches hpf_init), so it keeps the
-     * old flat [0, 20000] range instead of the rate-relative one. Skip the
-     * NaN/negative cases here (still invalid under the flat range too; only
-     * exercise the ones that are >0.45*sr but still inside [0, 20000]). No
-     * 48000 entry: 0.45*48000=21600 already exceeds the flat range's own
-     * 20000 ceiling, so there is no cutoff value that is rejected by the
-     * tightened (enabled) rule but still accepted by the flat (disabled)
-     * one at this rate -- 8000/16000 already demonstrate the distinction. */
+    /* The same bad cutoff values must NOT be rejected when enable_highpass=0: the field is inert
+     * (aec_carve never reaches hpf_init), so it keeps the flat [0, 20000] range. Only values above
+     * 0.45*sr but inside [0, 20000] are exercised. No 48000 entry: 0.45*48000=21600 already exceeds
+     * the flat 20000 ceiling, so no cutoff is rejected by the enabled rule but accepted by the flat
+     * one at that rate. */
     {
         struct { int sr; float cutoff; } inert_ok[] = {
             { 8000,  4000.0f },
@@ -278,10 +264,9 @@ static void test_highpass_cutoff(void) {
     }
 }
 
-/* Otherwise-valid 16 kHz balanced config: prove validation didn't collaterally
- * break the real path. get_mem_size>0, init OK, one hop of process runs.
- * aec_destroy() deliberately NOT called here — lifecycle/leak coverage is
- * test_static_aec.c's job (this test only touches config validation). */
+/* Otherwise-valid 16 kHz balanced config: get_mem_size>0, init OK, one hop of process runs, so
+ * validation did not break the real path. aec_destroy() is deliberately not called here:
+ * lifecycle/leak coverage is test_static_aec.c's job. */
 /* spatial_linear_context level 2 (AEC_CONTEXT_LINEAR_ONLY) skips the
  * residual-echo half of the post block, so like level 1 it only makes sense
  * under context_only; levels above 2 do not exist. */
@@ -341,11 +326,10 @@ static void test_linear_only_level_requires_context_only(void) {
     free(mem);
 }
 
-/* spatial_linear_context's whole premise (aec_post_run Step 20/21) is that
- * apply_output() never reads the skipped gain -- true only under
- * context_only (enable_res==0 && return_res_context==1). Every other
- * combination must be rejected by aec_validate_config() itself, not left to
- * the aec_post_run() debug assert alone. */
+/* spatial_linear_context's whole premise is that apply_output() never reads the skipped gain, which
+ * holds only under context_only (enable_res==0 && return_res_context==1). Every other combination
+ * must be rejected by aec_validate_config() itself, not left to the aec_post_run() debug assert
+ * alone. */
 static void test_spatial_linear_context_requires_context_only(void) {
     AecConfig valid_cfg; base_cfg(&valid_cfg);
     size_t sz = aec_get_mem_size(&valid_cfg);
@@ -433,12 +417,9 @@ static void test_valid_config_smoke(void) {
     free(mem);
 }
 
-/* Positive smoke at all three whitelisted rates -- get_mem_size>0,
- * aec_init/aec_create both succeed, one hop of aec_process runs clean at
- * 8000/16000/48000. Mirrors test_valid_config_smoke's 16k-only shape;
- * kept as a separate function since that one is referenced by name
- * elsewhere in prior review notes and its "didn't collaterally break"
- * framing is 16k-specific. */
+/* Positive smoke at all three whitelisted rates: get_mem_size>0, aec_init/aec_create succeed, one
+ * hop of aec_process runs clean at 8000/16000/48000. Same shape as test_valid_config_smoke, which
+ * is 16k-only. */
 static void test_multi_rate_valid_smoke(void) {
     int rates[] = { 8000, 16000, 48000 };
     for (size_t i = 0; i < sizeof(rates) / sizeof(rates[0]); ++i) {
@@ -497,17 +478,13 @@ static void test_multi_rate_valid_smoke(void) {
     }
 }
 
-/* The three direct init entry points below sit UNDER aec_create()'s validator,
- * so a bad sample_rate cannot reach them through the normal path. They are
- * public API though, and sample_rate is load-bearing there --
- * it retimes alpha_r/initial_state_threshold_hops and the
- * saturation attack/release pair. An unchecked sample_rate=0 would make
- * hop_seconds infinite and powf() return 0 or NaN, i.e. an EMA that never
- * adapts or a filter full of NaN, reported by nothing.
- *
- * The filters are pool-first (pbfdaf_init_static / pbfdkf_init_static), so
- * each guard must also leave both the instance and the caller-owned pool
- * untouched when it refuses. */
+/* The three direct init entry points below sit under aec_create()'s validator, so a bad sample_rate
+ * cannot reach them through the normal path, but they are public API and sample_rate is
+ * load-bearing there: it retimes alpha_r/initial_state_threshold_hops and the saturation
+ * attack/release pair. An unchecked sample_rate=0 would make hop_seconds infinite and powf() return
+ * 0 or NaN, an EMA that never adapts or a filter full of NaN. The filters are pool-first
+ * (pbfdaf_init_static / pbfdkf_init_static), so each guard must also leave the instance and the
+ * caller-owned pool untouched when it refuses. */
 static void test_direct_init_rejects_bad_rate(void) {
     PBFDAF f;
     PBFDAF f_before;
@@ -607,49 +584,16 @@ static void test_direct_init_rejects_bad_rate(void) {
 }
 
 /* ── shared signal-grid resolver: lockstep across every entry point ───────
- * (sample_rate, fft_size) admissibility (aec_validate_config()), the
- * `hop = fft/2` / `K = fft/2+1` derivation (aec_derive_dims()) and
- * AECB_RATE_TABLE's geometry columns all read one resolver, and this section
- * is what keeps that true.
- *
- * Proven here, on all four supported grids (the three product grids plus
- * the 8 kHz legacy one):
- *   1. RESOLVER CONTENT — frame/hop/n_freqs are what the grid table says,
- *      hard-coded rather than recomputed from the same `fft/2` expression
- *      the source uses (a recomputed expectation would move together with
- *      a broken formula).
- *   2. LOCKSTEP — the grid aec_get_mem_size() sized against == the grid
- *      aec_init()/aec_create() initialised against == the hop aec_process()
- *      actually consumes, on BOTH construction paths, AND == the geometry
- *      AECB_RATE_TABLE hands the post-filter chain.
- *   3. NO GUESSING — fft_size == 0 ("auto") is rejected by all three entry
- *      points; so is every mismatched pair (16k/1024, 48k/256, 8k/512, ...).
- *      16 kHz has TWO production grids, so a library that guessed would
- *      silently pick one.
- *
- * Mutation checks:
- *   - editing one AEC_GRID_TABLE row's hop (16k/512: 256 -> 128) turns rows
- *     1 and 2's "as tabled" / "AECB_RATE_TABLE agrees" red (2 failures) --
- *     the table is genuinely load-bearing, not decoration;
- *   - additionally making aec_derive_dims re-derive `hop = fft/2` itself
- *     instead of calling aec_resolve_signal_grid turns the LOCKSTEP rows
- *     red too ("init sees the resolver's grid", "aec_hop_size() == the
- *     resolved hop", "create sees the same grid", 5 failures total). That
- *     pair is the isolation test for "one entry point bypassed the
- *     resolver": on its own the bypass is value-identical today, and it is
- *     the DIVERGENCE it permits that this section catches.
- *   - KNOWN GAP: removing the
- *     aec_resolve_signal_grid() call from aec_validate_config() alone does
- *     NOT turn this section red. Rejection still happens one layer later,
- *     because aecb_rate_cfg() returns NULL for an unsupported pair and
- *     aec_get_mem_size() propagates that as 0 -- i.e. AECB_RATE_TABLE is a
- *     de facto second admissibility gate today. The observable public
- *     contract (all three entry points reject) is what this section pins,
- *     and it holds either way; collapsing that second gate onto the
- *     resolver means sourcing AECB_RATE_TABLE's four grid columns from
- *     AEC_GRID_TABLE, which is future work. The
- *     "AECB_RATE_TABLE agrees with the resolver" row above is what keeps
- *     the two honest until then. */
+ * (sample_rate, fft_size) admissibility (aec_validate_config()), the `hop = fft/2` / `K = fft/2+1` derivation
+ * (aec_derive_dims()) and AECB_RATE_TABLE's geometry columns all read one resolver. On all four supported grids:
+ *   1. the resolver's frame/hop/n_freqs are what the grid table says, hard-coded rather than recomputed from `fft/2`;
+ *   2. the grid aec_get_mem_size() sized against == the grid aec_init()/aec_create() initialised against == the hop
+ *      aec_process() consumes (both construction paths) == the geometry AECB_RATE_TABLE hands the post-filter chain;
+ *   3. fft_size == 0 ("auto") and every mismatched pair (16k/1024, 48k/256, 8k/512, ...) are rejected by all three entry
+ *      points: 16 kHz has two production grids, so a library that guessed would silently pick one.
+ * Mutations that must fail: editing one AEC_GRID_TABLE row's hop; making aec_derive_dims re-derive `hop = fft/2` itself.
+ * Not caught here: removing the aec_resolve_signal_grid() call from aec_validate_config() alone, since aecb_rate_cfg()
+ * returns NULL for an unsupported pair and aec_get_mem_size() then returns 0. */
 static void test_signal_grid_resolver(void) {
     struct { int sr, fft, frame, hop, K, legacy; const char* tag; } grids[] = {
         { 16000,  256,  256, 128, 129, 0, "16k/256 (product default)"   },
@@ -818,26 +762,15 @@ static void test_signal_grid_resolver(void) {
 }
 
 /* ── delay-mode translation + mode x field compatibility ──────────────────
- * The three-state delay API (AecDelayMode) replaced two implicitly-coupled
- * fields. Two properties need permanent cover:
- *
- *   1. TRANSLATION -- aec_config_resolve_delay() maps every legacy shape
- *      (enable_delay_est / fixed_delay_samples) onto exactly one delay_mode
- *      and rewrites the deprecated mirror from the result, idempotently.
- *      Mirrors python/tests/test_delay_mode.py's mapping-table test row for
- *      row; the two must never drift.
- *   2. STRICTNESS -- an illegal mode x field combination is REJECTED by all
- *      three entry points, not normalised and not ignored. Reusing
- *      check_rejected() means a regression that only fixes ONE entry point
- *      still fails here.
- *
- * Mutation checks (each breaks one line of the fix and must go red here):
- *   - drop the `fixed_delay_samples >= 0` arm of the translation
- *     -> "legacy fixed" rows resolve to EXTERNAL_ALIGNED and fail;
- *   - drop the `!cfg->enable_delay_est` guard (translate unconditionally)
- *     -> the MATCHED default row fails;
- *   - drop the mirror rewrite -> the idempotency rows fail;
- *   - drop any arm of the validator's mode switch -> the matrix fails. */
+ * Two properties need permanent cover:
+ *   1. TRANSLATION: aec_config_resolve_delay() maps every deprecated shape (enable_delay_est / fixed_delay_samples) onto
+ *      exactly one delay_mode and rewrites the deprecated mirror from the result, idempotently. It mirrors
+ *      python/tests/test_delay_mode.py's mapping-table test row for row.
+ *   2. STRICTNESS: an illegal mode x field combination is REJECTED by all three entry points, not normalised and not
+ *      ignored. check_rejected() makes a fix to only ONE entry point fail here.
+ * Mutations that must fail: dropping the `fixed_delay_samples >= 0` arm of the translation ("legacy fixed" rows resolve
+ * to EXTERNAL_ALIGNED); dropping the `!cfg->enable_delay_est` guard (the MATCHED default row fails); dropping the mirror
+ * rewrite (the idempotency rows fail); dropping any arm of the validator's mode switch (the matrix fails). */
 static void test_delay_mode_translation(void) {
     struct {
         int est; int fixed; AecDelayMode in; AecDelayMode want; const char* tag;
@@ -972,6 +905,9 @@ static void test_delay_mode_illegal_combinations(void) {
         base_cfg(&c);
         c.enable_delay_est = 42;
         check_rejected("enable_delay_est=42 (non-boolean mirror)", &c, mem, sz);
+        base_cfg(&c);
+        c.min_gain_split_floor_enabled = 2;
+        check_rejected("min_gain_split_floor_enabled=2 (non-boolean)", &c, mem, sz);
     }
 
     /* The guard is not blanket: every LEGAL combination still constructs,
@@ -1017,13 +953,10 @@ static void test_delay_mode_illegal_combinations(void) {
                 snprintf(label, sizeof(label),
                          "%s: current_delay seeded from the config", ok[i].tag);
                 CHECK(a.current_delay == ok[i].fixed, label);
-                /* The FIXED ring is sized for THIS delay -- the
-                 * tight `fixed + hop` bound -- not from the MATCHED search
-                 * budget (whose +4096 headroom has no meaning for an
-                 * immutable delay). The sizing rule itself, and the alignment
-                 * behaviour of the exact-fit ring, live in
-                 * test_linear_context.c / test_delay_num_filters.c; this row
-                 * only pins that a VALIDATED config lands on it. */
+                /* The FIXED ring is sized for THIS delay (the tight `fixed + hop` bound), not from
+                 * the MATCHED search budget. The sizing rule and the exact-fit ring's alignment
+                 * behaviour live in test_linear_context.c / test_delay_num_filters.c; this row only
+                 * pins that a validated config lands on it. */
                 snprintf(label, sizeof(label),
                          "%s: ring == fixed + hop (%d)", ok[i].tag,
                          ok[i].fixed + a.hop_size);
@@ -1048,9 +981,8 @@ static void test_delay_mode_illegal_combinations(void) {
         }
     }
 
-    /* The LEGACY spelling must size and construct exactly like the explicit
-     * one -- this is what makes the deprecated mirror a translation layer
-     * rather than a second source of truth. */
+    /* The deprecated spelling must size and construct exactly like the explicit one, which makes
+     * the deprecated mirror a translation layer rather than a second source of truth. */
     {
         AecConfig legacy; base_cfg(&legacy);
         legacy.enable_delay_est = 0;

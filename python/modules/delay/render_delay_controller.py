@@ -1,29 +1,9 @@
-"""Render delay controller — converts sample-domain matched-filter delay into
-hop-aligned buffer delay and emits ``EchoPathVariability`` events.
+"""Render delay controller: converts the sample-domain matched-filter delay to a
+hop-quantised buffer delay and emits ``EchoPathVariability`` events.
 
-Mirrors docs/aec3_extracts/src/aec3/render_delay_controller.{cc,h} +
-collapses the ``EchoPathVariability`` emission that AEC3 does inside
-``render_delay_buffer::AlignFromDelay``.
-
-NOT the production delay path (LEGACY/reference port, no live callers).
-``orchestrator.py`` uses ``LegacyDelayShim``/``EchoPathDelayEstimator``
-instead -- see ``legacy_compat.py``'s module docstring: hop-quantising the
-delay here loses the sub-hop sample precision the orchestrator's ring buffer
-needs. This module is kept as an AEC3-structural reference/for future
-migrations, has no dedicated test coverage, and its rate constants
-(``.._rates.HOP_SAMPLES`` etc.) are a fixed legacy 16 kHz/10 ms reference,
-NOT the live per-instance grid -- they do not track ``AecConfig``'s current
-hop size (which defaults to 8 ms at 16 kHz as of the 2026-08-01 grid change).
-Do not wire this into a live per-rate/per-grid path without first making
-``_rates.py`` take the actual sample_rate/hop_size instead of module-level
-constants, and adding real test coverage.
-
-Rate notes (against the fixed legacy reference above, not the live grid):
-  - AEC3 reports buffer delay in ``kBlockSize=64``-sample blocks
-    (``>> kBlockSizeLog2``). This port reports buffer delay in the legacy
-    10 ms hops (``>> log2(HOP_SAMPLES)`` analogue, via ``// HOP_SAMPLES``).
-  - ``hysteresis_limit_blocks`` (AEC3 default 1 block = 4 ms) maps to 1 of
-    those legacy hops (10 ms) — the smallest hysteresis expressible there.
+Reference implementation, not used by the orchestrator (hop quantisation loses
+sub-hop precision). Rates come from the fixed constants in ``_rates.py``
+(16 kHz, 10 ms hop), not from ``AecConfig``.
 """
 from typing import Optional
 
@@ -40,13 +20,10 @@ def _compute_buffer_delay_hops(
     hysteresis_limit_hops: int,
     estimated: DelayEstimate,
 ) -> DelayEstimate:
-    """Mirrors ComputeBufferDelay (render_delay_controller.cc:64-81) — quantises
-    sample delay to OUR hop units and applies hysteresis when both qualities
-    are REFINED."""
+    """Quantise the sample delay to hops; hysteresis applies to small increases only."""
     new_delay_hops = int(estimated.delay) // HOP_SAMPLES
     if current is not None:
         current_hops = int(current.delay)
-        # Only shrink hysteresis upward (avoid thrash on small increases).
         if (
             new_delay_hops > current_hops
             and new_delay_hops <= current_hops + hysteresis_limit_hops
@@ -56,19 +33,12 @@ def _compute_buffer_delay_hops(
 
 
 class RenderDelayController:
-    """Wraps EchoPathDelayEstimator. Per ``get_delay()`` call returns
-    ``(delay_estimate_in_hops, echo_path_variability)``.
+    """Wraps ``EchoPathDelayEstimator``; ``get_delay()`` returns ``(delay_in_hops, echo_path_variability)``.
 
-    ``delay_estimate_in_hops`` is None until enough estimates have crossed
-    the COARSE threshold. After that, it carries the buffer delay in OUR
-    hop units. The quality field tracks whether the underlying matched-
-    filter aggregator is in COARSE or REFINED state.
-
-    ``echo_path_variability.delay_change`` is:
-      - ``BUFFER_FLUSH``  on the call immediately after ``reset()``;
-      - ``NEW_DETECTED_DELAY`` when the hop-quantised buffer delay
-        crosses an integer boundary (after hysteresis);
-      - ``NONE`` otherwise.
+    ``delay_in_hops`` is None until a COARSE estimate exists, then carries the buffer
+    delay in hops with the aggregator's quality. ``delay_change`` is BUFFER_FLUSH on
+    the first call after ``reset()``, NEW_DETECTED_DELAY when the quantised delay
+    changes (after hysteresis), else NONE.
     """
 
     def __init__(

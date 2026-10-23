@@ -9,16 +9,15 @@
 # aec_record recording (+ 8k/48k resamples) and seeded synthetic echo / double-talk scenes; observer off/on,
 # mic HPF on/off, context seam, plus a regenerate-and-diff check of aec_balanced_config.h.
 #
-# Known gaps are marked EXPECTED_RED(S-xx); an expected-red cell that turns green FAILS the run (remove the
-# marker). Tolerances are FROZEN (2026-10-20, see test/pyc_parity/pyc_parity.py and CHANGELOG.md): every
-# cell still prints the measured numbers beside them.
+# Known gaps are registered as EXPECTED_RED in test/pyc_parity/pyc_parity.py; an expected-red cell that turns green FAILS
+# the run (remove the marker). Tolerances are frozen there, and every cell prints the measured numbers beside them.
 #
 #   usage: pyc_parity_aec.sh [--quick] [--only SUBSTR[,SUBSTR]] [--skip-static] [--json FILE] [--work DIR]
 #                            [--keep-work] [--aec-root DIR] [--repeat-check] [--write-pins]
 #          make test-pyc-parity [PYC_ARGS="--quick"]
 #   env  : PYTHON  interpreter with numpy, scipy, soundfile (default python3)
 #
-#   --quick         10 of the 44 scenarios (a few minutes) instead of the full matrix (about 9 min)
+#   --quick         a subset of the scenarios (a few minutes) instead of the full matrix
 #   --repeat-check  run the whole evaluation twice from fresh run directories and require byte-identical JSON
 #   --write-pins    (maintainers) rewrite test/pyc_parity/inputs.sha256 from the current environment
 #

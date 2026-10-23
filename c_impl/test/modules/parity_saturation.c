@@ -1,10 +1,10 @@
-/* parity_saturation.c — parity gate.
+/* parity_saturation.c -- parity gate for the Saturation detector.
  *
- * Reads sat_{ref,mic}.bin (flat dump of Python SaturationDetector.detect()
- * input/output per frame) and asserts C port produces identical levels.
+ * Usage: parity_saturation <sat.bin>. The file holds int32 n_frames, int32 hop, float64 threshold, then per frame float64
+ * level_in, float64 level_out and float32 input[hop] (the Python detector's state before and after each frame). The C port
+ * must reproduce level_out from level_in and the input exactly.
  *
- * Gate: smoothed level matches Python to bit-exact (both use fp64
- * internally; same op order). Allow ULP-level tolerance only as a fallback.
+ * Gate: the smoothed level matches Python bit-exactly (both use fp64 internally with the same op order).
  */
 #include "saturation.h"
 #include <stdio.h>
@@ -31,9 +31,8 @@ int main(int argc, char* argv[]) {
             n_frames, hop, threshold);
 
     Saturation s;
-    /* The golden's header carries hop but not sample_rate; this harness
-     * predates the retiming. 16000 reproduces the authored constants at
-     * hop=256 and keeps the existing golden valid. */
+    /* The golden's header carries hop but not sample_rate; 16000 reproduces the authored constants
+     * at hop=256. */
     saturation_init(&s, threshold, hop, 16000);
 
     float* in_buf = (float*)malloc((size_t)hop * sizeof(float));

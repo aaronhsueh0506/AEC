@@ -1,62 +1,25 @@
-"""Three-state delay mode (``AecConfig.delay_mode``) — config surface,
+"""Three-state delay mode (``AecConfig.delay_mode``): config surface,
 deprecated-field translation, and the behavioural identity of each mode.
 
-Why this test exists: alignment used to be decided by TWO fields whose
-relationship was implicit — ``enable_delay_est`` plus an undocumented
-"``fixed_delay_samples >= 0`` silently overrides it" rule inside the
-orchestrator. Nothing named the third state at all (far pre-aligned by the
-caller), and nothing rejected a combination the selected behaviour could not
-honour: ``AecConfig(fixed_delay_samples=1600)`` looked like it enabled a
-fixed delay while ``enable_delay_est`` still read True. ``delay_mode`` is now
-the single source of truth, ``enable_delay_est`` is a deprecated mirror
-folded into it by one translation step, and every illegal combination
-raises.
-
-What is asserted:
-  1. THE DEFAULT IS UNCHANGED — ``AecConfig()`` resolves to MATCHED / n=5 /
-     fixed=-1, and produces output bit-identical to an explicit
-     ``delay_mode=MATCHED``. (The cross-commit half of the byte-exact gate —
-     "identical to the pre-delay_mode implementation" — is proven out of
-     band against the stable baseline build; what a permanent test CAN pin
-     is that the new spelling never diverges from the default path.)
-  2. TRANSLATION IS EXACT (the can-fail core) — every row of the mapping
-     table in ``AecConfig._resolve_delay_mode`` is checked, AND the legacy
-     spelling is proven to produce bit-identical AUDIO to the explicit
-     spelling for both non-MATCHED modes. Breaking one row of the table
-     therefore fails here even if the resolved enum happens to survive.
-  3. ILLEGAL COMBINATIONS RAISE — the full mode x field matrix, including
-     ``delay_num_filters=0`` (never a silent "off" switch, in any mode).
-  4. THE MODES ARE ACTUALLY DIFFERENT — FIXED applies the caller's delay
-     with no estimator built; EXTERNAL_ALIGNED builds neither estimator nor
-     ring. Without this a translation that resolved to the right enum but
-     wired the wrong branch would pass everything above.
-  5. LATE MUTATION STILL TRANSLATES — ``cfg.enable_delay_est = False`` after
-     construction is honoured at AEC() time, mirroring the C port (which
-     resolves inside ``aec_create()``, not inside ``aec_config_defaults()``).
-  6. THE RING IS SIZED PER MODE (plan §3.2.8-9, step 3) — ``MATCHED`` keeps
-     the search ring (``max(delay_buffer_ms, max_delay_ms + 4096)``, which
-     also gates which estimates the controller may accept), ``FIXED`` carves
-     exactly ``fixed_delay_samples + hop`` and is INERT to those two knobs,
-     and ``EXTERNAL_ALIGNED`` carves nothing and leaves no other
-     delay-attached state. All three mirror C's ``aec_ref_ring_samples()``.
-  7. THE EXACT-FIT RING STILL SERVES THE RIGHT SAMPLES — the far the engine
-     actually consumes is byte-equal to the caller's far delayed by exactly
-     ``fixed_delay_samples``, across hundreds of wraps (the split read is
-     now the common path, not an edge case), through ``reset()``'s refill,
-     and a real synthetic echo is cancelled only when the delay is right.
-
-Mutation checks (each breaks one line and must go red here):
-  - drop the ``fixed_delay_samples >= 0`` arm of the translation (always
-    resolve to EXTERNAL_ALIGNED) -> "legacy fixed spelling" rows fail;
-  - drop the ``enable_delay_est`` guard (translate unconditionally) ->
-    the MATCHED default resolves to EXTERNAL_ALIGNED and rows 1/4 fail;
-  - drop the mirror rewrite -> the idempotency/round-trip rows fail;
-  - relax any ``raise`` in ``_resolve_delay_mode`` -> the matrix in 3 fails;
-  - drop the ``+ hop`` from ``ref_ring_samples``'s FIXED arm -> the ring
-    sizing rows and the wrap/refill alignment rows fail;
-  - shift the ring read offset by one hop/sample -> every "served far is
-    far[t-N]" row fails;
-  - hand EXTERNAL_ALIGNED a ring -> the no-ring rows fail.
+``delay_mode`` is the single source of truth; ``enable_delay_est`` is a
+deprecated mirror folded into it by one translation step, and every illegal
+combination raises. Asserted:
+  - the default (MATCHED / n=5 / fixed=-1) is bit-identical to an explicit
+    ``delay_mode=MATCHED``;
+  - every row of the ``AecConfig._resolve_delay_mode`` mapping table, and the
+    deprecated spelling gives bit-identical audio for both non-MATCHED modes;
+  - the full mode x field rejection matrix, including ``delay_num_filters=0``
+    (never a silent "off" switch);
+  - FIXED builds no estimator, EXTERNAL_ALIGNED neither estimator nor ring;
+  - ``cfg.enable_delay_est = False`` after construction is honoured at AEC()
+    time, as in the C ``aec_create()``;
+  - ring sizing per mode: MATCHED ``max(delay_buffer_ms, max_delay_ms + 4096)``
+    (also gates which estimates the controller may accept), FIXED
+    ``fixed_delay_samples + hop`` (inert to those two knobs), EXTERNAL_ALIGNED 0,
+    mirroring C's ``aec_ref_ring_samples()``;
+  - the exact-fit ring serves the caller's far delayed by exactly
+    ``fixed_delay_samples`` across hundreds of wraps and through ``reset()``'s
+    refill, and a synthetic echo is cancelled only when the delay is right.
 
 Run:
     python3 -m pytest python/tests/test_delay_mode.py
@@ -102,7 +65,7 @@ def _run(cfg: AecConfig, near, far, seconds: float = 1.5):
 
 
 class DelayModeDefaultTests(unittest.TestCase):
-    """The shipped default path must be indistinguishable from before."""
+    """The default config resolves to MATCHED and behaves as such."""
 
     def test_default_is_matched_n5_unset_fixed(self) -> None:
         cfg = AecConfig()
@@ -253,11 +216,8 @@ class DelayModeIllegalCombinationTests(unittest.TestCase):
                               delay_num_filters=0)
 
     def test_legacy_implicit_override_is_gone(self) -> None:
-        """The old "fixed>=0 silently overrides enable_delay_est" rule.
-
-        It used to construct fine and quietly run in fixed-delay mode with
-        ``enable_delay_est`` still reading True. It now raises: MATCHED
-        cannot honour a fixed delay, so the caller must say which they meant.
+        """``fixed_delay_samples >= 0`` with ``enable_delay_est`` left True raises:
+        MATCHED cannot honour a fixed delay, so the caller must say which they meant.
         """
         with self.assertRaises(ValueError):
             AecConfig(fixed_delay_samples=_FIXED)          # enable_delay_est=True
@@ -286,9 +246,9 @@ class DelayModeBehaviourTests(unittest.TestCase):
     def test_fixed_ring_covers_a_delay_beyond_max_delay_ms(self) -> None:
         """The ring covers a delay past the max_delay_ms budget -- exactly.
 
-        max_delay_ms/delay_buffer_ms size the MATCHED SEARCH ring and are
-        inert here (plan step 3): what the ring must hold is this one
-        immutable delay plus the hop being read, and nothing else.
+        max_delay_ms/delay_buffer_ms size the MATCHED SEARCH ring and are inert here:
+        what the ring must hold is this one immutable delay plus the hop being read,
+        and nothing else.
         """
         big = 40000   # 2.5 s at 16 kHz, past the 1024 ms max_delay_ms default
         cfg = AecConfig(delay_mode=AecDelayMode.FIXED, fixed_delay_samples=big)
@@ -302,10 +262,8 @@ class DelayModeBehaviourTests(unittest.TestCase):
         self.assertIsNone(aec.delay_est)
         self.assertFalse(aec._delay_active)
         self.assertFalse(hasattr(aec, '_ref_ring'))
-        # ...and no other delay-attached state left dangling: the applied
-        # delay is spelled 0 (the contract value, and what the C port's
-        # aec_debug_status reports), not left unset. It used to be absent
-        # entirely, which made get_stats() raise AttributeError in this mode.
+        # ...and no other delay-attached state: the applied delay is spelled 0 (the
+        # contract value, and what the C port's aec_debug_status reports), not unset.
         self.assertEqual(aec._current_delay, 0)
         self.assertEqual(aec.get_stats().delay_samples, 0)
 
@@ -352,18 +310,15 @@ def _cfg(sr, fft, **kw):
 
 class AlignmentRingSizingTests(unittest.TestCase):
     """``config.ref_ring_samples`` -- one helper, mirrored by C's
-    ``aec_ref_ring_samples()``.
-
-    Before plan step 3 all three modes that had a ring shared ONE size,
-    ``max(delay_buffer_ms, max_delay_ms + 4096)``, whatever the mode knew
-    about its own delay. FIXED now carves the tight bound it can prove
-    (``fixed + hop``), and EXTERNAL_ALIGNED carves nothing.
+    ``aec_ref_ring_samples()``. MATCHED keeps the search ring, FIXED carves the
+    tight bound it can prove (``fixed + hop``), EXTERNAL_ALIGNED carves nothing.
     """
 
     def test_matched_ring_is_still_the_search_budget(self) -> None:
-        """Unchanged, and deliberately so: this size also gates which
-        estimates the controller may accept (``new_delay <= size - hop``),
-        so shrinking it would change the DEFAULT path's audio."""
+        """MATCHED size is ``max(delay_buffer_ms, max_delay_ms + 4096)``; it also gates
+        which estimates the controller may accept (``new_delay <= size - hop``), so it
+        must not shrink.
+        """
         for sr, fft in ((16000, 256), (16000, 512), (48000, 1024)):
             with self.subTest(sr=sr, fft=fft):
                 cfg = _cfg(sr, fft)
@@ -382,9 +337,9 @@ class AlignmentRingSizingTests(unittest.TestCase):
                 self.assertEqual(AEC(cfg)._ref_ring_size, want)
 
     def test_fixed_ring_ignores_the_search_knobs(self) -> None:
-        """The claim that would still hold under the OLD formula for large
-        delays, and fails the moment a ``max()`` against the search budget
-        comes back: those two fields must not reach this mode at all."""
+        """FIXED must ignore max_delay_ms/delay_buffer_ms entirely: a ``max()`` against
+        the search budget would bring them back for large delays.
+        """
         for sr, fft, fixed in _RING_ROWS:
             with self.subTest(sr=sr, fft=fft, fixed=fixed):
                 base = _cfg(sr, fft, delay_mode=AecDelayMode.FIXED,
@@ -397,7 +352,7 @@ class AlignmentRingSizingTests(unittest.TestCase):
                                  AEC(base)._ref_ring_size)
 
     def test_fixed_ring_is_dramatically_smaller_than_the_matched_ring(self) -> None:
-        """The headline of step 3, as a ratio rather than a hardcoded size."""
+        """FIXED's ring is much smaller than MATCHED's, as a ratio rather than a hardcoded size."""
         cfg = _cfg(16000, 256, delay_mode=AecDelayMode.FIXED,
                    fixed_delay_samples=400)          # 25 ms
         matched = ref_ring_samples(_cfg(16000, 256), 128)
@@ -437,10 +392,10 @@ def _capture_aligned_far(aec):
 
 
 class FixedRingAlignmentTests(unittest.TestCase):
-    """An exact-fit ring wraps constantly, so the split (two-part) read is
-    now the common path rather than a rare edge case. These walk hundreds of
-    wraps and demand the served far be byte-equal to the caller's own far
-    delayed by exactly ``fixed_delay_samples``."""
+    """An exact-fit ring wraps constantly, so the split (two-part) read is the common
+    path. These walk hundreds of wraps and demand the served far be byte-equal to
+    the caller's own far delayed by exactly ``fixed_delay_samples``.
+    """
 
     def _drive(self, sr, fft, fixed, hops):
         cfg = _cfg(sr, fft, delay_mode=AecDelayMode.FIXED,
@@ -492,16 +447,12 @@ class FixedRingAlignmentTests(unittest.TestCase):
                         f"hop {h}: served far is not far[t-{fixed}]")
 
     def test_fixed_delay_cancels_a_known_echo(self) -> None:
-        """Correctness, not just bookkeeping: a synthetic echo at a known
-        delay is actually cancelled once compensated, and not at all when
-        the caller's fixed delay is wrong.
+        """A synthetic echo at a known delay is cancelled once compensated, and not at
+        all when the caller's fixed delay is wrong.
 
-        Runs the SHIPPED chain (RES on). ``enable_res=False`` is not a
-        neutral simplification here: it also starves the AEC3 ERLE feed
-        (``last_erle_windowed`` is only cached under
-        ``enable_res or return_res_context``), which stalls this
-        configuration at ~3 dB on every delay mode alike -- a property of
-        that diagnostic config, not of the alignment path.
+        Runs the SHIPPED chain (RES on): ``enable_res=False`` also starves the AEC3 ERLE
+        feed (``last_erle_windowed`` is only cached under
+        ``enable_res or return_res_context``), which stalls ERLE on every delay mode.
         """
         sr, hop, true_delay = 16000, 128, 1600
         rng = np.random.default_rng(7)

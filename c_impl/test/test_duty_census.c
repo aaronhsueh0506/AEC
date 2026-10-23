@@ -1,69 +1,33 @@
-/* test_duty_census.c — permanent regression test for the matched-filter
- * duty-cycle engagement census (Aec::duty_hops_total / duty_hops_run,
- * surfaced through AecDebugStatus).
- *
- * Background: the duty-cycle machine's doc comment in aec.h claims it cuts
- * "~90% of the matched-filter cost", and the cost model downstream of it has
- * been carrying that as a DESIGN estimate. Neither figure was ever measured
- * on a real run: the machine re-arms every time the estimate moves, so on an
- * unstable echo path the analysis never decimates at all and the realised
- * saving is nothing like the design figure. The census makes it measurable:
- * duty_hops_run/duty_hops_total is the realised engagement, so the saving
- * stops being a design intention and becomes a number a bench (or
- * example/aec_wav.c's one-line report) can print every run.
+/* test_duty_census.c -- regression test for the matched-filter duty-cycle engagement census (Aec::duty_hops_total /
+ * duty_hops_run, surfaced through AecDebugStatus). duty_hops_run / duty_hops_total is the realised engagement of the duty
+ * machine, which re-arms every time the estimate moves, so on an unstable echo path the analysis never decimates at all.
+ * The census makes the saving a number a bench (or example/aec_wav.c's one-line report) can print every run.
  *
  * What this test proves (nothing else in the suite does):
- *   1. duty_hops_total counts EVERY hop through the delay block under
- *      AEC_DELAY_MATCHED -- it equals the number of aec_process() calls.
- *   2. duty_hops_run is strictly LESS than the total on a stable echo path.
- *      This is the assertion that can actually fail: a census wired to a
- *      plain hop counter instead of to run_filter, or a duty machine that
- *      never arms, both make run == total and turn this red. The signal is
- *      a fixed single-tap echo held for 3 s, which is exactly the condition
- *      the duty machine is designed to decimate (estimate solid + unchanged
- *      for delay_est_init_s), so "it never armed" is a real failure here,
- *      not a property of the stimulus.
- *   3. The realised engagement lands in the decimated regime rather than at
- *      full rate: with a 0.5 s period (opt-in; the 0.0/full-rate default
- *      matches Python, which never throttles) at a 128-sample hop, K = 10,
- *      so a machine that arms early and stays armed tends toward ~10%
- *      engagement plus the un-armed warm-up. Asserted as a band (>0%, <60%)
- *      rather than a point value -- the exact figure depends on how fast the
- *      estimate goes solid, which is stimulus-dependent and not what this
- *      test pins.
- *   4. Only AEC_DELAY_MATCHED constructs a matched filter to decimate (see
- *      aec.h's `has_delay` doc): both AEC_DELAY_FIXED and
- *      AEC_DELAY_EXTERNAL_ALIGNED leave BOTH census counters at 0, and for
- *      the SAME reason in both cases -- has_delay is 0, so the duty block
- *      (nested inside `if (a->has_delay)`) never runs, not merely "the
- *      estimator produced nothing". Guards the reporting path from dividing
- *      by zero and from claiming a saving on a machine that was never built.
- *   5. aec_reset() zeroes the census, matching the "cumulative since
- *      aec_create/aec_init/aec_reset" contract on AecDebugStatus -- carrying
- *      pre-reset hops across would blend two duty regimes into one ratio --
- *      and counting resumes (not stuck-at-zero) afterwards.
- *   6. AecDebugStatus::delay_confidence is three-state and never reads a
- *      DelayAec that was never constructed: MATCHED tracks the estimator
- *      (a 5-hop run reports strictly less than a converged 3 s one), while
- *      FIXED and EXTERNAL_ALIGNED both report a constant 1.0 because their
- *      alignment is a caller contract, not a measurement. The same
- *      run_case() sweep already builds all three modes, so this is where the
- *      claim is cheapest to pin -- and it is the only test that would catch
- *      a reporting path reverting to the never-initialised struct (which
- *      answers 0.0, i.e. "estimator present but unconverged").
- *   7. The ERLE watchdog leaks the RETIMED per-hop amount
- *      (Aec::duty_erle_leak_db), reconstructed bit-exactly from the peak
- *      trajectory. test_rate_structural (d2)/(d2b) pin the field's value at
- *      every grid; only this proves the watchdog branch reads it instead of
- *      a frozen literal.
+ *   1. duty_hops_total counts EVERY hop through the delay block under AEC_DELAY_MATCHED: it equals the number of
+ *      aec_process() calls.
+ *   2. duty_hops_run is strictly LESS than the total on a stable echo path. A census wired to a plain hop counter instead
+ *      of run_filter, or a duty machine that never arms, makes run == total and turns this red. The signal is a fixed
+ *      single-tap echo held for 3 s, the condition the duty machine is designed to decimate (estimate solid and unchanged
+ *      for delay_est_init_s).
+ *   3. The realised engagement lands in the decimated regime: with a 0.5 s period (opt-in; the default 0.0 analyses every
+ *      hop) at a 128-sample hop, K = 12, so a machine that arms early tends toward 1/K engagement plus the un-armed
+ *      warm-up. Asserted as a band (>0%, <60%), since the exact figure depends on how fast the estimate goes solid.
+ *   4. Only AEC_DELAY_MATCHED constructs a matched filter to decimate (aec.h `has_delay`): FIXED and EXTERNAL_ALIGNED
+ *      leave both counters at 0 because has_delay is 0 and the duty block never runs. This guards the reporting path from
+ *      dividing by zero and from claiming a saving on a machine that was never built.
+ *   5. aec_reset() zeroes the census (the "cumulative since aec_create/aec_init/aec_reset" contract on AecDebugStatus),
+ *      and counting resumes afterwards.
+ *   6. AecDebugStatus::delay_confidence is three-state and never reads a DelayAec that was never constructed: MATCHED
+ *      tracks the estimator (a 5-hop run reports strictly less than a converged 3 s one), while FIXED and EXTERNAL_ALIGNED
+ *      report a constant 1.0 because their alignment is a caller contract. A reporting path that read the
+ *      never-initialised struct would answer 0.0.
+ *   7. The ERLE watchdog leaks the retimed per-hop amount (Aec::duty_erle_leak_db), reconstructed bit-exactly from the
+ *      peak trajectory. test_rate_structural (d2)/(d2b) pin the field's value; only this proves the watchdog branch reads it.
  *
- * The census is diagnostic: it must not perturb the signal path. That is not
- * asserted here (a single-process test cannot compare against a build
- * without the counters); it is verified out-of-band by rendering real
- * recordings through the pre-census and post-census builds and comparing
- * output bytes.
+ * The census is diagnostic and must not perturb the signal path; this test does not assert that.
  *
- * Build (standalone, from c_impl/ -- mirrors test_delay_num_filters.c):
+ * Build (standalone, from c_impl/):
  *   make -C ../../audiolib/common BACKEND=ne10 lib
  *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=gnu99 -Iinclude -Iexample \
  *       -I../../audiolib/common/include \
@@ -119,20 +83,12 @@ static void build_signals(void) {
         g_near[i] = (i >= DELAY) ? 0.5f * g_far[i - DELAY] : 0.0f;
 }
 
-/* Second stimulus, for check 7 only: the same converging echo path for the
- * first WD_CLEAN_S seconds, then an independent near-end noise floor on top
- * of it. build_signals()' signal cannot serve here -- its windowed ERLE only
- * ever climbs, so the watchdog's decay branch is never taken and a leak check
- * driven by it would pass over an empty loop. The added near-end raises the
- * error energy without touching the echo path, so erle_windowed falls back
- * below its running peak while the delay estimate stays exactly where it was
- * (same far, same single tap) and the duty machine stays armed -- which is
- * the state the decay branch lives in. Kept separate rather than folded into
- * build_signals() so checks 1-6 keep measuring the signal they were written
- * against. Sized by measurement, not by margin: 3 s of clean echo is what
- * checks 1-3 already show is enough for this topology to converge and arm,
- * and a 2 s tail yields 248 decay hops -- the same count an 8 s run produced,
- * so the extra seconds bought nothing. */
+/* Second stimulus, for check 7 only: the same converging echo path for the first WD_CLEAN_S seconds, then an independent
+ * near-end noise floor on top. build_signals()' signal cannot serve: its windowed ERLE only climbs, so the watchdog's decay
+ * branch is never taken and a leak check driven by it would pass over an empty loop. The added near-end raises the error
+ * energy without touching the echo path, so erle_windowed falls back below its running peak while the delay estimate stays
+ * put and the duty machine stays armed, the state the decay branch lives in. Sized by measurement: 3 s of clean echo is
+ * enough for this topology to converge and arm, and a 2 s tail yields 248 decay hops. */
 #define WD_SECONDS   5
 #define WD_CLEAN_S   3
 #define WD_SAMPLES   (SR * WD_SECONDS)
@@ -215,15 +171,10 @@ int main(void) {
         CHECK(eng > 0.0 && eng < 60.0, msg);
     }
 
-    /* ---- 6a: MATCHED reports the ESTIMATOR's confidence, and reports it
-     *          DYNAMICALLY. After 3 s of a fixed single-tap echo the value is
-     *          on the converged end of delay_aec_confidence's 0.0/0.5/1.0
-     *          ladder; after 5 hops the estimator cannot have got there yet,
-     *          so the same query must return strictly less. Pinning the long
-     *          run alone would pass just as happily against a helper that had
-     *          stopped consulting the estimator and returned a legal
-     *          constant -- which is exactly the regression this guards, since
-     *          the two other modes DO return a constant. */
+    /* ---- 6a: MATCHED reports the ESTIMATOR's confidence, dynamically. After 3 s of a fixed single-tap echo the value is on
+     *          the converged end of delay_aec_confidence's 0.0/0.5/1.0 ladder; after 5 hops it cannot have got there yet, so
+     *          the same query must return strictly less. Pinning the long run alone would also pass against a helper that
+     *          returned a legal constant, which is what the other two modes do. */
     conf_matched = conf;
     snprintf(msg, sizeof msg,
              "MATCHED delay_confidence is on the estimator's ladder after 3 s "
@@ -268,10 +219,9 @@ int main(void) {
     CHECK(total == 0 && run == 0,
           "AEC_DELAY_EXTERNAL_ALIGNED leaves both census counters at 0 "
           "(no estimator)");
-    /* ---- 6c: the caller CONTRACTED that ref arrives aligned, so there is no
-     *          uncertainty to report -- and specifically not the 0.0 a read of
-     *          the never-constructed DelayAec would produce. Same value
-     *          aec_get_linear_context() has always reported for this mode. */
+    /* ---- 6c: the caller contracted that ref arrives aligned, so there is no uncertainty to report, and specifically
+     *          not the 0.0 a read of the never-constructed DelayAec would produce. Same value aec_get_linear_context()
+     *          reports for this mode. */
     snprintf(msg, sizeof msg,
              "AEC_DELAY_EXTERNAL_ALIGNED delay_confidence == 1.0 (caller "
              "contract, not a never-built estimator's 0.0; got %.2f)",
@@ -312,24 +262,13 @@ int main(void) {
 
     /* ---- 7: the ERLE watchdog leaks the RETIMED amount, on the audio path.
      *
-     * The leak is the machine's only wall-clock rate; a bare
-     * 0.001f per hop would be 0.1 dB/s only on the 10 ms grid it was calibrated on,
-     * and 0.125 dB/s at this test's 8 ms hop. Aec::duty_erle_leak_db
-     * carries it, derived once at carve time; test_rate_structural (d2)
-     * asserts that field's VALUE at all four shipped grids and (d2b) its
-     * bit-exactness at the authoring grid.
-     *
-     * What neither of those can show is that the watchdog READS it. A field
-     * can be retimed, asserted on, and then ignored by the branch it was
-     * derived for -- the same failure mode test_rate_structural (d4) exists
-     * for. So this walks the leaky peak hop by hop and reconstructs the
-     * subtraction: on every hop where the peak decayed, the new peak must be
-     * exactly the previous one minus duty_erle_leak_db. Bit-exact, not
-     * within a tolerance -- it is the identical float operation, so anything
-     * else means the branch subtracted a different number.
-     *
-     * Coverage is asserted, not assumed: a stimulus that never arms the duty
-     * machine would satisfy an empty loop. ------------------------------- */
+     * The leak is the machine's only wall-clock rate: a bare 0.001f per hop is 0.1 dB/s only on the 10 ms grid it was
+     * calibrated on, and 0.125 dB/s at this test's 8 ms hop. Aec::duty_erle_leak_db carries it, derived once at carve
+     * time; test_rate_structural (d2)/(d2b) assert its value at all four shipped grids and its bit-exactness at the
+     * authoring grid. They cannot show that the watchdog READS it, so this walks the leaky peak hop by hop: on every hop
+     * where the peak decayed, the new peak must be exactly the previous one minus duty_erle_leak_db (the identical float
+     * operation, so bit-exact). Coverage is asserted, not assumed: a stimulus that never arms the duty machine would
+     * satisfy an empty loop. ------------------------------- */
     {
         AecConfig cfg;
         Aec aec;

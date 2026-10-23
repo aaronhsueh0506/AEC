@@ -1,8 +1,8 @@
-"""Generate a binary golden for the C PBFDKF v3.22 port (WS5 Phase 5.6).
+"""Generate a binary golden for the C PBFDKF port.
 
 This is the LINEAR-FILTER golden — the crux of the C port. It hooks the REAL
 balanced pipeline (NOT synthetic frames) and monkeypatches PBFDKF.process on a
-doubletalk case, capturing per hop EVERYTHING the C needs to replay the v3.22
+doubletalk case, capturing per hop EVERYTHING the C needs to replay the
 per-bin H_error Kalman update + leakage refresh in lockstep:
 
   External per-hop inputs (set by the orchestrator BEFORE process runs; the C
@@ -27,11 +27,10 @@ per-bin H_error Kalman update + leakage refresh in lockstep:
     * error_psd[n_bins], R[n_bins] (float32)   (NON-FFT → bit-exact)
     * partition_idx, call_counter, initial_state_active, init_render_hops
 
-A C parity harness constructs a PBFDKF with the captured
-config, then per hop: sets the external inputs, calls pbfdkf_process, and
-asserts the non-FFT state bit-exact + the FFT-derived arrays within rtol<1e-4
-(atol 1e-6). Covers startup (gated), convergence, far-inactive, block-
-stationary, and full-update paths over the whole DT case (~4186 hops).
+Replaying per hop (set the external inputs, call pbfdkf_process) must match the
+non-FFT state bit-exact and the FFT-derived arrays within rtol<1e-4 (atol 1e-6).
+Covers startup (gated), convergence, far-inactive, block-stationary, and
+full-update paths over the whole DT case.
 
 Layout (LE), all sizes in elements:
   int32 n_bins, n_partitions, hop, fft_size, block_size, n_hops
@@ -83,7 +82,7 @@ CASE = os.path.join(WAV, 'doubletalk', '0I0XMl3M0ECO0U1N0cJvpg_doubletalk')
 HOP = 160
 SR = 16000
 FL = 832
-MAX_HOPS = 4200   # whole DT case (~4186 hops)
+MAX_HOPS = 4200  # whole DT case
 
 
 def _w_i32(f, *vals):

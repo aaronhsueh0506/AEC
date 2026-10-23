@@ -6,7 +6,7 @@ case + delay-align harness as gen_pbfdkf_golden.py, monkeypatches
 AEC._aec3_select_linear_filter_output to capture, per hop where it actually
 fires (i.e. self._last_shadow_output_time is not None — skipped on frame 1):
 
-  Inputs the C replays:
+  Inputs:
     * e_refined_time[hop]            (= raw_output, the kwarg)
     * near_end[hop]                  (= near_end_block, the kwarg)
     * e_coarse_time[hop]             (= self._last_shadow_output_time, pre-call)
@@ -15,16 +15,16 @@ fires (i.e. self._last_shadow_output_time is not None — skipped on frame 1):
   Plus once: sqrt_hann[block_size] (filter._sqrt_hann_analysis), and the
   config sizes (hop, block_size, fft_size, n_freqs).
 
-  Expected outputs the C asserts BIT-EXACT (uint32 bit pattern):
+  Expected outputs, BIT-EXACT (uint32 bit pattern):
     * selected_esw[n_freqs]   (complex64)
     * selected_echo_spec[n_freqs] (complex64)
 
-A C harness constructs a LinearFilterSelect (init →
+A replay constructs a LinearFilterSelect (init →
 _form_prev_output_time=None, _form_last_selection=True), then per captured hop
-calls linear_filter_select with the stored inputs and asserts both complex
-spectra match bit-for-bit. State (_form_prev_output_time, _form_last_selection,
-_refined_filter_output_last_selected) evolves continuously in the C exactly as
-in Python across all captured hops.
+calls linear_filter_select with the stored inputs; both complex spectra must
+match bit-for-bit. State (_form_prev_output_time, _form_last_selection,
+_refined_filter_output_last_selected) evolves continuously exactly as in Python
+across all captured hops.
 
 Layout (LE), sizes in elements:
   int32 hop, block_size, fft_size, n_freqs, n_hops
@@ -61,7 +61,7 @@ CASE = os.path.join(WAV, 'doubletalk', '0I0XMl3M0ECO0U1N0cJvpg_doubletalk')
 HOP = 160
 SR = 16000
 FL = 832
-MAX_HOPS = 4200   # whole DT case (~4186 hops)
+MAX_HOPS = 4200  # whole DT case
 
 
 def _w_i32(f, *vals):

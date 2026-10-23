@@ -1,28 +1,22 @@
-"""Branch census for the F2.4 simple-mu update, over the 90-case blind corpus.
+"""Branch census for the simple-mu update, over the 90-case blind corpus.
 
-A retimed constant is only evidence if the branch that reads it is exercised by
-the corpus the A/B ran on. `_update_simple_mu_ratio` has three branches and each
-uses a different retimed retention:
+`_update_simple_mu_ratio` has three branches, each with its own retention:
 
     attack    _SIMPLE_MU_ALPHA_ATTACK    and arms the holdoff on a fresh onset
     hold      _SIMPLE_MU_ALPHA_HOLD      while the holdoff runs down
     release   _SIMPLE_MU_ALPHA_RELEASE   once it is spent
 
-A neutral A/B result means something different depending on which of those the
-corpus actually reached. If `release` never fires, a neutral verdict says
-nothing about its coefficient.
-
-No instrumentation is needed and none was added: the holdoff counter's
-transition identifies the branch unambiguously.
+A neutral A/B verdict says nothing about a branch the corpus never reaches. The
+branch is identified from the holdoff counter's transition, with no
+instrumentation:
 
     counter went UP           attack, fresh onset (armed to the limit)
     counter went DOWN         hold
     counter flat and nonzero  attack, ongoing
     counter flat at zero      release
 
-The last line is exact rather than a default: an attack at zero would arm the
-counter, and the limit is always >= 1, so a 0 -> 0 transition can only be
-release.
+The last line is exact: an attack at zero would arm the counter and the limit
+is always >= 1, so a 0 -> 0 transition can only be release.
 
     python3 eval/simple_mu_branch_census.py --policy retimed --out census.json
 """

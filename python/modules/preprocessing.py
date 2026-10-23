@@ -1,36 +1,25 @@
-"""Audio pre-processing: high-pass filter + saturation detector.
-
-Extracted from ``aec.py`` during refactor R.4. Self-contained: depends
-only on numpy.
-"""
+"""Audio pre-processing: high-pass filter and saturation detector (numpy only)."""
 import numpy as np
 
 from . import aec3_scale
 
 
 class HighPassFilter:
-    """2nd-order Butterworth IIR high-pass filter (bilinear transform).
-
-    Removes DC offset, 50/60Hz hum, and low-frequency rumble.
-    12 dB/octave rolloff. Processes sample-by-sample with two delay states.
-    """
+    """2nd-order Butterworth high-pass (bilinear transform, 12 dB/octave); removes DC, hum and rumble."""
 
     def __init__(self, cutoff_hz: float, sample_rate: int):
-        # Bilinear transform: pre-warp analog frequency
         wc = 2.0 * np.pi * cutoff_hz / sample_rate
         wc_w = np.tan(wc / 2.0)
         k = wc_w * wc_w
         sqrt2 = np.sqrt(2.0)
         norm = 1.0 / (1.0 + sqrt2 * wc_w + k)
 
-        # Transfer function coefficients (Direct Form II)
         self.b0 = norm
         self.b1 = -2.0 * norm
         self.b2 = norm
         self.a1 = 2.0 * (k - 1.0) * norm
         self.a2 = (1.0 - sqrt2 * wc_w + k) * norm
 
-        # Delay states
         self.z1 = 0.0
         self.z2 = 0.0
 
@@ -54,23 +43,13 @@ class HighPassFilter:
 
 
 class SaturationDetector:
-    """Detects speaker clipping/saturation in audio signals.
-
-    Returns a smoothed saturation_level in [0, 1] indicating how much
-    non-linear distortion is present. Also provides soft-clipping to
-    model the speaker's saturation behavior for the adaptive filter.
-    """
+    """Detects speaker clipping; ``detect()`` returns a smoothed level in [0, 1], ``soft_clip()`` models speaker saturation."""
 
     def __init__(self, threshold: float = 0.95,
                  hop_size: int = 256, sample_rate: int = 16000):
         self.threshold = threshold
         self.saturation_level = 0.0
-        # Asymmetric per-hop EMA (detect() is called once per hop). Reference
-        # grid is hop=256/16000 (16 ms), NOT the 10 ms grid used by the older
-        # constants: these are authored against a
-        # config declaring frame_size=512/hop_size=256. The defaults above
-        # reproduce the authored values so standalone/diagnostic use is
-        # unchanged.
+        # Asymmetric per-hop EMA, authored at hop 256 / 16 kHz and re-hopped to the actual grid.
         self.alpha_attack = aec3_scale.growth_rehop(
             0.3, 256, 16000, hop_size, sample_rate)    # fast attack
         self.alpha_release = aec3_scale.growth_rehop(
@@ -83,10 +62,8 @@ class SaturationDetector:
             return self.saturation_level
 
         abs_sig = np.abs(signal)
-        # Count clipped samples
         clip_count = np.sum(abs_sig > self.threshold)
 
-        # Count consecutive identical peak samples (digital clipping signature)
         consec_count = 0
         high_mask = abs_sig > self.threshold * 0.8
         for i in range(1, n):
@@ -95,7 +72,6 @@ class SaturationDetector:
 
         raw_sat = min((clip_count + 2 * consec_count) / n, 1.0)
 
-        # Asymmetric EMA
         if raw_sat > self.saturation_level:
             alpha = self.alpha_attack
         else:
@@ -105,10 +81,7 @@ class SaturationDetector:
 
     @staticmethod
     def soft_clip(signal: np.ndarray, knee: float = 0.8) -> np.ndarray:
-        """Soft-clip signal to model speaker saturation behavior.
-
-        Below knee: pass through. Above knee: tanh compression.
-        """
+        """Pass below ``knee``; tanh compression above."""
         out = signal.copy()
         abs_sig = np.abs(signal)
         mask = abs_sig >= knee

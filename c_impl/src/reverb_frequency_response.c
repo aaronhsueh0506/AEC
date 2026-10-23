@@ -1,5 +1,4 @@
-/* reverb_frequency_response.c — C port of reverb_frequency_response.py.
- * See the header for the parity contract. Build with -ffp-contract=off. */
+/* reverb_frequency_response.c -- see reverb_frequency_response.h. */
 #include "reverb_frequency_response.h"
 
 #include "utility/simd_aec.h"
@@ -30,15 +29,15 @@ void reverb_freq_resp_update(ReverbFrequencyResponse *r,
                              int linear_filter_quality_is_none,
                              int stationary_block) {
     const int N = r->n_freqs;
-    const float *direct;   /* frequency_response[filter_delay_blocks] */
-    const float *tail_row; /* frequency_response[-1] */
+    const float *direct;
+    const float *tail_row;
     float direct_energy_f, tail_energy_f;
     double direct_energy, average_decay, smoothing;
     float decay_f; /* average_decay narrowed to float32 at the tail multiply */
     float *tail = r->tail_response;
     int k;
 
-    /* cc:67 — skip on stationary block or quality None. */
+    /* Skip on a stationary block or no quality estimate. */
     if (stationary_block || linear_filter_quality_is_none) {
         return;
     }
@@ -49,11 +48,8 @@ void reverb_freq_resp_update(ReverbFrequencyResponse *r,
     direct   = frequency_response + (size_t)filter_delay_blocks * (size_t)N;
     tail_row = frequency_response + (size_t)(n_partitions - 1) * (size_t)N;
 
-    /* Average-decay scalar over k>=1 (kSkipBins=1). np.sum -> f32 pairwise
-     * (float32); Python then widens with `float(np.sum(...))` (exact,
-     * float32->float64) before dividing. The division and the EMA state
-     * below run in float64 throughout, matching Python's plain-float
-     * `_average_decay` -- NOT narrowed to float32 until the tail multiply. */
+    /* Average decay over k >= 1 (float32 pairwise sums widened to double, division and EMA in
+     * double). */
     direct_energy_f = sk_pairwise_sum_tailfold_b_f32(direct + 1, (size_t)(N - 1));
     direct_energy = (double)direct_energy_f;
     if (direct_energy == 0.0) {
@@ -63,32 +59,20 @@ void reverb_freq_resp_update(ReverbFrequencyResponse *r,
         average_decay = (double)tail_energy_f / direct_energy;
     }
 
-    /* EMA: smoothing = smoothing_base * quality; state update in float64
-     * (mirrors Python's `_average_decay += smoothing * (average_decay -
-     * _average_decay)`, a plain-float accumulation). Both smoothing_base
-     * and quality are double (see the header / ree_update_reverb_models):
-     * Python's filter_quality is a plain python float the whole way from
-     * FullBandErleEstimator, never narrowed to float32 before this. */
+    /* EMA: smoothing = smoothing_base * quality, state kept in double. */
     smoothing = r->smoothing_base * linear_filter_quality;
     r->average_decay += smoothing * (average_decay - r->average_decay);
 
-    /* Per-bin tail = direct(f32) * average_decay: Python multiplies the f32
-     * array by the float64 `_average_decay` scalar, which numpy<2 narrows to
-     * float32 ONCE for the multiply -- narrow here, not before. */
+    /* Per-bin tail = direct * average_decay, with the decay narrowed to float32 once. */
     decay_f = (float)r->average_decay;
     sk_scale_f32(tail, direct, decay_f, N);
 
-    /* Conservative variant: point-wise max with raw last partition.
-     * np.maximum: NaN-propagating; here the real data is non-negative |W|²,
-     * no NaN, so a straight compare-and-raise is exact. */
+    /* Conservative variant: point-wise max with the last partition. */
     if (r->use_conservative) {
         sk_raise_to_f32(tail, tail_row, N);
     }
 
-    /* Neighbour-max smoothing (k=1..N-2), ascending in-place.
-     * The reference runs ascending so tail[k-1] is the ALREADY-RAISED value from
-     * iteration k-1; a strong peak propagates rightward as a >=0.5/bin skirt.
-     * Mirrors Python: `tail[k] = max(tail[k], 0.5*(tail[k-1]+tail[k+1]))`. */
+    /* Neighbour-max smoothing for k = 1..N-2, ascending in place so a peak spreads rightward. */
     if (N >= 3) {
         int M = N - 2;
         for (k = 1; k <= M; ++k) {
@@ -97,5 +81,4 @@ void reverb_freq_resp_update(ReverbFrequencyResponse *r,
         }
     }
 
-    /* tail.astype(np.float32) is a no-op (already f32); tail_response is tail. */
 }

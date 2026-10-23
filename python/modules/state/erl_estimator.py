@@ -1,13 +1,7 @@
-"""ErlEstimator — per-bin echo return loss with minimum-statistics tracking.
+"""ErlEstimator: per-bin echo return loss with minimum-statistics tracking (single channel).
 
-Mirrors docs/aec3_extracts/src/aec3/erl_estimator.{cc,h}.
-
-Single-channel port. Bins indexed 0..n_bins-1.
-
-Rate notes:
-  - ``hold_counter`` set to 1000 on each downward jump. AEC3 1000 blocks
-    (~4 s) -> wall-clock ``ms_to_hops(4000, ...)`` at whatever grid is
-    live (not a fixed hop count -- see ``__init__``'s ``_hold_hops``).
+A downward jump holds the estimate for 4 s (converted to hops from the live grid)
+before it recovers upward by doubling per update.
 """
 import numpy as np
 
@@ -15,7 +9,7 @@ from .. import aec3_scale as _aec3_scale
 
 _MIN_ERL = 0.01
 _MAX_ERL = 1000.0
-_AEC3_X2_MIN = 44015068.0  # AEC3 source value — scaled per hop in __init__
+_AEC3_X2_MIN = 44015068.0  # scaled per hop in __init__
 
 
 class ErlEstimator:
@@ -24,12 +18,9 @@ class ErlEstimator:
         self._startup_hops = int(startup_phase_length_hops)
         self._n_bins = int(n_bins)
         self._x2_min = _aec3_scale.per_bin_psd_threshold(_AEC3_X2_MIN, hop_size)
-        # AEC3 1000 blocks (~4 s) hold-after-drop. Was the module-level
-        # `_HOLD_HOPS = int(4.0 * HOPS_PER_SECOND)`, baked at the stale
-        # hop=160/sr=16000 assumption; computed live here instead.
+        # 4 s hold-after-drop at the live grid.
         self._hold_hops = _aec3_scale.ms_to_hops(4000.0, hop_size, sample_rate)
         self._erl = np.full(self._n_bins, _MAX_ERL, dtype=np.float32)
-        # hold_counters_ is sized kFftLengthBy2Minus1 in AEC3; align here.
         self._hold_counters = np.zeros(self._n_bins - 2, dtype=np.int32)
         self._erl_time_domain = _MAX_ERL
         self._hold_counter_time_domain = 0
@@ -50,7 +41,6 @@ class ErlEstimator:
             return
         x2 = render_psd
         y2 = capture_psd
-        # Per-bin minimum-statistics update for k=1..n_bins-2.
         for k in range(1, self._n_bins - 1):
             if x2[k] > self._x2_min:
                 new_erl = y2[k] / x2[k]
@@ -58,16 +48,13 @@ class ErlEstimator:
                     self._hold_counters[k - 1] = self._hold_hops
                     self._erl[k] += 0.1 * (new_erl - self._erl[k])
                     self._erl[k] = max(self._erl[k], _MIN_ERL)
-        # Decrement hold counters; bins with counter <= 0 double per-update
-        # (slow recovery toward max).
+        # Counters at or below zero double the estimate per update (recovery toward max).
         self._hold_counters -= 1
         for k in range(1, self._n_bins - 1):
             if self._hold_counters[k - 1] <= 0:
                 self._erl[k] = min(_MAX_ERL, 2.0 * self._erl[k])
-        # Mirror endpoints.
         self._erl[0] = self._erl[1]
         self._erl[-1] = self._erl[-2]
-        # Fullband ERL.
         x2_sum = float(np.sum(x2))
         if x2_sum > self._x2_min * x2.size:
             y2_sum = float(np.sum(y2))

@@ -1,30 +1,22 @@
-/* print_mem_size_ref.c — independent reference tool backing
- * cli_delay_flags.sh's "aec_wav --print-mem-size's number equals
- * aec_get_mem_size()'s" cross-check.
+/* print_mem_size_ref.c -- independent reference tool backing cli_delay_flags.sh's cross-check that
+ * aec_wav --print-mem-size reports the number aec_get_mem_size() returns.
  *
- * Deliberately NOT part of aec_wav.c / example/: this tool builds an
- * AecConfig from the same CLI-shaped inputs and calls
- * aec_get_mem_breakdown() (which itself calls aec_get_mem_size()) from its
- * OWN source file, so the shell test's cross-check runs against a genuinely
- * separate code path from aec_wav.c's --print-mem-size printf. A mutation
- * that breaks only the CLI's print statement -- wrong field, transposed
- * arguments, a stale hardcoded number -- diverges from this tool's number
- * and fails the shell test; a mutation that breaks aec_get_mem_size() /
- * aec_get_mem_breakdown() itself would make both sides equally wrong (that
- * class of regression is caught instead by test_delay_num_filters.c, which
- * pins hand-computed byte deltas per grid/n, and by test_config_validation.c).
+ * It is deliberately not part of aec_wav.c / example/: it builds an AecConfig from the same CLI-shaped inputs and calls
+ * aec_get_mem_breakdown() (which calls aec_get_mem_size()) from its own source file, so the cross-check runs against a code
+ * path separate from aec_wav.c's --print-mem-size printf. A bug in the CLI's print statement (wrong field, transposed
+ * arguments, a stale hardcoded number) diverges from this tool's number and fails the shell test; a bug in
+ * aec_get_mem_size() / aec_get_mem_breakdown() itself would make both sides equally wrong and is caught instead by
+ * test_delay_num_filters.c (hand-computed byte deltas per grid/n) and test_config_validation.c.
  *
  * Usage:
  *   print_mem_size_ref <sample_rate> [--fft-size N] [--delay-mode M]
  *                       [--delay-num-filters N] [--fixed-delay S]
- * (M in {matched,fixed,external}; unset options leave the balanced-preset
- * default exactly as aec_wav.c's own CLI does.)
+ * (M in {matched,fixed,external}; unset options leave the balanced-preset default, as aec_wav.c's own CLI does.)
  *
  * On success prints exactly one line:
  *   total_bytes=N estimator_bytes=N ring_bytes=N
- * and exits 0. On a rejected config, prints nothing to stdout and exits 1 --
- * the shell test's fail-fast checks look for THAT exit code, not stdout
- * content, mirroring aec_wav's own contract for an illegal combination.
+ * and exits 0. On a rejected config, prints nothing to stdout and exits 1; the shell test's fail-fast checks look at that exit
+ * code, not at stdout, mirroring aec_wav's own contract for an illegal combination.
  */
 #include "aec.h"
 #include <stdio.h>

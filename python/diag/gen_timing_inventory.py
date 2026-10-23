@@ -1,9 +1,7 @@
 """Render docs/timing_constant_inventory.md from docs/timing_constant_inventory.json.
 
 The Markdown is derived, never hand-edited. Regenerating is how the counts, the
-category exclusivity and the absence of truncation stay true; editing in place
-would reintroduce exactly the drift that made the first version of that document
-unusable as release evidence.
+category exclusivity and the absence of truncation stay true.
 
 Both inputs live in this repository and every path is derived from this file's
 own location, so the document rebuilds in a clean clone with no local state.
@@ -72,16 +70,14 @@ TEXT_FIELDS = ("anchor", "effective", "provenance", "reasoning")
 PATH_RE = re.compile(r"\b((?:python|c_impl|docs|eval)/[A-Za-z0-9_./-]+"
                      r"\.(?:py|c|h|md|json))\b")
 
-# This document is read by people outside the work that produced it. Words that
-# only make sense from inside that work are a defect, not a style preference.
-# Matched on word boundaries: `TransparentMode` and `enable_transparent_mode`
-# are identifiers, and a naive substring check on "parent" made an earlier pass
-# elide them out of a quoted commit subject.
+# The document is read by people outside the work that produced it, so words that
+# only make sense from inside that work are rejected. Matched on word
+# boundaries: `TransparentMode` and `enable_transparent_mode` are identifiers
+# that contain "parent".
 BANNED = (r"\bparent\b", r"\bbrief\w*\b", r"\bintake\b", r"\bsubagent\b",
           r"\badjudicat\w*\b")
 
-# An absolute path in the data is the same defect in a different costume: it
-# pins the document to one machine.
+# An absolute path in the data pins the document to one machine.
 ABSOLUTE_PATH = re.compile(r"(?<![\w.])/[A-Za-z][\w.-]*/")
 
 

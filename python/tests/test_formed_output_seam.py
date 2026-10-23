@@ -5,9 +5,9 @@ computation entirely (Audio_ALG/AIAEC/dataset_gen/linear_aec.py's use case:
 materializing linear_error for a whole dataset, where that extra work would
 be pure waste since nothing downstream reads it).
 
-The seam remains necessary without an output limiter because it includes
-shadow/main selection, crossfade and WOLA formation; process() can expose the
-raw main-filter hop when the selector chooses another candidate.
+The seam is needed because it includes shadow/main selection, crossfade and
+WOLA formation; process() can expose the raw main-filter hop when the selector
+chooses another candidate.
 """
 
 import numpy as np
@@ -39,17 +39,11 @@ def test_formed_output_matches_res_context_formed_output(
 ) -> None:
     """The formed seam and the res-context seam are the same signal.
 
-    They are now the same code path rather than two that happen to agree:
-    the formed output is captured after _aec3_post() has run the FORM step,
-    and AecConfig refuses to serve it without that chain. The earlier
-    lightweight route ran the selector on its own and skipped AecState, so
-    the capture fallback's quality verdict stayed at its constructed False
-    for the whole stream and the two routes diverged wherever the energy
-    term fired -- measured at 286 hops out of 400 once the echo path was
-    removed mid-stream. Byte-identity is asserted here so a future
-    reintroduction of a second route has to prove it, and the shadow path
-    (enable_shadow=True) is covered because selection/crossfade only happens
-    when a coarse candidate exists.
+    They share one code path: the formed output is captured after _aec3_post() has
+    run the FORM step, and AecConfig refuses to serve it without that chain.
+    Byte-identity is asserted so a second route has to prove itself, and the
+    shadow path (enable_shadow=True) is covered because selection/crossfade only
+    happens when a coarse candidate exists.
     """
     cfg = _make_config(sample_rate, fft_size, enable_shadow)
     cfg.return_res_context = True
@@ -88,7 +82,7 @@ def test_formed_output_requires_the_chain_that_produces_it() -> None:
 
 
 def test_no_output_limiter_output_is_never_peak_scaled() -> None:
-    """A burst meeting the removed limiter's trigger condition is unscaled."""
+    """A loud burst after a quiet baseline is returned unscaled (no limiter gain)."""
     cfg = _make_config(16000, 256, enable_shadow=True)
     cfg.return_res_context = True
     cfg.return_formed_output = True
@@ -98,8 +92,7 @@ def test_no_output_limiter_output_is_never_peak_scaled() -> None:
 
     would_have_limited = False
     for i in range(80):
-        # Quiet baseline, a loud burst, then quiet again -- the excursion the
-        # removed limiter's attack/release smoothing used to ride.
+        # Quiet baseline, a loud burst, then quiet again.
         amp = 0.9 if 20 <= i < 30 else 0.02
         far = (amp * 0.3 * rng.uniform(-1.0, 1.0, hop)).astype(np.float32)
         near = (amp * rng.uniform(-1.0, 1.0, hop)).astype(np.float32)

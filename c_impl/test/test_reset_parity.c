@@ -1,29 +1,22 @@
-/* test_reset_parity.c — aec_reset() delivers a fresh instance.
+/* test_reset_parity.c -- aec_reset() delivers a fresh instance.
  *
- * The contract on aec_reset() is that the instance it returns is
- * indistinguishable from one just built on the same config. That was prose,
- * not a gate, and it was false: state survived the call that a fresh
- * construction never has, and the first post-reset hop already diverged.
+ * The contract on aec_reset() is that the instance it returns is indistinguishable from one just built on the same config.
  *
- * The gate is byte identity of everything a caller can observe, over a run
- * long enough for the filter to converge and the delay estimator to lock:
+ * The gate is byte identity of everything a caller can observe, over a run long enough for the filter to converge and the
+ * delay estimator to lock:
  *   - out[hop]                    (aec_process; the audio a caller ships)
  *   - AecResContext.formed_hop    (the linear-AEC seam's time output)
  *   - AecResContext.error_spec    (its freq output, n_freqs Complex)
- * Reference instance: constructed, never warmed. Subject instance:
- * constructed, warmed WARM_HOPS on an unrelated echo path, then aec_reset().
- * Both are then fed the same TEST_HOPS of a second echo path and compared
- * hop by hop. A residue that steers any decision moves one of the three.
+ * Reference instance: constructed, never warmed. Subject instance: constructed, warmed WARM_HOPS on an unrelated echo path,
+ * then aec_reset(). Both are then fed the same TEST_HOPS of a second echo path and compared hop by hop. A residue that
+ * steers any decision moves one of the three.
  *
- * Covered per run: the three product grids (16k/256, 16k/512, 48k/1024) x
- * both consumption modes (full cascade, and the enable_res=0 +
- * return_res_context=1 seam an external RES drives). The kernel set is
- * whatever the build selected, so `make test-reset-parity` and
- * `make SIMD=0 test-reset-parity` are two distinct runs of the gate.
- * The caller-pool path needs no separate case here: test_static_aec.c
- * already pins aec_init byte-equal to aec_create on a real recording.
+ * Covered per run: the three product grids (16k/256, 16k/512, 48k/1024) x both consumption modes (full cascade, and the
+ * enable_res=0 + return_res_context=1 seam an external RES drives). The kernel set is whatever the build selected, so
+ * `make test-reset-parity` and `make SIMD=0 test-reset-parity` are two distinct runs of the gate. The caller-pool path needs
+ * no separate case here: test_static_aec.c pins aec_init byte-equal to aec_create on a real recording.
  *
- * Build (standalone, from c_impl/ -- mirrors test_process_context.c's recipe):
+ * Build (standalone, from c_impl/):
  *   make -C ../../audiolib/common lib
  *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=gnu99 -Iinclude \
  *       -I../../audiolib/common/include \

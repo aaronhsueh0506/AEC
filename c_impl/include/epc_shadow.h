@@ -1,8 +1,5 @@
-/* epc_shadow.h — ports of EchoPathChangeDetector + ShadowCopyController
- * (aec.py).
- *
- * All scalar math float32 (drift versus Python accepted).
- */
+/* EchoPathChangeDetector and ShadowCopy. Scalar math is float32.
+ * Python reference: modules/epc.py. */
 #ifndef AEC_EPC_SHADOW_H
 #define AEC_EPC_SHADOW_H
 
@@ -33,19 +30,13 @@ typedef struct EpcDetector {
     int    epc_hangover;
     float  epc_total_rise;
     float  epc_delta_threshold;
-    /* EPV_FAST_TC/EPV_SLOW_TC retimed for the live (hop_size, sample_rate)
-     * grid at epc_init() time -- see epc_init()'s doc comment in epc_shadow.c.
-     * Config slice (fixed for the instance's lifetime; NOT touched by
-     * epc_reset()). */
+    /* Config slice, fixed for the instance lifetime (epc_reset() leaves it alone);
+     * EPV_FAST_TC/EPV_SLOW_TC are retimed to the live grid in epc_init(). */
     float  epv_fast_tc;
     float  epv_slow_tc;
 } EpcDetector;
 
-/* hop_size/sample_rate are required so epc_init() can retime
- * EPV_FAST_TC/EPV_SLOW_TC (module constants in epc_shadow.c, per-hop EMA
- * alphas authored against the hop=160/sample_rate=16000 grid) per instance
- * (see epc_shadow.c). Must match epc.py's EchoPathChangeDetector.__init__
- * (Python side). */
+/* hop_size/sample_rate retime EPV_FAST_TC/EPV_SLOW_TC, authored for hop=160 @ 16 kHz. */
 void epc_init(EpcDetector* e, int hangover, float total_rise,
                  float delta_threshold, int hop_size, int sample_rate);
 void epc_reset(EpcDetector* e);
@@ -58,7 +49,7 @@ EpcEvent epc_update_shadow_rise(EpcDetector* e,
                                      int is_stationary);
 void epc_tick_hangover(EpcDetector* e);
 
-/* ── ShadowCopyController ───────────────────────────────── */
+/* ── ShadowCopy ─────────────────────────────────────────── */
 typedef enum {
     SC_GATE_ENERGY = 0,
     SC_GATE_COHERENCE,
@@ -76,12 +67,8 @@ typedef struct ShadowCopy {
     ShadowCopyGateMode gate_mode;
     float  copy_err_baseline;
     int    copy_counter;
-    /* Per-grid EMA retention, set once at init and never cleared by
-     * shadow_copy_reset(). No separate `streak` counter is kept:
-     * on the energy path it would always advance and reset together with
-     * copy_counter, and SC_GATE_STREAK does not otherwise use copy_counter,
-     * so one counter serves both paths and sizeof(ShadowCopy), sizeof(Aec)
-     * and every pool offset stay unchanged. */
+    /* Per-grid EMA retention, set at init and kept by shadow_copy_reset().
+     * copy_counter serves both the energy and the streak gate. */
     float  copy_err_baseline_retention;
     int    main_paused;
     int    pause_resume;

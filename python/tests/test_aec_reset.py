@@ -1,12 +1,11 @@
-"""v3.21.3 reset-state regression — AEC.reset() AEC3 post-state clearing.
+"""AEC.reset() AEC3 post-state clearing.
 
-Pre-v3.21.3 bug: AEC.reset() body initialised the AEC3-aligned post-stage
-fields (`_aec3_state` / `_aec3_ree` / `_aec3_sg` / `_aec3_ola_buf` /
-CNG state (`_aec3_n2` / `_aec3_n2_initial` / `_aec3_y2_smoothed` /
-`_aec3_n2_counter` / `_aec3_cng_seed` / `_aec3_noise_initialized`) /
-`_aec3_pending_*` / `_aec3_stationarity` + counters) in `__init__` but
-never touched them on reset(). Re-using an AEC instance across utterances
-carried previous-stream post-filter state into the next stream.
+reset() must clear every AEC3 post-stage field created in `__init__`
+(`_aec3_state` / `_aec3_ree` / `_aec3_sg` / `_aec3_ola_buf` / CNG state
+(`_aec3_n2` / `_aec3_n2_initial` / `_aec3_y2_smoothed` / `_aec3_n2_counter` /
+`_aec3_cng_seed` / `_aec3_noise_initialized`) / `_aec3_pending_*` /
+`_aec3_stationarity` + counters), so re-using an AEC instance across
+utterances carries no post-filter state into the next stream.
 
 Run:
     python -m pytest python/tests/test_aec_reset.py
@@ -130,11 +129,8 @@ class Aec3PostResetTests(unittest.TestCase):
 
 
 class ReturnResContextTests(unittest.TestCase):
-    """v3.21.3 return-context regression — `return_res_context=True` contract.
-
-    Before v3.21.3: `_res_context` was always None so the documented
-    `(output, AecResContext)` return type never fired — only `ndarray`
-    came back regardless of the config flag.
+    """`return_res_context=True` contract: process() returns `(output,
+    AecResContext)`; with False it returns only the ndarray.
     """
 
     def setUp(self) -> None:
@@ -144,8 +140,7 @@ class ReturnResContextTests(unittest.TestCase):
         self.aec = AEC(self.cfg)
 
     def test_default_returns_ndarray_only(self) -> None:
-        """With return_res_context=False, process() returns ndarray
-        (regression guard)."""
+        """With return_res_context=False, process() returns an ndarray."""
         cfg = AecConfig()
         np.random.seed(42)
         aec = AEC(cfg)
@@ -205,12 +200,10 @@ def _echo_scene(rng, hop, n_hops, delay, erl):
 class ResetEqualsFreshInstanceTests(unittest.TestCase):
     """``AEC.reset()`` owes the caller a fresh instance.
 
-    The C twin gate is ``make test-reset-parity``
-    (c_impl/test/test_reset_parity.c); this is the same property on this port,
-    so the two resets cannot drift apart on what they clear. Before the fix
-    both ports carried the filters' AEC3 startup gates, the Kalman H_error and
-    the inst-ERLE slope ring across the call, and the first post-reset hop
-    already diverged.
+    The C twin gate is ``make test-reset-parity`` (c_impl/test/test_reset_parity.c);
+    this is the same property on this port, so the two resets cannot drift apart on
+    what they clear: the filters' AEC3 startup gates, the Kalman H_error and the
+    inst-ERLE slope ring must not carry across the call.
     """
 
     WARM_HOPS = 600

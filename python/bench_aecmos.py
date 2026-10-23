@@ -7,9 +7,9 @@ Usage:
 Walks <output_dir> for `<stem>_ours.wav` files, finds the matching
 `<stem>_mic.wav` / `<stem>_lpb.wav` under wav/aec_challenge_blind/<scenario>/,
 runs the local AECMOS ONNX (model/Run_1663915512_Stage_0.onnx), aggregates
-per-bucket means, and dumps per-case scores + worst-N lists.
+per-bucket means, and dumps per-case scores + worst-20 lists.
 
-Buckets (matches review acceptance criteria):
+Buckets:
   FS_static   — farend_singletalk, no _with_movement_
   FS_movement — farend_singletalk, _with_movement_
   NE          — nearend_singletalk
@@ -19,9 +19,9 @@ Buckets (matches review acceptance criteria):
 Outputs (in <result_dir>):
   scores.json — per-case dict {stem: {bucket, echo, deg}}
   result.md   — bucket means + worst-20 per bucket; if --baseline given,
-                also Δ vs baseline + Pareto verdict
+                also Δ vs baseline + per-bucket verdict
 
-Speed: single ONNX session reused across cases (FastAECMOS pattern).
+A single ONNX session is reused across cases.
 """
 import os
 import sys
@@ -44,31 +44,17 @@ import librosa
 
 
 class FastAECMOS:
-    """Reusable AECMOS estimator (single ONNX session).
+    """Reusable AECMOS estimator (single ONNX session), 16 kHz only.
 
-    official_segmentation (default True): the Interspeech 2021 / ICASSP 2022
-    blind-test clips are LENGTHENED beyond their scored portion so the AEC
-    under test has time to converge before the segment that is actually
-    judged; the official scoring rule (AECMOS/AECMOS_local/README.md) feeds
-    only that portion to the model, not the clip from its start:
+    official_segmentation (default True) scores only the portion the official AEC
+    Challenge rule judges, since the blind clips are lengthened beyond it:
       FS (far-end singletalk) -- second half of the clip.
       DT (double-talk)        -- last (L-15) / 2 seconds, L = clip length (s).
-      NE (near-end singletalk)-- the whole clip (no segmentation).
-    The model's own max_len=20s cap (below) then applies AFTER this slice,
-    exactly as in the official evaluation: a clip whose scored segment is
-    itself longer than 20 s is further truncated to that segment's first
-    20 s, not the original clip's first 20 s.
-    False reproduces the pre-2026-09-26 behaviour (always the clip's own
-    first 20 s, every bucket) for direct comparison against scores computed
-    before this fix; every number computed before 2026-09-26's ruling to
-    restore the official rule was under this legacy behaviour and must be
-    read as such, never silently compared against an official-segmentation
-    score as if the methods matched.
-    This file only ever covered the 16 kHz Interspeech 2021 blind set
-    (self.sampling_rate is hard-coded 16000). The 48 kHz ICASSP 2023 set's
-    own fullband model (dft 1536, hidden (4,1,96)) is not present in this
-    checkout; 48 kHz scoring stays unimplemented here, not silently
-    approximated.
+      NE (near-end singletalk)-- the whole clip.
+    The model's max_len=20s cap applies after this slice. False (--legacy-score)
+    scores the clip's own first 20 s in every bucket; such scores are not
+    comparable with official-segmentation scores. 48 kHz scoring is not
+    implemented (self.sampling_rate is 16000).
     """
 
     def __init__(self, model_path, official_segmentation=True):
@@ -78,10 +64,8 @@ class FastAECMOS:
         self.hidden_size = (4, 1, 64)
         self.max_len = 20
         self.official_segmentation = official_segmentation
-        # Cap ONNX to 1 thread/instance so N bench workers map 1:1 onto cores
-        # (uncapped, each session spawns ~ncores intra-op threads → heavy
-        # oversubscription — the reason plain --workers 9 doesn't speed up).
-        # Thread count does NOT affect deterministic inference output.
+        # Cap ONNX to 1 thread per instance so N bench workers map 1:1 onto cores;
+        # thread count does not affect inference output.
         _so = ort.SessionOptions()
         _so.intra_op_num_threads = 1
         _so.inter_op_num_threads = 1
@@ -238,7 +222,6 @@ def main():
         if (i + 1) % 50 == 0:
             print(f"  {i+1}/{len(cases)}", flush=True)
 
-    # Aggregate
     summary = {}
     for bucket, d in bucket_acc.items():
         echo_vals = [v for _, v in d['echo']]
@@ -254,7 +237,6 @@ def main():
     json.dump(out, open(os.path.join(args.result_dir, 'scores.json'), 'w'),
               indent=2)
 
-    # result.md
     md = [f"# Bench result — {args.label}", '']
     md.append(f"Dataset: {args.dataset}")
     md.append(f"Output dir: {args.output_dir}")

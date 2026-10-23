@@ -1,12 +1,4 @@
-"""Delay-subsystem POD types — DelayEstimate + EchoPathVariability.
-
-Mirrors:
-  - docs/aec3_extracts/src/aec3/delay_estimate.h
-  - docs/aec3_extracts/src/aec3/echo_path_variability.{cc,h}
-
-Both are dataclass-frozen; structural-equality comparable so downstream
-state machinery can do change detection cheaply.
-"""
+"""Delay-subsystem value types (frozen dataclasses): DelayEstimate, EchoPathVariability."""
 from dataclasses import dataclass
 from enum import Enum
 

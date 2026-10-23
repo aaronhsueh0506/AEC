@@ -1,29 +1,18 @@
-"""Effective-value regression for the 2026-08-06 detector/adaptation retiming.
+"""Effective-value test for the detector/adaptation retiming.
 
 This asserts the constants a live ``AEC`` instance actually ENDS UP WITH on each
-supported grid, not the presence of a retiming call. That distinction is the
-whole point of this file: an external reviewer read the four touched modules and
-concluded the retiming had not been applied at all, because the values they
-sampled were the authored ones. Two things make that failure mode easy:
+supported grid, not the presence of a retiming call: only an effective-value
+assertion across every grid distinguishes "retimed" from "not retimed". Two of
+the constants are legitimately UNCHANGED on two of the four grids (the
+saturation pair is authored at a 16 ms hop, so it is identity-mapped at 8k/128
+and 16k/256), so sampling one grid can show "nothing changed" for part of the
+table.
 
-  * a benchmark A/B harness swaps authored-value copies of these modules into
-    the working tree while it renders its baseline, so the tree is transiently
-    un-retimed and looks exactly like an unfinished implementation;
-  * two of the constants are legitimately UNCHANGED on two of the four grids
-    (the saturation pair is authored at a 16 ms hop, so it is identity-mapped
-    at 8k/128 and 16k/256), so sampling one grid can easily show "nothing
-    changed" for part of the table.
-
-Only an effective-value assertion across every grid distinguishes "retimed" from
-"not retimed", and it fails loudly if a baseline variant is ever left in place.
-
-Reference grids are NOT uniform -- verified per constant from git provenance:
+Reference grids are NOT uniform:
   * ``self.alpha``            per-SAMPLE, authored at sr=16000
-  * ``alpha_erl`` (both)      per-hop, 10 ms  (5407e71 annotates hop as "10ms")
-  * ``_alpha_r``              per-hop, 10 ms  (authored 16 ms at e9cb383, but
-                              the default moved to 10 ms at 83ced18 and every
-                              validating commit since kept 0.95 there)
-  * saturation attack/release per-hop, 16 ms  (243d67c, frame 512 / hop 256)
+  * ``alpha_erl`` (both)      per-hop, 10 ms
+  * ``_alpha_r``              per-hop, 10 ms
+  * saturation attack/release per-hop, 16 ms (frame 512 / hop 256)
 
 Retiming one of the 16 ms constants off a 10 ms reference is wrong by 1.6x, so
 the reference grid is asserted here too, not just the shape of the formula.
@@ -86,12 +75,8 @@ def test_effective_timing_constants_match_their_reference_grid(sample_rate,
 
 
 def test_retiming_is_actually_applied_somewhere():
-    """Guard against a whole-table identity map.
-
-    Every assertion above still passes if every constant is left authored AND
-    the reference grid happens to equal the live grid. This pins the case that
-    cannot be explained that way: at 16 kHz / hop 128 the 10 ms constants must
-    move, and at 48 kHz the per-sample constant must move.
+    """Guard against a whole-table identity map: at 16 kHz / hop 128 the 10 ms
+    constants must move, and at 48 kHz the per-sample constant must move.
     """
     aec_16k128, filt_16k128, sat_16k128 = _instance(16000, 256)
     assert filt_16k128._alpha_r != pytest.approx(0.95, abs=1e-9)
@@ -106,9 +91,7 @@ def test_retiming_is_actually_applied_somewhere():
 def test_sixteen_ms_constants_are_identity_on_their_own_reference_grid():
     """The 16 ms pair must NOT move at 8k/128 and 16k/256 -- both are 16.000 ms.
 
-    A reviewer seeing these unchanged is looking at correct behaviour, not an
-    unfinished retime. Retiming them off a 10 ms reference would move them here,
-    which is exactly the 1.6x error this pins down.
+    Retiming them off a 10 ms reference would move them here (the 1.6x error).
     """
     for sample_rate, frame_size in ((8000, 256), (16000, 512)):
         _, filt, sat = _instance(sample_rate, frame_size)

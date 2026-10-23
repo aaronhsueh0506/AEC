@@ -1,14 +1,12 @@
-"""Generate a binary golden for the C subband_erle port (WS5 Phase 5.2).
+"""Generate a binary golden for the C subband_erle port.
 
 Runs the Python SubbandErleEstimator over a deterministic multi-frame
 x2/y2/e2 sequence (incl. converged_filter True/False, a coherence gate mask,
 the kPointsToAccumulate(=6) accumulation rollover, the low-render branch, the
 onset-detection hold/release chain) and writes inputs + the full per-frame
-ERLE state to a raw little-endian file that
-a C replay harness (not shipped in this tree)
-replays.
+ERLE state to a raw little-endian file.
 
-We emit MULTIPLE config variants back-to-back in one file so the C test can
+We emit MULTIPLE config variants back-to-back in one file so that it can
 exercise:
   - the production config (use_onset_detection=True,
     use_min_erle_during_onsets=True, coh gate active);

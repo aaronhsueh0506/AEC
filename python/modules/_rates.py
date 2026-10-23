@@ -1,29 +1,7 @@
-"""Block / FFT rate constants and AEC3 rescale helpers.
+"""Block / FFT rate constants and block-to-hop conversion helpers.
 
-LEGACY -- the only importer is ``delay/render_delay_controller.py``, itself
-a reference/legacy port with no production caller (see that module's
-docstring). Everywhere else in this package that needs a rate/hop
-conversion takes ``hop_size``/``sample_rate`` as real parameters and uses
-``aec3_scale.py``'s helpers instead (see e.g. ``state/filter_analyzer.py``,
-which used to hardcode against this same module before being fixed that
-way). Do not add a new import of this module -- use ``aec3_scale.py``.
-
-Project-locked framing for AEC: SR=16 kHz, hop=160 samples (10 ms), FFT=512
-(the legacy 16 kHz default before the 2026-08-01 grid change -- NOT any
-current default). AEC3 reference uses SR=16 kHz, kBlockSize=64 (4 ms),
-kFftLength=128.
-
-Every AEC3 per-block constant must be converted to milliseconds first, then
-re-discretised to OUR hops via ``aec3_blocks_to_our_hops`` (or ``ms_to_hops``
-when the AEC3 source already documents the constant in time units). Inline
-the rescaled value with a comment of the form:
-
-    # AEC3 N blocks (~Xms) -> our M hops
-
-Lag-range / coverage knobs (matched_filter window length, max_delay_ms,
-etc.) MUST be specified in ms — not in "N blocks" — so we don't inherit
-AEC3's 4-ms-block budgeting at our 10-ms hop and end up with 2.5x the
-intended coverage.
+Fixed reference constants: 16 kHz, 160-sample (10 ms) hop, FFT 512, 64-sample (4 ms)
+AEC3 block; they are not the live grid. Prefer the helpers in ``aec3_scale.py``.
 """
 import math
 

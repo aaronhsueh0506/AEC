@@ -1,4 +1,4 @@
-"""Generate a binary golden for the C FFT bit-exact parity test.
+"""Generate a binary golden for the C FFT bit-exact parity check.
 
 Dumps, for many input vectors at n=512 (the production fft_size):
 
@@ -10,8 +10,8 @@ Dumps, for many input vectors at n=512 (the production fft_size):
     Xin : complex64[n/2+1]            (the spectrum the C feeds in)
     y   : float32[n]                  np.fft.irfft(Xin.astype(complex128), n).astype(float32)
 
-A C-side harness replays fft_forward(x) vs X and fft_inverse(Xin) vs y
-and reports the BIT-EXACT mismatch count (compared as the stored 32-bit values).
+Replaying fft_forward(x) vs X and fft_inverse(Xin) vs y reports the BIT-EXACT
+mismatch count (compared as the stored 32-bit values).
 
 The two paths mirror exactly what the AEC pipeline does: the spectra are held
 as complex64 (the Complex {float r,i} struct), and np.fft.rfft upcasts the
@@ -45,8 +45,7 @@ def make_forward_inputs():
     rng = np.random.default_rng(12345)
     cases = []
 
-    # broadband random, several magnitudes (incl. near-zero ~1e-11 — the regime
-    # where the legacy radix-2 fft diverged from pocketfft by <=1 ULP)
+    # broadband random, several magnitudes (incl. near-zero ~1e-11)
     for scale in (1.0, 0.1, 1e-3, 1e-6, 1e-9, 1e-11, 1e-15):
         cases.append((rng.standard_normal(N).astype(np.float32) * scale))
 
@@ -66,13 +65,12 @@ def make_forward_inputs():
         cases.append(np.cos(2 * np.pi * k * t / N).astype(np.float32))
         cases.append((1e-7 * np.sin(2 * np.pi * k * t / N)).astype(np.float32))
 
-    # windowed near-silence (sqrt-Hann * tiny noise) — mimics the cold-start
-    # near-silent blocks that triggered the aec3_post out[hop] ULP residual
+    # windowed near-silence (sqrt-Hann * tiny noise) — mimics cold-start near-silent blocks
     win = np.sqrt(0.5 - 0.5 * np.cos(2 * np.pi * (np.arange(N) + 0.5) / N))
     for scale in (1e-9, 1e-11, 1e-13):
         cases.append((win * rng.standard_normal(N) * scale).astype(np.float32))
 
-    # many more random near-zero vectors to stress the divergence regime
+    # many more random near-zero vectors
     for _ in range(64):
         s = 10.0 ** rng.uniform(-13, -8)
         cases.append((rng.standard_normal(N) * s).astype(np.float32))

@@ -1,22 +1,17 @@
-/* test_static_aec.c — verify aec_init() (static) produces byte-equal output
- * to aec_create() (dynamic) on the same input.
+/* test_static_aec.c -- verify aec_init() (static) produces byte-equal output to aec_create() (dynamic) on the same input.
  *
- * Build (standalone, NE10 FFT backend (default); the FFT wrapper + fast_math
- * now live in the shared audiolib archive, built once and linked in):
+ * Build (standalone, NE10 FFT backend (default); the FFT wrapper + fast_math live in the shared audiolib archive):
  *   make -C ../../audiolib/common BACKEND=ne10 lib
  *   gcc -O2 -ffp-contract=off -std=gnu99 -Iinclude -Iexample -I../../audiolib/common/include \
  *       -I../../audiolib/common \
  *       test/test_static_aec.c $(find src -name '*.c') \
  *       $(make -s -C ../../audiolib/common BACKEND=ne10 print-lib-path) -lm -o bin/test_static_aec
- * The normal entry point is `make test-static-aec`; the standalone recipe is
- * retained for bring-up environments that do not use this repository's
- * Makefile.
+ * The normal entry point is `make test-static-aec`.
  * Run:
  *   ./bin/test_static_aec mic.wav ref.wav [sample_rate]
  *
- * Optional 3rd argv selects the sample rate for building AecConfig
- * (default 16000). The WAV files themselves must already be at that rate
- * (this test does not resample).
+ * The optional 3rd argv selects the sample rate for building AecConfig (default 16000). The WAV files themselves must already
+ * be at that rate (this test does not resample).
  */
 #include "aec.h"
 #include "aec_pool_test_util.h"
@@ -90,18 +85,15 @@ int main(int argc, char** argv) {
     else
         printf("FAIL: %d/%d samples differ\n", diffs, frames * hop);
 
-    /* aec_destroy() must also run on the static instance: it tears down the
-     * single shared FFT handle, whose NE10 twiddle config is allocated outside
-     * the pool. The caller-owned pool itself is freed by the caller. */
+    /* The FFT handle and its twiddles live in the pool, so aec_destroy() frees
+     * nothing here; the caller frees the pool. */
     aec_destroy(aec_st);
     free(out_dyn); free(out_st); free(pool);
 
     /* Leak-loop: repeat init -> process -> destroy so a leak checker
      * (`leaks --atExit -- ./bin/test_static_aec ...`) can see whether
-     * anything grows with iteration count. A real leak (e.g. aec_destroy()
-     * skipping the shared FFT handle's fft_destroy() on the static path)
-     * shows up here as N-times-repeated allocations; a correct teardown
-     * stays flat. */
+     * anything grows with iteration count. A leak shows up here as
+     * N-times-repeated allocations; a correct teardown stays flat. */
     {
         const int kIters = 50;
         const int loop_frames = frames < 20 ? frames : 20; /* keep it fast */

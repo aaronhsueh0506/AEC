@@ -1,17 +1,8 @@
-"""AEC3-aligned delay subsystem (matched_filter + lag_aggregator + clockdrift
-+ echo_path_delay_estimator + render_delay_controller).
+"""AEC3-style delay subsystem: matched filter, lag aggregator, clock drift, echo-path delay estimator.
 
-Replaces the legacy GCC-PHAT ``python/modules/delay.py`` shim.
-
-Production entry point: ``orchestrator.py`` uses ``LegacyDelayShim`` (see
-``legacy_compat.py``) directly over ``EchoPathDelayEstimator``, NOT
-``RenderDelayController`` -- the latter quantises delay to hop boundaries,
-losing the sub-hop sample precision the orchestrator's ring buffer needs.
-``RenderDelayController`` is exported below as an AEC3-structural
-reference/for future migrations; it has no live caller, no dedicated test
-coverage, and its rate constants are a fixed legacy 16 kHz/10 ms reference
-that does not track the current per-instance grid (see its own docstring
-before using it in anything new).
+``orchestrator.py`` uses ``LegacyDelayShim`` over ``EchoPathDelayEstimator``.
+``RenderDelayController`` is a block-quantised reference implementation with
+fixed 16 kHz / 10 ms constants.
 """
 from .clockdrift_detector import ClockdriftDetector, ClockdriftLevel
 from .delay_types import DelayAdjustment, DelayEstimate, DelayQuality, EchoPathVariability

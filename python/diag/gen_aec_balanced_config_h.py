@@ -1,30 +1,24 @@
-"""Generate c_impl/include/aec_balanced_config.h — the baked v3.22 balanced
-AEC3 sub-module construction config.
+"""Generate c_impl/include/aec_balanced_config.h — the baked balanced AEC3
+sub-module construction config.
 
 The orchestrator builds AecState / ResidualEchoEstimator / SuppressionGain /
 StationarityEstimator with a large set of derived constants (hz_to_bin,
 fft_density_scale, wall-clock-rescaled CNG/ratchet constants, per-bin tuning
 interpolation). Rather than re-derive all of that in C (and risk a 1-ULP drift),
-we capture the LIVE balanced instance's exact values once and emit them as C
-literals. aec_create() then bakes them straight into the sub-module init calls,
-mirroring c_impl/test/historical/parity_aec3_post_run.c.
+the LIVE balanced instance's exact values are captured once and emitted as C
+literals; aec_create() bakes them straight into the sub-module init calls.
 
 mild differs from balanced ONLY in split_floor_far_active_db (mild -20 /
 balanced -28); aggressive also differs in split_floor_dt (-38 / -30 vs
 balanced's -28 / -20). Both fields are applied at runtime in
-aec_config_from_preset — so only the balanced base is baked here.
+aec_config_from_preset, so only the balanced base is baked here.
 
-M2 (multi-rate campaign) extension: on top of the legacy 16 kHz block (kept
-byte-for-byte, produced by the exact same code path as before), this also
-captures the live balanced instance at 8 kHz and 48 kHz and emits
-``AECB_R8K_*`` / ``AECB_R48K_*`` blocks + a runtime ``AECB_RATE_TABLE``
-lookup. Only genuinely rate-varying quantities are duplicated per-rate; a
-generator-internal cross-rate invariance assertion (``_assert_cross_rate_
-invariance``) diffs the COMPLETE captured value set across 8/16/48 kHz and
-aborts loudly if anything outside the declared rate-varying set
-(``RATE_VARYING_MACROS`` / ``RATE_VARYING_ARRAYS``) differs — this is what
-catches accidental hidden rate dependence instead of silently baking a wrong
-"constant" that happens to be right at 16 kHz.
+The unsuffixed block is the 16 kHz capture; the live instance is also captured
+at 8 kHz and 48 kHz and emitted as ``AECB_R8K_*`` / ``AECB_R48K_*`` blocks + a
+runtime ``AECB_RATE_TABLE`` lookup. Only rate-varying quantities are duplicated
+per rate: ``_assert_cross_rate_invariance`` diffs the complete captured value
+set across 8/16/48 kHz and aborts if anything outside the declared
+(``RATE_VARYING_MACROS`` / ``RATE_VARYING_ARRAYS``) set differs.
 
 Run: python3 python/diag/gen_aec_balanced_config_h.py
 """
@@ -48,9 +42,8 @@ SR = 16000
 DEFAULT_FRAME = 512
 FL = 832
 
-# M2: additional rates. filter_length is left at Python's own __post_init__
-# auto-policy (None => not passed => dataclass sentinel -1 => 52 ms <44.1kHz
-# / 64 ms >=44.1kHz), NOT hardcoded like the legacy 16 kHz FL=832.
+# Additional rates. filter_length is left to AecConfig.__post_init__ auto-policy
+# (52 ms <44.1kHz / 64 ms >=44.1kHz), unlike the 16 kHz FL=832.
 EXTRA_GRIDS = (
     (8000, 256, 'R8K', 'AECB_ENABLE_8K'),
     (16000, 256, 'R16K256', 'AECB_ENABLE_16K_256'),
@@ -78,24 +71,19 @@ def emit_array(name, arr):
 
 
 def _lf_clamp_comment(n_bins, sr, val):
-    """Reproduces the hand-written lf_clamp_bin comment byte-for-byte at 16 kHz
-    (n_bins=257, sr=16000 -> 8), generalised so 8k/48k get their own
-    correct (n_bins, sr) values in the same format."""
+    """lf_clamp_bin comment text for (n_bins, sr), e.g. n_bins=257, sr=16000 -> 8."""
     return ('/* hz_to_bin(250 Hz, n_bins=%d, sr=%d) = round(250*2*(%d-1)/%d) = %d */\n'
             % (n_bins, sr, n_bins, sr, val))
 
 
 def _capture_all(sr, frame_size, filter_length=None):
-    """Instantiate the live Python balanced AEC at `sr` and return every
-    value the header emitter needs, keyed by the AECB_* macro name it
-    feeds (sans prefix/tag). This dict is the SINGLE SOURCE OF TRUTH used by
-    both the emitters below and the cross-rate invariance assertion so the
-    two can never drift apart.
+    """Instantiate the live Python balanced AEC at `sr` and return every value the
+    header emitter needs, keyed by the AECB_* macro name it feeds (sans
+    prefix/tag). This dict is the single source of truth for both the emitters and
+    the cross-rate invariance assertion.
 
-    filter_length=None means "don't pass filter_length at all" -> the
-    AecConfig dataclass sentinel (-1) triggers its own __post_init__ auto
-    policy. Only the legacy 16 kHz call passes an explicit filter_length
-    (832, matching the historical hardcoded FL).
+    filter_length=None means "don't pass filter_length", so AecConfig's
+    __post_init__ auto policy applies; only the 16 kHz call passes an explicit 832.
     """
     kwargs = dict(
         sample_rate=sr,
@@ -125,9 +113,8 @@ def _capture_all(sr, frame_size, filter_length=None):
     values['HOP_SIZE'] = int(f.hop_size)
     values['N_PARTITIONS'] = int(f.n_partitions)
     values['FILTER_TAPS_SIZE'] = filter_taps_size
-    # FILTER_LENGTH is new in M2 (no legacy unsuffixed macro existed before;
-    # the 16k row of the rate table uses the literal 832 instead of minting
-    # a brand-new unsuffixed macro, so the legacy block stays untouched).
+    # FILTER_LENGTH has no unsuffixed macro; the 16k row of the rate table uses the
+    # literal 832.
     values['FILTER_LENGTH'] = int(cfg.filter_length)
 
     # ── driver flags ──
@@ -140,9 +127,8 @@ def _capture_all(sr, frame_size, filter_length=None):
     values['USE_STATIONARITY_PROPERTIES'] = int(
         bool(aec._aec3_sg_config.echo_audibility.use_stationarity_properties))
     values['STATIONARITY_CONVERGE_HOPS'] = int(aec._aec3_stationarity_converge_hops)
-    # Hardcoded literal in orchestrator.py (_ar_thr = 5.96e-4), NOT derived
-    # from sample_rate/hop_size -> genuinely rate-invariant (verified by the
-    # cross-rate assertion below, not just assumed).
+    # Hardcoded literal in orchestrator.py (_ar_thr = 5.96e-4), not derived from
+    # sample_rate/hop_size, so rate-invariant (checked by the cross-rate assertion).
     values['ACTIVE_RENDER_THRESHOLD'] = 5.96e-4
 
     # ── CNG constants ──
@@ -153,8 +139,8 @@ def _capture_all(sr, frame_size, filter_length=None):
     values['CNG_N2_INITIAL_ALPHA'] = float(aec._aec3_cng_n2_initial_alpha)
     values['CNG_N2_UPDATE_ONSET_HOPS'] = int(aec._aec3_cng_n2_update_onset_hops)
     values['CNG_N2_INITIAL_DURATION_HOPS'] = int(aec._aec3_cng_n2_initial_duration_hops)
-    # NOTE: genuinely rate-varying (fft_size/2 density scale in
-    # orchestrator.py's GetNoiseFloorFactor port) -- see RATE_VARYING_MACROS.
+    # genuinely rate-varying (fft_size/2 density scale of orchestrator.py's
+    # _aec3_noise_floor_int16sq) -- see RATE_VARYING_MACROS.
     values['NOISE_FLOOR_INT16SQ'] = float(aec._aec3_noise_floor_int16sq)
     values['ERLE_COH_GATE_ALPHA'] = float(cfg.erle_coh_gate_alpha)
     values['ERLE_COH_GATE_THRESHOLD'] = float(cfg.erle_coh_gate_threshold)
@@ -267,19 +253,11 @@ def _capture_all(sr, frame_size, filter_length=None):
     )
 
 
-# Declared rate-varying macro names -- values legitimately differ 8k/16k/48k.
-# Starts from the M2 task's declared list (geometry + Hz-anchored bin
-# indices), EXTENDED with quantities this generator's own cross-rate
-# invariance assertion caught during implementation (fft/hop density-scaled
-# absolute-power constants the original task spec did not anticipate).
-# Reported prominently: these 8 fields are the "found" set --
-#   SG_LOW_RENDER_THRESHOLD, SG_FLOOR_POWER, SG_LOW_RENDER_LIMIT,
-#   SG_NORMAL_RENDER_LIMIT, REE_MIN_NOISE_FLOOR_POWER, REE_NL_NORM_POWER,
-#   REE_RESIDUAL_NOISE_GATE_POWER, NOISE_FLOOR_INT16SQ
-# -- all AEC3 EchoAudibility / ResidualEchoEstimator / CNG absolute-power
-# constants that are density-scaled by fft_size/2 (or frame_size) relative
-# to AEC3's fixed 64-sample/128-bin reference, so they move with sample
-# rate exactly like the bin geometry does.
+# Declared rate-varying macro names -- values legitimately differ across
+# 8k/16k/48k: geometry, Hz-anchored bin indices, and the absolute-power constants
+# density-scaled by fft_size/2 (or frame_size) relative to AEC3's fixed
+# 64-sample/128-bin reference (the EchoAudibility / ResidualEchoEstimator / CNG
+# constants listed below), which move with sample rate like the bin geometry.
 RATE_VARYING_MACROS = {
     'N_BINS', 'FFT_SIZE', 'BLOCK_SIZE', 'HOP_SIZE', 'N_PARTITIONS',
     'FILTER_TAPS_SIZE', 'FILTER_LENGTH',
@@ -287,7 +265,7 @@ RATE_VARYING_MACROS = {
     'SG_LAST_LF_BAND', 'SG_FIRST_HF_BAND', 'SG_LAST_LF_SMOOTHING_BAND',
     'SG_LF_CLAMP_BIN', 'SG_DNE_LF_END', 'SG_DNE_LF_ENDPOINT_BIN',
     'SG_AUD_LF_END_BIN', 'SG_AUD_MF_END_BIN', 'SG_HF_LGB',
-    # found by the invariance assertion, not in the original task list:
+    # density-scaled absolute-power constants:
     'SG_LOW_RENDER_THRESHOLD', 'SG_FLOOR_POWER', 'SG_LOW_RENDER_LIMIT',
     'SG_NORMAL_RENDER_LIMIT',
     'REE_MIN_NOISE_FLOOR_POWER', 'REE_NL_NORM_POWER',
@@ -314,10 +292,8 @@ RATE_VARYING_ARRAYS = {
 def _assert_cross_rate_invariance(captures):
     """`captures`: {sample_rate: _capture_all(...) result}.
 
-    Aborts loudly (SystemExit) if any macro/array NOT declared rate-varying
-    differs across sample rates -- this is the mechanism that catches
-    accidental hidden rate dependence rather than silently baking a
-    16 kHz-only value into what looks like a rate-invariant constant.
+    Aborts (SystemExit) if any macro/array NOT declared rate-varying differs across
+    sample rates, so a 16 kHz-only value is never baked in as a constant.
     """
     rates = sorted(captures)
     ref_sr = rates[0]
@@ -357,9 +333,7 @@ def _assert_cross_rate_invariance(captures):
 
 
 def emit_legacy_block(w, cap):
-    """Emits the ORIGINAL unsuffixed (16 kHz) block. Byte-for-byte identical
-    to the pre-M2 generator's output (including the hand-patched E8 LF_CLAMP
-    comment/define that predated this generator change -- see cdd7f6b)."""
+    """Emits the unsuffixed (16 kHz) block."""
     v = cap['values']
 
     # ── geometry ──
@@ -404,12 +378,10 @@ def emit_legacy_block(w, cap):
     w('/* AecState config */\n')
     w('#define AECB_ST_NUM_CAPTURE_CHANNELS %d\n' % v['ST_NUM_CAPTURE_CHANNELS'])
     w('#define AECB_ST_ENABLE_FILTER_ANALYZER %d\n' % v['ST_ENABLE_FILTER_ANALYZER'])
-    # -1 == AEC_STATE_STARTUP_HOPS_AUTO (aec_state.c): the BALANCED preset
-    # never overrides erle_startup_hops/erl_startup_hops, so this is always
-    # the "auto" sentinel, resolved live per-grid at aec_state_init() time
-    # -- NOT a literal hop count. Must stay the sentinel value (not a real
-    # hop count like 200) so aec_create()'s multi-rate (8k/16k/48k) call
-    # sites keep auto-scaling instead of freezing at a 16 kHz-only constant.
+    # -1 == AEC_STATE_STARTUP_HOPS_AUTO (aec_state.c): the BALANCED preset never
+    # overrides erle_startup_hops/erl_startup_hops, so this stays the 'auto' sentinel
+    # resolved per grid at aec_state_init() time, not a literal hop count (keeps the
+    # 8k/16k/48k call sites auto-scaling).
     w('#define AECB_ST_ERLE_STARTUP_HOPS %d\n' % v['ST_ERLE_STARTUP_HOPS'])
     w('#define AECB_ST_ERL_STARTUP_HOPS %d\n' % v['ST_ERL_STARTUP_HOPS'])
     w('#define AECB_ST_ECHO_CAN_SATURATE %d\n' % v['ST_ECHO_CAN_SATURATE'])
@@ -501,10 +473,9 @@ def emit_legacy_block(w, cap):
 
 
 def emit_rate_block(w, tag, enable_flag, cap):
-    """Emits the AECB_<tag>_* block for one extra rate (8k/48k): ONLY the
-    rate-varying subset (geometry, synth window, REE hop, Hz-anchored SG bin
-    indices, and the extra density-scaled constants the invariance
-    assertion found), guarded by `enable_flag` so firmware can strip it."""
+    """Emits the AECB_<tag>_* block for one extra rate (8k/48k): only the
+    rate-varying subset, guarded by `enable_flag` so firmware can strip it.
+    """
     v = cap['values']
     sr = cap['sr']
 
@@ -582,9 +553,9 @@ def emit_rate_block(w, tag, enable_flag, cap):
 
 def emit_rate_table(w):
     """Emits the AecBalancedRateDims struct + AECB_RATE_TABLE lookup array
-    + aecb_rate_cfg() accessor. The 16 kHz row references the LEGACY
-    unsuffixed macros/arrays directly (pointer/value identity with the data
-    already baked above -- nothing new is derived for 16 kHz)."""
+    + aecb_rate_cfg() accessor. The 16 kHz row references the unsuffixed
+    macros/arrays directly.
+    """
     w('/* ------------------------------------------------------------------\n')
     w(' * Multi-rate lookup. Static/header-only, mirroring the existing\n')
     w(' * pattern of this header (this file is included by exactly one TU\n')

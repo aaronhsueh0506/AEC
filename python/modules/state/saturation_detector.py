@@ -1,11 +1,8 @@
-"""AecState::SaturationDetector — flags echo saturation (filter or render path).
+"""SaturationDetector: flags echo saturation.
 
-Mirrors docs/aec3_extracts/src/aec3/aec_state.cc:446-478 verbatim.
-
-Threshold ``kSaturationThreshold = 20000`` is in raw int16 amplitude
-units; works on filter-path subtractor outputs when the linear estimate
-is usable, otherwise on the render block scaled by ``echo_path_gain`` *
-margin.
+With a usable linear estimate it tests the subtractor outputs against 20000 (int16
+units); otherwise it scales the render block by ``echo_path_gain`` * 10 and tests
+against 32000.
 """
 import numpy as np
 

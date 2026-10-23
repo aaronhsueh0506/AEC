@@ -1,10 +1,7 @@
-"""Golden reference for the C aec3_scale + freq_utils port (WS5 Phase 5.0).
+"""Golden reference for the C aec3_scale + freq_utils port.
 
 Emits `key=%.17g` reference lines of the Python conversion layer, for a
-bit-exact `diff` against the same keys printed by a C driver over
-c_impl/src/aec_scale.c and c_impl/src/freq_utils.c (no such driver is shipped
-in this tree). Run:
-
+bit-exact `diff` against the same keys printed by a C driver. Run:
     python3 python/diag/parity_aec3_scale_golden.py > /tmp/py_scale.txt
 """
 import os

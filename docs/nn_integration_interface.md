@@ -1,5 +1,5 @@
 # NN integration interface (residual / NR / joint) — doc-only spec
-AEC v3.22.5 · the freq-domain seam for swapping any post-linear stage with a learned model
+The freq-domain seam for swapping any post-linear stage with a learned model
 
 > Scope: this documents the **existing** interface that lets a neural model replace the residual-echo
 > suppressor, the noise reduction, or both, **without touching the linear AEC or the front/back transform**.
@@ -94,12 +94,8 @@ different hop:
 | `FIXED` | always `cfg.fixed_delay_samples` (never −1) | once the ring can serve the offset, not hop 0: the first `ceil(fixed_delay_samples / hop)` hops report `UNLOCKED` over RAW far, and the next process call reports `LOCKED` |
 | `EXTERNAL_ALIGNED` | always `0` | **hop 0** — the caller has contracted that `ref` is already aligned, so there is nothing to wait for |
 
-This is a **behavior change from the pre-`delay_mode` API**: the legacy
-`enable_delay_est=0` toggle (still accepted as a deprecated mirror, folded
-into `delay_mode` by `aec_config_resolve_delay()`) used to leave `delay_state`
-at `UNLOCKED` forever, because the library could not distinguish "caller
-pre-aligned the input" from "estimator switched off and nobody aligned
-anything". The equivalent `delay_mode` configuration is now
+The legacy `enable_delay_est=0` toggle is a deprecated mirror of `delay_mode`,
+folded into it by `aec_config_resolve_delay()`; its equivalent is
 `AEC_DELAY_EXTERNAL_ALIGNED`, which reports `LOCKED` / `delay_samples=0` /
 `delay_confidence=1.0` from the very first hop. A consumer that gates a
 far-conditioned NN post-filter on `delay_state == LOCKED` must account for
@@ -118,14 +114,10 @@ Fail-open policy (bypass the far-conditioned model, emit the linear error)
 belongs to the integrator. Regression coverage: `test/test_linear_context.c`
 (201 checks, including the capture-fallback and far-active/no-echo scenarios).
 
-A second `MATCHED`-only failure mode is visible at this seam only through
-`generation`: the estimator can acquire correctly and then re-lock to an
-EARLIER, wrong delay (pre-echo mis-attribution), which arrives as a normal
-`CHANGED` hop. The library has no built-in mechanism that delays or prevents
-such an adoption (a prototype was measured and removed 2026-10-19 — see
-CHANGELOG `### Removed`), so a consumer must not treat a post-`CHANGED`
-`LOCKED` as proof the alignment is correct — flush far feature rings on
-`generation` movement regardless. A consumer that owns its own estimator can
+The estimator's `confidence` measures histogram consistency, not match quality,
+so a `LOCKED` state is not proof that the alignment is correct, and a re-lock
+arrives as a normal `CHANGED` hop visible through `generation`: flush far
+feature rings on `generation` movement regardless. A consumer that owns its own estimator can
 ask the engine the same "is this lane still cancelling" question the engine
 asks of itself, via the read-only `aec_linear_is_cancelling(const Aec*)` (`aec.h`);
 it returns 0 when the ERLE machinery has not run, i.e. absence of evidence,
@@ -162,7 +154,7 @@ Each is a pure function on the shared grid; the network replaces the DSP functio
 
 ## Why this is safe for a DSP-first release
 - The interface is already present (`return_res_context`, `AecResContext`, `denoise_spectrum`, `run_res`)
-  and exercised by `aec_nr_pipeline.py --pipeline-mode linear`. Shipping v3.22.5 DSP does not commit to any
+  and exercised by `Audio_ALG/pipelines/aec_nr_pipeline.py`. Shipping the DSP stages does not commit to any
   model; it guarantees the seam exists so an NN arc can start without re-architecting the front end.
 - Training-data generation is free: the DSP stages produce `(input features = AecResContext, target = clean
   near-end)` pairs on the 800-case corpus and any field recording, at the exact grid the model will run on.

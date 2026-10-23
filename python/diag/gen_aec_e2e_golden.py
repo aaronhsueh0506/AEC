@@ -1,4 +1,4 @@
-"""Generate the END-TO-END binary golden for the C aec_process cutover.
+"""Generate the END-TO-END binary golden for the C aec_process.
 
 Constructs the REAL balanced AEC (AecConfig.from_preset('balanced', sr, FL))
 with np.random.seed(0) (CNG determinism), feeds RAW mic/lpb hops (NO pre-align —
@@ -7,19 +7,16 @@ the C runs its own delay alignment), and captures per-hop:
 
 The C parity_aec_e2e.c constructs Aec via aec_create(balanced) and replays per
 hop asserting out[hop] matches within the documented float32-FFT tolerance
-(TOL_E2E in parity_aec_e2e.c). Reads sr/hop straight back out of the golden's
-own header, so it needs no changes to run this at a new rate.
+(TOL_E2E in parity_aec_e2e.c). It reads sr/hop straight back out of the
+golden's own header, so any rate works.
 
 Source material: the SAME 16 kHz doubletalk case at every rate.
 --sr 16000 (default) reads wav/aec_challenge_blind/doubletalk/..._{mic,lpb}.wav
-directly. --sr 8000 / --sr 48000 (M5, multi-rate campaign, review F01) resample
-that same case with scipy.signal.resample_poly (1:2 down to 8k, 3:1 up to 48k)
--- the identical resampling this repo's gen_aec_wav_pairs.py-equivalent scratch
-script (m5/resample_pairs.py) uses for the other per-rate checks, so the same
-underlying audio drives every rate's golden. FL (filter_length) defaults to
-None, which lets AecConfig.__post_init__ derive it from sr via the real ms
-policy (52ms <44.1kHz / 64ms >=44.1kHz) -- the same policy aec_config_defaults
-mirrors in C (aec.c).
+directly. --sr 8000 / --sr 48000 resample that case with
+scipy.signal.resample_poly (1:2 down to 8k, 3:1 up to 48k). FL (filter_length)
+defaults to None, which lets AecConfig.__post_init__ derive it from sr (52ms
+<44.1kHz / 64ms >=44.1kHz), the same policy aec_config_defaults mirrors in C
+(aec.c).
 
 Run:
     python3 python/diag/gen_aec_e2e_golden.py /tmp/aec_e2e_golden.bin balanced --sr 16000
@@ -45,10 +42,7 @@ NATIVE_SR = 16000
 
 MAX_HOPS = 4200
 
-# M5: 1:2 -> 8 kHz, 3:1 -> 48 kHz. Matches m5/resample_pairs.py exactly (same
-# up/down factors), so the 8k/48k goldens are driven by the identical
-# resampled audio the other M5 per-rate checks (test_static_aec 3-rate loop,
-# UBSan sweep, Python<->C waveform check) use.
+# resample_poly factors: 1:2 -> 8 kHz, 3:1 -> 48 kHz.
 _RESAMPLE_UP_DOWN = {8000: (1, 2), 48000: (3, 1)}
 
 
@@ -86,10 +80,7 @@ def main():
     cfg = AecConfig.from_preset(args.preset, sample_rate=sr,
                                 enable_res=not args.no_res,
                                 live_observer_enabled=args.live_observer)
-    hop = cfg.hop_size   # was hardcoded "sr*10//1000" (10ms) -- diverged from
-                          # AecConfig's real hop once 16kHz's default grid
-                          # moved to 256/128 (8ms), crashing aec.process() on
-                          # a mismatched hop size.
+    hop = cfg.hop_size  # the grid's real hop (a mismatched hop size crashes aec.process())
     np.random.seed(0)
     aec = AEC(cfg)
 

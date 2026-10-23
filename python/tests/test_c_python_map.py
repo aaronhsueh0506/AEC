@@ -12,12 +12,7 @@ without importing any algorithm module:
 Paths are derived from this file's own location (``<repo>/python/tests``), so
 the same file works unchanged in ``AEC`` and in its mirror
 ``Audio_ALG/lib/aec``: each checkout is checked against its own ``python/``
-and ``c_impl/``.  The two checkouts carry identical Python symbol sets and
-identical C function sets (2026-10-20: the one prior textual difference, a
-redundant duplicate NO_FLOOR rejection guard in this repo's
-``AEC.set_preset()`` that ``lib/aec`` never carried, was removed here as part
-of allowing the runtime retarget on both sides -- the two ``set_preset()``
-bodies are now identical too).
+and ``c_impl/``.
 """
 
 import ast

@@ -1,51 +1,31 @@
-/* test_runtime_preset.c — permanent regression test for the runtime strength
- * retarget: suppression_gain_set_split_floor_far_active_db() and its
- * aec_set_preset() wrapper.
+/* test_runtime_preset.c -- regression test for the runtime strength retarget:
+ * suppression_gain_set_split_floor_far_active_db() and its aec_set_preset() wrapper.
  *
- * Why the seam exists: mild/balanced differ in exactly one field,
- * min_gain_floor_far_active_db; aggressive also differs in a second,
- * min_gain_floor_dt_db (aec_config_from_preset). Both reach the suppressor
- * as a single scalar clamp each, read once per hop. So a preset change
- * never actually needed a rebuild -- but the only way to get one
- * was to construct a new Aec, discarding the filter, the delay lock and every
- * smoothing history. The floor is a hard clamp with nothing downstream to
- * smooth it and mild<->aggressive is an 18 dB step, so the retarget also has
- * to be able to walk instead of jump.
+ * mild/balanced differ in exactly one field, min_gain_floor_far_active_db; aggressive also differs in
+ * min_gain_floor_dt_db (aec_config_from_preset). Both reach the suppressor as a single scalar clamp read once per hop, so a
+ * preset change needs no rebuild (which would discard the filter, the delay lock and every smoothing history). The floor is
+ * a hard clamp and mild<->aggressive is an 18 dB step, so the retarget must also be able to walk instead of jump.
  *
- * Everything here drives real aec_process() hops rather than a test-only hook.
- * The ramp advances inside suppression_gain_get_gain(), so the trajectory is
- * observable per hop through a->a3_sg even on hops where the clamp is not
- * binding -- which is what makes the timing assertions meaningful rather than
- * scene-dependent.
+ * Everything here drives real aec_process() hops, no test-only hook. The ramp advances inside suppression_gain_get_gain(),
+ * so the trajectory is observable per hop through a->a3_sg even on hops where the clamp is not binding.
  *
  * What only this test proves (the byte-equal gate cannot):
- *   1. ramp_ms == 0 lands on EXACTLY the float a fresh instance constructed
- *      with that preset holds -- the property that makes the setter a true
- *      preset change and not an approximation of one. The byte-equal gate only
- *      ever exercises the untouched instance, so it cannot see this at all.
- *   2. ramp_ms > 0 advances ONCE PER HOP, is monotonic, never overshoots, and
- *      lands EXACTLY on the hop the ms->hops conversion predicts. A geometric
- *      walk that merely converges leaves a residue and stays nominally live
- *      for the rest of the stream; nothing downstream would report that.
- *   3. A call during a ramp restarts from the CURRENT live value -- it
- *      neither snaps back to the old target nor inherits the old ratio.
- *   4. aec_reset() abandons ramp PROGRESS while keeping the TARGET. That split
- *      is the whole reason the ramp lives in the state block and the target in
- *      cfg: aec_reset carries cfg/tun forward verbatim.
- *   5. Rejection is TOTAL: an out-of-range argument leaves the suppressor
- *      bit-identical, so a caller cannot half-apply a strength change. The dB
- *      bound is the config validator's own [-300, 50], so a runtime call
- *      cannot install a value init would have refused.
- *   6. The setter disturbs NOTHING else -- far-active latch, DominantNearend
- *      counters, initial_state and the three smoothing histories all survive.
- *   7. A lane configured with spatial_linear_context never reaches get_gain,
- *      so a retarget there is inert BY CONSTRUCTION -- the ramp does not even
- *      step. Pinned here so the 4-channel product's own setter cannot be
- *      "simplified" into per-lane calls without this failing.
+ *   1. ramp_ms == 0 lands on EXACTLY the float a fresh instance constructed with that preset holds.
+ *   2. ramp_ms > 0 advances once per hop, is monotonic, never overshoots, and lands exactly on the hop the ms->hops
+ *      conversion predicts (a geometric walk that merely converges leaves a residue and stays nominally live).
+ *   3. A call during a ramp restarts from the CURRENT live value: it neither snaps back to the old target nor inherits the
+ *      old ratio.
+ *   4. aec_reset() abandons ramp progress but keeps the target (the ramp lives in the state block, the target in cfg, which
+ *      aec_reset carries forward verbatim).
+ *   5. Rejection is TOTAL: an out-of-range argument leaves the suppressor bit-identical. The dB bound is the config
+ *      validator's own [-300, 50], so a runtime call cannot install a value init would have refused.
+ *   6. The setter disturbs nothing else: the far-active latch, DominantNearend counters, initial_state and the three
+ *      smoothing histories survive.
+ *   7. A lane configured with spatial_linear_context never reaches get_gain, so a retarget there is inert by construction
+ *      (the ramp does not step); this fails if the 4-channel product's setter is simplified into per-lane calls.
  *
- * Mutation coverage: run_landing_is_load_bearing() replays the same walk with
- * the exact-landing branch removed and asserts the residue really appears, so
- * assertion 2 is shown to be capable of failing.
+ * Mutation coverage: run_landing_is_load_bearing() replays the same walk with the exact-landing branch removed and asserts
+ * that the residue appears, so assertion 2 is shown to be capable of failing.
  */
 #include "aec.h"
 #include "suppression_gain.h"
@@ -412,12 +392,8 @@ static void run_half_hop_rounding_parity(void) {
     aec_destroy(&a);
 }
 
-/* ── 8: NO_FLOOR runtime switching (reverses the Python orchestrator's
- * construction-time-only rejection -- C never had that guard, since C never
- * had a 4th enum value until now; see suppression_gain.h's comment on
- * suppression_gain_set_split_floor_enabled()). The gate STEPS immediately
- * (no ramp -- a boolean has no continuous path to walk), exactly like the
- * DT floor. ─────────────────────────────────────────────────────────────── */
+/* ── 8: NO_FLOOR runtime switching. The gate STEPS immediately (a boolean has no continuous path to walk), exactly like the
+ * DT floor; see suppression_gain_set_split_floor_enabled() in suppression_gain.h. ───────────────────────────────────── */
 
 static void run_no_floor_switch(void) {
     Aec live, fresh_nf, fresh_bal;
@@ -425,7 +401,7 @@ static void run_no_floor_switch(void) {
     /* INTO NO_FLOOR: the gate steps off on the same call that retargets it,
      * landing field-for-field on a freshly constructed NO_FLOOR instance --
      * the same "ramp_ms==0 matches construction" property test 1 proves for
-     * the dB floors, now proven for the boolean gate too. */
+     * the dB floors, proven here for the boolean gate too. */
     CHECK(open_aec(&live, AEC_PRESET_BALANCED, 0) == 0,
           "no_floor: created (balanced)");
     CHECK(open_aec(&fresh_nf, AEC_PRESET_NO_FLOOR, 0) == 0,
@@ -444,11 +420,9 @@ static void run_no_floor_switch(void) {
     CHECK(live.cfg.min_gain_split_floor_enabled == 0,
           "no_floor: mirrored into AecConfig");
 
-    /* AWAY FROM NO_FLOOR: the gate steps back on AND the far-active/dt
-     * scalars are written through the existing setters -- the hazard
-     * where a caller flips only
-     * the boolean and forgets the scalar, or vice versa, does not reproduce
-     * here because aec_set_preset() always writes all three together. */
+    /* AWAY FROM NO_FLOOR: the gate steps back on AND the far-active/dt scalars are written through
+     * the existing setters; flipping only the boolean (or only the scalar) cannot happen here
+     * because aec_set_preset() always writes all three together. */
     CHECK(open_aec(&fresh_bal, AEC_PRESET_BALANCED, 0) == 0,
           "no_floor: reference BALANCED instance created");
     CHECK(aec_set_preset(&live, AEC_PRESET_BALANCED, 0.0f) == 0,
@@ -511,13 +485,9 @@ static void run_no_floor_round_trip(void) {
     aec_destroy(&a);
 }
 
-/* NOTE: AecRes-side NO_FLOOR + aec_res_reset() coverage (the r->sg_cfg
- * mirror that aec_res_reset()'s rebuild() re-inits split_floor_enabled
- * from) lives in test_aec_res.c, not here -- AecRes is opaque in aec.h/
- * aec_res.h (its full definition is private to src/aec_res.c), and
- * test_aec_res.c already includes that source file for exactly this kind
- * of internal-state assertion. See its "NO_FLOOR" block next to the
- * existing preset/reset coverage. */
+/* AecRes-side NO_FLOOR + aec_res_reset() coverage (the r->sg_cfg mirror that aec_res_reset()'s
+ * rebuild() re-inits split_floor_enabled from) lives in test_aec_res.c: AecRes is opaque in
+ * aec_res.h, and that test includes src/aec_res.c for internal-state assertions. */
 
 /* ── mutation: the exact-landing branch must be load-bearing ─────────────── */
 

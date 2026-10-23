@@ -1,22 +1,7 @@
-"""Stationarity estimator for the render path.
+"""Render-path stationarity estimator.
 
-Float-scale port of `docs/aec3_extracts/src/aec3/stationarity_estimator.{cc,h}`
-and `echo_audibility.{cc,h}` (only the bits we need for residual scaling).
-
-When the render signal is stationary (e.g. a constant background hum on the
-far-end), the residual echo estimator should report ~0 echo contribution for
-those bins so the suppression gain doesn't spuriously damp nearend speech.
-
-NE-outlier root cause: cases like
-`E0l0WVPQjEi6AmtbvfSYLA_nearend_singletalk` and
-`wJVPo4lexUK40x0nuK0KWg_nearend_singletalk` have a constant ~0.009 RMS hum
-on the lpb track; without stationarity awareness, the AEC3-port residual
-chain treats nonzero render PSD as active echo and pushes the suppression
-gain down on every bin → cuts 9-18% of nearend RMS.
-
-This module wires into ``_aec3_post`` and zeros out R²/R²_unbounded on bands
-flagged as stationary (after filter convergence) — mirrors AEC3
-`residual_echo_estimator.cc:303-313`.
+Flags render bins that are stationary (e.g. constant far-end hum) so the residual echo
+estimator zeroes R^2 there (after filter convergence) instead of damping near-end speech.
 """
 from __future__ import annotations
 
@@ -34,7 +19,7 @@ from ..aec3_scale import (
 
 
 class _NoiseSpectrum:
-    """Per-bin slow noise-floor tracker (stationarity_estimator.cc:159-242)."""
+    """Per-bin slow noise-floor tracker."""
 
     def __init__(self, n_freqs: int, min_noise_power: float,
                  avg_init_hops: int, initial_phase_hops: int,
@@ -65,7 +50,6 @@ class _NoiseSpectrum:
             self.noise += (1.0 / self._avg_init) * spectrum.astype(np.float32)
             return
         alpha = self._alpha_now()
-        # Per-bin update following NoiseSpectrum::UpdateBandBySmoothing.
         rising = spectrum > self.noise
         falling = ~rising
         if np.any(rising):
@@ -86,32 +70,16 @@ class _NoiseSpectrum:
 
 
 class StationarityEstimator:
-    """Render-path per-bin stationarity flag.
-
-    Mirrors AEC3 ``StationarityEstimator`` collapsed for single-channel use.
-    The history ring of past render PSDs is held externally (we feed a
-    pre-stacked window into ``update_stationarity_flags``).
-    """
+    """Render-path per-bin stationarity flag; keeps its own ring of past render PSDs."""
 
     def __init__(self, n_freqs: int, hop_samples: int = 160,
                  sample_rate: int = 16000) -> None:
         self.n_freqs = int(n_freqs)
-        # Stationarity tunables auto-rescaled from AEC3 block counts to our
-        # hop count via aec3_scale helpers so any hop/sr stays AEC3 strict.
+        # Block-count tunables are rescaled to the live hop grid.
         from .. import aec3_scale as _aec3_scale
         self._window_hops = _aec3_scale.blocks_to_hops(13, hop_samples, sample_rate)
         self._hangover_hops = _aec3_scale.blocks_to_hops(12, hop_samples, sample_rate)
-        # Was STATIONARITY_AVG_INIT_HOPS_DEFAULT / STATIONARITY_INITIAL_PHASE_
-        # HOPS_DEFAULT -- module-level constants frozen at hop=160/sr=16000,
-        # passed straight through unlike _window_hops/_hangover_hops above.
-        # Rescaled live the same way for consistency.
-        # STATIONARITY_ALPHA/_INIT (0.004/0.04) are AEC3-native per-4ms-block
-        # constants (stationarity_estimator.cc: `constexpr float kAlpha =
-        # 0.004f`, applied once per NoiseSpectrum::Update() call, which AEC3
-        # calls once per block). This port's update_noise_estimator() calls
-        # _NoiseSpectrum.update() once per hop (not per 4ms block), so the
-        # bare literals need the same per_block_ema_alpha_to_per_hop rescale
-        # as every other AEC3 per-block alpha in this codebase.
+        # Per-block EMA alphas (0.004 / 0.04) are rescaled to per-hop.
         self.noise = _NoiseSpectrum(
             n_freqs=self.n_freqs,
             min_noise_power=STATIONARITY_MIN_NOISE_POWER_FLOAT,
@@ -126,7 +94,6 @@ class StationarityEstimator:
         )
         self.hangovers = np.zeros(self.n_freqs, dtype=np.int32)
         self.stationarity_flags = np.zeros(self.n_freqs, dtype=bool)
-        # Internal ring buffer of past render PSDs, length = window_hops.
         self._history = np.zeros((self._window_hops, self.n_freqs), dtype=np.float32)
         self._history_filled = 0
         self._history_write = 0
@@ -145,12 +112,7 @@ class StationarityEstimator:
 
     def update_stationarity_flags(self, render_psd: np.ndarray,
                                   average_reverb: np.ndarray | None = None) -> None:
-        """Refresh per-bin stationarity flags using the latest render PSD.
-
-        Internally maintains a ``window_hops``-length history of render PSDs;
-        ``average_reverb`` is added to the accumulated power per AEC3 (pass
-        zeros if reverb estimate is not yet available).
-        """
+        """Refresh per-bin flags from the latest render PSD; ``average_reverb`` (optional) is added to the accumulated power."""
         psd32 = render_psd.astype(np.float32)
         self._history[self._history_write] = psd32
         self._history_write = (self._history_write + 1) % self._window_hops
@@ -194,12 +156,7 @@ class StationarityEstimator:
 
 def get_residual_echo_scaling(stationarity: StationarityEstimator,
                               filter_has_had_time_to_converge: bool) -> np.ndarray:
-    """Per-bin residual scaling (echo_audibility.h:40-51).
-
-    Returns 0.0 for stationary bands once the filter has converged enough that
-    we can trust the stationarity flag (avoids zeroing R² before the noise
-    floor is reliably learned), 1.0 otherwise.
-    """
+    """Per-bin residual scaling: 0.0 on stationary bands once the filter has converged, else 1.0."""
     scaling = np.ones(stationarity.n_freqs, dtype=np.float32)
     if filter_has_had_time_to_converge:
         scaling[stationarity.band_stationary_mask()] = 0.0

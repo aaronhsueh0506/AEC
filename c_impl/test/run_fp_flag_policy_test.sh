@@ -1,141 +1,32 @@
 #!/bin/sh
-# run_fp_flag_policy_test.sh - permanent regression test for the
-# quote/escape/allow-list rejection + CFLAGS+CXXFLAGS+CPPFLAGS exact-token
-# conflict check in ../Makefile's "Conflict detection" block (search
-# "FP_INPUT_FLAGS" there).
+# run_fp_flag_policy_test.sh - regression test for the Makefile's flag-policy gates: the character allow-list and the
+# CFLAGS/CXXFLAGS/CPPFLAGS exact-token conflict check (see "FP_INPUT_FLAGS" in ../Makefile).
 #
-# CONTRACT: the Makefile checks CFLAGS, CXXFLAGS and CPPFLAGS together with an
-# exact-TOKEN $(filter): a bare -Ofast/-ffast-math/-ffp-contract=<x> token in
-# any of them is rejected (e.g. `env CXXFLAGS=-Ofast make ... lib`), while a
-# harmless `-DROUND9_NOTE=-Ofastness` macro define -- not the compiler flag
-# -Ofast at all -- is accepted. Before that check, every character outside an
-# allow-list is rejected, which covers the shell quoting, escaping,
-# expansion and response-file bypass shapes.
+# Contract: a bare -Ofast/-ffast-math/-ffp-contract=<x> token in CFLAGS, CXXFLAGS, CPPFLAGS or EXTRA_CFLAGS is rejected, while a
+# harmless token that merely contains such text (-DROUND9_NOTE=-Ofastness) is accepted. Before that check, every character
+# outside [A-Za-z0-9_./=,+- ] (plus space) is rejected, which covers quoting, escaping, globs, ~, redirection, process
+# substitution and @response-file shapes. The single-quote check stays a separate Make-native pre-check because it gates the
+# allow-list's own single-quoted $(shell) embedding.
 #
-# ALLOW-LIST: a character deny-list cannot catch bare glob characters (*, ?,
-# [, ]), tilde (~), or -- most seriously -- real shell REDIRECTION (>, <) or
-# process substitution (<(...)). The Makefile applies a single
-# character-class ALLOW-list (see its "The allow-list itself" comment)
-# covering the input as a whole -- everything NOT in
-# [A-Za-z0-9_./=,+- ] (plus space) is rejected outright. The single-quote
-# check survives as a Make-native (non-shell) pre-check, kept for a
-# DIFFERENT reason (it gates the allow-list's own $(shell)-based
-# single-quote-embedding of the untrusted text, so it must run first and
-# stay pure $(findstring)) -- not because the allow-list itself fails to
-# reject a lone single quote (it does, on its own, too).
+# Cases (mostly against the cheap `print-obj-dir` target, since the gates fire at Makefile parse time):
+#   1-4    single-quoted, double-quoted, quote-split and @response-file EXTRA_CFLAGS -> must FAIL, naming the character
+#   5      positive control: -DROUND9_NOTE=-Ofastness and -DTEXT=ffast-math -> must SUCCEED
+#   6-8    bare -Ofast / -ffast-math via EXTRA_CFLAGS, CXXFLAGS and CPPFLAGS -> must FAIL
+#   9-10   command-line CFLAGS= and `make -e` with FP_POLICY= still hit the override-rejection foreach first
+#   11-17  glob, ~, redirection and process-substitution payloads -> rejected by the allow-list
+#   18     ${VAR} expansion to -Ofast -> rejected by the exact-token $(filter), not the allow-list
+#   19-26  the checks' own internal variables must be rejected as a command-line override and under `-e`
+#   then   the same payload matrix against EXTRA_LDFLAGS (LDFLAGS is embedded in every link recipe), a positive control
+#          with a legitimate link flag, and the internal-variable overrides again via an EXTRA_LDFLAGS payload
 #
-# This repo has no standalone shell-based build-isolation suite of its own
-# (searched for "test_build_isolation" anywhere in this repo; the only hit
-# is a comment in run_counter_saturation_ubsan.sh referencing audiolib's
-# suite by name, not a suite of this repo's own), so this script mirrors
-# BOTH audiolib's S23b (quote/escape/response-file bypass) AND S24
-# (allow-list bypass shapes the old deny-list never caught, plus the
-# FP-policy check's own internal-variable override exposure) as one small
-# permanent standalone script, same convention as this repo's other
-# test/run_*.sh scripts (run_selftest_ubsan.sh,
-# run_counter_saturation_ubsan.sh): cd to the repo root via the script's
-# own location, scratch-isolated (OBJ_ROOT/BIN_ROOT under one mktemp -d,
-# removed by a trap covering normal exit and both signals), never touching
-# this repo's real obj/bin trees.
-#
-# Cases 1-10 (original S23b-equivalent set), each run against the cheap
-# `print-obj-dir` introspection target (no real compile/link needed to
-# prove the parse-time gate fires or doesn't):
-#   1. EXTRA_CFLAGS="'-Ofast'"      (single-quoted)         -> must FAIL,
-#      log contains "FP policy conflict" AND "single-quote"
-#   2. EXTRA_CFLAGS='"-ffast-math"' (double-quoted)         -> must FAIL,
-#      log contains "FP policy conflict" AND "outside the allowed set" AND
-#      the specific character '"' in the reported disallowed-character set
-#      (the allow-list redesign moved this off a dedicated "double-quote"
-#      message -- double quote is simply not in the allowed character set)
-#   3. EXTRA_CFLAGS="-O'f'ast"      (quote-split mid-token) -> must FAIL,
-#      log contains "FP policy conflict" AND "single-quote" (unchanged: the
-#      single-quote pre-check still fires first for any single quote)
-#   4. EXTRA_CFLAGS='@flags.rsp'    (response-file)         -> must FAIL,
-#      log contains "FP policy conflict" AND "outside the allowed set" AND
-#      the specific character '@' (same allow-list redesign as case 2 --
-#      '@' is simply not in the allowed set)
-#   5. positive control: EXTRA_CFLAGS=-DROUND9_NOTE=-Ofastness AND (a
-#      second sub-case) EXTRA_CFLAGS=-DTEXT=ffast-math -- both harmless,
-#      UNQUOTED tokens that merely CONTAIN -Ofast/ffast-math as a substring
-#      of a larger identifier, not the compiler flag itself -> both must
-#      SUCCEED (the exact-token $(filter) check must not false-positive on
-#      either -- a substring $(findstring ...) check would -- AND every
-#      character in both tokens is in the allow-list's own allowed set)
-#
-# Also re-confirms the OTHER two things a naive re-implementation could
-# regress: (i) an actual bare -Ofast/-ffast-math/-ffp-contract=<x> token,
-# unquoted, in CFLAGS/CXXFLAGS/CPPFLAGS/EXTRA_CFLAGS, is still rejected --
-# including via CXXFLAGS/CPPFLAGS specifically now that the check has been
-# widened from CFLAGS-only; and (ii) the pre-existing, unrelated
-# "Command-line override rejection" foreach (a command-line CFLAGS=/
-# CXXFLAGS=/CPPFLAGS=/LDFLAGS=/FP_POLICY=/FP_ALLOWED_CHARS_RE= override, or
-# `make -e` with any of those six set in the environment) still fires first
-# and is untouched by this change.
-#
-# Cases 11-17 (allow-list bypass shapes the OLD 9-item deny-list never
-# caught -- audiolib S24 equivalent): glob-star, glob-question,
-# glob-brackets, tilde, redirect-out, redirect-in, process-subst -- each a
-# REAL, live bypass of the old deny-list (none of these characters were
-# checked for at all before this redesign), each now REJECTED by the
-# character-class allow-list, identifying the specific offending
-# character(s).
-#
-# Case 18: positive control, distinct code path: a
-# Make-native ${VAR}-style expansion must still be rejected via the
-# EXACT-TOKEN $(filter) check, not the character allow-list -- GNU Make
-# treats ${...} identically to $(...) and resolves it to R11_FLAG's value
-# (-Ofast) before either FP-policy check ever runs, so the resulting
-# FP_INPUT_FLAGS text is the plain, clean, ALL-ALLOWED-CHARACTERS token
-# "-Ofast" -- the character allow-list has nothing to catch here; only the
-# unchanged FP_CONFLICT_FLAGS $(filter) check can still reject it.
-#
-# Cases 19-26: the FP-policy check's OWN internal variables
-# (FP_INPUT_FLAGS/SHELL_SAFE_ALLOWLIST_RC/FP_ALLOWED_CHARS_RE/
-# FP_CONFLICT_FLAGS) must themselves be rejected as a command-line override
-# AND under `-e` -- each of the four names, both ways -- exactly like
-# FP_POLICY/CFLAGS/CXXFLAGS/CPPFLAGS/LDFLAGS already are, so overriding an
-# internal checker variable can never silently defeat the checks above it
-# while the real CFLAGS/CXXFLAGS/CPPFLAGS content still reaches the compiler
-# unvalidated. (SHELL_SAFE_ALLOWLIST_RC is this fix's rename of what used to
-# be FP_ALLOWLIST_RC -- see the "link-flags character-safety coverage"
-# section below.)
-#
-# LINK-FLAGS (LDFLAGS/EXTRA_LDFLAGS) CHARACTER-SAFETY COVERAGE: the allow-list
-# covers LDFLAGS (a plain `-lm` literal plus whatever EXTRA_LDFLAGS folds in)
-# as well as CFLAGS/CXXFLAGS/CPPFLAGS, because LDFLAGS is embedded in every
-# real link recipe ($(LINK) $(CFLAGS) -o $@ $^ $(LDFLAGS)) exactly the same
-# way CFLAGS is embedded in every compile recipe:
-# `make print-obj-dir EXTRA_LDFLAGS=';echo LINK_FLAG_INJECTION'` must be
-# rejected like the same payload via EXTRA_CFLAGS. The Makefile routes the
-# single-quote pre-check and the allow-list through SHELL_SAFE_INPUT_FLAGS
-# (= FP_INPUT_FLAGS plus the fully-assembled LDFLAGS; SHELL_SAFE_ALLOWLIST_RC
-# and SHELL_SAFE_DISALLOWED_CHARS are its result variables).
-# The cases further below (after case 26) replay this file's own
-# EXTRA_CFLAGS matrix -- the literal reported injection payload, the
-# glob/tilde/redirect/process-substitution set (this file's cases 11-17),
-# and a positive control -- against EXTRA_LDFLAGS instead, and extend the
-# internal-variable override-rejection coverage to SHELL_SAFE_INPUT_FLAGS
-# and SHELL_SAFE_ALLOWLIST_RC, this time via an EXTRA_LDFLAGS payload
-# (cases 19-26's own EXTRA_CFLAGS payload covers the CFLAGS-side vector; an
-# override here must not be able to let an EXTRA_LDFLAGS injection payload
-# back through either).
-#
-# Usage: ./test/run_fp_flag_policy_test.sh
-#   (from anywhere; cd's to this repo root itself via the script's own
-#   location, no assumption about caller cwd)
-#
-# Exit code 0 + "run_fp_flag_policy_test: ALL PASS" means every case
-# behaved as expected. Nonzero + at least one "FAIL" line means a
-# regression.
+# Usage: ./test/run_fp_flag_policy_test.sh   (cd's to the repo root itself; scratch-isolated OBJ_ROOT/BIN_ROOT under one
+# mktemp -d, removed by a trap on normal exit and both signals; the repo's real obj/bin trees are never touched)
+# Exit 0 and "run_fp_flag_policy_test: ALL PASS" mean every case behaved as expected; a "FAIL" line is a regression.
 
 set -u
 cd "$(dirname "$0")/.."
 
-# Explicit template (same fix applied throughout this repo's other
-# test/run_*.sh scripts): a bare `mktemp -d` with no template argument
-# ignores $TMPDIR on this host, silently defeating any caller that sets
-# TMPDIR to observe this script's scratch-dir lifecycle.
+# Explicit template: a bare `mktemp -d` ignores $TMPDIR on some hosts; the template honors it.
 SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/aec-fp-flag-policy.XXXXXX")" || {
     echo "FATAL: mktemp failed to create a scratch directory" >&2
     exit 1
@@ -174,9 +65,7 @@ else
     fi
 fi
 
-# Case 2: double-quoted. Allow-list redesign: double quote is caught by the
-# character-class allow-list (not a dedicated "double-quote" deny-list
-# entry any more) -- the reported disallowed-character set is a single '"'.
+# Case 2: double-quoted. The character allow-list catches it; the reported disallowed set is a single '"'.
 LOG2="$SCRATCH/log_double_quoted"
 if env EXTRA_CFLAGS='"-ffast-math"' "$MAKE_BIN" BACKEND=ne10 OBJ_ROOT="$OBJ_ROOT" BIN_ROOT="$BIN_ROOT" print-obj-dir >"$LOG2" 2>&1; then
     fail "case 2: env EXTRA_CFLAGS='\"-ffast-math\"' (double-quoted) print-obj-dir unexpectedly SUCCEEDED (must be rejected)"
@@ -204,9 +93,7 @@ else
     fi
 fi
 
-# Case 4: @response-file syntax. Allow-list redesign: '@' is caught by the
-# character-class allow-list (it is simply not in the allowed set), not a
-# dedicated "response-file" deny-list entry any more.
+# Case 4: @response-file syntax. '@' is not in the allowed set, so the allow-list catches it.
 LOG4="$SCRATCH/log_response_file"
 if env EXTRA_CFLAGS='@flags.rsp' "$MAKE_BIN" BACKEND=ne10 OBJ_ROOT="$OBJ_ROOT" BIN_ROOT="$BIN_ROOT" print-obj-dir >"$LOG4" 2>&1; then
     fail "case 4: env EXTRA_CFLAGS='@flags.rsp' (response-file) print-obj-dir unexpectedly SUCCEEDED (must be rejected)"
@@ -241,13 +128,9 @@ fi
 
 echo "=== run_fp_flag_policy_test: prior behaviour must not regress ==="
 
-# A real, unquoted -Ofast/-ffast-math/-ffp-contract=<x> must still be
-# rejected -- via EXTRA_CFLAGS (the original, narrower CFLAGS-only check's
-# own case) AND now via CXXFLAGS/CPPFLAGS directly (the widened part of
-# this fix; a plain environment CXXFLAGS/CPPFLAGS folds in normally via the
-# pre-existing "Command-line override rejection" foreach's origin logic,
-# never touching EXTRA_CFLAGS at all -- see the Makefile's own "CORRECTED
-# UNDERSTANDING" comment).
+# A real, unquoted -Ofast/-ffast-math/-ffp-contract=<x> must still be rejected: via EXTRA_CFLAGS (case 6) and directly via
+# CXXFLAGS/CPPFLAGS (cases 7-8; a plain environment value folds in through the override-rejection foreach's origin logic, not
+# through EXTRA_CFLAGS).
 LOG6="$SCRATCH/log_plain_ofast_extra_cflags"
 if env EXTRA_CFLAGS=-Ofast "$MAKE_BIN" BACKEND=ne10 OBJ_ROOT="$OBJ_ROOT" BIN_ROOT="$BIN_ROOT" print-obj-dir >"$LOG6" 2>&1; then
     fail "case 6: env EXTRA_CFLAGS=-Ofast print-obj-dir unexpectedly SUCCEEDED (must be rejected)"
@@ -287,11 +170,8 @@ else
     fi
 fi
 
-# The pre-existing, unrelated command-line-override / `make -e` rejection
-# must still fire first and untouched -- a command-
-# line CFLAGS= override, and `make -e` with FP_POLICY= set in the
-# environment, are both still rejected by that separate foreach, never
-# reaching (or being affected by) this fix's own conflict-detection block.
+# The command-line-override / `make -e` rejection must still fire first: a command-line CFLAGS= (case 9) and `make -e` with
+# FP_POLICY= in the environment (case 10).
 LOG9="$SCRATCH/log_cmdline_cflags_override"
 if "$MAKE_BIN" CFLAGS=-O3 BACKEND=ne10 OBJ_ROOT="$OBJ_ROOT" BIN_ROOT="$BIN_ROOT" print-obj-dir >"$LOG9" 2>&1; then
     fail "case 9: make CFLAGS=-O3 print-obj-dir unexpectedly SUCCEEDED (command-line override rejection regressed)"
@@ -322,10 +202,8 @@ echo
 echo "=== run_fp_flag_policy_test: FP-policy allow-list bypass shapes the OLD"
 echo "=== 9-item deny-list never caught (audiolib S24 equivalent) ==="
 
-# Cases 11-17: real, live bypasses of the OLD deny-list (verified BEFORE the
-# allow-list fix: none of these characters/constructs were checked for at
-# all), each now REJECTED by the character-class allow-list, identifying the
-# specific offending character(s).
+# Cases 11-17: glob, ~, redirection and process-substitution payloads, each rejected by the character allow-list and
+# identified by its offending character(s).
 fp_check_rejected() {
     label="$1"; flag_value="$2"; expect_chars="$3"
     log="$SCRATCH/log_$(printf '%s' "$label" | tr -c 'A-Za-z0-9' '_')"
@@ -348,23 +226,10 @@ fp_check_rejected "15_redirect_out"  '-I>/tmp/evil'   '>'
 fp_check_rejected "16_redirect_in"   '-I</etc/passwd' '<'
 fp_check_rejected "17_process_subst" '<(echo hi)'     '()<'
 
-# Case 18: positive control (distinct code path) -- a Make-native
-# ${VAR}-style expansion must still be rejected via the EXACT-TOKEN
-# $(filter) check, not the character allow-list -- GNU Make treats ${...}
-# identically to $(...) and resolves it to R11_FLAG's value (-Ofast) before
-# either FP-policy check ever runs, so the resulting FP_INPUT_FLAGS text is
-# the plain, clean, ALL-ALLOWED-CHARACTERS token "-Ofast" -- the character
-# allow-list has nothing to catch here; only the unchanged FP_CONFLICT_FLAGS
-# $(filter) check can still reject it. R11_FLAG must be `export`-ed as a
-# real shell variable first (a bare `env VAR=x cmd ${VAR}` does NOT make VAR
-# visible to the CURRENT shell's own expansion of ${VAR} in that same
-# command line), and 'EXTRA_CFLAGS=${R11_FLAG}' must be SINGLE-QUOTED on
-# make's own command line so the invoking shell does NOT resolve
-# ${R11_FLAG} itself, leaving the literal text for GNU MAKE to resolve
-# (Make auto-imports every environment variable, so R11_FLAG is visible to
-# it once exported). Deliberately `-n` (a dry run) -- the FP-policy checks
-# run at Makefile parse time, before any target executes, so a dry run
-# alone still exercises this path.
+# Case 18: positive control on a distinct code path. Make resolves a ${VAR} expansion to the plain token "-Ofast" before either
+# check runs, so only the exact-token $(filter) check, not the character allow-list, can reject it. R11_FLAG must be exported
+# so Make imports it, and EXTRA_CFLAGS='${R11_FLAG}' must be single-quoted so the invoking shell leaves the text for Make.
+# Run with -n: the checks fire at Makefile parse time, before any target executes.
 export R11_FLAG=-Ofast
 LOG18="$SCRATCH/log_18_r11_dollar_brace"
 if "$MAKE_BIN" -n BACKEND=ne10 OBJ_ROOT="$OBJ_ROOT" BIN_ROOT="$BIN_ROOT" 'EXTRA_CFLAGS=${R11_FLAG}' lib >"$LOG18" 2>&1; then
@@ -384,21 +249,10 @@ echo
 echo "=== run_fp_flag_policy_test: FP-policy check's own internal variables"
 echo "=== must themselves be override-proof (cmdline + make -e) ==="
 
-# Cases 19-26: the FP-policy check's own INTERNAL variables (FP_INPUT_FLAGS/
-# SHELL_SAFE_ALLOWLIST_RC/FP_ALLOWED_CHARS_RE/FP_CONFLICT_FLAGS) were
-# themselves overridable from the command line / under `-e`, silently
-# defeating every check above while the REAL CFLAGS/CXXFLAGS/CPPFLAGS used
-# in actual compile recipes still carried the dangerous content. payload is
-# the EXTRA_CFLAGS value that would (absent the override) be caught by the
-# check the override under test defeats: FP_INPUT_FLAGS/
-# SHELL_SAFE_ALLOWLIST_RC/FP_ALLOWED_CHARS_RE gate the CHARACTER allow-list,
-# so a semicolon payload exercises that path; FP_CONFLICT_FLAGS gates the
-# SEPARATE
-# -Ofast/-ffast-math/-ffp-contract= exact-token filter, so it needs an
-# all-allowed-characters payload that is still a real conflict ("-Ofast"
-# itself) -- a semicolon payload there would be caught by the (untouched)
-# allow-list first and never actually exercise the FP_CONFLICT_FLAGS-
-# specific override path at all.
+# Cases 19-26: the checks' internal variables (FP_INPUT_FLAGS, SHELL_SAFE_ALLOWLIST_RC, FP_ALLOWED_CHARS_RE, FP_CONFLICT_FLAGS)
+# must be rejected as a command-line override and under `-e`, because an override would silently defeat the checks above them.
+# payload is an EXTRA_CFLAGS value that the check under test would catch: a semicolon for the character allow-list variables,
+# and "-Ofast" for FP_CONFLICT_FLAGS (a semicolon would be caught by the allow-list first and never reach the conflict check).
 fp_check_override_rejected() {
     varname="$1"; varvalue="$2"; payload="$3"; use_dash_e="$4"
     log="$SCRATCH/log_override_$(printf '%s' "$varname" | tr -c 'A-Za-z0-9' '_')_$use_dash_e"
@@ -437,13 +291,7 @@ echo
 echo "=== run_fp_flag_policy_test: link-flags (LDFLAGS/EXTRA_LDFLAGS)"
 echo "=== character-safety coverage ==="
 
-# The literal reported repro: a semicolon payload via EXTRA_LDFLAGS,
-# dry-run-confirmed BEFORE this fix to sail through untouched and land live
-# in a real link recipe (`make -n selftest
-# EXTRA_LDFLAGS=';echo LINK_FLAG_INJECTION'` -- and, more directly,
-# `make -n print-obj-dir` with the same override, which never even reaches
-# a compile/link recipe -- both showed no FP-policy rejection at all before
-# this fix, unlike the identical payload via EXTRA_CFLAGS).
+# The reported injection payload: a semicolon via EXTRA_LDFLAGS must be rejected like the same payload via EXTRA_CFLAGS.
 ldflags_check_rejected() {
     label="$1"; flag_value="$2"; expect_chars="$3"
     log="$SCRATCH/log_ldflags_$(printf '%s' "$label" | tr -c 'A-Za-z0-9' '_')"
@@ -460,8 +308,7 @@ ldflags_check_rejected() {
 
 ldflags_check_rejected "injection-semicolon" ';echo LINK_FLAG_INJECTION' ';'
 
-# Same glob/tilde/redirect/process-substitution matrix cases 11-17 run for
-# EXTRA_CFLAGS above, replicated verbatim for EXTRA_LDFLAGS.
+# The glob/tilde/redirect/process-substitution matrix of cases 11-17, run against EXTRA_LDFLAGS.
 ldflags_check_rejected "glob-star"        '-L*t'            '*'
 ldflags_check_rejected "glob-question"    '-Lfas?'          '?'
 ldflags_check_rejected "glob-brackets"    '-Lfas[t]'        '[]'
@@ -470,32 +317,18 @@ ldflags_check_rejected "redirect-out"     '-lm>/tmp/evil'   '>'
 ldflags_check_rejected "redirect-in"      '-lm</etc/passwd' '<'
 ldflags_check_rejected "process-subst"    '<(echo hi)'      '()<'
 
-# Positive control: a real, legitimate link flag this project's own
-# Makefile comment anticipates a consumer needing (the "-Wl,-rpath,dir /
-# -Wa,--option pass-through flags" example the allow-list's own char-set
-# comment gives) must pass the character check AND actually produce a
-# working aec_wav binary. Unlike every case above, this exercises a REAL
-# link recipe ($(TARGET), which embeds $(LDFLAGS) directly) rather than the
-# cheap print-obj-dir query target, so -- like every other real build this
-# repo performs -- it needs audiolib present as a sibling checkout
-# (COMMON_DIR); the query-only cases above never touch audiolib at all.
+# Positive control: a legitimate link flag (-Wl,-rpath,dir) must pass the character check and yield a working aec_wav binary.
+# Unlike the cases above it exercises a real link recipe ($(TARGET) embeds $(LDFLAGS)), so it needs audiolib as a sibling
+# checkout (COMMON_DIR).
 LOG_LDFLAGS_POS="$SCRATCH/log_ldflags_positive_rpath"
 POS_LDFLAGS='-Wl,-rpath,/usr/lib -L/usr/lib'
 if env EXTRA_LDFLAGS="$POS_LDFLAGS" "$MAKE_BIN" BACKEND=ne10 OBJ_ROOT="$OBJ_ROOT" BIN_ROOT="$BIN_ROOT" all >"$LOG_LDFLAGS_POS" 2>&1; then
-    # Resolve the just-built binary's own path from the build's own
-    # "aec_wav [<backend>] -> <path>" echo line (the `all` recipe's last
-    # line) rather than a separate `print-bin-dir` query invocation: a
-    # query-only invocation never resolves COMMON_LIB, so its CFG_SIG folds in
-    # an EMPTY COMMON_PRODUCER_SIG and resolves to a DIFFERENT (query-only)
-    # bin/ directory than the real build above, which does resolve COMMON_LIB
-    # and folds in a real producer signature -- confirmed empirically.
+    # Take the binary's path from the build's own "aec_wav [<backend>] -> <path>" line (the last line of the `all` recipe): a
+    # query-only `print-bin-dir` does not resolve COMMON_LIB, so its CFG_SIG differs and it names a different bin/ directory.
     bin_path="$(sed -n 's/^aec_wav \[[^]]*\] -> //p' "$LOG_LDFLAGS_POS" | tail -1)"
-    # `aec_wav --help` is not a recognized option (this binary only takes
-    # positional mic/ref/out args) -- it prints its usage banner and exits
-    # NON-zero, same as any other invalid invocation. So the correctness bar
-    # here is "the binary actually ran and printed its usage text" (proof
-    # the -Wl,-rpath/-L payload landed in a real, loadable, executing
-    # binary), not a zero exit status.
+    # `aec_wav --help` is not a recognized option (the binary takes positional mic/ref/out args): it prints its usage banner and
+    # exits non-zero. The bar is that the binary ran and printed usage, which proves the -Wl,-rpath/-L payload produced a
+    # loadable executable; the exit status is not checked.
     RUN_OUT="$SCRATCH/run_ldflags_positive.out"
     "$bin_path" --help >"$RUN_OUT" 2>&1
     if [ -n "$bin_path" ] && [ -x "$bin_path" ] && grep -q "^Usage:" "$RUN_OUT"; then
@@ -510,12 +343,8 @@ else
     cat "$LOG_LDFLAGS_POS" >&2
 fi
 
-# Command-line/`-e` override-rejection for the two variables this fix
-# introduces/renames (SHELL_SAFE_INPUT_FLAGS is new; SHELL_SAFE_ALLOWLIST_RC
-# is FP_ALLOWLIST_RC's rename) -- cases 19-26 above already cover both via
-# an EXTRA_CFLAGS payload; this repeats it via EXTRA_LDFLAGS specifically,
-# since that is the exact vector this fix exists to close (an override here
-# must not be able to let an EXTRA_LDFLAGS injection payload back through).
+# Override rejection for SHELL_SAFE_INPUT_FLAGS and SHELL_SAFE_ALLOWLIST_RC via an EXTRA_LDFLAGS payload (cases 19-26 cover the
+# EXTRA_CFLAGS vector): an override must not let an EXTRA_LDFLAGS injection payload through.
 ldflags_check_override_rejected() {
     varname="$1"; varvalue="$2"; payload="$3"; use_dash_e="$4"
     log="$SCRATCH/log_ldflags_override_$(printf '%s' "$varname" | tr -c 'A-Za-z0-9' '_')_$use_dash_e"

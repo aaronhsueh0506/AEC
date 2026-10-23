@@ -1,24 +1,16 @@
-"""Regression test for the top-level (non-AEC3) hop-authored constant audit
-(2026-08 gap-fix, follow-up to the AEC3-internal per-block/hop-count
-constant audit -- see CHANGELOG.md).
+"""Tests for the top-level (non-AEC3) hop-authored constant retiming.
 
-Bug: ``shadow_err_alpha`` / ``warmup_frames`` / ``epc_hangover`` /
-``ne_recent_hold`` / ``filter_misadjustment_stable_frames`` /
-``filter_misadjustment_hangover_frames`` (AecConfig) and
-``EchoPathChangeDetector.EPV_FAST_TC``/``EPV_SLOW_TC`` (epc.py) are
-project-native (NOT AEC3-sourced) constants authored as literal hop counts
-/ per-hop EMA constants against the legacy hop=160/sample_rate=16000
-(10 ms) grid that predates this repo's own multi-rate history, with zero
-rate conversion -- so the SAME literal covered wildly different wall-clock
-durations depending on grid (e.g. warmup_frames=100 covered 0.8 s / 1.6 s /
-1.067 s at 16k/256, 16k/512, 48k/1024 respectively before this fix).
-
-Fix: retimed via ``aec3_scale.ms_to_hops``/``aec3_scale.growth_rehop`` in
+``shadow_err_alpha`` / ``warmup_frames`` / ``epc_hangover`` / ``ne_recent_hold`` /
+``filter_misadjustment_stable_frames`` / ``filter_misadjustment_hangover_frames``
+(AecConfig) and ``EchoPathChangeDetector.EPV_FAST_TC``/``EPV_SLOW_TC`` (epc.py)
+are project-native (NOT AEC3-sourced) constants authored as hop counts / per-hop
+EMA constants for the hop=160/sample_rate=16000 (10 ms) grid. They are retimed
+via ``aec3_scale.ms_to_hops``/``aec3_scale.growth_rehop`` in
 ``AecConfig.__post_init__`` (hop-count fields) and
-``EchoPathChangeDetector.__init__`` (EPV_FAST_TC/EPV_SLOW_TC, now real
-constructor parameters -- ``hop_size``/``sample_rate`` were previously not
-parameters at all). ``ne_recent_sustain`` is deliberately left unretimed --
-see config.py's field comment for why.
+``EchoPathChangeDetector.__init__`` (EPV_FAST_TC/EPV_SLOW_TC, from its
+``hop_size``/``sample_rate`` parameters), so each covers the same wall-clock
+duration on every grid. ``ne_recent_sustain`` is deliberately left unretimed --
+see config.py's field comment.
 
 Run:
     python3 -m pytest python/tests/test_hop_authored_timing_parity.py
@@ -37,9 +29,8 @@ from modules.enums import AecPreset  # noqa: E402
 from modules.epc import EchoPathChangeDetector  # noqa: E402
 from modules.state.filter_analyzer import FilterAnalyzer  # noqa: E402
 
-# The three grids the task calls out explicitly, plus 8 kHz (this repo's
-# fourth whitelisted grid, and same hop_ms as 16k/512 -- a useful extra
-# data point) for parity with the C side's test_rate_structural.c GRIDS[].
+# The three product grids plus 8 kHz (the fourth whitelisted grid, same hop_ms
+# as 16k/512), matching the C side's test_rate_structural.c GRIDS[].
 GRIDS = [
     (8000, 256),
     (16000, 256),
@@ -47,10 +38,10 @@ GRIDS = [
     (48000, 1024),
 ]
 
-# Legacy targets: the wall-clock duration / EMA time-constant each field
-# was authored to cover at the legacy hop=160/sample_rate=16000 (10 ms)
-# grid. TC = -hop_seconds / ln(retention) for the RETENTION-convention EMA
-# constants (shadow_err_alpha, EPV_FAST_TC, EPV_SLOW_TC).
+# Targets: the wall-clock duration / EMA time-constant each field was authored to
+# cover at the hop=160/sample_rate=16000 (10 ms) grid. TC = -hop_seconds /
+# ln(retention) for the RETENTION-convention EMA constants (shadow_err_alpha,
+# EPV_FAST_TC, EPV_SLOW_TC).
 HOP_MS_TOL = 0.15   # integer-hop-count rounding budget (see C test's comment)
 ALPHA_TOL = 0.01    # growth_rehop is continuous -- should be near-exact
 
@@ -165,9 +156,8 @@ class TopLevelConstantRetimingTests(unittest.TestCase):
     def test_filter_analyzer_ir_exclusion_window_scales_with_rate(self) -> None:
         """The AEC3 64/128-sample window means 4/8 ms at 16 kHz.
 
-        It indexes the time-domain impulse response, so changing the FFT/hop
-        at the same rate must not move it, while 48 kHz needs 192/384 samples.
-        Legacy 8 kHz is deliberately unchanged by this product-grid fix.
+        It indexes the time-domain impulse response, so changing the FFT/hop at the
+        same rate must not move it, while 48 kHz needs 192/384 samples.
         """
         expected = {
             (8000, 256): (64, 128),
@@ -186,11 +176,11 @@ class TopLevelConstantRetimingTests(unittest.TestCase):
             self.assertEqual(actual, expected[(sr, fs)])
 
     def test_pre_fix_regression_would_have_failed(self) -> None:
-        """Sanity-check the tolerance band itself: the OLD (frozen-literal,
-        never-retimed) behavior must fall clearly OUTSIDE the 15% band this
-        test enforces -- otherwise the test wouldn't actually catch the bug
-        it's named for. Mirrors the C test's own header comment."""
-        # warmup_frames=100 hops frozen at every grid (pre-fix behavior):
+        """Sanity-check the tolerance band itself: a frozen (never-retimed) literal must
+        fall clearly OUTSIDE the 15% band this test enforces, otherwise the test could
+        not catch a missing retime. Mirrors the C test's own header comment.
+        """
+        # warmup_frames=100 hops frozen at every grid:
         old_ms_16k_256 = 100 * (128 / 16000.0) * 1000.0   # 800 ms
         old_ms_16k_512 = 100 * (256 / 16000.0) * 1000.0   # 1600 ms
         rel_err = abs(old_ms_16k_512 - old_ms_16k_256) / old_ms_16k_256
@@ -202,19 +192,13 @@ class TopLevelConstantRetimingTests(unittest.TestCase):
 
 
 class ConfigReconstructionIdempotencyTests(unittest.TestCase):
-    """Regression test for the reconstruction-idempotency bug (2026-08-04
-    gap-fix, follow-up to the retiming fix above): __post_init__ used to
-    treat WHATEVER value sat in a retimed field as still "authored at the
-    legacy 10 ms grid" on every run, so rebuilding an already-resolved
-    config via ``dataclasses.replace()``/``AecConfig(**asdict(cfg))`` (e.g.
-    process_wav_files()'s sample-rate-mismatch re-resolve path at
-    modules/orchestrator.py) silently double-retimed the six wall-clock
-    fields, compounding further on every additional reconstruction.
+    """Rebuilding an already-resolved config must not re-retime it.
 
-    Fix: timing_reference_hop_size/_sample_rate track which grid the
-    current field values are calibrated for; retiming is skipped when that
-    already matches the resolved grid, and rebased from the tracked
-    reference (not a hardcoded 10 ms) when it doesn't.
+    ``dataclasses.replace()`` / ``AecConfig(**asdict(cfg))`` (e.g.
+    process_wav_files()'s sample-rate-mismatch re-resolve path in
+    modules/orchestrator.py) must leave the six wall-clock fields unchanged on the
+    same grid, and rederive them from the pinned ``_canonical_*`` values on a
+    different grid, so repeated or chained reconstruction never compounds drift.
     """
 
     RETIMED_FIELDS = (
@@ -253,10 +237,11 @@ class ConfigReconstructionIdempotencyTests(unittest.TestCase):
                 "already-resolved config")
 
     def test_pre_fix_double_retime_would_have_failed(self) -> None:
-        """Sanity-check: mutation test. Simulating the OLD unconditional
-        retiming (rebase from a hardcoded 10 ms every call, regardless of
-        provenance) on an already-resolved config must visibly drift from
-        the original -- otherwise this test wouldn't catch a regression."""
+        """Mutation check: an unconditional retiming (rebase from a hardcoded 10 ms on
+        every call, regardless of provenance) applied to an already-resolved config
+        must visibly drift from the original, otherwise this test would not catch a
+        regression.
+        """
         from modules import aec3_scale as _aec3_scale
         cfg = AecConfig.from_preset(
             AecPreset.BALANCED, sample_rate=16000, frame_size=256)
@@ -271,12 +256,12 @@ class ConfigReconstructionIdempotencyTests(unittest.TestCase):
 
     def test_sample_rate_change_via_replace_matches_fresh_construction(
             self) -> None:
-        """The actual production path this bug lives on:
-        process_wav_files() calls ``dataclasses.replace(config,
-        sample_rate=mic_sr, frame_size=-1, hop_size=-1, filter_length=-1)``
-        when the caller's config was built for a different sample rate than
-        the file being processed. The reconstructed config must match a
-        config built fresh for the new rate, not a double-retimed drift."""
+        """The production path: process_wav_files() calls ``dataclasses.replace(config,
+        sample_rate=mic_sr, frame_size=-1, hop_size=-1, filter_length=-1)`` when the
+        caller's config was built for a different sample rate than the file being
+        processed. The reconstructed config must match a config built fresh for the
+        new rate, not a double-retimed drift.
+        """
         from dataclasses import replace
         cfg_16k = AecConfig.from_preset(
             AecPreset.BALANCED, sample_rate=16000, frame_size=256)
@@ -292,31 +277,23 @@ class ConfigReconstructionIdempotencyTests(unittest.TestCase):
 
     def test_fresh_construction_unaffected_by_provenance_tracking(
             self) -> None:
-        """The idempotency fix must be behavior-preserving for the common
-        (fresh-construction) path: a bare AecConfig() and an
-        AecConfig.from_preset() must retime exactly as before (10 ms
-        reference), since the _canonical_* fields capture from the legacy
-        grid on first construction."""
+        """Fresh construction (a bare AecConfig() and AecConfig.from_preset()) retimes
+        from the 10 ms reference, since the _canonical_* fields capture from that grid
+        on first construction.
+        """
         cfg = AecConfig.from_preset(
             AecPreset.BALANCED, sample_rate=16000, frame_size=256)
         self.assertEqual(cfg._canonical_ms_warmup_frames, 1000.0)
-        # warmup_frames=100 authored hops @ legacy 10 ms grid -> retimed to
+        # warmup_frames=100 authored hops @ 10 ms grid -> retimed to
         # the 8 ms (128-sample hop) grid: round(100*10/8) = 125.
         self.assertEqual(cfg.warmup_frames, 125)
 
     def test_chained_grid_changes_do_not_drift(self) -> None:
-        """Regression test (2026-08-04, same-day follow-up): the FIRST
-        version of the idempotency fix tracked "which grid is the CURRENT
-        value calibrated for" and rebased from THAT -- correct for repeated
-        same-grid reconstruction, but still lossy across a CHAIN of
-        different grids, because ms_to_hops() rounds to the nearest integer
-        hop and each chain step rebased from the previous step's
-        already-rounded hop count instead of the original canonical ms
-        value (confirmed by direct measurement: 16k/512 -> 48k/1024 ->
-        16k/512 landed one hop off the true original in that version).
-        Fixed by pinning the canonical value once and always rederiving
-        from it. A long chain through every whitelisted grid must return
-        exactly to the starting values, not a rounding-drifted neighbour."""
+        """A long chain of reconstructions through different grids must return exactly to
+        the starting values, not a rounding-drifted neighbour: ms_to_hops() rounds to
+        the nearest integer hop, so each step must rederive from the pinned canonical ms
+        value rather than the previous step's already-rounded hop count.
+        """
         from dataclasses import replace
         cfg = AecConfig.from_preset(
             AecPreset.BALANCED, sample_rate=16000, frame_size=512)
@@ -355,18 +332,16 @@ class ConfigReconstructionIdempotencyTests(unittest.TestCase):
                         "target grid")
 
     def test_pre_fix_chained_drift_would_have_failed(self) -> None:
-        """Mutation check: simulate the FIRST version's bug (rebase from
-        the PREVIOUS grid's already-rounded hop count at each chain step,
-        instead of a pinned canonical ms value) directly and confirm it
-        visibly drifts from the correct (canonical) result -- otherwise the
-        chain test above wouldn't actually be exercising anything. Uses the
-        exact chain confirmed (by direct measurement) to drift:
-        filter_misadjustment_stable_frames 19 -> 18 through
-        16k/512 -> 48k/1024 -> 16k/256 -> 8k/256 -> 16k/512."""
+        """Mutation check: rebasing from the PREVIOUS grid's already-rounded hop count at
+        each chain step (instead of a pinned canonical ms value) must visibly drift
+        from the correct result, otherwise the chain test would not exercise anything.
+        Chain: 16k/512 -> 48k/1024 -> 16k/256 -> 8k/256 -> 16k/512 on
+        filter_misadjustment_stable_frames.
+        """
         from modules import aec3_scale as _aec3_scale
 
         def naive_chain_rebase(authored_value, hop_rate_chain):
-            ref_hop, ref_rate = 160, 16000  # legacy 10 ms authoring grid
+            ref_hop, ref_rate = 160, 16000  # 10 ms authoring grid
             value = authored_value
             for hop, rate in hop_rate_chain:
                 ref_ms_per_hop = 1000.0 * ref_hop / ref_rate

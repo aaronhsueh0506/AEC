@@ -327,9 +327,9 @@ static void run_core_sweep(void) {
 
 /* -------------------------------------------- subnormal characterisation */
 
-/* Informational: where the hardware flushes, a dot of subnormal operands
- * differs from the C model (the model's fmaf/mul-add keep subnormals). It never fails; it only states the behaviour
- * so a reader of the log knows which side of the contract a build is on. */
+/* Informational: where the hardware flushes, a dot of subnormal operands differs from the C model
+ * (the model's fmaf/mul-add keep subnormals). It never fails; it only states the behaviour so a
+ * reader of the log knows which side of the contract a build is on. */
 static void report_subnormal_behaviour(void) {
     float a[64], b[64];
     int diff = 0, n = 200;

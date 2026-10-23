@@ -6,116 +6,43 @@ Single-channel AEC (1 mic + 1 ref) supporting PBFDKF (frequency-domain Kalman),
 multi-ERLE, shadow filter, and post-filter residual echo suppression.
 Python reference implementation + C implementation.
 
-**Release**: v4.0.0rc1 — Python `aec.py` `__version__ = "4.0.0rc1"`.
-**Not ship-ready.** The AEC3 Tier-2 audit and top-level timing retiming still
-change production output and remain unreviewed. The 800-case bench (balanced,
-current 16 kHz default grid, `--cng`, no pre-alignment) was rerun 2026-10-19
-at commit `02df7cd` under the official per-bucket AECMOS segmentation for all
-three engines — see "ours vs AEC3 vs Speex, official segmentation" below.
-FS_movement echo (3.733) still clears the 3.5 bar; "beats AEC3 on every deg
-axis" holds on DT/NE (ours ahead by 0.45–0.56) but not strictly on FS, where
-the two are within 0.008 of each other and both within 0.009 of the AECMOS
-ceiling (5.0) — a tie at the ceiling, not a loss. Native 48 kHz carries smoke and spot-check
-evidence, which is sufficient for dataset generation; 48 kHz never gets an
-AECMOS number, so its release verdict stays parity/structural.
-See `[4.0.0]` "Known limitations" in [CHANGELOG.md](CHANGELOG.md); do not tag
-or publish until those close. The `4.x` major bump records the public-ABI and
-output-contract breaks
-listed there (custom output limiter removed, `AecConfig`/`AecResContext`
-layout changes, 16 kHz default grid 512/256 → 256/128), **not** a new algorithm
-generation. The production algorithm is the v3.21 AEC3-aligned `_aec3_post`
-chain (AecState + ResidualEchoEstimator + SuppressionGain + CNG) with the
-v3.22 split min-gain floor (DT/NE near-end preservation). **3.23.0** fixes the
-no-pre-align (no-PA) online-delay path and ships a default-ON DT-deg recovery
-stack (`dt_aware_recovery_soft` + `dt_aware_res_floor`,
-`min_gain_floor_dt_db = −20`). Four Pareto presets — `mild` / `balanced` /
-`aggressive` / `no_floor` — share a two-field strength axis (aggressive also
-deepens the DT floor; see "Presets" below); **`balanced` is production** and
-historically met all four ship bars **under legacy scoring on the 512/256
-grid** (see "Status snapshot" below); those bar thresholds were calibrated
-under that method+grid and have not been recalibrated for the current
-official-segmentation/256-128 measurement, so a direct pass/fail restatement
-against the old numeric bars is not meaningful — the AEC3/Speex comparison
-under the current method+grid is now in "Status snapshot" and should be read
-on its own terms (AEC3-relative, not against the legacy bars). See
-`[3.23.0]` in the changelog for that release's evidence.
+**Release**: v4.0.0rc1 (`__version__` in `python/aec.py`). **Not ship-ready**:
+the open items are the `[4.0.0]` "Known limitations" in
+[CHANGELOG.md](CHANGELOG.md), which also holds the version history and the
+measurements behind each default.
 
-**Float32 campaign** (2026-07-15, on top of 3.23.0): all production C is now
-float32 end-to-end (delay chain, orchestrator scalars, post/state modules,
-`residual_echo_estimator`, HPF). **Python bit-exact parity is retired
-repo-wide** — the Python reference (fp64) is now the **algorithm spec**, C is
-the float32 **implementation**, and Python↔C comparison is **tolerance-based**
-(~−60 dB class, correlation 0.99999958), not 0/0. The **FFT backend is
-NE10 (float32, ARM NEON)** for both the host build (`make`, malloc) and the
-embedded deployment (caller pool via `aec_get_mem_size`/`aec_init`); the
-static path is byte-equal to the malloc path. `SIMD=0` and `SIMD=1` are
-likewise not bit-identical: the matched filter's dot product
-(`c_impl/src/delay_aec.c`) uses four accumulators plus `vfmaq_f32` — reordered
-summation *and* fused rounding — and its NLMS update fuses where the scalar
-spells a separate multiply and add. Every gate here is therefore
-**per configuration**: byte-exact against the same configuration before a
-change, never across configurations. Regression anchors: the end-to-end tolerance gate
-(`c_impl/test/parity_aec_e2e.c`) and staged
-gates vs the `fp64-baseline` tag (60-case stratified AECMOS within noise bar,
-waveform drift median −95 dB, 1-hour soak stable). See the float32 and SIMD
-entries under [CHANGELOG.md](CHANGELOG.md) `[4.0.0]`.
+The production algorithm is the AEC3-aligned `_aec3_post` chain (AecState +
+ResidualEchoEstimator + SuppressionGain + CNG) behind the PBFDKF linear stage,
+with a split min-gain floor for near-end preservation and a default-ON
+double-talk recovery stack (`dt_aware_recovery_soft` +
+`dt_aware_res_floor_enabled`, `min_gain_floor_dt_db = −20`). Four Pareto
+presets — `mild` / `balanced` / `aggressive` / `no_floor` — share a two-field
+strength axis (see "Presets" below); **`balanced` is production**.
+
+**Numeric contract.** Production C is float32 end-to-end. The Python reference
+(fp64) is the **algorithm spec**, C is the float32 **implementation**, and
+Python↔C comparison is **tolerance-based**, not bit-exact
+(`c_impl/test/parity_aec_e2e.c`, 2e-2 at 16 kHz). The **FFT backend is NE10
+(float32, ARM NEON)** for both the host build (`make`, malloc) and the embedded
+deployment (caller pool via `aec_get_mem_size`/`aec_init`); the pool path is
+byte-equal to the malloc path. `SIMD=0` and `SIMD=1` are likewise not
+bit-identical: the matched filter's dot product (`c_impl/src/delay_aec.c`)
+uses four accumulators plus `vfmaq_f32` (reordered summation *and* fused
+rounding), and its NLMS update fuses where the scalar path spells a separate
+multiply and add. Byte-exact comparison is therefore only meaningful within
+one build configuration.
 
 ---
 
 ## Status snapshot
 
-**800-case AECMOS — ours vs WebRTC AEC3 vs Speex (MDF)**, `balanced /
-fl=832 (52 ms) / --cng`, local AECMOS ONNX, full AEC Challenge 2021 blind
-corpus (echo↑ deg↑). **No pre-alignment** — every engine self-aligns online
-(ours via its in-pipeline matched-filter `EchoPathDelayEstimator`; AEC3 via its
-internal `RenderDelayController`; Speex internally), exactly as in production.
-**Legacy scoring** (whole-clip / first-20s window, pre-2026-09-26) **on the
-16 kHz 512/256 grid** (the pre-4.0.0rc1 default) — not comparable to the
-official-segmentation, 256/128-grid numbers in the next section; the jump
-between the two sections' "ours" DT_static deg (2.074 → 3.375) is the sum of
-a scoring-window change and a grid change, not a regression:
-
-| Bucket | n | **ours** echo / deg | AEC3 echo / deg | Speex echo / deg |
-|---|---|---|---|---|
-| FS_static   | 169 | 3.544 / 4.999 | 3.821 / 4.999 | 2.847 / 5.000 |
-| FS_movement | 131 | 3.519 / 4.999 | 3.790 / 4.999 | 2.757 / 5.000 |
-| DT_static   | 186 | 4.218 / 2.074 | 4.531 / 1.815 | 3.427 / 3.179 |
-| DT_movement | 114 | 4.114 / 2.140 | 4.456 / 1.816 | 3.272 / 3.301 |
-| NE          | 200 | 4.998 / 4.021 | 4.999 / 3.410 | 4.998 / 4.128 |
-
-- (legacy scoring) **Echo cancellation: AEC3 > ours > Speex.** AEC3 cuts the
-  most; Speex is a weak canceller (FS ~2.8, DT ~3.3); ours sits in between
-  (FS ~3.5, DT ~4.2).
-- (legacy scoring) **Near-end preservation (deg): Speex > ours > AEC3.** AEC3
-  pays for its echo cancellation with the worst DT deg (1.82) and NE deg
-  (3.41); ours holds the middle and **beats AEC3 on every degradation axis**
-  (DT deg 2.07/2.14 vs 1.82, NE deg 4.02 vs 3.41) while **approaching AEC3 on
-  echo** (FS_movement 3.519 vs 3.790, within 0.27). This was the ship target
-  under this grid/method: *approach AEC3 on echo, beat it on deg.* All four
-  ship bars met **under legacy scoring on the 512/256 grid**; **not
-  re-verified** on the current 256/128 default grid or under official
-  segmentation (see below) — AEC3/Speex have not been rerun either way.
-- These numbers reflect the v3.23.0 matched-filter pre-echo fix (the delay
-  estimator now holds the true echo-path delay online instead of collapsing
-  toward 0) plus the default-ON DT-deg recovery stack (soft acquire-reset +
-  DT-gated RES floor), which trades a little echo for DT-deg headroom above the
-  pre-align reference while keeping all four ship bars **under this legacy
-  measurement**.
-
-**ours vs AEC3 vs Speex, official per-bucket segmentation, 16 kHz 256/128
-grid (current default)** — `balanced / fl=832 (52 ms) / --cng`, full AEC
-Challenge 2021 blind corpus, no pre-alignment, all three engines self-align
-online (ours via `EchoPathDelayEstimator`; AEC3 via `RenderDelayController`;
-Speex internally), scored 2026-10-19 at commit `02df7cd`. This supersedes
-the ours-only run at `e567ccf` published here earlier the same day: that
-commit is 19 commits behind `02df7cd` and the gap includes real default-path
-changes (a nonlinear-path L1-term cap, a mid-ramp DT-floor-inversion fix +
-preset-table consolidation, plus a `/simplify`+`/code-review` pass), not
-measurement noise — confirmed via a bit-exact probe stem before the full
-rerun, and via `git diff --stat` showing `bench_aecmos.py`/the single-preset
-eval path unchanged over that range. Saved at
-`../.research/2026-10-19/aec800_vs_ref/{scores_ours,scores_aec3,scores_speex}/scores.json`
-(sibling to this repo, the campaign's research-data convention):
+**800-case AECMOS — ours vs WebRTC AEC3 vs Speex (MDF).** Full AEC Challenge
+2021 blind corpus (echo↑ deg↑), `balanced / fl=832 (52 ms) / --cng`, 16 kHz
+256/128 grid (the default), official per-bucket AECMOS segmentation, local
+AECMOS ONNX; measured build: commit `02df7cd`. **No pre-alignment** — every
+engine self-aligns online (ours via its in-pipeline matched-filter
+`EchoPathDelayEstimator`; AEC3 via its internal `RenderDelayController`;
+Speex internally), exactly as in production.
 
 | Bucket | n | **ours** echo / deg | AEC3 echo / deg | Speex echo / deg |
 |---|---|---|---|---|
@@ -125,14 +52,13 @@ eval path unchanged over that range. Saved at
 | DT_movement | 114 | 3.838 / 3.385 | 4.150 / 2.931 | 2.916 / 3.874 |
 | NE          | 200 | 4.998 / 3.969 | 4.999 / 3.410 | 4.998 / 4.128 |
 
-Same qualitative story as the legacy-scoring table above, now under the
-official segmentation: **echo cancellation AEC3 > ours > Speex** (ours trails
-AEC3 by 0.24–0.31, leads Speex by 0.80–0.93); **near-end preservation (deg)
-Speex > ours > AEC3** on DT/NE (ours beats AEC3 by 0.45–0.56), with FS deg a
-near-ceiling tie across all three engines (within 0.009 of 5.0). Caveat:
-Speex ran at its script-hardcoded `fl=2048` taps (no `--speex-fl` flag
-exists), not the 832-tap/52 ms grid ours and AEC3 use — same-corpus and
-same-method, but not a tail-length-matched comparison.
+**Echo cancellation: AEC3 > ours > Speex** (ours trails AEC3 by 0.24–0.31,
+leads Speex by 0.80–0.93). **Near-end preservation (deg): Speex > ours > AEC3**
+on DT/NE (ours beats AEC3 by 0.45–0.56), with FS deg a near-ceiling tie across
+all three engines (within 0.009 of 5.0). Caveat: Speex ran at its
+script-hardcoded `fl=2048` taps (no `--speex-fl` flag exists), not the
+832-tap/52 ms grid ours and AEC3 use — same corpus and method, but not a
+tail-length-matched comparison.
 
 ### Presets — a strength axis, four operating points
 
@@ -141,39 +67,36 @@ far-active residual-gain floor that trades echo suppression against near-end
 preservation. `aggressive` also deepens `min_gain_floor_dt_db` (the floor
 used in its place during double-talk) — without it, `dt_protect_active`
 hard-overrides the far-active floor with the SAME shared −20 dB for every
-preset whenever it fires (including a measured ~30% false-arm rate on
-far-end-singletalk), masking most of the strength-axis difference on exactly
-the hops where a user would expect to hear it. `no_floor` is a fourth tier
-that removes the floor mechanism entirely (`min_gain_split_floor_enabled=
-False`) instead of deepening it further:
+preset whenever it fires (it also false-arms in far-end single talk), masking
+most of the strength-axis difference on exactly the hops where a user would
+expect to hear it. `no_floor` is a fourth tier that removes the floor
+mechanism entirely (`min_gain_split_floor_enabled=False`) instead of
+deepening it further:
 
 | Preset | far-active floor | dt floor | character |
 |---|---|---|---|
-| `mild`       | −20 dB | −20 dB | near-priority — more near-end kept, more echo leak (FS dips below the 3.5 bar by design). Was `gentle` until 2026-07-15 (NR-style naming, same parameters) |
-| **`balanced` ★** | −28 dB | −20 dB | **production** — all four ship bars met |
-| `aggressive`   | −38 dB | −30 dB | echo-priority — deeper suppression, more near-end loss (deg stays >2.0, above AEC3); dev-pool DT_static echo +0.17/+0.14 MOS vs a shared-dt-floor aggressive, at a bounded near-end cost |
-| `no_floor`   | inert (gate off) | inert (gate off) | deepest point on the axis — purely audibility/R²-derived gain; most near-end loss. `AecPreset.NO_FLOOR` / `AEC_PRESET_NO_FLOOR` (C enum value `3`); the dB columns are the same bytes as `balanced`'s but never read once `min_gain_split_floor_enabled` (C) / `min_gain_split_floor_enabled` (Python) is `False` |
+| `mild`       | −20 dB | −20 dB | near-priority — more near-end kept, more echo leak |
+| **`balanced` ★** | −28 dB | −20 dB | **production** |
+| `aggressive`   | −38 dB | −30 dB | echo-priority — deeper suppression, more near-end loss; dev-pool (47-case) DT_static echo +0.17/+0.14 MOS vs a shared-dt-floor aggressive, at a bounded near-end cost |
+| `no_floor`   | inert (gate off) | inert (gate off) | deepest point on the axis — purely audibility/R²-derived gain; most near-end loss. `AecPreset.NO_FLOOR` / `AEC_PRESET_NO_FLOOR` (C enum value `3`); the dB columns are never read once `min_gain_split_floor_enabled` is `False` |
 
 `mild` / `aggressive` / `no_floor` are deliberate Pareto operating points on the
-proven single-channel DT-deg-vs-echo wall; all share the same `_aec3_post`
-chain and 800-case-tuned base. Full version history → [CHANGELOG.md](CHANGELOG.md).
+single-channel DT-deg-vs-echo trade-off; all share the same `_aec3_post` chain
+and base tuning.
 
 #### Retargeting a running instance
 
 The preset can be changed on a live instance without rebuilding it — the
 filter, the delay lock and every smoothing history carry on. `no_floor`
 changes a boolean (`min_gain_split_floor_enabled`), which the ramp below
-cannot represent, so it STEPS immediately instead of ramping — the same
-instant-step discipline the DT floor already uses, just extended to one
-more field. **Both C** (`aec_set_preset()` / `aec_res_set_preset()`) **and
-Python** (`AEC.set_preset()`): switching to or from `no_floor` is allowed,
-with no accept/reject guard — the gate steps on the same call that also
-writes the far-active/dt floors through their existing (ramped / stepped)
-setters, so a round trip through `no_floor` always lands back on the
-target preset's exact values, never on a half-applied mix. Construction-time
-`no_floor` (`aec_config_from_preset()` / `AecConfig.from_preset()`) and
-runtime retargeting are both symmetric between the two languages as of
-2026-10-20.
+cannot represent, so it STEPS immediately instead of ramping, as the DT floor
+does. Both C (`aec_set_preset()` / `aec_res_set_preset()`) and Python
+(`AEC.set_preset()`) allow switching to or from `no_floor` with no
+accept/reject guard: the gate steps on the same call that writes the
+far-active and dt floors, so a round trip through `no_floor` always lands on
+the target preset's exact values. Construction-time `no_floor`
+(`aec_config_from_preset()` / `AecConfig.from_preset()`) and runtime
+retargeting behave the same in both languages.
 
 ```c
 int aec_set_preset(Aec* a, AecPreset preset, float ramp_ms);   /* aec.h */
@@ -231,7 +154,7 @@ A/B guidance → [docs/c_user_manual_zh_TW.md §7.1](docs/c_user_manual_zh_TW.md
 | | |
 |---|---|
 | Static pool | Backend、grid、filter 長度與功能開關都會影響大小；部署時以 `aec_get_mem_size()` 查詢，不使用文件中的固定常數 |
-| Compute / frame | 4 × 256-FFT + Kalman update (129 bins × 7 partitions) |
+| Compute / frame | Kalman update over 129 bins × 7 partitions |
 | FFT                                | NE10 ARM-NEON FFT (float32) — ~float32 precision vs numpy `np.fft` |
 
 The static pool path is byte-equal to the malloc path (`test_static_aec`); full
@@ -241,19 +164,19 @@ per-region breakdown → [c_impl/STATIC_MEMORY.md](c_impl/STATIC_MEMORY.md).
 
 | Limitation | Detail |
 |---|---|
-| Supported SR              | 8 / 16 / 48 kHz whitelisted no-padding grids; all four (8k 256/128, 16k 256/128, 16k 512/256, 48k 1024/512) are covered by the C/Python timing-parity gate. Product validation targets 16 / 48 kHz: AECMOS is only meaningful at 16 kHz, and 8 kHz is a legacy standalone/mono grid that retimes carry only when they are shown to be safe there. Other rates, including 32 kHz / 44.1 kHz, need external resampling. |
+| Supported SR              | 8 / 16 / 48 kHz whitelisted no-padding grids; all four (8k 256/128, 16k 256/128, 16k 512/256, 48k 1024/512) are covered by the C/Python timing-parity gate. Product validation targets 16 / 48 kHz: AECMOS is only meaningful at 16 kHz, and 8 kHz is a legacy standalone grid. Other rates, including 32 kHz / 44.1 kHz, need external resampling. |
 | Channel count             | mono only — no mic array / stereo reference |
 | Echo nonlinearity         | linear filter + RES; no dedicated nonlinear model. High speaker distortion produces residual harmonic leakage |
 | Delay direction           | positive only (mic lags ref). Negative-delay scenarios must be aligned upstream |
 | Stationary far + weak NE  | linear AEC may absorb very low-energy NE syllables into the echo path. Stationary-DT hangover mitigates but cannot fully restore worst frames |
-| DT-from-frame-0           | NE present from sample 0 prevents the filter from ever converging — see [docs/aec_methods.md 附錄 E](docs/aec_methods.md#附錄-e-dt-from-frame-0-限制) |
-| Echo-path > filter length | echo tail beyond `filter_length` (default 52 ms worth of samples) is not modelled. Larger rooms need a longer filter (cost: memory + compute). C-API only — there is no CLI flag for it |
+| DT-from-frame-0           | NE present from sample 0 prevents the filter from ever converging |
+| Echo-path > filter length | echo tail beyond `filter_length` (default 52 ms worth of samples) is not modelled. Larger rooms need a longer filter (cost: memory + compute). C: set `AecConfig.filter_length` (no `aec_wav` flag); Python CLI: `--filter <samples>` |
 | Mid-stream SR/filter change | not supported. `filter_length` is fixed at construction; SR change requires destroy + re-create |
 | Mic/ref clock drift       | sustained sample-rate drift between mic and ref tanks ERLE (filter cannot track) |
 
 ### Common problems & adjustments
 
-Both Python (`aec.py`) and C (`c_impl`'s config-keyed `aec_wav`) use the same algorithm; the
+Both Python (`aec.py`) and C (`c_impl`'s `aec_wav`) use the same algorithm; the
 adjustments below apply to both unless noted. CLI flag examples shown for
 C; equivalent Python flags differ only in syntax (`--mode pbfdkf` etc.).
 
@@ -263,10 +186,10 @@ C; equivalent Python flags differ only in syntax (`--mode pbfdkf` etc.).
 | **NE clipped during double-talk** | Lower preset → `--preset mild` (−20 dB floor, near-priority: keeps more near-end at the cost of more echo leak). Don't tweak individual RES knobs — preset values are co-tuned. |
 | **Slow startup / first-second echo** | Filter convergence needs ≥ 0.5 s of meaningful far energy. Normal adaptive behavior. Consider muting output during application warm-up (e.g. play a "connecting…" cue). |
 | **Echo spikes when device moves** | Echo path changes → EPC fires → ~200 ms re-convergence with brief leak. Usually self-recovers. For frequent movement, increase filter length. |
-| **Output sounds muffled / pumping in NE-only** | Comfort noise mismatch. Try `--cng` (both C and Python; Python uses `--no-cng` to disable) to shape the noise floor; do NOT stack a second CNG layer downstream. |
+| **Output sounds muffled / pumping in NE-only** | Comfort noise mismatch. CNG is on by default in C (`--no-cng` disables) and with any Python preset (`--cng` / `--no-cng` override); check it is enabled, and do NOT stack a second CNG layer downstream. |
 | **First file sounds OK but second file glitches in batch processing** | Missed `aec_reset` between files. DT / EPC / convergence state accumulates. Reset before each independent stream. |
 | **Linear-AEC residual sounds wrong (separate filter from RES)** | `"$BIN"/aec_wav mic ref linear_only.wav --no-res` after resolving `BIN="$(make -s print-bin-dir)"` in `c_impl/` (or use the Python `--no-res` equivalent). This isolates filter-side issues from RES-side issues. |
-| **Per-frame state inspection** | C: `--debug-level 2 --debug-log /tmp/aec.log`, then `grep PBFDKF /tmp/aec.log`. Python: `python3 aec.py mic ref out --diag`. |
+| **Per-frame state inspection** | C: `--debug-trace trace.csv` (one CSV row per hop: `usable_linear`, `fullband_erle`, `r2_mean`, `gain_mean`, …). Python: `python3 aec.py mic ref out --diag`. |
 | **Detect mic/ref drift or wrong delay** | Run with `--no-delay-est`, supply pre-aligned files, compare output vs the online-delay-est version. Large divergence → drift, or a delay beyond the acquirable ceiling (1216 / 608 / 608 ms at 8 / 16 / 48 kHz — compile-time, not raised by `max_delay_ms`; see the C manual §3). |
 | **Build mismatch between Python and C output** | Verify C built with `-ffp-contract=off` (mandatory) and same preset / `--cng` setting. Output WAV defaults to fp32 PCM in C; `AEC_OUT_FLOAT=0` for 16-bit PCM. |
 
@@ -277,7 +200,7 @@ C; equivalent Python flags differ only in syntax (`--mode pbfdkf` etc.).
 ```
    mic (near-end)                    ref (far-end)
         │                                  │
-        ▼                                  │   (ref-path HPF OFF since v3.19)
+        ▼                                  │
    ┌──────────┐                            ▼
    │  HPF     │   (80 Hz, mic only)   ┌──────────────┐
    └────┬─────┘                       │  Saturation  │   (soft-clip ref)
@@ -285,7 +208,7 @@ C; equivalent Python flags differ only in syntax (`--mode pbfdkf` etc.).
         │                                  ▼
         │                             ┌──────────────┐
         │                             │  Delay est.  │   (online EchoPathDelay-
-        │                             │  + ring buf  │    Estimator, periodic)
+        │                             │  + ring buf  │    Estimator)
         │                             └────┬─────────┘
         └────────────┬────────────────────┘
                      ▼
@@ -311,11 +234,9 @@ C; equivalent Python flags differ only in syntax (`--mode pbfdkf` etc.).
                 clean output
 ```
 
-The v3.21 pipeline retired the legacy 9-stage `ResFilter`; the post-filter is
-now `AEC._aec3_post` driving the AEC3-aligned chain (`modules/state`,
-`modules/residual`, `modules/render`, `modules/delay`). Algorithm details →
-[docs/aec_methods.md](docs/aec_methods.md). Historical PBFDKF/shadow parameter
-tables are not current default contracts.
+The post-filter is `AEC._aec3_post`, which drives the AEC3-aligned chain
+(`modules/state`, `modules/residual`, `modules/render`, `modules/delay`).
+Algorithm details → [docs/aec_methods.md](docs/aec_methods.md).
 
 ### Future direction — NN post-filter after the linear AEC
 
@@ -359,11 +280,7 @@ each `process()` call `aec.get_formed_output()` returns the same value
 
 This reads back a value the post chain already computed for its own gate — it is **not** a
 lighter path that skips that chain. `AecConfig` raises `ValueError` at construction if
-`return_formed_output` is set while both `enable_res` and `return_res_context` are false. The
-standalone FORM-only selector that configuration once ran had no `AecState` behind it, so the
-capture fallback's usable-linear verdict stayed at its constructed `False` for the whole stream
-and the seam silently diverged from the one the board ships; it was deleted rather than kept as a
-second contract.
+`return_formed_output` is set while both `enable_res` and `return_res_context` are false.
 
 Note this is the *selected and crossfaded* linear output, not the raw main-filter output — and in
 context-only mode (`enable_res=False`, `return_res_context=True`) the selection can be the capture
@@ -400,7 +317,7 @@ deterministic fallback. NN-integration contract →
 |---|---|---|
 | Python (`python/aec.py`) | `--diag` on the CLI | per-second console line: ERLE / gain mean / shadow-advantage / DT indicator. For per-frame internal state, instantiate `AEC` programmatically and read `aec._diag` after each `aec.process(...)` call. |
 | Python (`python/run_one_case.py`) | always — generates the diagnostic PNG | mic / ref / out waveforms + spectrograms + per-frame ERLE |
-| C (`c_impl/bin/<backend>-<config-hash>/aec_wav`) | `--debug-level {0..3}`, optional `--debug-log <path>` | grep-friendly per-frame stderr (or file) lines: `[AEC][t=…s][f=…][PBFDKF] mu_mean=… P_mean=…`. Release builds (`-DNDEBUG`) strip log strings entirely. |
+| C (`c_impl/bin/<backend>-<config-hash>/aec_wav`) | `--debug-trace <path>`, `--debug` | `--debug-trace`: one CSV row per hop (columns in `c_impl/include/aec_debug.h`); `--debug`: one status line per second |
 
 ---
 
@@ -425,7 +342,7 @@ python3 aec.py mic.wav ref.wav out.wav --mode pbfdkf --preset balanced --enable-
 python3 aec.py mic.wav ref.wav out.wav --mode pbfdkf --preset balanced --enable-res --diag
 
 # Single case + diagnostic plot (mic/ref/out + spectrograms + ERLE-over-time PNG)
-python3 ../python/run_one_case.py mic.wav ref.wav out.wav --preset balanced
+python3 run_one_case.py mic.wav ref.wav out.wav --preset balanced
 ```
 
 ### C
@@ -437,7 +354,7 @@ BIN="$(make -s print-bin-dir)"
 
 "$BIN"/aec_wav mic.wav ref.wav out.wav                  # BALANCED preset
 "$BIN"/aec_wav mic.wav ref.wav out.wav --preset 2       # 0 mild | 1 balanced | 2 aggressive | 3 no_floor (names also accepted)
-"$BIN"/aec_wav mic.wav ref.wav out.wav --cng            # enable CNG (default off)
+"$BIN"/aec_wav mic.wav ref.wav out.wav --no-cng         # disable CNG (default on)
 "$BIN"/aec_wav mic.wav ref.wav out.wav --no-res         # skip residual filter
 "$BIN"/aec_wav mic.wav ref.wav out.wav --debug-level 2  # per-frame log
 ```
@@ -478,10 +395,10 @@ Preset trade-off:
 | Preset | floor | Echo suppression | NE preservation | Use |
 |---|---|---|---|---|
 | `mild`     | −20 dB | light  | best (near-priority) | NE 過度被壓時、demo / 試聽 |
-| `balanced` ★ | −28 dB | medium | good (all ship bars) | general / production default |
+| `balanced` ★ | −28 dB | medium | good | general / production default |
 | `aggressive` | −38 dB | strong | minor loss (echo-priority) | hands-free, speakerphone, high echo |
 
-Full parameter reference → [docs/aec_methods.md §6 (Configuration)](docs/aec_methods.md).
+Full parameter reference → [docs/aec_methods.md §1 (Tunable parameters)](docs/aec_methods.md).
 
 ---
 
@@ -489,11 +406,10 @@ Full parameter reference → [docs/aec_methods.md §6 (Configuration)](docs/aec_
 
 ```bash
 # 1) Render Python AEC outputs (BALANCED preset, fl=52 ms, CNG on)
-source .venv/bin/activate
 python3 python/eval_aec_challenge.py wav/aec_challenge_blind/ \
     --preset balanced --filter 832 --cng -o out_python/
 
-# 2) Score with AECMOS (needs speechmos + onnxruntime ≤1.16.3 + numpy<2)
+# 2) Score with AECMOS (needs onnxruntime, librosa and soundfile)
 python3 python/bench_aecmos.py out_python/ results/
 
 # Compare against a saved baseline scores.json
@@ -513,30 +429,39 @@ make -C c_impl test-rate-structural test-process-context test-avg-reverb-slots
 
 ```
 AEC/
-├── README.md                    # this file
+├── README.md
+├── CHANGELOG.md
 ├── python/
-│   ├── aec.py                       # algorithm + CLI (single-case process)
+│   ├── aec.py                       # public re-exports + CLI entry point
+│   ├── modules/                     # algorithm (config, orchestrator, delay/, state/, residual/, ...)
 │   ├── run_one_case.py              # single-case render + diagnostic plot (PNG)
 │   ├── eval_aec_challenge.py        # render outputs on the AEC Challenge dataset
 │   ├── bench_aecmos.py              # AECMOS scoring of rendered outputs
-│   ├── eval_manifest90.py            # fixed partial blind benchmark
-│   └── tests/                        # Python regression tests
+│   ├── eval_manifest90.py           # fixed partial blind benchmark
+│   ├── preset_arg.py                # shared --preset parser
+│   ├── diag/                        # golden and timing-inventory generators
+│   └── tests/                       # Python regression tests
 ├── c_impl/                          # C implementation
-│   ├── README.md                    # short landing → docs/c_user_manual_zh_TW.md
+│   ├── README.md                    # build, FP policy, streaming, regression gates
+│   ├── STATIC_MEMORY.md             # caller-owned pool contract
 │   ├── include/                     # public headers
 │   ├── src/                         # sources
-│   ├── example/
-│   │   ├── aec_wav.c                # CLI entry point
-│   │   └── wav_io.h
-│   ├── test/modules/                # per-module test harnesses (dev tooling)
+│   ├── example/                     # aec_wav CLI, wav_io.h
+│   ├── test/                        # test harnesses
 │   └── Makefile
 ├── docs/
-│   ├── aec_methods.md                   # canonical algorithm spec (v3.21)
-│   ├── archive/                         # historical reports, presentations, and retired parameter guides
-│   ├── development_guide.md              # contributor invariants and validation commands
-│   ├── nn_integration_interface.md       # NN residual/NR/joint freq-domain seam
-│   └── c_user_manual_zh_TW.md            # canonical C user manual (API + CLI appendix)
-├── eval/                            # fixed benchmark manifest + builder
+│   ├── aec_methods.md                   # algorithm specification
+│   ├── c_user_manual_zh_TW.md           # C user manual (API + CLI appendix)
+│   ├── nn_integration_interface.md      # NN residual/NR/joint freq-domain seam
+│   ├── development_guide.md             # contributor invariants and validation commands
+│   ├── c_python_function_map.md         # C function <-> Python symbol map
+│   ├── timing_constant_inventory.md     # generated hop-authored constant inventory
+│   ├── delay_estimator_design_zh_TW.md  # delay estimator design
+│   ├── delay_estimator_productization_plan_zh_TW.md
+│   ├── html/                            # HTML pages (API, parameters, flow)
+│   └── archive/                         # archived documents
+├── model/                           # AECMOS ONNX model and wrapper
+├── eval/                            # fixed benchmark manifest, A/B tooling
 └── wav/                             # local/downloaded test audio (mostly ignored)
 ```
 

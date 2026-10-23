@@ -1,8 +1,7 @@
 # Delay Estimator（matched filter）設計說明
 
-2026-08-14 首版：整併本輪 root-cause 調查（FST 579 ms 誤鎖案例）、upstream 溯源、
-blind-test 語料延遲普查與 48 kHz 適用性稽核的結果。所有數字可由文中列出的
-工具/測試重現。
+機制、語意警示、`num_filters` 的取捨、blind-test 語料延遲分佈與 48 kHz 適用性。
+所有數字可由文中列出的工具/測試重現。
 
 相關文件：`c_user_manual_zh_TW.md` §延遲契約（使用者視角的上限表）、
 `nn_integration_interface.md`（509 ms 可靠上界的引用點）、
@@ -33,7 +32,7 @@ render/capture（per hop）
 | filter 數 `num_filters` | 5 | — |
 | 幾何全 span | `(5−1)×384+512 = 2048 ds` | 512 ms |
 | **可靠上界**（reliable 需 `peak < FILTER_SIZE−10`） | 2037 ds | **509.25 ms** |
-| `get_max_filter_lag()` 公式值（histogram 配置用，overclaim 一個 shift） | 2432 ds | 608 ms |
+| `get_max_filter_lag()` 公式值（histogram 配置用，多算一個 shift） | 2432 ds | 608 ms |
 
 每個 sub-block，每個 filter 做一次 NLMS 更新與誤差量測；勝者 =
 `reliable` 且 `error_sum` 最小的 filter，`reliable ⟺ peak 在窗內邊界外
@@ -41,7 +40,7 @@ render/capture（per hop）
 勝者的 lag 丟進 aggregator 的 250-estimate histogram；同一 bin 累積
 超過 `converged=20` 票即 latch `REFINED`（confidence 1.0）。
 
-## 2. 語意警示（本輪 root-cause 的核心教訓）
+## 2. 語意警示
 
 1. **confidence 量的是「一致性」，不是「匹配品質」**。`error_sum` 在
    `MatchedFilter.update` 內就被丟棄，不進 aggregator。一個持續出現的
@@ -56,104 +55,30 @@ render/capture（per hop）
    每 ~500 ms 的 soft reset 只清 filter 不清 histogram、orchestrator
    Path B 需要估計值變動 >32 samples 才動作。錯誤鎖定實務上只有
    `aec_reset()` 能清，而重置後幾何限制不變、會鎖回同一個錯誤值。
-4. **先鎖對、再被 pre-echo 誤鎖搶走**（2026-08-17 實測）。這是第 2 點的
-   反面：延遲在範圍內、估計器一開始**鎖對了**，卻在十幾個 hop 後改口。
-   最小重現（白噪遠端、16 kHz、fft 512／hop 256、真 bulk delay 6400
-   樣本）：hop 32 鎖定 6336（正確，64 樣本網格），hop 49 改鎖
-   **4800 = 6400 − 1600**，正好早 100 ms，即 pre-echo 誤歸因的簽名；
-   之後 450 個 hop 一直回報 4800。4ch core 同一場景同樣重現
-   （hop 34 → 6336，hop 50 → 4800）。
-   **關鍵性質：錯值是持續的**，所以「連續 K 次確認」這類閘門完全擋不住
-   ——每一個確認窗看到的都是同一個自洽的錯答案。
-   能分辨的判別器是線性 filter 自己的健康度：誤鎖當下 PBFDKF 在既有
-   對齊上仍在消除回音，而**真正的回音路徑變化會先讓消除能力崩掉**。
-   這個現象一度被當成「需要在下游擋住」的目標，設計了一版 Path B 延遲
-   變更保護原型（新候選比現行延遲更早、且線性 filter 仍在消除回音時
-   暫留一個有界窗再採用）。
+4. **回報的是 dominant peak**。aggregator 用 highest-peak 直方圖判定品質，
+   production 回報的延遲就是這個 dominant 候選；pre-echo 候選只供 AEC3
+   對照與診斷，不決定對齊位置（若回報 pre-echo 候選，錯值會天生自洽、
+   confidence 天生是 1.0，任何「連續 K 次確認」閘門都擋不住）。由
+   `test_delay_dominant_selection`（Python 與 C）釘住。
+5. **dominant-peak 近似平手時，C 與 Python 可能落在不同路徑。** 例如舊反射與
+   新路徑增益相等的 multipath 場景，aggregator 的投票幾乎正好平手；兩個
+   port 的 tie-break 規則相同（bin index 最小者勝，bin-to-lag 映射方向一致），
+   落點由各自測試雜訊實現的具體樣本決定，不是 port 之間的缺口。
 
-   > **⚠ 已由根因修復取代（2026-08-21）。** 上面的分析與量測都成立，但當時
-   > 把它當成「需要在下游擋住」的現象，實際上它是**選擇接縫本身的缺陷**：
-   > aggregator 用 highest-peak 直方圖判定品質、卻回傳 pre-echo 候選，所以
-   > 那個錯值天生自洽、confidence 天生是 1.0——這也正是「連續 K 次確認擋
-   > 不住」的原因。修復是讓 production 只回報 dominant peak（pre-echo 仍
-   > 保留供 AEC3 對照與診斷），見 `test_delay_dominant_selection`。
-
-   > **下游保護原型已從本 repo 移除（2026-10-19）。** 上一段提到的 Path B
-   > 延遲變更暫留原型曾在本 repo 的 Python／C 兩端實作（語意相同，預設
-   > OFF，關閉時 byte-exact）並在 n=800 案例的經驗反事實上量過：擋下 0 個
-   > 真實誤鎖、
-   > 卻新增 3 個假陽性（正常的延遲變更被多等一個窗）。淨負，依裁定移除；
-   > 移除前的完整量測、暫留規則三件事與各實測表見 CHANGELOG
-   > `### Removed`（2026-10-19）條目，本節不再重複維護那份已移除機制的
-   > 文件。**範圍僅本 repo**：`Audio_ALG/pipelines/4ch_aec_bf_nr_res` 的
-   > `FourAecNrResConfig` 自己有一組同名、同設計的延遲變更保護欄位
-   > （獨立重實作，不讀本 repo 的 `AecConfig`），本次移除未觸及，該
-   > pipeline 自己的 `tests/test_delay_parity.py` 窗長掃描列仍在——是否
-   > 連動移除屬另一個待裁定的範圍。下面這一條是從它的迴歸測試裡**附帶**
-   > 發現、與機制本身無關、但值得保留的 aggregator 根因鏈。
-
-   **衍生發現（AMEND_35/37，2026-10-18）：aggregator 在近似 50/50 的
-   dominant-peak tie 上，C／Python 兩個 port 對同一個 multipath 場景給出
-   不同的鎖定結果，根因是隨機實現差異，不是 tie-break 邏輯不同。**
-   上面提到的保護原型的迴歸測試（已與機制一起移除）在 16 kHz／fft 512／
-   hop 256、`enable_res=0`／`return_res_context=1` 的設定下有一列
-   multipath／新增路徑場景（2400 hop 觀察窗，新路徑於第 250 個 hop
-   加入）：舊反射留在 2400 樣本、新路徑在 1600 樣本（更早）以增益
-   0.5 加入；當舊／新兩條路徑增益相等（g_old=0.5）時，aggregator 的
-   dominant-peak 投票幾乎正好是平手（鎖定類別以 ±128 樣本為容忍帶）。
-   全速延遲估計改為預設之後
-   （AMEND_35，2026-10-18，`delay_est_period_s` 由 0.5 s 節流改為 0.0 ＝
-   不節流），這一列在 C 端兩個已測種子上一次落在舊路徑的鎖定類別、一次
-   落在新路徑；而 Python 參照場景（等價的 g_old=0.5 設定）據（已刪除的）
-   原始程式碼註解所述，在 20 個種子的掃描中**每個種子都落在新路徑**，
-   沒有任何實現敏感性——**此 20-seed 掃描本身沒有留下可重現的腳本或測試
-   artifact（已查過，repo 內搜尋不到），只有這段文字敘述**，若此結論未來
-   要重新驗證，需要先重建這個掃描。根因鏈（四步排除，非假設）：
-   (1) 還原舊的 0.5 s 節流預設仍穩定落在新路徑（22/22），排除「只是還沒
-   收斂」；
-   (2) 還原舊節流但把觀察窗拉長到 6000 hop 仍落在新路徑，排除「再等久
-   一點就會變」；
-   (3) C 端 `delay_aec_accumulate_ex` 的內迴圈已用 `DA_BLOCK_SIZE=64`
-   分桶，與 `lag_aggregator.py` 的內部 block 節奏完全一致，排除「C／
-   Python 呼叫頻率對不上」；
-   (4) 翻轉 C 測試自己的 `far_noise()` 種子（32-bit xorshift，均勻分布
-   [-0.35, 0.35]，固定種子 `0x5EED1234`）、其餘條件不變，鎖定結果就從
-   舊路徑的類別換成新路徑的類別——證實這真的是一個平手，由那一次雜訊
-   實現的具體樣本決定，不是必然的偏向。
-   接著比對兩個 port 的 tie-break 規則本身：C 的 `sk_argmax_i32`／
-   `da_argmax_incremental_update`（`delay_aec.c`）與 Python
-   `lag_aggregator.py` 的 `np.argmax`-based `_HighestPeakAggregator`
-   用的是**同一條** tie-break 規則（bin index 最小者勝，且兩邊的
-   bin-to-lag 映射方向一致遞增）；pre-echo 直方圖（C 的 `da_pre_echo_*`
-   對 Python 的 `PreEchoLagAggregator`／`detect_pre_echo`）在兩邊都已
-   確認是惰性的——從未影響任一邊實際回報的主延遲，不可能是兩個 port
-   落點不同的來源。所以兩邊落點不同，**不是** tie-break 邏輯有差異，而是
-   C 測試自己的 `far_noise()`（xorshift、均勻分布）與 Python 場景的
-   `np.random.default_rng(7)`（Gaussian ×0.1）是兩個獨立種子、不同分布
-   的隨機實現，各自對同一個真正接近 50/50 的動態平手取樣——在 g_old=0.5
-   這一列上落點不同，正是兩個這樣的獨立實現該有的行為，不是 port 之間的
-   缺口。這個發現與上面移除的保護原型本身無關（是在比較「有無保護原型」
-   的過程中附帶發現的 aggregator 性質），移除原型不影響這個發現的有效性；
-   若未來要動 `delay_est_period_s` 的預設或 aggregator 的 tie-break 規則，
-   這條平手案例與其根因鏈仍是需要重新驗證的基準。
-
-## 3. `num_filters=5` 的出處（溯源結論）
+## 3. `num_filters=5` 的取捨
 
 - upstream 參考實作中它是 `EchoCanceller3Config::Delay::num_filters` 的
   **純靜態預設值**（validator 只防呆 0..5000），沒有任何依延遲需求自動
-  調整的機制；至少 2019-10 → 2026-05 六年未變。
-- 本 repo 於 2026-05-17（`77af915`）逐字沿用，之後 C port（`c5c09c4`）
-  再逐字鏡像 —— **未曾獨立 A/B 驗證**（對照：`down_sampling_factor` 的
-  ds8 選項曾以 60-case AECMOS 實測並因遠端單講退化而移除，是唯一被
-  驗證過的幾何常數）。
+  調整的機制。
+- 本實作逐字沿用，C port 逐字鏡像，**未獨立 A/B 驗證**。
 - 與我們的 hop/filter_length 沒有推導關係：matched filter 活在自己的
   4 ms sub-block 網格；`filter_length`（16 kHz 時 832 taps = 52 ms）管的
   是「對齊之後」線性濾波器能模的殘差+回聲尾長。系統不變量是
   **鎖定後殘差恆正且 <10 ms**（64-sample 量化 + headroom 恆提早 32–92
   samples），與 filter 數無關。
-- 兩處引入當日即與 upstream 分岔、無記錄理由的常數：
+- 兩個常數與 upstream 不同、沒有記錄理由：
   `matching_filter_threshold 0.3`（upstream 0.2）、`smoothing_slow 0.1`
-  （upstream 0.7）。維持現狀；任何變更須走 800-case 隔離驗證。
+  （upstream 0.7）。任何變更須走 800-case 隔離驗證。
 
 ## 4. 超出範圍的延遲：系統層責任（設計立場）
 
@@ -176,8 +101,7 @@ upstream 對 >512 ms 延遲的官方解是**外部 delay hint**（OS 回報音�
 C 端目前每 filter、每 64-sample block 的 dot／NLMS MAC 上限為
 `512 + 16×512 + 16×512 = 16,896` MAC：一次初始 render 能量、
 16 次 dot，以及全部通過 excitation／saturation gate 時的 16 次 NLMS 更新。
-後續 render 能量用原順序的 sliding recurrence；沒有消費者的
-accumulated-error prefix 不再計算。下表以 250 block/s 計算 bank 上限，
+後續 render 能量用原順序的 sliding recurrence。下表以 250 block/s 計算 bank 上限，
 未含 sliding recurrence、error sum、decimator、peak scan、histogram 與
 scalar bookkeeping；不是 CPU 實測。
 穩態實際分析比例由現有 duty state machine 與 watchdog 決定，不能固定除以 10。
@@ -196,43 +120,37 @@ scratch（只有 48 kHz 才配置）。
 | estimator OFF（`FIXED` / `EXTERNAL_ALIGNED`） | — | 0 | 0 B |
 
 NEON 路徑把當次 tap update 與下一個 sample 的 dot 合併走訪，直接使用
-剛更新的 tap，減少 coefficient reload。四組 dot accumulator、FMA、
-reduction tree、每個 gate 與更新時序維持原樣；MAC 數、filter 數、duty
-設定和 pool layout 都不變。首筆 dot、末筆 update 及無更新分支各自處理；
+剛更新的 tap，減少 coefficient reload。首筆 dot、末筆 update 及無更新分支各自處理；
 scalar 路徑保留原演算。`make test-delay-kernels` 對照獨立的分開走訪 reference，
 檢查所有 taps、error sum，以及 first-only／last-only／no-update 等 gate。
 
 縮 n 不動 window/shift/threshold（每個窗的統計行為與 upstream 完全一
 致），是偏離最小的縮法。
 
-**Config 通路（2026-08-14 已開通）**：Python `AecConfig.delay_num_filters`
+**Config 通路**：Python `AecConfig.delay_num_filters`
 （1..5，`__post_init__` fail-fast 驗證）→ orchestrator → LegacyDelayShim
 → `EchoPathDelayEstimator(num_filters=…)`；C `AecConfig::delay_num_filters`
 （`aec_validate_config` 拒絕超界）→ `delay_aec_get_mem_size()` /
-`delay_aec_init()` → runtime `DaMatchedFilter::num_filters`。預設 5 =
-幾何完全不變（byte-equal，測試釘住）。
+`delay_aec_init()` → runtime `DaMatchedFilter::num_filters`。
 
-**RAM 也隨 n 縮（2026-08-16，產品化計畫 step 2 起）**。原本刻意的取捨
-「算力隨 n 縮、RAM 不縮」已撤回：`DelayAec` 改成 metadata + pool
-pointers，bank／accumulated error／render ring／兩個 lag histogram 全部
-由 `aec_get_mem_size(cfg)` 依 resolved `(sample_rate, hop, n)` 從呼叫端
-記憶池切出，每少一組 filter 固定省 **5,728 B**（每個格點都一樣），
-n=1 相對 n=5 省 22,912 B。`DA_NUM_FILTERS`(=5) 現在只是驗證用的幾何上
-限，不再 size 任何東西。零 heap 不變；`n` 與格點一樣是 init-time
+**RAM 隨 n 縮**：`DelayAec` 是 metadata + pool pointers，bank／accumulated
+error／render ring／兩個 lag histogram 全部由 `aec_get_mem_size(cfg)` 依
+resolved `(sample_rate, hop, n)` 從呼叫端記憶池切出，每少一組 filter 固定省
+**5,728 B**（每個格點都一樣），n=1 相對 n=5 省 22,912 B。`DA_NUM_FILTERS`(=5)
+只是驗證用的幾何上限，不 size 任何東西。零 heap；`n` 與格點一樣是 init-time
 immutable（要改必須重新查大小並重新 init）。
 
-Histogram bins 沿用 `n*SHIFT + SIZE` 的 **overclaim** 公式（多帶一組
-filter 的餘裕），不是算術上最緊的 `(n-1)*SHIFT + SIZE`。這不是保守，
-是必要的：pre-echo histogram 的 bin 數決定 windowed local-max scan 走
-幾個 32-bin 視窗，用最緊公式時 n=2 只會掃 1 個視窗（bin 0..31），
-但該 bank 自己就能報到 bin 55——等於砍掉一半搜尋範圍。overclaim 公式
-在 n=1..5 都剛好涵蓋可達 bin，且被捨掉的視窗恆為全零（永遠贏不了
-scan），所以每個 n 的行為都與「陣列固定配到 n=5 上限」時完全一致。
+Histogram bins 用 `n*SHIFT + SIZE` 的公式（多帶一組 filter 的餘裕），不是算術上最緊的
+`(n-1)*SHIFT + SIZE`。這是必要的：pre-echo histogram 的 bin 數決定 windowed
+local-max scan 走幾個 32-bin 視窗，用最緊公式時 n=2 只會掃 1 個視窗（bin 0..31），
+但該 bank 自己就能報到 bin 55——等於砍掉一半搜尋範圍。此公式在 n=1..5 都剛好涵蓋
+可達 bin，且多出的視窗恆為全零（永遠贏不了 scan），所以每個 n 的行為都與
+「陣列固定配到 n=5 上限」時完全一致。
 
 使用場景：板端 fixed_delay 補償後 nf=1~2；bench/dataset 一律維持 5
-（發佈分數的量測幾何）。板端最終選值待 bring-up 殘差 profile 量測。
+（發佈分數的量測幾何）。
 
-### 5.1 實務延遲量級參考（按裝置/傳輸路徑，2026-08-14 討論定調）
+### 5.1 實務延遲量級參考（按裝置/傳輸路徑）
 
 各部署形態的 bulk delay 典型量級（經驗值，供選 mode/n 的第一輪判斷；
 正式選值仍以 bring-up 實測公式為準——見
@@ -247,19 +165,19 @@ jitter + drift + safety margin < bank reliable reach」）：
 | 藍牙輸出 | 150–500 ms+ | 變動、重連會跳 | `MATCHED` n=4~5 |
 | challenge 語料（未知裝置錄音） | 實測見 §6：2021 全集 max 923 ms（~5% 超出 509 ms）；2023@48k max 674 ms（~1% 超界） | 無系統 hint，只能自己找 | `MATCHED` n=5（bench/dataset 固定幾何） |
 
-定調原則（同日決策，設計立場詳見 §4）：**系統延遲是系統層的知識**——firmware
+原則（設計立場詳見 §4）：**系統延遲是系統層的知識**——firmware
 buffer 大小本來就已知，或 bring-up 用 loopback 量一次——用
 `fixed_delay_samples` 補掉（estimator 整個不建、搜尋算力=0），演算法
 只留小範圍追殘差/drift。這也是 upstream 的哲學：OS 以
 buffer-delay hint 回報延遲，matched filter 是沒有 hint 時的自救手段。
 延遲不可知的形態（藍牙類）才需要大 n 全程搜尋。
 
-## 6. Blind-test 語料延遲普查（2026-08-14 實測）
+## 6. Blind-test 語料延遲普查
 
 工具：`wav/measure_blind_delay.py`（NCC + 裁齊長度避開 zero-pad 假峰 +
-dominance 判準 + undecidable 閘；方法先以 579.44 ms 已知案例與合成
+dominance 判準 + undecidable 閘；方法以 579.44 ms 已知案例與合成
 延遲自驗）。注意：GCC-PHAT 在 mic/lpb 檔長不一致時會把長度差放大成
-假峰（曾實測 600.00 ms 假峰 = 檔長差），故本工具用 plain NCC。
+假峰（例如 600.00 ms 假峰 = 檔長差），故本工具用 plain NCC。
 
 **Interspeech 2021 blind set（16 kHz，287 對，全集）**：
 
@@ -287,7 +205,7 @@ dominance 判準 + undecidable 閘；方法先以 579.44 ms 已知案例與合�
   遠小於 2021 的 5%；分佈整體偏高於 2021（p50 79–168 ms vs 48 ms）但
   99% 落在現行 509 ms 覆蓋內。
 
-## 7. 48 kHz 適用性（2026-08-14 稽核結論）
+## 7. 48 kHz 適用性
 
 **可以直接餵 48 kHz wav**：`process_wav_files` 自動從檔頭讀取取樣率並
 解析 grid（48 k → frame 1024 / hop 512 / filter_length 3072 = 64 ms，
@@ -295,27 +213,25 @@ dominance 判準 + undecidable 閘；方法先以 579.44 ms 已知案例與合�
 （同一合成 300 ms 延遲，48 k 與 16 k 鎖定值差 **0.000 ms**；ERLE 正常
 上升；無 NaN）。覆蓋上限以 ms 計與 16 k 相同（509/608 ms）。
 
-**真實 48 kHz clip 抽驗（2026-08-14，ICASSP-2023 集 10 clips 跨
-0–674 ms delay 頻段）**：9/9 在覆蓋內的 clip 全部鎖對 delay（誤差
-+2.8～+5.7 ms、恆提早=headroom 契約）；消除量實測 4–13 dB（far-active
-能量域；三個 instant-ERLE 尾段平均偏低的 clip 經 far-active gating 重驗
-均為 10–12.8 dB 真實消除——instant-ERLE 的靜音段稀釋是量測 artifact，
-不是引擎問題）；674 ms 超界 clip 為**誠實未鎖定**（未誤鎖）。→ 48 kHz
-以現行參數**放行**用於 dataset 生成與評測。
+**真實 48 kHz clip 抽驗（ICASSP-2023 集 10 clips 跨 0–674 ms delay 頻段）**：
+9/9 在覆蓋內的 clip 全部鎖對 delay（誤差 +2.8～+5.7 ms、恆提早=headroom 契約）；
+消除量實測 4–13 dB（far-active 能量域；三個 instant-ERLE 尾段平均偏低的 clip
+經 far-active gating 重驗均為 10–12.8 dB 真實消除——instant-ERLE 的靜音段稀釋是
+量測 artifact，不是引擎問題）；674 ms 超界 clip 為**誠實未鎖定**（未誤鎖）。
+→ 48 kHz 以現行參數可用於 dataset 生成與評測。
 
 注意事項：
 
-1. **調校未驗證是官方已記載限制**（CHANGELOG 4.0.0rc Known
-   limitations）：48 kHz 此前只有結構性驗證；上述抽驗是首批原生 48 kHz
-   素材的消除量數據點（4–13 dB，行為正常），但仍非系統性 AECMOS 調校
-   驗證。dataset 生成可直接跑，正式 release 前建議補 AECMOS 批次分數。
-2. **驅動腳本陷阱**：`eval_aec_challenge.py --filter` 預設 2048、
-   `run_one_case.py` 預設 832，皆為 16 kHz-authored 絕對 sample 數；
-   48 kHz 須顯式覆寫（3072）或走 config 自動解析路徑。
-   `run_one_case.py` 另須 `--sample-rate 48000`（不符會 fail-fast 報錯）。
-3. C↔Python 的 48 kHz parity 差異（−23.8 dB、corr 0.99998，f32/f64
-   Kalman 捨入放大所致）只影響跨語言 parity 測試與 C 部署驗證，
+1. **調校未驗證是官方已記載限制**（CHANGELOG `[4.0.0]` Known
+   limitations）：48 kHz 只有結構性驗證與上述抽驗，沒有系統性 AECMOS 調校驗證。
+2. **驅動腳本預設**：`eval_aec_challenge.py --filter` 預設 `-1`（自動：
+   <44.1 kHz 為 52 ms、≥44.1 kHz 為 64 ms）；`run_one_case.py` 與
+   `eval_manifest90.py` 的 `--filter` 預設 832（16 kHz-authored 的絕對 sample 數），
+   48 kHz 須顯式覆寫為 3072，`run_one_case.py` 另須 `--sample-rate 48000`
+   （不符會 fail-fast 報錯）。
+3. C↔Python 的 48 kHz 差異（f32/f64 Kalman 捨入放大所致，容差見
+   `c_impl/test/parity_aec_e2e.c`）只影響跨語言 parity 測試與 C 部署驗證，
    Python-only 的 dataset 生成不受影響。
 4. 未 retime 常數（`_simple_mu_ratio` 四常數、`erle_coh_gate_alpha`）為
-   全 grid 共通的已記錄決策/待辦；48 k/1024 的 hop（10.667 ms）最接近
-   原 authoring grid，漂移幅度（+4~7%）反而是各 grid 中最小。
+   全 grid 共通；48 k/1024 的 hop（10.667 ms）最接近原 authoring grid，
+   漂移幅度（+4~7%）是各 grid 中最小。

@@ -1,32 +1,18 @@
-/* stationarity_estimator.c — C port of
- * python/modules/state/stationarity_estimator.py.
- *
- * All per-bin math is float32. Each op is a separate float32 rounding;
- * -ffp-contract=off keeps the compiler from fusing them. The scalar
- * pre-compute of alpha / 1.0/avg_init runs directly in float32.
- */
+/* stationarity_estimator.c -- see stationarity_estimator.h. Float32 per-bin math. */
 #include "stationarity_estimator.h"
 
-#include "aec_scale.h"        /* aec_blocks_to_hops */
-#include "utility/simd_aec.h"  /* sk_noise_spectrum_update_f32 (kernel 23) */
+#include "aec_scale.h"
+#include "utility/simd_aec.h"
 
-#include <limits.h>   /* INT_MAX */
+#include <limits.h>
 #include <math.h>
 #include <string.h>
 
-/* Bins per accumulator block in update_stationarity_flags' row-major walk.
- * Purely a working-set knob: every value produces identical output, so it is
- * chosen for stack cost and for coverage rather than for the last few
- * percent of speed. 128 keeps the frame at ~1 KiB (against the 4 KiB the
- * suppressor's own render scratch already puts on this hop's deepest path)
- * and, being under the smallest shipped bin count, guarantees the blocked
- * walk actually splits on every grid -- a whole-spectrum accumulator would
- * leave the base-offset arithmetic below unexercised at 129 bins. It costs
- * ~6% of the block's own runtime against a 256-bin accumulator at 129 bins,
- * against a ~4x saving over the column-major walk it replaces. */
+/* Bins per accumulator block in the row-major flag walk; a working-set knob that does not change
+ * the output. */
 #define STAT_ACC_BLOCK 128
 
-/* ── _NoiseSpectrum ───────────────────────────────────────────────────────── */
+/* NoiseSpectrum */
 
 static void noise_spectrum_init(NoiseSpectrum *n, int n_freqs,
                                 float min_noise_power, int avg_init_hops,
@@ -35,15 +21,14 @@ static void noise_spectrum_init(NoiseSpectrum *n, int n_freqs,
     int k;
     n->n_freqs = n_freqs;
     n->min_noise = min_noise_power;
-    n->avg_init = avg_init_hops > 1 ? avg_init_hops : 1; /* max(1, avg_init_hops) */
+    n->avg_init = avg_init_hops > 1 ? avg_init_hops : 1;
     n->init_phase = initial_phase_hops;
     n->alpha = alpha;
     n->alpha_init = alpha_init;
-    /* _tilt = (alpha_init - alpha) / max(1, init_phase) */
     n->tilt = (alpha_init - alpha) / (float)(initial_phase_hops > 1 ? initial_phase_hops : 1);
     n->noise = noise_storage;
     for (k = 0; k < n_freqs; ++k) {
-        n->noise[k] = min_noise_power; /* np.full(.., _min, f32) */
+        n->noise[k] = min_noise_power;
     }
     n->block_counter = 0;
 }
@@ -56,7 +41,7 @@ static void noise_spectrum_reset(NoiseSpectrum *n) {
     n->block_counter = 0;
 }
 
-/* _alpha_now (float32). */
+/* Smoothing weight for the current block. */
 static float noise_spectrum_alpha_now(const NoiseSpectrum *n) {
     if (n->block_counter > (n->init_phase + n->avg_init)) {
         return n->alpha;
@@ -66,33 +51,30 @@ static float noise_spectrum_alpha_now(const NoiseSpectrum *n) {
 
 static void noise_spectrum_update(NoiseSpectrum *n, const float *spectrum) {
     int k;
-    /* Cap only at INT_MAX: capping at a warmup boundary would freeze the
-     * tilt arithmetic there instead of entering its steady-state branch. */
+    /* The counter caps only at INT_MAX so the tilt arithmetic is never frozen at a warmup
+     * boundary. */
     if (n->block_counter < INT_MAX) n->block_counter += 1;
 
     if (n->block_counter <= n->avg_init) {
-        /* noise += (1.0/avg_init) * spectrum.astype(f32); scalar (1.0/avg_init)
-         * computed and applied directly in float32. */
+        /* Warmup: running mean of the first avg_init spectra. */
         float inv = 1.0f / (float)n->avg_init;
         for (k = 0; k < n->n_freqs; ++k) {
-            float tmp = inv * spectrum[k];          /* f32 mul */
-            n->noise[k] = n->noise[k] + tmp;        /* f32 add */
+            float tmp = inv * spectrum[k];
+            n->noise[k] = n->noise[k] + tmp;
         }
         return;
     }
 
     {
-        float alpha = noise_spectrum_alpha_now(n); /* float32-by-design */
+        float alpha = noise_spectrum_alpha_now(n);
         int   apply_mask10 = (n->block_counter > n->init_phase);
-        /* sk_noise_spectrum_update_f32: branchless NEON (compute-both +
-         * vbslq_f32 select) twin of the scalar per-bin update above --
-         * bit-exact by construction (utility/simd_aec.h kernel 23). */
+        /* Branchless SIMD twin of the scalar per-bin update. */
         sk_noise_spectrum_update_f32(n->noise, spectrum, alpha, apply_mask10,
                                      n->min_noise, n->n_freqs);
     }
 }
 
-/* ── StationarityEstimator ────────────────────────────────────────────────── */
+/* StationarityEstimator */
 
 void stationarity_estimator_init(StationarityEstimator *s,
                                  int n_freqs, int hop_samples, int sample_rate,
@@ -104,11 +86,7 @@ void stationarity_estimator_init(StationarityEstimator *s,
     s->n_freqs = n_freqs;
     s->window_hops = aec_blocks_to_hops(13, hop_samples, sample_rate);
     s->hangover_hops = aec_blocks_to_hops(12, hop_samples, sample_rate);
-    /* Was STAT_AVG_INIT_HOPS_DEFAULT/STAT_INITIAL_PHASE_HOPS_DEFAULT (frozen
-     * #defines, blocks_to_hops(20/500,160,16000)=8/200) and STAT_ALPHA/
-     * STAT_ALPHA_INIT (frozen per-4ms-block reference literals, 0.004f/0.04f) --
-     * all four passed straight through unlike window_hops/hangover_hops
-     * above. Rescaled live the same way for consistency. */
+    /* Noise-tracker constants are rescaled to the live grid like window_hops/hangover_hops. */
     noise_spectrum_init(&s->noise, n_freqs, STAT_MIN_NOISE_POWER_FLOAT,
                         aec_blocks_to_hops(20, hop_samples, sample_rate),
                         aec_blocks_to_hops(500, hop_samples, sample_rate),
@@ -148,13 +126,11 @@ void stationarity_estimator_update_noise_estimator(StationarityEstimator *s,
     noise_spectrum_update(&s->noise, render_psd);
 }
 
-/* _update_hangover */
 static void update_hangover(StationarityEstimator *s) {
     sk_stationarity_hangover_i32(s->stationarity_flags, s->hangovers,
                                   (int32_t)s->hangover_hops, s->n_freqs);
 }
 
-/* _smooth_per_freq */
 static void smooth_per_freq(StationarityEstimator *s) {
     sk_stationarity_smooth_u8(s->stationarity_flags, s->n_freqs);
 }
@@ -165,27 +141,14 @@ void stationarity_estimator_update_stationarity_flags(StationarityEstimator *s,
     int k, row;
     float *slot = &s->history[s->history_write * s->n_freqs];
 
-    /* self._history[write] = render_psd.astype(f32) */
+    /* Store the latest PSD in the history ring. */
     for (k = 0; k < s->n_freqs; ++k) slot[k] = render_psd[k];
     s->history_write = (s->history_write + 1) % s->window_hops;
     if (s->history_filled < s->window_hops) s->history_filled += 1;
 
-    /* acum_power = history[:filled].sum(axis=0) + rev   (sequential f32 sum
-     * over storage rows 0..filled-1, matching numpy sum(axis=0) for N<=window).
-     *
-     * Walked ROW-major over a block of per-bin accumulators rather than
-     * column-major per bin: every bin's own add sequence is unchanged
-     * (row 0, row 1, ... row filled-1, then rev, then the compare), and the
-     * only thing reordered is the interleaving of the INDEPENDENT per-bin
-     * chains, which no float rounding depends on -- bit-exact by
-     * construction. What it buys is contiguous reads: a column-major form
-     * strides every inner add by n_freqs, which neither the prefetcher nor the
-     * vectorizer can follow.
-     *
-     * `acc` is a fixed STAT_ACC_BLOCK-element block and the bins are
-     * processed one block at a time, so the stack cost is constant and no
-     * bound on n_freqs is assumed. See STAT_ACC_BLOCK for how the block size was
-     * chosen. */
+    /* acum_power = sum of the filled history rows + average_reverb. The bins are walked row-major
+     * over STAT_ACC_BLOCK-wide blocks, so each bin keeps its own add order and reads stay
+     * contiguous. */
     {
         float acc[STAT_ACC_BLOCK];
         int base;
@@ -193,23 +156,22 @@ void stationarity_estimator_update_stationarity_flags(StationarityEstimator *s,
             int m = s->n_freqs - base;
             if (m > STAT_ACC_BLOCK) m = STAT_ACC_BLOCK;
             for (k = 0; k < m; ++k) {
-                acc[k] = s->history[0 * s->n_freqs + base + k]; /* row 0 */
+                acc[k] = s->history[0 * s->n_freqs + base + k];
             }
             for (row = 1; row < s->history_filled; ++row) {
                 const float *hrow = s->history + (size_t)row * s->n_freqs + base;
                 for (k = 0; k < m; ++k) {
-                    acc[k] = acc[k] + hrow[k];      /* f32 add */
+                    acc[k] = acc[k] + hrow[k];
                 }
             }
-            /* + rev (zeros if average_reverb is NULL) */
+            /* Add the reverb (zeros if NULL). */
             if (average_reverb != NULL) {
                 const float *rev = average_reverb + base;
                 for (k = 0; k < m; ++k) {
-                    acc[k] = acc[k] + rev[k];       /* f32 add */
+                    acc[k] = acc[k] + rev[k];
                 }
             }
-            /* noise = window_hops * max(self.noise.noise, 1e-30)
-             * THR_RATIO * noise; stationary if acum < that. */
+            /* Stationary if acum < STAT_THR_RATIO * window_hops * max(noise, 1e-30). */
             sk_stationarity_flags_u8(s->stationarity_flags + base, acc,
                                       s->noise.noise + base, s->window_hops,
                                       STAT_THR_RATIO, m);
@@ -227,6 +189,6 @@ void stationarity_estimator_band_stationary_mask(const StationarityEstimator *s,
 
 int stationarity_estimator_is_block_stationary(const StationarityEstimator *s) {
     int count = sk_stationary_mask_u8(s->stationarity_flags, s->hangovers, NULL, s->n_freqs);
-    /* float(np.mean(mask)) > BLOCK_FRACTION; mean = count / n_freqs (float32-by-design) */
+    /* Fraction of stationary bands. */
     return ((float)count / (float)s->n_freqs) > STAT_BLOCK_FRACTION;
 }

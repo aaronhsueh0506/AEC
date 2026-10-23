@@ -1,4 +1,5 @@
-/* Render-activity, filter-convergence and double-talk detectors. */
+/* Render-activity, filter-convergence and double-talk detectors (float32).
+ * Python reference: modules/detectors.py. */
 #ifndef AEC_DETECTORS_H
 #define AEC_DETECTORS_H
 
@@ -14,12 +15,8 @@ typedef struct RenderActivity {
     float  env_var;
     int    active_prev;
     int    is_stationary;
-    /* render_activity_update() scratch, kept off the stack (a fixed
-     * `float blocks[1024]` local would overflow once the runtime hop can
-     * require more than 1024/PAIR_BLOCK=8 blocks, e.g. a higher-sample-rate
-     * build). Owned by caller; length >= ceil(n/8) for the `n` passed to
-     * render_activity_update (n is always the instance's hop_size at every call
-     * site). */
+    /* render_activity_update() scratch, caller-owned, length >= ceil(n/8) for the n passed to
+     * render_activity_update (the instance hop_size). */
     float* pairwise_scratch;
     int    pairwise_scratch_len;
     /* Retimed from the authored 10 ms-hop value in render_activity_init. */
@@ -33,12 +30,9 @@ typedef struct RenderActivityResult {
     int    warmup_active;
 } RenderActivityResult;
 
-/* pairwise_scratch/pairwise_scratch_len: caller-owned scratch for the
- * internal 8-wide pairwise-sum reduction (see render_activity_update);
- * length must be >= ceil(hop_size/8). */
-/* hop_size/sample_rate retime this detector's wall-clock constants off the
- * authored hop=160 @ 16000 (10 ms) grid. hop alone is not enough: hop=128 is
- * both 8 kHz (16.000 ms) and 16 kHz (8.000 ms). */
+/* pairwise_scratch/pairwise_scratch_len: caller-owned scratch for the 8-wide pairwise-sum
+ * reduction, length >= ceil(hop_size/8).
+ * hop_size/sample_rate retime the wall-clock constants authored for hop=160 @ 16 kHz. */
 void render_activity_init(RenderActivity* r, float* pairwise_scratch,
                            int pairwise_scratch_len,
                            int hop_size, int sample_rate);
@@ -52,8 +46,8 @@ typedef struct FilterConvergence {
     int    once_converged;
     int    conv_counter;
     float  divergence;
-    /* Retimed in filter_convergence_init. conv_counter's threshold
-     * (FC_CONV_FRAMES) is deliberately NOT here: it is an evidence count. */
+    /* Retimed in filter_convergence_init; FC_CONV_FRAMES is an evidence count and is not retimed.
+     * */
     float  div_alpha;
     float  div_alpha_c;   /* = 1.0f - div_alpha, cached at init */
     float  div_decay;

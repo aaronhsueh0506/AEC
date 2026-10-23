@@ -18,8 +18,7 @@
  *     etc.) between or after the two destroy calls — that is NOT
  *     guaranteed/tested here, only double-destroy-then-stop is.
  *
- * Build (standalone, from c_impl/ — mirrors test_config_validation.c's
- * documented recipe):
+ * Build (standalone, from c_impl/):
  *   make -C ../../audiolib/common lib
  *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=gnu99 -Iinclude -Iexample \
  *       -I../../audiolib/common/include -I../../audiolib/common \

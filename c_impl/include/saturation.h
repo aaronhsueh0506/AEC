@@ -1,11 +1,5 @@
-/* saturation.h — port of python/aec.py SaturationDetector.
- *
- * Detects clipping in a signal and returns a smoothed saturation level
- * in [0, 1] via an asymmetric EMA. Also offers a static soft_clip helper.
- *
- * Float32: state and accumulation run in `float`, matching sample I/O (the
- * reference Python ran fp64; drift accepted).
- */
+/* Clipping detector: smoothed saturation level in [0, 1] (asymmetric EMA) plus a soft_clip helper.
+ * State and accumulation are float32. Python reference: modules/preprocessing.py (SaturationDetector). */
 #ifndef AEC_SATURATION_H
 #define AEC_SATURATION_H
 
@@ -22,19 +16,15 @@ typedef struct Saturation {
     float alpha_release;
 } Saturation;
 
-/* hop_size/sample_rate retime the attack/release EMAs off their authored
- * hop=256/16000 (16 ms) grid — NOT the 10 ms reference the filter EMAs use.
- * Returns void, so a non-positive hop_size/sample_rate cannot be reported:
- * aec_growth_rehop() absorbs it by returning the authoring value, leaving the
- * detector un-retimed rather than driving it with a NaN retention. */
+/* hop_size/sample_rate retime the attack/release EMAs from the 256/16000 authoring grid.
+ * Non-positive values leave the detector un-retimed (init cannot report errors). */
 void  saturation_init(Saturation* s, float threshold,   /* default 0.95 */
                       int hop_size, int sample_rate);
 void  saturation_reset(Saturation* s);
 /* Returns smoothed saturation_level (also stored in s->saturation_level). */
 float saturation_detect(Saturation* s, const float* signal, size_t n);
 
-/* Pure helper, mirrors Python staticmethod soft_clip(signal, knee=0.8).
- * Writes result into `out`. `out` may alias `signal`. */
+/* Soft-clips `signal` above `knee` (typically 0.8) into `out`; `out` may alias `signal`. */
 void  saturation_soft_clip(const float* signal, float* out, size_t n,
                               float knee);
 

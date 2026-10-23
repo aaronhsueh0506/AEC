@@ -86,7 +86,7 @@ pre code{background:none;padding:0}
 <tr><td><code>min_gain_floor_dt_db</code></td><td><b>−20.0</b></td><td><code>[-300,50]</code></td><td>DT 期間改用的較淺地板,比 balanced far-active 地板高 8 dB → 保護近端語音。<b>mild/balanced 相同</b>,aggressive 深化到 −30.0</td></tr>
 <tr><td><code>ne_recent_threshold</code></td><td>0.3</td><td><code>[0,1000]</code></td><td>超過才算「近端剛出現」。只讀 energy DT；遠端單講時通常很低，但 loud residual echo 仍可能誤觸，這也是 DT floor 不能無限制調淺的原因。</td></tr>
 <tr><td><code>ne_recent_hold</code></td><td>150 hops(1500 ms)</td><td><code>[0,1e6]</code></td><td>觸發後 hold 多久。會 retime</td></tr>
-<tr><td><code>ne_recent_sustain</code></td><td>3</td><td><code>[0,1e6]</code></td><td>需連續幾 hop 超門檻才 arm。每 hop 必定遞增或歸零,<b>其實是時長、不是真的事件計數</b>;但三個格點目前各自已驗證的「3 hop」對應三種不同時長,換算成單一時長會讓 16kHz/512 格點新增回音誤觸發(已用 300 案驗證),故仍<b>刻意不 retime</b></td></tr>
+<tr><td><code>ne_recent_sustain</code></td><td>3</td><td><code>[0,1e6]</code></td><td>需連續幾 hop 超門檻才 arm。每 hop 必定遞增或歸零,<b>其實是時長、不是真的事件計數</b>;但三個格點目前各自已驗證的「3 hop」對應三種不同時長,換算成單一時長會讓 16kHz/512 格點新增回音誤觸發,故仍<b>刻意不 retime</b></td></tr>
 <tr><td><code>dt_aware_recovery_soft</code></td><td>1</td><td>0/1</td><td>近端剛出現時走軟性 realign,避免 DT 中把濾波器打掉</td></tr>
 <tr><td colspan="4" style="background:#eef5f0"><b>飽和 / CNG</b></td></tr>
 <tr><td><code>enable_saturation</code></td><td>1</td><td>0/1</td><td>建構 ref/mic 飽和偵測器</td></tr>
@@ -96,7 +96,7 @@ pre code{background:none;padding:0}
 <tr><td colspan="4" style="background:#eef5f0"><b>Delay 取得行為(僅 MATCHED)</b></td></tr>
 <tr><td><code>max_delay_ms</code> / <code>delay_buffer_ms</code></td><td>1024 / 2048</td><td><code>[0,60000]</code>／<code>[0,120000]</code></td><td>共同決定 search ring 大小,而 ring 大小<b>同時是 estimate 的准入閘</b> → <b>改小會改變預設路徑的音訊</b></td></tr>
 <tr><td><code>delay_est_init_s</code></td><td>0.3</td><td><code>[0,3600]</code></td><td>進入 duty-cycle 省電抽樣前需連續穩定的秒數。調大 → 更晚省電</td></tr>
-<tr><td><code>delay_est_period_s</code></td><td>0.5</td><td><code>[0,3600]</code></td><td>duty 期間多久跑一次 matched filter。調大 → 更省 MIPS,但 delay 變動偵測更慢</td></tr>
+<tr><td><code>delay_est_period_s</code></td><td>0.0</td><td><code>[0,3600]</code></td><td>matched filter 的分析週期(算力節流)。<code>0</code> = 每個 hop 都分析(全速)；&gt; 0 時,進入 duty-cycle 後每 K 個 hop 才實跑一次(K = round(period ÷ hop 時長) ÷ 5,下限 1)。調大 → 更省 MIPS,但 delay 變動偵測更慢</td></tr>
 <tr><td><code>delay_acquire_protect_converged</code></td><td>1</td><td>0/1</td><td>已在消除時不做首次 realign。關掉 → 首鎖更積極,但可能打掉已收斂的濾波器</td></tr>
 <tr><td><code>delay_acquire_warm_transfer</code></td><td>1</td><td>0/1</td><td>符合閘門時<b>平移已學到的 IR</b> 而非清零,避免 spectrogram 上的垂直線</td></tr>
 </table></div>

@@ -1,22 +1,14 @@
-"""Regression test: EchoPathDelayEstimator.reset()
-must clear its ENTIRE 48kHz signal chain consistently: both the OUTER
-_Resample48 anti-alias sidechain (filter state + decimation phase) AND the
-INNER decimators / ring buffer / pending edge-chunker samples.
+"""EchoPathDelayEstimator.reset() must clear its ENTIRE 48kHz signal chain
+consistently: both the OUTER _Resample48 anti-alias sidechain (filter state +
+decimation phase) AND the INNER decimators / ring buffer / pending
+edge-chunker samples.
 
-Bug this guards against: reset() cleared only the outer sidechain (added
-alongside the sidechain itself), leaving the inner chain's biquad memory /
-ring-buffer audio history / pending partial-block samples stale — a mixed
-fresh/stale reset. Call-site audit: the ONLY caller of
-EchoPathDelayEstimator.reset() is LegacyDelayShim.reset() <- AEC.reset()
-(orchestrator.py:839), the top-level, cold-start-style full reset (see
-test_aec_reset.py — it recreates AecState/ResidualEchoEstimator/
-SuppressionGain, clears CNG state, zeroes the OLA buffer, resets every other
-subsystem). It is NOT a lightweight per-echo-path-change nudge — that is the
-separate internal ``_reset(reset_lag_aggregator=False, ...)`` soft-reset path
-inside ``_process_inner_block`` (fires on the consistent-estimate stability
-counter, ~every 500 ms in normal steady state), which correctly never
-touches the sidechain or the inner buffers. So the fix makes the public
-``reset()`` clear the whole chain together.
+The only caller of EchoPathDelayEstimator.reset() is LegacyDelayShim.reset() <-
+AEC.reset() (orchestrator.py), the top-level cold-start-style full reset (see
+test_aec_reset.py). It is not the lightweight per-echo-path-change soft reset,
+the separate internal ``_reset(reset_lag_aggregator=False, ...)`` inside
+``_process_inner_block``, which never touches the sidechain or the inner
+buffers.
 
 Run:
     python3 -m pytest python/tests/test_delay_reset.py
@@ -58,8 +50,8 @@ def _feed_delayed_noise(est, seed, n_hops, hop, delay_samples):
 
 class Resample48ResetConsistencyTests(unittest.TestCase):
     """Whitebox: reset() must zero the outer sidechain AND the inner
-    decimator/ring/pending state together (the exact assertion the pre-fix
-    code fails)."""
+    decimator/ring/pending state together.
+    """
 
     def test_reset_clears_inner_signal_chain_state(self):
         est = EchoPathDelayEstimator(sample_rate=48000)
@@ -87,14 +79,13 @@ class Resample48ResetConsistencyTests(unittest.TestCase):
 
         est.reset(reset_delay_confidence=True)
 
-        # Outer sidechain cleared (pre-existing behaviour, unaffected by
-        # this fix).
+        # Outer sidechain cleared.
         self.assertTrue(np.all(est._resample48_render._zi == 0.0))
         self.assertTrue(np.all(est._resample48_capture._zi == 0.0))
         self.assertEqual(est._resample48_render._phase, 0)
         self.assertEqual(est._resample48_capture._phase, 0)
 
-        # Inner chain must NOW also be fully cleared -- the fix.
+        # Inner chain must also be fully cleared.
         self.assertTrue(np.all(est._render_ring.buffer == 0.0),
                          "render_ring buffer left stale pre-fix")
         self.assertEqual(est._render_ring.write, 0,

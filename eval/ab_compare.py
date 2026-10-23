@@ -1,25 +1,9 @@
 """Completeness and byte-equality gate for a blind A/B run.
 
-An A/B is only evidence if it covered the corpus it claims to have covered, and
-"byte-identical" is only a finding if somebody compared the bytes. Both had been
-taken on trust:
-
-  * the first version of the C harness reported "rendered 90" while all 90
-    renders had exited 2 (an invalid CLI flag), because it counted loop
-    iterations rather than successes;
-  * `bench_aecmos.py` writes a well-formed `scores.json` for "Scoring 0 cases",
-    so a scorer that saw nothing still produced a file that reads like a result;
-  * the follow-up guard only rejected *zero* scored cases, so 1..89 still
-    passed as a complete run;
-  * the byte-identical conclusion in two evidence READMEs was inferred from
-    every AECMOS delta being exactly +0.0000, which is what a broken harness
-    produces too.
-
-This module answers those directly: the rendered set, the scored set and the
-manifest must be the SAME SET (not the same size), and every output pair is
-compared sample by sample with the result written to `wav_comparison.json`.
-
-Usable as a CLI from the harness or as functions from a test.
+The rendered set, the scored set and the manifest must be the SAME SET (not the
+same size), and every output pair is compared sample by sample; the result is
+written to the --out JSON. Usable as a CLI from the harness or as functions
+from a test.
 """
 from __future__ import annotations
 
@@ -76,10 +60,8 @@ def scored_stems(scores_path):
 
 
 def require_same_set(what, actual, expected):
-    """Set equality, not cardinality.
-
-    Counting alone accepts a run that rendered case X twice and case Y never,
-    which is the failure a count check is least likely to survive contact with.
+    """Set equality, not cardinality: a count accepts a run that rendered case X
+    twice and case Y never.
     """
     missing = sorted(expected - actual)
     extra = sorted(actual - expected)
@@ -115,11 +97,8 @@ class Wav:
 def _read_wav(path):
     """Minimal RIFF reader.
 
-    `aec_wav` writes WAVE_FORMAT_IEEE_FLOAT (tag 3); the stdlib `wave` module
-    only accepts PCM and raises "unknown format: 3", so it cannot be used to
-    check the outputs this harness actually produces. Both tags are handled
-    here so the same gate works on the CLI's float output and on any PCM
-    reference.
+    `aec_wav` writes WAVE_FORMAT_IEEE_FLOAT (tag 3), which the stdlib `wave` module
+    rejects; float and PCM tags are both handled here.
     """
     with open(path, "rb") as fh:
         blob = fh.read()

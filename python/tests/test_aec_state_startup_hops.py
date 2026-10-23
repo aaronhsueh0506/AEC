@@ -1,18 +1,8 @@
-"""Regression test for the erle_startup_hops/erl_startup_hops sentinel bug.
+"""Tests for the erle_startup_hops/erl_startup_hops sentinel.
 
-Bug: AecStateConfig.erle_startup_hops/erl_startup_hops
-used to default to the literal 200, and AecState._resolve_startup_hops read
-"field still equals 200" as "caller left it at default -> auto-compute the
-grid-correct hop count", overriding ANY caller-supplied value that happened
-to equal 200 -- including a caller who deliberately wanted exactly 200
-startup hops (e.g. because 200 is the grid-correct value at their own
-sample rate/hop size). That request was silently discarded and replaced
-with the auto-computed value instead.
-
-Fix: the sentinel is now `None` (AecStateConfig.erle_startup_hops/
-erl_startup_hops: Optional[int] = None), which cannot collide with any real,
-reachable hop count -- so "not set" and "explicitly set to 200" are now
-distinguishable, and 200 is honored like any other explicit value.
+AecStateConfig.erle_startup_hops/erl_startup_hops default to `None` ("auto":
+AecState computes the grid-correct hop count). `None` cannot collide with any
+real hop count, so an explicit value such as 200 is honored verbatim.
 
 Run:
     python3 -m pytest python/tests/test_aec_state_startup_hops.py
@@ -46,21 +36,17 @@ class StartupHopsSentinelTests(unittest.TestCase):
         self.assertEqual(state._erl_estimator._startup_hops, 200)
 
     def test_unset_auto_resolves_at_a_different_grid(self) -> None:
-        """At a grid where 2.0 s is NOT 200 hops (hop=256/sr=16000 -> 16 ms/
-        hop -> 125 hops), leaving the field unset must track the grid, not
-        freeze at the legacy-grid coincidental value of 200."""
+        """At a grid where 2.0 s is NOT 200 hops (hop=256/sr=16000 -> 16 ms/hop -> 125
+        hops), leaving the field unset must track the grid, not stay at 200.
+        """
         state = AecState(AecStateConfig(hop_size=256, sample_rate=16000))
         self.assertEqual(state._erle_estimator._startup_hops, 125)
         self.assertEqual(state._erl_estimator._startup_hops, 125)
 
     def test_explicit_200_honored_verbatim_at_non_default_grid(self) -> None:
-        """THE regression case the bug prevented: a caller who explicitly
-        sets erle_startup_hops/erl_startup_hops to exactly 200 -- at a grid
-        (hop=256/sr=16000) where the auto-computed value is 125, NOT 200 --
-        must get exactly 200 honored, not silently replaced by 125.
-
-        Under the old `== 200` sentinel this would have been
-        misinterpreted as "left at default" and overridden to 125.
+        """A caller who explicitly sets erle_startup_hops/erl_startup_hops to exactly 200,
+        at a grid (hop=256/sr=16000) where the auto-computed value is 125, must get
+        exactly 200, not 125.
         """
         state = AecState(AecStateConfig(
             hop_size=256, sample_rate=16000,
@@ -70,17 +56,18 @@ class StartupHopsSentinelTests(unittest.TestCase):
         self.assertEqual(state._erl_estimator._startup_hops, 200)
 
     def test_explicit_200_honored_verbatim_at_default_grid_too(self) -> None:
-        """At the legacy grid, explicit 200 coincides with the auto value --
-        still must resolve to 200 (sanity check; not diagnostic on its own
-        since auto would also produce 200 here)."""
+        """At hop=160/sr=16000, explicit 200 coincides with the auto value and must still
+        resolve to 200 (sanity check; not diagnostic on its own).
+        """
         state = AecState(AecStateConfig(
             hop_size=160, sample_rate=16000, erle_startup_hops=200,
         ))
         self.assertEqual(state._erle_estimator._startup_hops, 200)
 
     def test_explicit_non_200_still_honored(self) -> None:
-        """Non-default explicit values (already worked pre-fix) keep
-        working, and ERLE/ERL resolve independently of each other."""
+        """Non-default explicit values keep working, and ERLE/ERL resolve independently
+        of each other.
+        """
         state = AecState(AecStateConfig(
             hop_size=256, sample_rate=16000,
             erle_startup_hops=7, erl_startup_hops=9,

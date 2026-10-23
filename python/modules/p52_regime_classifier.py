@@ -1,37 +1,10 @@
-"""P52 A.0R.3 — AcousticRegimeClassifier.
+"""AcousticRegimeClassifier: labels a recording's echo-path nonstationarity.
 
-Classifies a recording's echo-path nonstationarity into a regime label
-{stable, mildly_nonstationary, wildly_nonstationary} based on the
-ERL-decile-std metric introduced by the post-A.0 post-mortem
-(docs/p52_a0_postmortem.md §2 Step 2). Thresholds are anchored to the
-cohort distribution measured on the 800-case AEC Challenge corpus.
+Regime = {stable, mildly_nonstationary, wildly_nonstationary} from the std of the
+per-decile ERL (dB): stable below 9.43, mild below 21.04, wild above.
 
-**Design contract** (anti-loophole, P52 v1.1 §6.4 + Path 3):
-- This classifier is **analysis-only**. Its output **must NOT** feed any
-  production decision (filter mu gating, RES suppression, shadow copy
-  state, AecState flags, P50 preset selection, …).
-- The intended consumer is offline tooling: a `tools/research/` driver
-  scripts that classify cohort cases for stratified evaluation.
-- Anyone wiring this into the live AEC `process()` path is violating
-  the v1.1 anti-loophole rules; review must reject such a PR.
-
-**Why a separate module instead of dropping the helper into `aec.py`:**
-the classifier consumes a complete recording (mic + lpb wav), not a
-per-frame state. Embedding it in `aec.py`'s online state machine would
-either require streaming the metric (different definition; not anchored
-to post-mortem evidence) or buffering the full recording (memory cost
-on long sessions, no production use case). Keeping it in its own module
-with a clean function signature makes the analysis-only role obvious.
-
-Thresholds (anchored to docs/p52_a0_postmortem.md §2 Step 2 distribution
-on 800 cases, ERL_decile_std, n=660 with sufficient far-active deciles):
-   stable                 : value <   9.43 dB  (= cohort p90)
-   mildly_nonstationary   : 9.43 ≤ value <  21.04 dB  (= cohort p99)
-   wildly_nonstationary   : value ≥  21.04 dB        (top ≤ 1 % outliers)
-
-The target post-mortem case `qNvSMyUSXUyrDGpOw7s6qg_farend_singletalk`
-measured std = 23.39 dB and lands cleanly in wildly_nonstationary under
-this scheme (≈ p99.2 in the cohort; rank 655/660).
+Analysis-only: the output must not feed any production decision. It consumes a
+complete (mic, loopback) recording and is meant for offline tooling.
 """
 from __future__ import annotations
 
@@ -42,13 +15,13 @@ from typing import Optional, Sequence
 import numpy as np
 
 
-# Cohort-anchored thresholds (see module docstring).
-_STABLE_MAX_DB = 9.43       # cohort p90 on 800-case ERL_decile_std (n=660)
-_MILD_MAX_DB = 21.04        # cohort p99; target case 23.39 ≥ this → wildly
+# Thresholds in dB (std of per-decile ERL).
+_STABLE_MAX_DB = 9.43  # stable below this
+_MILD_MAX_DB = 21.04  # mild below this, wild above
 
 
 class AcousticRegime(str, Enum):
-    """Three-way regime label. String-valued so it serializes cleanly to CSV / JSON."""
+    """Regime label; string-valued for CSV / JSON."""
     STABLE = 'stable'
     MILDLY_NONSTATIONARY = 'mildly_nonstationary'
     WILDLY_NONSTATIONARY = 'wildly_nonstationary'
@@ -61,27 +34,16 @@ class RegimeClassification:
     regime: AcousticRegime
     erl_decile_std_db: float
     erl_decile_ptp_db: float
-    deciles_used: int               # number of deciles with sufficient far energy
-    erl_per_decile_db: Optional[Sequence[float]] = None  # for plotting / debug
+    deciles_used: int  # deciles with sufficient far-end energy
+    erl_per_decile_db: Optional[Sequence[float]] = None  # per-decile ERL, for plotting
 
 
 class AcousticRegimeClassifier:
-    """Compute the ERL-decile-std regime label for a (mic, lpb) recording.
+    """ERL-decile-std regime label for a (mic, lpb) recording; stateless and reusable."""
 
-    Usage:
-        clf = AcousticRegimeClassifier()
-        result = clf.classify(mic, lpb, sample_rate=16000)
-        result.regime  # AcousticRegime.WILDLY_NONSTATIONARY etc.
-
-    The classifier is stateless — instances can be reused freely.
-    """
-
-    # FS-active threshold for per-decile ERL: skip deciles where lpb is silent.
     FAR_ACTIVE_PWR_THRESHOLD = 1e-5
 
-    # Minimum number of deciles that must have far-active content for the
-    # classification to be considered meaningful. Below this we return STABLE
-    # with a flag (deciles_used < 4) so callers can skip / re-bin if desired.
+    # Fewer far-active deciles than this returns STABLE with ``deciles_used`` set.
     MIN_DECILES_WITH_FAR = 4
 
     NUM_DECILES = 10
@@ -105,20 +67,13 @@ class AcousticRegimeClassifier:
 
     def classify(self, mic: np.ndarray, lpb: np.ndarray,
                  sample_rate: int = 16000) -> RegimeClassification:
-        """Compute regime label from a complete (mic, lpb) recording.
+        """Classify a complete recording.
 
-        Args:
-            mic: mono mic-side waveform, float in [-1, 1]. Length must match lpb.
-            lpb: mono loopback (far-end reference) waveform, same length / sr.
-            sample_rate: required for documentation only (deciles are length-
-                relative).
-
-        Returns:
-            RegimeClassification with the regime, the underlying decile-std
-            and decile-peak-to-peak values, and the per-decile ERL trace for
-            debug / plotting.
+        ``mic`` and ``lpb`` are mono float waveforms in [-1, 1]. ``sample_rate`` is
+        unused (deciles are length-relative). Returns the regime, decile std / peak-to-peak
+        (dB) and the per-decile ERL trace.
         """
-        del sample_rate  # not used directly; reserved for API compat
+        del sample_rate  # unused
         mic = np.asarray(mic, dtype=np.float32)
         lpb = np.asarray(lpb, dtype=np.float32)
         if mic.ndim != 1 or lpb.ndim != 1:

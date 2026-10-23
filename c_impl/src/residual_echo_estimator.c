@@ -1,10 +1,5 @@
-/* residual_echo_estimator.c — C port of residual_echo_estimator.py.
- * All-float32 arithmetic in the R² paths (every input is f32 and every scalar
- * multiplier is value-cast to f32 inside the numpy array op). The reverb
- * decay's pow() runs in double precision (matching Python's float64
- * exponentiation, single-narrowed to float32 at the end -- see
- * aec_scale.h's aec_per_block_growth_to_per_hop) and is evaluated at init,
- * not per hop. Built with -ffp-contract=off. */
+/* residual_echo_estimator.c -- see residual_echo_estimator.h. Float32 in the R^2 paths; the
+ * reverb decay is exponentiated in double once at init. */
 #include "residual_echo_estimator.h"
 #include "aec_scale.h"
 #include "utility/simd_aec.h"
@@ -12,9 +7,8 @@
 #include <math.h>
 #include <string.h>
 
-/* ── deque helpers (appendleft semantics, index 0 = most recent) ──────────── */
-/* The two render deques are rings of `count` frames with `head` = logical 0.
- * appendleft: head moves back one slot (mod 16), count grows up to 16. */
+/* Deque helpers (appendleft semantics, index 0 = newest) */
+/* Rings of `count` frames with `head` as logical index 0; appendleft moves head back one slot. */
 static float *ree_buf_slot(float *buf, int n_bins, int slot) {
     return buf + (size_t)slot * (size_t)n_bins;
 }
@@ -30,7 +24,7 @@ static void ree_appendleft(float *buf, int n_bins, int *count, int *head,
            (size_t)n_bins * sizeof(float));
 }
 
-/* logical index i (0=most recent). Caller must guarantee 0 <= i < count. */
+/* Frame at logical index i (0 = newest); requires 0 <= i < count. */
 static const float *ree_buf_at(const float *buf, int n_bins, int head, int i) {
     int slot = (head + i) % REE_DELAY_BUF_SIZE;
     return buf + (size_t)slot * (size_t)n_bins;
@@ -62,11 +56,8 @@ void ree_init(ResidualEchoEstimator *r,
     r->n_bins = n_bins;
     r->hop_size = hop_size;
     r->sample_rate = sample_rate;
-    /* Render-noise-power per-block growth (x2_noise_floor *= 1.1),
-     * rescaled to the live grid so the wall-clock
-     * recovery-after-hold rate is preserved at any grid. Mirrors
-     * residual_echo_estimator.py. 1.1 (not 1.1f): the exponentiation must
-     * run on the full-precision double literal -- see aec_scale.h. */
+    /* Render-noise-power per-block growth (x2_noise_floor *= 1.1) rescaled to the live grid; 1.1 is
+     * a double literal so the exponentiation keeps full precision. */
     r->noise_floor_growth_per_hop =
         aec_per_block_growth_to_per_hop(1.1, hop_size, sample_rate);
     r->echo_model = *echo_model;
@@ -78,13 +69,8 @@ void ree_init(ResidualEchoEstimator *r,
     r->reverb_decay = reverb_decay;
     r->reverb_mild_decay_scale = reverb_mild_decay_scale;
     r->reverb_enabled = reverb_enabled ? 1 : 0;
-    /* Resolve both dominant_nearend branches of _reverb_decay() here: the
-     * pow() argument and exponent are config + grid only, so the per-hop
-     * path (called 2-3x per hop) just reads the cached value. The mild branch
-     * keeps the double-precision multiply-then-exponentiate order of the
-     * reference expression (Python's `d *= float(mild_decay_scale)`,
-     * float64 throughout) -- scaling after the pow() is a different number,
-     * and scaling in float32 is 1 ULP off from Python for this constant. */
+    /* Both dominant_nearend decay branches are resolved here, once. The mild branch multiplies in
+     * double before the exponentiation. */
     if (r->reverb_enabled) {
         double d_mild = reverb_decay;
         d_mild *= reverb_mild_decay_scale;
@@ -161,7 +147,7 @@ void ree_update_reverb_models(ResidualEchoEstimator *r,
                               double filter_quality,
                               int filter_quality_is_none,
                               int stationary_block) {
-    /* Only the freq-resp branch is wired (adaptive decay estimator not bound). */
+    /* Only the frequency-response branch is wired. */
     if (r->have_reverb_freq_resp) {
         reverb_freq_resp_update(&r->reverb_freq_resp, frequency_response,
                                 n_partitions, filter_delay_blocks,
@@ -170,19 +156,18 @@ void ree_update_reverb_models(ResidualEchoEstimator *r,
     }
 }
 
-/* UpdateRenderNoisePower (cc:325-359). */
+/* Stationary render noise floor update. */
 static void ree_update_render_noise_power(ResidualEchoEstimator *r,
                                           const float *render_psd) {
-    /* Snap the floor down to a lower PSD at once; otherwise count hops and,
-     * once the hold has elapsed, ramp it up by the wall-clock-rescaled growth,
-     * never below the model's floor. */
+    /* Snap the floor down to a lower PSD at once; otherwise count hops and, after the hold, ramp it
+     * up by the rescaled growth, never below the model floor. */
     sk_noise_floor_track_f32(r->x2_noise_floor, r->x2_noise_floor_counter,
                              render_psd, r->noise_floor_growth_per_hop,
                              r->echo_model.min_noise_floor_power,
                              r->noise_floor_hold_hops, r->n_bins);
 }
 
-/* GetEchoPathGain → returns g*g (python float). */
+/* Returns the squared echo path gain. */
 static float ree_echo_path_gain(const ResidualEchoEstimator *r,
                                 int transparent_mode,
                                 int gain_for_early_reflections) {
@@ -196,23 +181,14 @@ static float ree_echo_path_gain(const ResidualEchoEstimator *r,
     return g * g;
 }
 
-/* _reverb_decay(dominant_nearend): static config path (decay estimator not
- * bound). Returns the per-hop decay (float32).
- *
- * The wall-clock-preserving rescale (accounts for BOTH hop_size AND
- * sample_rate -- see the header comment / residual_echo_estimator.py's
- * _reverb_decay() docstring for the full derivation) depends on nothing but
- * config and grid, so both branches are exponentiated once in ree_init() and
- * this reduces to the branch select. Anything that made reverb_decay,
- * reverb_mild_decay_scale, reverb_enabled, hop_size or sample_rate mutable
- * after init would have to recompute the two cached values with it. */
+/* Per-hop decay (float32): a branch select between the two values cached in ree_init(). */
 static float ree_reverb_decay(const ResidualEchoEstimator *r,
                               int dominant_nearend) {
     return dominant_nearend ? r->reverb_decay_per_hop_mild
                             : r->reverb_decay_per_hop;
 }
 
-/* _update_reverb_linear (cc:390-392). */
+/* Linear-path reverb update. */
 static void ree_update_reverb_linear(ResidualEchoEstimator *r,
                                      const float *render_psd,
                                      const float *s2_linear,
@@ -233,17 +209,17 @@ static void ree_update_reverb_linear(ResidualEchoEstimator *r,
     delayed_render = ree_buf_at(r->reverb_render_history, r->n_bins,
                                 r->reverb_buf_head, offset);
     if (r->have_reverb_freq_resp) {
-        /* scaling = tail_response.astype(f32) — tail_response already f32. */
+        /* Scaling comes from the reverb frequency response. */
         scaling_src = r->reverb_freq_resp.tail_response;
         reverb_model_update(&r->reverb_model, delayed_render, scaling_src,
                             decay);
     } else {
-        /* fallback: scaling = s2_linear / max(render_psd, 1e-10), clip gain_cap */
+        /* Fallback scaling = s2_linear / max(render_psd, 1e-10), capped at gain_cap. */
         float gain_cap = (r->default_gain_late * r->default_gain_late) * 4.0f;
         for (k = 0; k < r->n_bins; ++k) {
             float den = render_psd[k];
             float lo = 1.0e-10f;
-            float d = (den > lo) ? den : lo; /* np.maximum array vs pyfloat (f32) */
+            float d = (den > lo) ? den : lo;
             float s = s2_linear[k] / d;
             if (s > gain_cap) {
                 s = gain_cap;
@@ -252,6 +228,19 @@ static void ree_update_reverb_linear(ResidualEchoEstimator *r,
         }
         reverb_model_update(&r->reverb_model, delayed_render, scaling_buf,
                             decay);
+    }
+}
+
+/* Adds the scaled reverb tail to both R2 arrays and records the split. */
+static void ree_add_reverb(ResidualEchoEstimator *r, float *r2,
+                           float *r2_unbounded, int N) {
+    int k;
+    for (k = 0; k < N; ++k) {
+        float reverb = r->reverb_model.reverb[k] * r->reverb_tail_strength;
+        r->last_r2_direct[k] = r2[k];
+        r->last_r2_reverb[k] = reverb;
+        r2[k] = r2[k] + reverb;
+        r2_unbounded[k] = r2_unbounded[k] + reverb;
     }
 }
 
@@ -269,13 +258,11 @@ void ree_estimate(ResidualEchoEstimator *r,
     const int N = r->n_bins;
     int k;
 
-    /* Step 1: update stationary render noise floor. */
+    /* Update the stationary render noise floor. */
     ree_update_render_noise_power(r, render_psd);
 
-    /* push current render to both history deques unconditionally (appendleft).
-     * delay_render_buf must be pushed on linear hops too, or it goes stale and
-     * gives a wrong EchoGeneratingPower on linear→nonlinear transitions; push at
-     * the top so every hop keeps both deques current. */
+    /* Push the current render to both deques every hop (also on linear hops) so the delay buffer
+     * stays current for linear-to-nonlinear transitions. */
     ree_appendleft(r->reverb_render_history, N, &r->reverb_buf_count,
                    &r->reverb_buf_head, render_psd);
     ree_appendleft(r->delay_render_buf, N, &r->delay_buf_count,
@@ -285,10 +272,7 @@ void ree_estimate(ResidualEchoEstimator *r,
         usable = 0;
     }
 
-    /* diag reset -- only needed when neither of this hop's two unconditional
-     * full-array writers below will run: the usable==1 branch (line ~310)
-     * always writes both arrays, and in the usable==0 branch the only writer
-     * (line ~453) is gated by this exact condition. */
+    /* Clear the diagnostics unless one of the full-array writers below will run. */
     if (!(usable ||
           (r->echo_model.model_reverb_in_nonlinear_mode && !transparent_mode))) {
         memset(r->last_r2_reverb, 0, (size_t)N * sizeof(float));
@@ -302,7 +286,7 @@ void ree_estimate(ResidualEchoEstimator *r,
                 r2_unbounded[k] = capture_psd[k];
             }
         } else {
-            /* R² = s2_linear / max(erle, 1e-30) (all f32). */
+            /* R^2 = s2_linear / max(erle, 1e-30). */
             for (k = 0; k < N; ++k) {
                 float eb = erle[k];
                 float eu = erle_unbounded[k];
@@ -312,19 +296,10 @@ void ree_estimate(ResidualEchoEstimator *r,
                 r2_unbounded[k] = s2_linear[k] / du;
             }
         }
-        /* UpdateReverb(kLinear) + AddReverb. */
+        /* Update the reverb and add it. */
         ree_update_reverb_linear(r, render_psd, s2_linear, dominant_nearend,
                                  filter_length_blocks);
-        for (k = 0; k < N; ++k) {
-            /* reverb = reverb_model.reverb * reverb_tail_strength
-             * (f32 array * pyfloat → f32). */
-            float reverb = r->reverb_model.reverb[k] *
-                           r->reverb_tail_strength;
-            r->last_r2_direct[k] = r2[k];
-            r->last_r2_reverb[k] = reverb;
-            r2[k] = r2[k] + reverb;
-            r2_unbounded[k] = r2_unbounded[k] + reverb;
-        }
+        ree_add_reverb(r, r2, r2_unbounded, N);
     } else {
         if (saturated) {
             for (k = 0; k < N; ++k) {
@@ -333,22 +308,20 @@ void ree_estimate(ResidualEchoEstimator *r,
             }
         } else {
             float echo_path_gain = ree_echo_path_gain(r, transparent_mode, 1);
-            /* EchoGeneratingPower window walk. x2 lives in per-instance scratch. */
+            /* EchoGeneratingPower window walk; x2 lives in the per-instance scratch. */
             float *x2 = r->scratch;
             if (r->use_aec_echo_gen_window) {
                 int delay = (filter_delay_blocks > 0 ? filter_delay_blocks : 0);
-                int pre = r->render_pre_window_size;   /* 1 */
-                int post = r->render_post_window_size; /* 1 */
+                int pre = r->render_pre_window_size;
+                int post = r->render_post_window_size;
                 int idx_start, idx_stop, i;
-                /* delay_render_buf already pushed at the top of ree_estimate. */
                 idx_start = delay - pre;
                 if (idx_start < 0) idx_start = 0;
                 idx_stop = delay + post;
                 if (idx_stop > r->delay_buf_count - 1) {
                     idx_stop = r->delay_buf_count - 1;
                 }
-                /* x2 = np.maximum.reduce over slices [idx_start, idx_stop].
-                 * deque[i] is logical index i (0 = most recent). */
+                /* x2 = element-wise maximum over frames [idx_start, idx_stop]. */
                 {
                     const float *first = ree_buf_at(r->delay_render_buf, N,
                                                     r->delay_buf_head,
@@ -365,7 +338,7 @@ void ree_estimate(ResidualEchoEstimator *r,
                     }
                 }
             } else {
-                /* legacy ring buffer (default-OFF). */
+                /* Ring render history (used only when use_aec_echo_gen_window is off). */
                 if (!r->render_history_initialised) {
                     int row;
                     for (row = 0; row < r->render_history_size; ++row) {
@@ -380,7 +353,7 @@ void ree_estimate(ResidualEchoEstimator *r,
                     r->render_history_idx = (r->render_history_idx + 1) %
                                             r->render_history_size;
                 }
-                /* x2 = max over axis 0. */
+                /* x2 = maximum over the history rows. */
                 memcpy(x2, ree_buf_slot(r->render_history, N, 0),
                        (size_t)N * sizeof(float));
                 {
@@ -395,42 +368,38 @@ void ree_estimate(ResidualEchoEstimator *r,
                     }
                 }
             }
-            /* Noise gate — SKIPPED when
-             * use_stationarity_properties=True (matches Python
-             * `if not self._use_stationarity_properties:`). Production sets
-             * this True, so the gate does not run; a `transparent_mode` guard
-             * must not be used instead (transparent_mode is always False on
-             * this path, so the gate would fire and collapse x2 to 0). */
+            /* The noise gate is skipped when use_stationarity_properties is set (the shipped
+             * setting). */
             if (!r->use_stationarity_properties) {
-                /* noise gate (cc:121-129). */
+                /* Noise gate. */
                 float ng = r->use_aec_residual_noise_gate
                            ? r->residual_noise_gate_power
                            : r->echo_model.noise_gate_power;
-                float slope = r->echo_model.noise_gate_slope; /* 0.3 */
+                float slope = r->echo_model.noise_gate_slope;
                 for (k = 0; k < N; ++k) {
                     if (ng > x2[k]) {
-                        /* x2[mask] = max(0, x2 - slope*(ng - x2)) (all f32) */
+                        /* x2 = max(0, x2 - slope * (ng - x2)) where x2 < ng. */
                         float v = x2[k] - slope * (ng - x2[k]);
                         x2[k] = (v > 0.0f) ? v : 0.0f;
                     }
                 }
             }
-            /* subtract stationary noise (cc:284-288), all f32; then max 0. */
+            /* Subtract the stationary noise floor, floor at 0. */
             {
-                float sgs = r->echo_model.stationary_gate_slope; /* 10 */
+                float sgs = r->echo_model.stationary_gate_slope;
                 for (k = 0; k < N; ++k) {
                     float v = x2[k] - sgs * r->x2_noise_floor[k];
                     x2[k] = (v > 0.0f) ? v : 0.0f;
                 }
             }
             for (k = 0; k < N; ++k) {
-                /* r2 = x2 * echo_path_gain (f32 array * pyfloat → f32). */
+                /* r2 = x2 * echo_path_gain. */
                 float v = x2[k] * echo_path_gain;
                 r2[k] = v;
                 r2_unbounded[k] = v;
             }
             if (r->nl_r2_enabled && r->nl_r2_alpha > 0.0f) {
-                /* r2_nl = (alpha * x2**2 / norm).astype(f32), all f32. */
+                /* Non-linear term alpha * x2^2 / norm. */
                 float alpha = r->nl_r2_alpha;
                 float norm = r->nl_norm_power;
                 float cap_mult = r->nl_r2_cap_multiple;
@@ -438,9 +407,7 @@ void ree_estimate(ResidualEchoEstimator *r,
                     float x2sq = x2[k] * x2[k];
                     float r2_nl = alpha * x2sq / norm;
                     if (cap_mult > 0.0f) {
-                        /* np.minimum(r2_nl, r2 * cap_multiple), f32 — caps
-                         * only the tail, at a multiple of the already-
-                         * computed direct term (r2[k] here, pre-nl). */
+                        /* Cap the non-linear term at a multiple of the direct term. */
                         float cap = r2[k] * cap_mult;
                         r2_nl = (r2_nl < cap) ? r2_nl : cap;
                     }
@@ -449,7 +416,7 @@ void ree_estimate(ResidualEchoEstimator *r,
                 }
             }
         }
-        /* UpdateReverb(kNonLinear) + AddReverb. */
+        /* Update the reverb (non-linear mode) and add it. */
         if (r->echo_model.model_reverb_in_nonlinear_mode && !transparent_mode) {
             float ep_late = ree_echo_path_gain(r, transparent_mode, 0);
             float decay = ree_reverb_decay(r, dominant_nearend);
@@ -463,17 +430,8 @@ void ree_estimate(ResidualEchoEstimator *r,
                                                     ep_late,
                                                     decay);
             }
-            /* AddReverb fires even when delayed_render is None (matches
-             * Python: reverb read + add happens unconditionally inside the
-             * model_reverb_in_nonlinear_mode block). */
-            for (k = 0; k < N; ++k) {
-                float reverb = r->reverb_model.reverb[k] *
-                               r->reverb_tail_strength;
-                r->last_r2_direct[k] = r2[k];
-                r->last_r2_reverb[k] = reverb;
-                r2[k] = r2[k] + reverb;
-                r2_unbounded[k] = r2_unbounded[k] + reverb;
-            }
+            /* The reverb is added even when no delayed render is available. */
+            ree_add_reverb(r, r2, r2_unbounded, N);
         }
     }
 }

@@ -80,20 +80,18 @@ Audio_ALG production pipelines accept only the three rows above.
 Pool size depends on the complete config, backend and target ABI. Do not copy a
 checked-in byte count into firmware. Query `aec_get_mem_size` and reserve that
 exact result in the board memory map. For orientation, the balanced 16 kHz
-build with the NE10 FFT backend (the only backend), measured on the current
-host at the default `delay_mode = MATCHED` / `delay_num_filters = 5`, is:
+build with the NE10 FFT backend (the only backend) at the default
+`delay_mode = MATCHED` / `delay_num_filters = 5` is (`make test-delay-num-filters`
+prints these):
 
 | FFT / hop | Pool size |
 |---:|---:|
 | 256 / 128 | 397,744 B |
 | 512 / 256 | 525,440 B |
 
-These figures move with `Aec`/`AecConfig`'s own struct size whenever a
-field is added or removed, so they are re-measured fresh at each revision
-rather than carried forward — do not patch them by hand against a diff;
-re-run `aec_get_mem_size()` (or `make test-delay-num-filters`) and copy its
-output. Every difference below is unchanged across such moves: the growth or
-shrinkage is per instance, not per delay filter.
+These figures depend on the struct sizes of `Aec`/`AecConfig`; re-run
+`aec_get_mem_size()` (or `make test-delay-num-filters`) rather than carrying
+them forward.
 
 The delay configuration moves these numbers, because the matched-filter bank,
 the down-sampled render ring and both lag histograms are carved from this same

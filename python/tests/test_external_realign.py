@@ -2,58 +2,26 @@
 ``EXTERNAL_ALIGNED`` instance, and the "vertical line" it exists to prevent.
 
 An ``EXTERNAL_ALIGNED`` instance converges while its caller serves one far
-alignment; the caller then changes that alignment (a shared delay estimator
-re-locked, a wrapper re-measured). The only response available before this
-entry point existed was ``reset()``, which wipes the converged filter — the
-echo is fully re-exposed for dozens of hops (the bright half of the
-spectrogram line) — and restarts the WOLA sequence, which costs a near-zero
-output hop (the dark half).
-
-What is asserted:
-
-  1. THE WARM PATH HOLDS CANCELLATION across an advance (delta > 0, the
-     raw -> aligned move a first acquisition makes): the residual stays below
-     half the echo on every following hop.
-  2. THE DEFECT REPRODUCES — the same scene with ``reset()`` instead rebounds
-     to >= 0.8x the echo. Without this row, row 1 could pass on a scene where
-     the filter never cancelled in the first place.
-  3. THE SHIFT IS SIGNED — a retard (delta < 0) has a bounded refill transient
-     and then cancels outright, and it moves the taps in the OPPOSITE
-     direction from an advance (the control that would catch a retard
-     implemented as an advance).
-  4. THE CONTRACT — 0 on delta == 0, -1 outside ``EXTERNAL_ALIGNED``, and a
-     gate rejection returns 0 (the reset outcome) rather than raising.
-  5. THE GATE SURVIVES FAR SILENCE. The inst-ERLE ring holds ~15 entries and
-     every far-silent hop pushes 0.0 into it, so a realign arriving >= 16 hops
-     after the last far burst — a wrapper that re-measures its alignment
-     between bursts, i.e. the ordinary case — would read "not cancelling" on a
-     filter cancelling at ~13 dB windowed and throw it away. The windowed half
-     of ``linear_is_cancelling()`` is what still knows.
-  6. THE RESET BRANCH RECONVERGES rather than stalling: pinned against a
-     ``reset()`` twin's trajectory at six checkpoints and settled well under
-     the echo. The branch is only correct because it is FILTER-ONLY, which is
-     row 7.
-  7. FRAMING IS UNTOUCHED. On a near-end-only scene (no far, so the filter and
-     its latches are inert and the mic/synthesis path is all that is left to
-     observe) the filter-only reset leaves the formed output stream
-     BIT-IDENTICAL to an instance that was never called, while a ``reset()``
-     twin does not — it drops a near-zero hop at the boundary. That difference
-     is the entire reason this entry point is not ``reset()``.
-
-Mutation checks (each breaks one line and must go red here):
-  - drop the signed arm of ``PBFDAF.warm_shift_ir`` (return on s <= 0 as
-    before) -> row 3's direction control fails;
-  - gate on the inst-ERLE ring alone instead of ``linear_is_cancelling()``
-    -> row 5 fails;
-  - make the reject branch a counters-only ``handle_echo_path_change`` (the
-    taps stay at the abandoned alignment) -> row 6 fails;
-  - make the reject branch a full ``reset()`` -> row 7 fails;
-  - skip the ``X_buf`` clear on a retard -> row 3's post-refill row fails;
-  - skip the SHADOW's ``far_buffer`` clear in ``_reset_filter_for_realign``
-    -> row 6 fails (settled 0.209 vs 0.007 of the echo). The main filter's own
-    ``far_buffer`` clear is inert on this scene — both are cleared for the same
-    reason, but it is the shadow's spliced analysis frame that this scene
-    measures, through the shadow-advantage/DT signals it feeds.
+alignment; the caller then changes that alignment. ``reset()`` would wipe the
+converged filter (the echo is re-exposed for dozens of hops: the bright half of
+the spectrogram line) and restart the WOLA sequence (a near-zero output hop: the
+dark half). Asserted:
+  - the warm path holds cancellation across an advance (delta > 0): the
+    residual stays below half the echo on every following hop, while the same
+    scene with ``reset()`` rebounds to >= 0.8x the echo (control);
+  - the shift is signed: a retard (delta < 0) has a bounded refill transient,
+    then cancels outright, and moves the taps opposite to an advance;
+  - the contract: 0 on delta == 0, -1 outside ``EXTERNAL_ALIGNED``, and a gate
+    rejection returns 0 (the reset outcome) rather than raising;
+  - the gate survives far silence: far-silent hops fill the last 15 inst-ERLE
+    entries the gate reads with 0.0, so the windowed half of
+    ``linear_is_cancelling()`` must still recognise a cancelling filter >= 16
+    hops after the last far burst;
+  - the reset branch reconverges (against a ``reset()`` twin's trajectory at six
+    checkpoints, and settled well under the echo);
+  - framing is untouched: on a near-end-only scene the filter-only reset leaves
+    the formed output BIT-IDENTICAL to an instance that was never called, while
+    a ``reset()`` twin drops a near-zero hop at the boundary.
 """
 
 import numpy as np
@@ -70,7 +38,7 @@ HOP = 256
 D = 300                 # true bulk delay, samples
 HOPS = 250              # convergence hops before the realign
 TAIL = 6                # hops watched after it
-GAP = 24                # far-silent hops (> the 15-entry inst-ERLE ring)
+GAP = 24  # far-silent hops (> the 15 inst-ERLE entries the gate reads)
 OBS = 12                # far-active hops watched after the gap
 TRAJ = 140              # reconvergence hops compared against the reset() twin
 PAD = 4 * D
@@ -267,14 +235,11 @@ def test_reset_branch_tracks_a_reset_twin_and_settles(far_hist):
         ours.append(_hop(aec, far_hist, h, D) / echo)
         theirs.append(_hop(twin, far_hist, h, D) / echo)
 
-    # The band is wide on purpose. Both trajectories are already at ~1% of the
-    # echo a handful of hops in, where hop-to-hop scene noise — not the
-    # restart — decides the ratio (it crosses below 1.0 at several
-    # checkpoints). What the comparison is here to catch is a branch that does
-    # NOT reconverge: the counters-only echo-path-change this used to be left
-    # the residual at 1.3-1.5x the echo indefinitely, i.e. two orders of
-    # magnitude outside this band. The absolute settled bound below is the
-    # tight half of the row.
+    # The band is wide on purpose. Both trajectories are already at ~1% of the echo
+    # a handful of hops in, where hop-to-hop scene noise, not the restart, decides
+    # the ratio. What the comparison catches is a branch that does NOT reconverge: its
+    # residual stays near the echo's own level, orders of magnitude outside this band.
+    # The absolute settled bound below is the tight half of the row.
     for k in (5, 10, 20, 40, 80, 120):
         assert ours[k] <= 2.5 * theirs[k], (
             f"reset-trajectory +{k}: {ours[k]:.4f} vs twin {theirs[k]:.4f}"

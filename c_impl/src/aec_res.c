@@ -1,7 +1,7 @@
 /* aec_res.c -- standalone residual-echo suppression gain; see aec_res.h. */
 #include "aec_res.h"
 #include "aec_config_build.h"
-#include "aec_balanced_config.h" /* AECB_SQRT2_SIN_LUT only */
+#include "aec_balanced_config.h"
 #include "utility/simd_aec.h"
 #include "utility/mem_align.h"
 #include "suppression_gain.h"
@@ -17,8 +17,7 @@
 struct AecRes {
     int n_bins;
     int hop_size;
-    /* Configuration as built; reset re-applies it, and a preset change
-     * updates it so a reset keeps the retargeted floor. */
+    /* Configuration as built; reset re-applies it and a preset change updates it. */
     SuppressionGainConfig sg_cfg;
     SuppressionGainTuning sg_tun;
     SuppressionGain sg;
@@ -27,8 +26,8 @@ struct AecRes {
     float* render_scaled;   /* hop_size */
 };
 
-/* Float count of the suppressor's state and scratch: last_gain, last_nearend,
- * last_echo, the smoother ring, and seven per-bin work arrays. */
+/* Float count of the suppressor state and scratch: three per-bin history arrays, the smoother
+ * ring and seven per-bin work arrays. */
 static size_t sg_float_count(int n_bins, int smoother_n) {
     return ck_mul_size((size_t)(10 + smoother_n), (size_t)n_bins);
 }
@@ -122,9 +121,8 @@ const float* aec_res_process(AecRes* r, const AecResInput* in) {
         !in->comfort_noise || !in->render_hop)
         return NULL;
 
-    /* Near-end power on the int16^2 scale; once every filter has converged the
-     * residual's own power caps it. Same op order as a plain |z|^2: re*re +
-     * im*im, no fused multiply-add. */
+    /* Near-end power on the int16^2 scale; once every filter has converged the residual power caps
+     * it. */
     for (k = 0; k < r->n_bins; ++k) {
         float n2 = in->near_spec[k].r * in->near_spec[k].r +
                    in->near_spec[k].i * in->near_spec[k].i;
@@ -152,13 +150,9 @@ int aec_res_set_preset(AecRes* r, AecPreset preset, float ramp_ms) {
     if (!r) return -1;
     if (aec_preset_floor_db(preset, &db) != 0) return -1;
     if (aec_preset_dt_floor_db(preset, &dt_db) != 0) return -1;
-    /* NO_FLOOR runtime switching allowed, same as aec_set_preset() (see its
-     * comment). Looked up before any write. */
     if (aec_preset_split_floor_enabled(preset, &en) != 0) return -1;
-    /* The suppressor validates and applies first and writes nothing on refusal,
-     * so a rejected ramp leaves the stored configuration untouched. Same
-     * documented semantics as aec_set_preset(): ramp_ms governs far-active
-     * only, the DT floor and the split-floor gate step immediately. */
+    /* The suppressor validates and applies first and writes nothing on refusal. ramp_ms governs the
+     * far-active floor only; the DT floor and the split-floor gate step immediately. */
     if (suppression_gain_set_split_floor_far_active_db(&r->sg, db, ramp_ms) != 0)
         return -1;
     if (suppression_gain_set_split_floor_dt_db(&r->sg, dt_db) != 0)

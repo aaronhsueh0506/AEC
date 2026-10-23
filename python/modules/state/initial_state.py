@@ -1,24 +1,11 @@
-"""AecState::InitialState — controls the initial-phase filter parameter set.
-
-Mirrors docs/aec3_extracts/src/aec3/aec_state.cc:327-353 verbatim with
-hop-rescaled thresholds.
-"""
+"""InitialState: tracks whether the filter is still in the initial-phase regime."""
 from .. import aec3_scale as _aec3_scale
 
 
 class InitialState:
-    """Tracks whether the filter is still in the initial-state regime.
-
-    Transitions out of the initial state once enough "strong, not
-    saturated" render frames have accumulated:
-      - conservative_initial_phase=True : 5 seconds  (AEC3-default
-        for cases sensitive to early misadaptation)
-      - conservative_initial_phase=False: ``initial_state_seconds``
-        from config (AEC3 default 2.5 s).
-
-    ``TransitionTriggered()`` fires for ONE update on the transition
-    edge — used by ERLE reset and other consumers that need to clear
-    initial-state-only filtering on entry to steady state.
+    """Leaves the initial state after enough strong, unsaturated render frames:
+    5 s if ``conservative_initial_phase``, else ``initial_state_seconds`` (default 2.5).
+    ``transition_triggered()`` is true for one update on the transition edge.
     """
 
     def __init__(
@@ -30,15 +17,9 @@ class InitialState:
         sample_rate: int = 16000,
     ) -> None:
         self._conservative = bool(conservative_initial_phase)
-        # Was `int(initial_state_seconds * HOPS_PER_SECOND)` -- that constant
-        # (formerly state/_constants.py, since removed as dead code) baked in
-        # a stale hop=160/sr=16000 assumption that matches none of the
-        # currently supported grids. Rescaled live via ms_to_hops so the
-        # window stays initial_state_seconds/5s at any grid.
         self._initial_state_hops = _aec3_scale.ms_to_hops(
             initial_state_seconds * 1000.0, hop_size, sample_rate
         )
-        # AEC3 5 s conservative threshold (~5*250=1250 blocks).
         self._conservative_hops = _aec3_scale.ms_to_hops(
             5000.0, hop_size, sample_rate
         )

@@ -2,28 +2,18 @@
 
 For one clip and one grid, runs baseline (all four constants frozen) and
 candidate (all four retimed) through the eval driver's own `run_ours()`, records
-the full simple-mu state trajectory of each, and measures the output difference
-in physical units.
+the simple-mu state trajectory of each, and measures the output difference in
+physical units.
 
-## What can and cannot be measured on this corpus
+`wav/aec_challenge_blind` ships mic and lpb only, so no scenario has a clean
+near-end target and SI-SDR/STOI are not computable. The target-free measure
+splits the hops by far-end activity:
 
-`wav/aec_challenge_blind` ships **mic and lpb only**. There is no clean
-near-end target in any scenario -- not even `nearend_singletalk`, whose lpb sits
-only ~3.7 dB below the mic, so the far end is playing there too. **SI-SDR and
-STOI are therefore not computable anywhere in this corpus**, and any figure
-presented as one would be computed against the mic, i.e. against a reference
-that still contains the echo the AEC is supposed to remove. Saying so is the
-point: a DT degradation on this corpus cannot be physically decoupled, and the
-remaining honest options are the target-free measure below plus listening.
-
-The target-free measure: split the hops by far-end activity.
-
-  far-INACTIVE hops   No echo is arriving, so everything in the mic is near end
-                      (plus noise). Any output energy the candidate removes
-                      relative to the baseline is near-end damage, full stop --
-                      no reference needed. `d_near_db` below.
+  far-INACTIVE hops   No echo is arriving, so output energy the candidate
+                      removes relative to the baseline is near-end damage.
+                      `d_near_db` below.
   far-ACTIVE hops     On an FS clip the output IS residual echo, so lower is
-                      better. On a DT clip the two are superimposed and this
+                      better; on a DT clip the two are superimposed and this
                       number alone cannot separate them. `d_far_db`.
 
 Far activity is taken from the lpb, delay-compensated by the bulk delay the
@@ -54,7 +44,7 @@ FROZEN = dict(_SIMPLE_MU_HOLDOFF_HOPS=20, _SIMPLE_MU_ALPHA_ATTACK=0.3,
 
 
 def retimed_values(sample_rate, frame_size):
-    """Rejected candidate values, independent of production's disposition."""
+    """Hop-count-scaled values for the four constants at this grid."""
     from modules import aec3_scale
     hop = frame_size // 2
     return {
@@ -81,9 +71,8 @@ def case_paths(stem):
 def run_with_trace(mic, ref, sr, overrides):
     """Run the clip through the driver's own entry point, tracing simple-mu.
 
-    Traced by wrapping AEC.process rather than by editing the module: the branch
-    is identified from the holdoff counter's transition, which needs no
-    instrumentation inside the update (up = attack/fresh onset, down = hold,
+    AEC.process is wrapped rather than the module edited: the branch is identified
+    from the holdoff counter's transition (up = attack/fresh onset, down = hold,
     flat at 0 = release, flat nonzero = attack/ongoing).
     """
     import eval_aec_challenge as E
@@ -103,12 +92,9 @@ def run_with_trace(mic, ref, sr, overrides):
         state["prev"] = self._simple_mu_holdoff
 
     def mu_scale(self, mu_min=None):
-        """Record what the REAL call returned. The first version of this probe
-        called _get_simple_mu_scale() from the process wrapper instead, which
-        changed the run it was measuring: that method decrements
-        _warmup_frames as a side effect, so every hop consumed two warmup
-        frames instead of one and the probe disagreed with the A/B it was
-        supposed to explain."""
+        """Record what the REAL call returned; calling _get_simple_mu_scale() again
+        would decrement _warmup_frames a second time and change the run.
+        """
         v = orig_mu(self, mu_min)
         state["mu"] = float(np.mean(np.asarray(v, dtype=np.float64)))
         return v
@@ -150,8 +136,9 @@ def run_with_trace(mic, ref, sr, overrides):
 
 
 def bulk_delay(mic, ref, sr, max_ms=500.0):
-    """GCC-PHAT bulk delay, used ONLY to align the far-activity mask -- never
-    fed to the AEC (that would be the pre-align crutch this bench forbids)."""
+    """GCC-PHAT bulk delay, used ONLY to align the far-activity mask; never fed to
+    the AEC (that would be the pre-align crutch this bench forbids).
+    """
     n = 1 << int(np.ceil(np.log2(len(mic) + len(ref))))
     M = np.fft.rfft(mic, n)
     R = np.fft.rfft(ref, n)
@@ -207,9 +194,9 @@ def probe(stem, frame_size, far_active_db=-45.0):
     far_active = ref_db > far_active_db
 
     def db(ea, eb, mask):
-        """Ratio of RMS over the masked HOPS. Takes per-hop energies rather
-        than samples so the far-activity mask, which is per hop, cannot be
-        applied to a sample-length array by accident."""
+        """Ratio of RMS over the masked HOPS. Takes per-hop energies so the per-hop
+        far-activity mask cannot be applied to a sample-length array.
+        """
         if mask.sum() == 0:
             return None
         return float(20 * np.log10(
@@ -230,8 +217,7 @@ def probe(stem, frame_size, far_active_db=-45.0):
         return c
 
     def transitions(tr):
-        """Hop indices where the branch changes -- the timings the retiming is
-        supposed to move."""
+        """Hop indices where the branch changes."""
         out = []
         prev = None
         for i, b in enumerate(tr["branch"][:n_hops]):

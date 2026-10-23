@@ -1,33 +1,21 @@
 """`_alpha_r` is a live constant of the DIRECT PBFDKF API, and only of that.
 
-This is the Python half of `test_rate_structural` check (d5). It exists because
-`_alpha_r` cannot be pinned by anything that drives the AEC through its normal
-entry point, and establishing that took two wrong readings:
-
-  ``AEC``, shadow ON (default)
-      ``_error_psd`` is never read. The orchestrator publishes
-      ``_e2_coarse_per_bin`` every hop and the live per-bin branch of the
-      H_error refresh reads ``error_spec`` directly.
-  ``AEC``, shadow OFF
-      the scalar fallback DOES run and DOES read the smoothed ``_error_psd`` --
-      but ``_e2_coarse_for_refresh`` is likewise only set on the shadow path, so
-      it stays ``0.0`` and ``e2_ref_sum <= e2_coa_sum`` is constant-false
-      whatever the coefficient is. Confirmed empirically in C: 90 cases x 2
-      grids with ``--no-shadow`` are byte-identical
-      (``eval/ab_evidence/2026-08-07-alpha-r/``).
-  direct ``PBFDKF.process()``
-      the caller supplies its own ``_e2_coarse_for_refresh``, both sides of the
-      comparison vary, and ``_alpha_r`` selects the leakage branch and the
-      adaptation that follows.
+Python half of `test_rate_structural` check (d5). `_alpha_r` cannot be pinned by
+anything that drives the AEC through its normal entry point:
+  - ``AEC``, shadow ON (default): ``_error_psd`` is never read; the orchestrator
+    publishes ``_e2_coarse_per_bin`` every hop and the per-bin branch of the
+    H_error refresh reads ``error_spec`` directly.
+  - ``AEC``, shadow OFF: the scalar fallback reads the smoothed ``_error_psd``,
+    but ``_e2_coarse_for_refresh`` is only set on the shadow path, so it stays
+    ``0.0`` and ``e2_ref_sum <= e2_coa_sum`` is constant-false.
+  - direct ``PBFDKF.process()``: the caller supplies its own
+    ``_e2_coarse_for_refresh``, both sides of the comparison vary, and
+    ``_alpha_r`` selects the leakage branch and the adaptation that follows.
 
 So a zero delta from a wrapper-level A/B is not evidence that this constant is
-inert, and the constant is neither removable nor safe to leave un-retimed: the
-10 ms anchor is what a direct caller gets.
-
-What is asserted is the coefficient the EMA ACTUALLY APPLIED, recovered from two
-runs differing only in ``_error_psd``'s starting value -- not the stored
-attribute, which is what the pre-fix tests asserted while the C loop ran on a
-hardcoded literal.
+inert; the 10 ms anchor is what a direct caller gets. What is asserted is the
+coefficient the EMA ACTUALLY APPLIED, recovered from two runs differing only in
+``_error_psd``'s starting value, not the stored attribute.
 """
 from __future__ import annotations
 
@@ -141,9 +129,9 @@ def test_the_applied_coefficient_is_the_retimed_field(measured):
 
 
 def test_the_applied_coefficient_covers_the_anchored_wall_clock_span(measured):
-    """The field-vs-applied check alone still passes if BOTH move together,
-    which is exactly what reverting the reference hop to 256 would do. Pin the
-    span itself."""
+    """The field-vs-applied check alone still passes if BOTH move together (e.g. the
+    reference hop changed from 256). Pin the span itself.
+    """
     hop, sr = measured["hop"], measured["sample_rate"]
     tc_ms = -(hop / sr) * 1000.0 / math.log(measured["a_meas"])
     assert tc_ms == pytest.approx(TC_TARGET_MS, abs=1.0), (
@@ -211,17 +199,12 @@ def test_the_branch_moves_h_error(measured):
 
 @pytest.mark.parametrize("enable_shadow", [True, False])
 def test_the_aec_wrapper_output_does_not_depend_on_alpha_r(enable_shadow):
-    """The scope claim itself, measured rather than described.
+    """The scope claim itself, measured: drive the whole AEC twice with wildly
+    different coefficients and require bit-identical output in BOTH shadow modes.
 
-    Drive the whole AEC twice with wildly different coefficients and require
-    bit-identical output in BOTH shadow modes -- the two halves of the table in
-    this module's docstring, which reach the same result for different reasons.
-
-    This is the assertion that fails if somebody later wires
-    ``_e2_coarse_for_refresh`` on a non-shadow path: at that point the wrapper
-    WOULD start observing ``_alpha_r``, this file's scope note would be wrong,
-    and the constant would need a wrapper-level A/B it has never had. Failing
-    here is the correct outcome then, not a regression.
+    This fails if ``_e2_coarse_for_refresh`` is ever wired on a non-shadow path: the
+    wrapper would then observe ``_alpha_r`` and the constant would need a
+    wrapper-level A/B.
     """
     from modules.orchestrator import AEC
     from modules.config import AecConfig

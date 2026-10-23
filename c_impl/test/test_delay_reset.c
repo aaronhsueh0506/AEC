@@ -1,35 +1,20 @@
-/* test_delay_reset.c — regression test: verify
- * delay_aec_reset() clears the delay estimator's ENTIRE 48kHz signal chain
- * consistently -- both the OUTER DaResample48 anti-alias sidechain (filter
- * state + decimation phase) AND the INNER DaEstimator's decimators / ring
- * buffer / pending edge-chunker samples.
- *
- * Bug this guards against: reset() clearing only the outer sidechain,
- * leaving the inner chain's biquad
- * memory / ring-buffer audio history / pending partial-block samples stale
- * -- a mixed fresh/stale reset. Call-site audit
- * (delay_aec_reset's only caller is aec_reset(), a full top-level
- * cold-start-style reset -- see aec.c / test_lifecycle.c / bench_rtf.c, NOT
- * a lightweight per-echo-path-change nudge) established that the correct
- * fix is a FULL reset: everything in the chain gets cleared together.
+/* test_delay_reset.c -- regression test: delay_aec_reset() clears the delay estimator's ENTIRE 48 kHz signal chain
+ * consistently: the OUTER DaResample48 anti-alias sidechain (filter state + decimation phase) AND the INNER DaEstimator's
+ * decimators / ring buffer / pending edge-chunker samples. A reset that cleared only the outer sidechain would leave a mixed
+ * fresh/stale state. delay_aec_reset()'s only caller is aec_reset(), a full cold-start-style reset (not a per-echo-path-change
+ * nudge), so everything in the chain is cleared together.
  *
  * Four tests:
- *   1. Whitebox: feed one real hop, confirm the inner chain (ring buffer /
- *      decimator biquad state / pending_count) holds nonzero state, then
- *      confirm delay_aec_reset() zeroes ALL of it (sidechain AND inner
- *      chain).
- *   2. Functional (reset mid-stream at 48kHz, then verify delay
- *      re-acquisition): lock onto a delay D1, reset() mid-stream, feed an
- *      unrelated delay D2 for a short post-reset window, and confirm the
- *      post-reset estimate matches a brand-new instance fed only that same
- *      D2 stream -- reset() should leave the object behaviourally
- *      equivalent to fresh for anything that follows.
- *   3. Edge-chunker split invariance: the 64-sample block cadence belongs to
- *      the stream, not to how the caller slices it -- the same samples fed
- *      one at a time, in odd-sized runs, or in whole hops leave the same
- *      carved state and the same pending samples.
- *   4. Edge-chunker overlap: an input that lives inside a pending array is
- *      appended sample by sample, so each store is visible to the next read.
+ *   1. Whitebox: feed one real hop, confirm the inner chain (ring buffer / decimator biquad state / pending_count) holds
+ *      nonzero state, then confirm delay_aec_reset() zeroes ALL of it (sidechain AND inner chain).
+ *   2. Functional (reset mid-stream at 48 kHz, then delay re-acquisition): lock onto a delay D1, reset() mid-stream, feed an
+ *      unrelated delay D2 for a short post-reset window, and confirm the post-reset estimate matches a brand-new instance fed
+ *      only that D2 stream, i.e. reset() leaves the object behaviourally equivalent to fresh.
+ *   3. Edge-chunker split invariance: the 64-sample block cadence belongs to the stream, not to how the caller slices it; the
+ *      same samples fed one at a time, in odd-sized runs, or in whole hops leave the same carved state and the same pending
+ *      samples.
+ *   4. Edge-chunker overlap: an input that lives inside a pending array is appended sample by sample, so each store is
+ *      visible to the next read.
  *
  * Build (standalone, from c_impl/; does NOT link aec.c):
  *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=gnu99 -Iinclude \

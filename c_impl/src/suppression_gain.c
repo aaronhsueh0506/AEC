@@ -1,14 +1,5 @@
-/* suppression_gain.c — C port of python/modules/residual/suppression_gain.py.
- * Build with -ffp-contract=off.
- *
- * PRECISION: float32 (drift versus Python accepted):
- *  - Every per-bin array and every scalar (ENR/EMR/min/max/CNG/DNE math,
- *    SuppressionGainConfig thresholds) is float32, single rounding per op;
- *    native C float arithmetic throughout.
- *  - np.sum/np.mean-equivalent reductions over f32 stay pairwise float32
- *    (sk_pairwise_sum_tailfold_b_f32 / the local f32_sum_slice helper below).
- *  - np.exp/np.sqrt equivalents use fast_exp/fast_sqrt (float32).
- */
+/* suppression_gain.c -- see suppression_gain.h. Float32 throughout, pairwise float32 sums for
+ * reductions. */
 #include "suppression_gain.h"
 
 #include <assert.h>
@@ -18,13 +9,13 @@
 #include "aec_scale.h"
 
 
-/* float32 sum of a sub-slice a[lo:hi) via the canonical pairwise sum. */
+/* Float32 sum of a[lo:hi) via the pairwise sum. */
 static float f32_sum_slice(const float *a, int lo, int hi) {
     if (hi <= lo) return 0.0f;
     return sk_pairwise_sum_tailfold_b_f32(a + lo, (size_t)(hi - lo));
 }
 
-/* ---------------------------------------------------------------- helpers */
+/* helpers */
 
 void suppression_gain_init(SuppressionGain *sg,
                            const SuppressionGainConfig *cfg,
@@ -38,18 +29,10 @@ void suppression_gain_init(SuppressionGain *sg,
     memset(sg, 0, sizeof(*sg));
     sg->cfg = *cfg;
     sg->tun = *tun;
-    /* tun->table_len is the length the caller's per-rate lookup row baked the six
-     * per-bin tuning arrays at. gain_to_no_audible_echo's per-bin loop below
-     * reads all six at index [0, cfg->n_bins) -- a mismatch would walk off the
-     * end of one of those static const arrays. Construction-time-only invariant
-     * (both n_bins and the tables come from the same rate-table row for a
-     * validated sample rate), so a debug assert is the whole guard here (unlike
-     * aec_state.c's filter_taps_full_len, which is a per-hop live value and gets
-     * both a debug assert AND a release-path skip). */
+    /* table_len must equal cfg->n_bins: the per-bin loops read the six tuning tables at
+     * [0, n_bins). Construction-time invariant, so a debug assert is the guard. */
     assert(tun->table_len == cfg->n_bins);
-    /* Seed the live floor equal to its target: an instance whose runtime
-     * setter is never called then applies exactly cfg->split_floor_far_active,
-     * as it did before the retarget path existed. */
+    /* The live floor starts equal to its target. */
     sg->split_floor_far_active_live = cfg->split_floor_far_active;
     sg->split_floor_ramp_ratio = 1.0f;
     sg->last_gain = last_gain;
@@ -70,13 +53,8 @@ void suppression_gain_init(SuppressionGain *sg,
         sg->last_echo[k] = 0.0f;
     }
     sg->low_render_avg_power = 32768.0f * 32768.0f;
-    /* Power IIR (average_power = 0.9*avg + 0.1*x2) is per-4ms-block; a bare
-     * hardcoded 0.9f/0.1f has no rate conversion at all (the correct per-hop
-     * alpha at hop=160/sr=16000 is 1-0.9^2.5 ~= 0.2316, not 0.1). The
-     * wall-clock-rescaled form below mirrors suppression_gain.py's
-     * _LowNoiseRenderDetector with use_wallclock_ema_alpha=True, but -- same as
-     * the Python default -- is OFF (cfg->use_wallclock_ema_alpha=0); see
-     * suppression_gain.h. */
+    /* The power IIR (0.9 / 0.1) is per 4 ms block; the wall-clock-rescaled form is optional and
+     * off by default (cfg->use_wallclock_ema_alpha = 0). */
     if (cfg->use_wallclock_ema_alpha) {
         float alpha = aec_per_block_ema_alpha_to_per_hop(
             0.1f, cfg->hop_size, cfg->sr);
@@ -101,18 +79,13 @@ void suppression_gain_set_initial_state(SuppressionGain *sg, int state) {
     sg->initial_state = state ? 1 : 0;
 }
 
-/* Bounds for the runtime retarget. The dB range is the config validator's
- * (aec.c, AEC_CK_RANGE_F on min_gain_floor_far_active_db) so a running
- * instance cannot be pushed somewhere init would have refused. */
+/* Bounds for the runtime retarget; the dB range matches the config validator. */
 #define SG_SPLIT_FLOOR_DB_MIN   (-300.0f)
 #define SG_SPLIT_FLOOR_DB_MAX     (50.0f)
 #define SG_SPLIT_FLOOR_RAMP_MS_MAX (60000.0f)
 
-/* Shared by both split-floor setters below: range-checked dB -> power
- * conversion. Returns 0 and writes *power_out on success, -1 (nothing
- * written) on an out-of-range/non-finite db -- same expression aec_carve()
- * and the Python float32 twin use, so ramp_ms == 0 lands on exactly the
- * value a fresh instance holds. */
+/* Range-checked dB -> power conversion shared by the split-floor setters. Returns 0 and writes
+ * *power_out, or -1 (nothing written) for a non-finite or out-of-range db. */
 static int sg_split_floor_db_to_power(float db, float *power_out) {
     if (!isfinite(db) || db < SG_SPLIT_FLOOR_DB_MIN || db > SG_SPLIT_FLOOR_DB_MAX) {
         return -1;
@@ -121,17 +94,14 @@ static int sg_split_floor_db_to_power(float db, float *power_out) {
     return 0;
 }
 
-/* One step of the dB-linear (power-geometric) walk toward the target. Idle
- * whenever live == target, which is every hop of an instance whose setter was
- * never called -- that is what keeps the default path byte-identical. */
+/* One step of the power-geometric (dB-linear) walk toward the target; idle when live == target. */
 static void advance_split_floor_ramp(SuppressionGain *sg) {
     float live = sg->split_floor_far_active_live;
     float target = sg->cfg.split_floor_far_active;
     float value;
     if (live == target) return;
     value = live * sg->split_floor_ramp_ratio;
-    /* Land exactly instead of approaching asymptotically: a 1-ULP residue
-     * would leave the ramp nominally live for the rest of the stream. */
+    /* Land exactly on the target rather than approaching it asymptotically. */
     if (sg->split_floor_ramp_ratio == 1.0f ||
         (sg->split_floor_ramp_ratio > 1.0f ? (value >= target)
                                            : (value <= target))) {
@@ -156,19 +126,13 @@ int suppression_gain_set_split_floor_far_active_db(SuppressionGain *sg,
 
     hops = 0;
     if (ramp_ms > 0.0f && target > 0.0f && live > 0.0f && live != target) {
-        /* aec_ms_to_hops() ends in a float->int conversion that would be
-         * undefined for a large enough input; the SG_SPLIT_FLOOR_RAMP_MS_MAX
-         * check above is what keeps it in range, since sr and hop_size only
-         * ever come from the library's fixed grid table (worst case
-         * 60 s * 48000/128 = 22500 hops). Using the shared helper rather than
-         * open-coding the division is also what makes this path round exactly
-         * the way every other ms-authored constant does -- and the way the
-         * Python reference's float32 twin does. */
+        /* The ramp_ms bound above keeps the float->int conversion in aec_ms_to_hops() in range
+         * (worst case 60 s * 48000/128 = 22500 hops). */
         hops = aec_ms_to_hops(ramp_ms, sg->cfg.hop_size, sg->cfg.sr);
         if (hops < 1) hops = 1;
     }
 
-    /* Everything validated; only now write. */
+    /* Everything is validated; write now. */
     sg->cfg.split_floor_far_active = target;
     if (hops == 0) {
         sg->split_floor_far_active_live = target;
@@ -177,8 +141,7 @@ int suppression_gain_set_split_floor_far_active_db(SuppressionGain *sg,
     }
     ratio = powf(target / live, 1.0f / (float)hops);
     if (ratio == 1.0f) {
-        /* Step too small (or ramp too short) for the per-hop factor to be
-         * representable as anything but identity: land now rather than stall. */
+        /* Ratio is exactly 1 (step too small): land now rather than stall. */
         sg->split_floor_far_active_live = target;
         sg->split_floor_ramp_ratio = 1.0f;
         return 0;
@@ -187,12 +150,7 @@ int suppression_gain_set_split_floor_far_active_db(SuppressionGain *sg,
     return 0;
 }
 
-/* The DT-lifted floor has no ramp state: it is a hard per-hop override
- * (get_min_gain, only while dt_protect_active is true), not a value the gain
- * rule converges toward continuously the way split_floor_far_active_live is
- * -- so there is nothing to walk and no "live" vs "target" split. Steps
- * immediately. See aec.h's aec_set_preset() comment for why this is a
- * deliberate asymmetry with the far-active setter above, not an oversight. */
+/* The DT-lifted floor is a hard per-hop override with no ramp state, so it steps immediately. */
 int suppression_gain_set_split_floor_dt_db(SuppressionGain *sg, float db) {
     float target;
     if (!sg) return -1;
@@ -201,12 +159,7 @@ int suppression_gain_set_split_floor_dt_db(SuppressionGain *sg, float db) {
     return 0;
 }
 
-/* See suppression_gain.h's comment on this function for why a boolean gate
- * steps rather than ramps. A plain coerce-and-store, no range to validate --
- * same shape as suppression_gain_set_split_floor_dt_db() above, minus the
- * float range check. Python's SuppressionGain.set_split_floor_enabled() /
- * AEC.set_preset() (orchestrator.py) have the identical step-not-ramp
- * contract. */
+/* Plain coerce-and-store; a boolean gate steps rather than ramps. */
 int suppression_gain_set_split_floor_enabled(SuppressionGain *sg, int enabled) {
     if (!sg) return -1;
     sg->cfg.split_floor_enabled = enabled ? 1 : 0;
@@ -217,34 +170,30 @@ int suppression_gain_is_dominant_nearend(const SuppressionGain *sg) {
     return sg->dne_nearend_state ? 1 : 0;
 }
 
-/* _ne_state_for_gain_rules — returns raw DNE state unless the stat-aware
- * proxy is enabled (OFF in balanced). */
+/* Raw DominantNearend state unless the stat-aware proxy is enabled (off in the shipped presets). */
 static int ne_state_for_gain_rules(const SuppressionGain *sg) {
     if (!sg->cfg.stat_aware_ne_proxy_enabled) return sg->dne_nearend_state;
     if (sg->dne_nearend_state) return 1;
     return sg->stat_mask_frac > sg->cfg.stat_aware_ne_proxy_threshold;
 }
 
-/* LowNoiseRenderDetector.detect — returns bool, mutates avg power. */
+/* Low-noise render detector: returns the flag and updates the average power. */
 static int low_noise_render_detect(SuppressionGain *sg, const float *rb,
                                    int hop, float *x2_sum_out) {
     const SuppressionGainConfig *c = &sg->cfg;
-    float x2[1024];          /* hop_size <= 1024 in practice */
+    float x2[1024];          /* hop_size <= 1024 */
     float x2_sum, x2_max;
     int low_noise, i;
     *x2_sum_out = 0.0f;
     if (hop <= 0 || hop > (int)(sizeof(x2) / sizeof(x2[0]))) return 0;
-    /* x2[i] = rb[i]*rb[i]; sk_sq_scale_f32 with scale=1.0f is bit-exact here
-     * ((x*x)*1.0f == x*x for every finite value, no rounding change). */
+    /* Squared samples (scale 1). */
     sk_sq_scale_f32(rb, 1.0f, x2, hop);
     x2_sum = sk_pairwise_sum_tailfold_b_f32(x2, (size_t)hop);
     *x2_sum_out = x2_sum;
     x2_max = x2[0];
     for (i = 1; i < hop; ++i) if (x2[i] > x2_max) x2_max = x2[i];
-    /* Normalize average_power to per-sample before peak comparison.
-     * The reference uses 64-sample blocks; at larger hop sizes, average_power is
-     * hop/64 times larger for the same RMS, making the peak-rejection
-     * 2.5x too loose at hop=160.  Mirror Python: avg_per_sample = avg*(64/hop). */
+    /* Normalise the average power to per-sample (reference block is 64 samples) before the peak
+     * comparison. */
     {
         float avg_per_sample = sg->low_render_avg_power * (64.0f / (float)hop);
         low_noise = (sg->low_render_avg_power < c->low_render_threshold)
@@ -255,7 +204,7 @@ static int low_noise_render_detect(SuppressionGain *sg, const float *rb,
     return low_noise ? 1 : 0;
 }
 
-/* DominantNearendDetector.update — all sums in f32 pairwise, ratios in f32. */
+/* DominantNearend update; sums are float32 pairwise. */
 static void dominant_nearend_update(SuppressionGain *sg, const float *nearend,
                                     const float *echo, const float *cn,
                                     int initial_state) {
@@ -291,14 +240,13 @@ static void dominant_nearend_update(SuppressionGain *sg, const float *nearend,
     sg->dne_nearend_state = sg->dne_hold_counter > 0;
 }
 
-/* _MovingAverageSpectrum.average — append spectrum, return f32 per-bin mean
- * over the (<= n) most-recent rows. Writes to out[n_bins]. */
+/* Append the spectrum to the ring and write the per-bin mean over the most recent rows to out. */
 static void nearend_smoother_average(SuppressionGain *sg, const float *spec,
                                      float *out) {
     int n = sg->cfg.nearend_smoother_n;
     int nb = sg->cfg.n_bins;
     int idx, k;
-    /* append: write into the slot after the current newest, evicting oldest. */
+    /* Append into the slot after the newest, evicting the oldest. */
     if (sg->ma_count < n) {
         idx = (sg->ma_head + sg->ma_count) % n;
         sg->ma_count += 1;
@@ -308,21 +256,13 @@ static void nearend_smoother_average(SuppressionGain *sg, const float *spec,
     }
     memcpy(sg->ma_buf + (size_t)idx * nb, spec, (size_t)nb * sizeof(float));
 
-    /* n == 1: the ring is one row, so idx and ma_head are pinned at 0 and
-     * ma_count at 1 for every call, and the reduction below degenerates to
-     * out[k] = ma_buf[k] / 1.0f -- an exact IEEE identity (the divisor is
-     * a power of two and the quotient is representable, for every input
-     * including signed zeros and denormals; -ffast-math is rejected by the
-     * build, so no flush-to-zero can creep in). Copy instead of dividing.
-     * Runtime gate, not compile-time: the 16 kHz/512 and 8 kHz grids run
-     * n == 1, the 16 kHz/256 and 48 kHz grids run n == 2. */
+    /* n == 1: the mean is the single row, so copy instead of dividing. */
     if (n == 1) {
         memcpy(out, sg->ma_buf, (size_t)nb * sizeof(float));
         return;
     }
 
-    /* mean(buf, axis=0): sum the `ma_count` rows per bin in f32 then divide
-     * by count in f32. Sequential-in-f32 reduction over up to `n` rows. */
+    /* Per-bin mean over ma_count rows, summed sequentially in float32. */
     for (k = 0; k < nb; ++k) {
         int r;
         float acc;
@@ -336,7 +276,7 @@ static void nearend_smoother_average(SuppressionGain *sg, const float *spec,
     }
 }
 
-/* WeightEchoForAudibility band weigh (suppression_gain.cc:88-121). */
+/* Echo weighted for audibility, one band. */
 static void weigh_band(const SuppressionGainConfig *c, const float *echo,
                        float *out, float threshold, int begin, int end) {
     int k;
@@ -347,7 +287,7 @@ static void weigh_band(const SuppressionGainConfig *c, const float *echo,
         if (seg < threshold) {
             float tmp = (threshold - seg) * normalizer;
             float w = 1.0f - tmp * tmp;
-            if (w < 0.0f) w = 0.0f;          /* max(0.0f, .) */
+            if (w < 0.0f) w = 0.0f;
             out[k] = seg * w;
         } else {
             out[k] = seg;
@@ -365,20 +305,17 @@ static void weight_echo_for_audibility(const SuppressionGainConfig *c,
     weigh_band(c, echo, out, c->floor_power * c->aud_thr_hf, mf_end, n);
 }
 
-/* _get_max_gain */
+/* Maximum gain: last_gain * increase, clipped to [floor_first_increase, 1]. */
 static void get_max_gain(SuppressionGain *sg, float *out) {
     const SuppressionGainConfig *c = &sg->cfg;
     int is_ne = ne_state_for_gain_rules(sg);
     float inc = is_ne ? c->max_inc_nearend : c->max_inc_normal;
     float ffi = c->floor_first_increase;
     sk_scale_f32(out, sg->last_gain, inc, c->n_bins);
-    /* max(.,ffi) then min(.,1.0f), low-bound-then-high-bound -- exactly
-     * sk_clip_f32's order; ffi (floor_first_increase, e.g. 1e-5) < 1.0f
-     * always holds by construction. */
     sk_clip_f32(out, ffi, 1.0f, c->n_bins);
 }
 
-/* _get_min_gain */
+/* Minimum gain. */
 static void get_min_gain(SuppressionGain *sg, const float *weighted_residual,
                          int low_noise_render, int saturated_echo, float *out) {
     const SuppressionGainConfig *c = &sg->cfg;
@@ -395,12 +332,12 @@ static void get_min_gain(SuppressionGain *sg, const float *weighted_residual,
         for (k = 0; k < n; ++k) {
             float wr = weighted_residual[k];
             if (wr > 0.0f) {
-                float denom = wr < 1e-30f ? 1e-30f : wr;  /* max f32 */
+                float denom = wr < 1e-30f ? 1e-30f : wr;
                 out[k] = min_echo_power / denom;
             } else {
                 out[k] = 1.0f;
             }
-            if (out[k] > 1.0f) out[k] = 1.0f;   /* min(.,1.0f) */
+            if (out[k] > 1.0f) out[k] = 1.0f;
         }
     }
     /* LF smoothing block */
@@ -412,47 +349,35 @@ static void get_min_gain(SuppressionGain *sg, const float *weighted_residual,
         if (end > n) end = n;
         for (k = 0; k < end; ++k) {
             if (sg->last_nearend[k] > sg->last_echo[k] || k <= permanent) {
-                /* last_gain[k]*dec, all float32. */
+                /* last_gain[k] * dec */
                 float prod = sg->last_gain[k] * dec;
                 float mg = out[k];
-                float chosen = mg;            /* max(mg, prod) */
+                float chosen = mg;
                 if (prod > mg) chosen = prod;
-                if (1.0f < chosen) chosen = 1.0f; /* min(chosen, 1.0f) */
+                if (1.0f < chosen) chosen = 1.0f;
                 out[k] = chosen;
             }
         }
     }
-    /* Split min-gain floor (default ON). */
+    /* Split min-gain floor. */
     if (c->split_floor_enabled) {
         float base_floor;
         if (sg->far_active_latched) {
-            /* DT (near recently present) lifts the floor toward near-protection;
-             * FS (far-active, no near) keeps the aggressive far_active floor.
-             * fmaxf(), not plain c->split_floor_dt: suppression_gain_set_
-             * split_floor_dt_db() steps instantly while suppression_gain_
-             * set_split_floor_far_active_db() ramps (see both setters'
-             * comments) -- mid-ramp into a preset whose dt target is DEEPER
-             * than the preset being ramped away from, dt would otherwise
-             * briefly be numerically deeper than the far-active floor
-             * currently in force, inverting "DT floor protects near-end"
-             * for that window. At any steady state (no ramp in flight, the
-             * only case every existing golden/test exercises) dt >=
-             * far_active already holds for all three presets, so this is a
-             * no-op there -- matches the Python mirror's max(). */
+            /* In double-talk the DT floor lifts the far-active floor. fmaxf() keeps the DT floor
+             * from dropping below the far-active floor while a ramp is in flight (the DT setter
+             * steps, the far-active setter ramps); at steady state it is a no-op. */
             base_floor = sg->dt_protect_active
                              ? fmaxf(c->split_floor_dt, sg->split_floor_far_active_live)
                              : sg->split_floor_far_active_live;
         } else {
             base_floor = c->split_floor_far_silent;
         }
-        /* max(.,base_floor) then min(.,1.0f) -- sk_clip_f32's exact
-         * low-then-high order; base_floor is a power-domain gain floor
-         * (10^(db/10), db<0) so base_floor<1.0f always holds. */
+        /* Clip to [base_floor, 1]. */
         sk_clip_f32(out, base_floor, 1.0f, n);
     }
 }
 
-/* _gain_to_no_audible_echo */
+/* Gain to no audible echo. */
 static void gain_to_no_audible_echo(SuppressionGain *sg, const float *nearend,
                                     const float *echo, const float *masker,
                                     float *out) {
@@ -460,17 +385,12 @@ static void gain_to_no_audible_echo(SuppressionGain *sg, const float *nearend,
     int n = c->n_bins;
     int is_ne;
     int k;
-    float ne_w = 0.0f;                          /* scalar LF ne_weight */
+    float ne_w = 0.0f;
     const float *enr_tr_tab, *enr_su_tab, *emr_tr_tab;
     int have_scalar_blend_inputs;
 
-    /* Per-bin soft blend (the shipped balanced configuration): the whole
-     * body below reduces to kernel 27, whose scalar twin is that body
-     * transcribed statement-for-statement. The other three combinations
-     * (blend off, or blend on with a single scalar weight) stay on the
-     * general loop -- they are not what any production preset runs. Checked
-     * first so the scalar-blend/tuning-table setup below is skipped
-     * entirely on the default path, where it's never read. */
+    /* Per-bin soft blend (the shipped configuration) is handled by one SIMD kernel and checked
+     * first. */
     if (c->soft_blend_enabled && c->soft_blend_per_bin) {
         sk_no_audible_echo_gain_f32(nearend, echo, masker,
                                     sg->tun.nearend_enr_tr,
@@ -488,7 +408,7 @@ static void gain_to_no_audible_echo(SuppressionGain *sg, const float *nearend,
     have_scalar_blend_inputs = c->soft_blend_enabled;
 
     if (have_scalar_blend_inputs) {
-        /* ne_lf / echo_lf : f32 pairwise sum over [1:dne_lf_end] */
+        /* ne_lf / echo_lf: pairwise sums over [1, dne_lf_end) */
         float ne_lf = f32_sum_slice(nearend, 1, c->dne_lf_end);
         float echo_lf = f32_sum_slice(echo, 1, c->dne_lf_end);
         float enr_lf = echo_lf / (ne_lf + 1.0f);
@@ -498,11 +418,9 @@ static void gain_to_no_audible_echo(SuppressionGain *sg, const float *nearend,
         ne_w = 1.0f / (1.0f + fast_exp(sig_arg));
     }
 
-    /* Resolve tuning tables. With the per-bin blend the blended values are
-     * computed inline per bin below (no malloc, no blended-table scratch), so
-     * the table pointers stay NULL in that case. */
+    /* Resolve the tuning tables; with soft blend the blended values are computed per bin below. */
     if (c->soft_blend_enabled) {
-        enr_tr_tab = NULL;    /* per-bin path computes inline */
+        enr_tr_tab = NULL;
         enr_su_tab = NULL;
         emr_tr_tab = NULL;
     } else {
@@ -518,7 +436,7 @@ static void gain_to_no_audible_echo(SuppressionGain *sg, const float *nearend,
         if (c->soft_blend_enabled) {
             float ne_wb;
             if (c->soft_blend_per_bin) {
-                /* _enr_bin = echo/(nearend+1.0); sigmoid in f32 -> ne_wb */
+                /* Per-bin sigmoid weight from echo/(nearend + 1). */
                 float enr_bin = echo[k] / (nearend[k] + 1.0f);
                 float sig = (enr_bin - c->soft_blend_enr_thr)
                             / c->soft_blend_softness;
@@ -528,7 +446,7 @@ static void gain_to_no_audible_echo(SuppressionGain *sg, const float *nearend,
             } else {
                 ne_wb = ne_w;
             }
-            /* blend: (ne_wb*nearend + (1-ne_wb)*normal), all f32 */
+            /* Blend nearend and normal tables. */
             enr_tr_k = (ne_wb * sg->tun.nearend_enr_tr[k]
                         + (1.0f - ne_wb) * sg->tun.normal_enr_tr[k]);
             enr_su_k = (ne_wb * sg->tun.nearend_enr_su[k]
@@ -541,8 +459,8 @@ static void gain_to_no_audible_echo(SuppressionGain *sg, const float *nearend,
             emr_tr_k = emr_tr_tab[k];
         }
 
-        enr = echo[k] / (nearend[k] + 1.0f);     /* f32 */
-        emr = echo[k] / (masker[k] + 1.0f);      /* f32 */
+        enr = echo[k] / (nearend[k] + 1.0f);
+        emr = echo[k] / (masker[k] + 1.0f);
         g = 1.0f;
         if (enr > enr_tr_k && emr > emr_tr_k) {
             float d_lin = enr_su_k - enr_tr_k;
@@ -550,23 +468,21 @@ static void gain_to_no_audible_echo(SuppressionGain *sg, const float *nearend,
             float g_lin = (enr_su_k - enr) / denom_lin;
             float denom_emr = emr < 1e-30f ? 1e-30f : emr;
             float g_emr = emr_tr_k / denom_emr;
-            g = g_lin > g_emr ? g_lin : g_emr;   /* max f32 */
+            g = g_lin > g_emr ? g_lin : g_emr;
         }
         out[k] = g;
     }
 }
 
-/* _limit_lf_gains — mirrors Python: np.minimum(gain[:lf_clamp_bin], gain[lf_clamp_bin]).
- * The reference's native fft=128 uses hardcoded bins 0-2 (≤125 Hz); our fft=512 needs
- * 9 bins (0-250 Hz).  lf_clamp_bin = hz_to_bin(250 Hz) = 8 at 16 kHz / 512-pt. */
+/* Limit LF gains to the value at lf_clamp_bin (hz_to_bin(250 Hz)). */
 static void limit_lf_gains(float *gain, int n, int lf_clamp_bin) {
     if (lf_clamp_bin > 0 && lf_clamp_bin < n) {
         float anchor = gain[lf_clamp_bin];
-        sk_clip_f32(gain, -(float)INFINITY, anchor, lf_clamp_bin);   /* np.minimum */
+        sk_clip_f32(gain, -(float)INFINITY, anchor, lf_clamp_bin);
     }
 }
 
-/* _limit_hf_gains */
+/* Limit HF gains. */
 static void limit_hf_gains(SuppressionGain *sg, float *gain) {
     const SuppressionGainConfig *c = &sg->cfg;
     int n = c->n_bins;
@@ -574,17 +490,16 @@ static void limit_hf_gains(SuppressionGain *sg, float *gain) {
     int biq = c->hf_biq;
     int k;
     if (biq > 0 && lgb + biq <= n) {
-        /* min over gain[lgb:lgb+biq] (f32), then minimum out */
+        /* Minimum over gain[lgb : lgb + biq], then clip the rest to it. */
         float mug = gain[lgb];
         for (k = lgb + 1; k < lgb + biq; ++k) if (gain[k] < mug) mug = gain[k];
         sk_clip_f32(gain + lgb + 1, -(float)INFINITY, mug, n - (lgb + 1));
     }
     if (n >= 2) gain[n - 1] = gain[n - 2];
-    /* conservative_hf path: OFF in balanced. */
     (void)c;
 }
 
-/* --------------------------------------------------------------- get_gain */
+/* get_gain */
 
 void suppression_gain_update_dominant_nearend(
     SuppressionGain *sg,
@@ -595,7 +510,7 @@ void suppression_gain_update_dominant_nearend(
     const SuppressionGainConfig *c = &sg->cfg;
     const float *echo_for_det;
 
-    /* stationary_mask is None in balanced -> stat_mask_frac = 0.0f. */
+    /* No stationary mask: stat_mask_frac = 0. */
     sg->stat_mask_frac = 0.0f;
 
     echo_for_det = c->dne_use_unbounded_echo ? residual_echo_unbounded
@@ -628,15 +543,14 @@ const float *suppression_gain_get_gain(
     low_noise_render = low_noise_render_detect(sg, render_block, c->hop_size,
                                                 &render_x2_sum);
 
-    /* split-floor far-active latch (pre-_lower_band_gain). */
+    /* Split-floor far-active latch. */
     if (c->split_floor_enabled && !sg->far_active_latched) {
-        /* reuse the render x2 sum computed by low_noise_render_detect above
-         * (same pairwise tree over the same block — identical value). */
+        /* Reuse the render x2 sum from low_noise_render_detect. */
         float mean_pow = render_x2_sum / (float)c->hop_size;
         if (mean_pow > c->split_floor_latch_power) sg->far_active_latched = 1;
     }
 
-    /* ---- _lower_band_gain ---- */
+    /* Lower-band gain */
     /* Step 1: max gain */
     get_max_gain(sg, sg->max_gain);
     /* Step 2: smoothed nearend */
@@ -646,18 +560,12 @@ const float *suppression_gain_get_gain(
     /* Step 4: min gain (uses last_nearend / last_echo) */
     get_min_gain(sg, sg->weighted_residual, low_noise_render, saturated_echo,
                  sg->min_gain);
-    /* Step 5: GainToNoAudibleEcho */
+    /* Step 5: gain that leaves no audible echo */
     gain_to_no_audible_echo(sg, sg->nearend, sg->weighted_residual,
                             comfort_noise, sg->g_raw);
-    /* Step 6: np.maximum(np.minimum(G_raw, max_gain), min_gain).
-     * Order is minimum-first then maximum, not np.clip (min(max(x,lo),hi)).
-     * When min_gain > max_gain (saturated-echo recovery), min_gain wins. */
-    /* minimum(G_raw, max_gain): "if (v>hi) v=hi;" == (hi<v)?hi:v, which
-     * matches sk_min_f32(a,b)=(a<b)?a:b with a=max_gain, b=g_raw exactly
-     * (including the signed-zero tie case, since b is returned unmodified
-     * on the false branch just like the original's implicit "else v"). */
+    /* Step 6: minimum(G_raw, max_gain), then maximum with min_gain; min_gain wins when it exceeds
+     * max_gain (saturated-echo recovery). */
     sk_min_f32(sg->gain, sg->max_gain, sg->g_raw, n);
-    /* maximum(., min_gain): per-bin array bound, "if (v<lo) v=lo;". */
     sk_raise_to_f32(sg->gain, sg->min_gain, n);
 
     /* Step 7: LF + HF limiters */
@@ -666,19 +574,9 @@ const float *suppression_gain_get_gain(
                      || c->conservative_hf;
     if (hf_lim_applied) limit_hf_gains(sg, sg->gain);
 
-    /* Stash for next hop. last_gain is copied because sg->gain is the
-     * pointer aec_get_res_context hands out as the res-context seam -- it
-     * has to keep naming the same buffer across hops. The other two are
-     * purely internal, so their stash is a pointer swap: nearend and
-     * weighted_residual are both rewritten in full at the top of the next
-     * get_gain (nearend_smoother_average covers every bin, and
-     * weight_echo_for_audibility's three weigh_band calls tile [0,n)
-     * exactly) before get_min_gain reads last_nearend/last_echo, so the
-     * buffer each name refers to is the only thing that changes. Both
-     * pointers are equal-length slices of the same pool -- the swap moves
-     * no memory and grows nothing. A reconfigure re-inits from whatever
-     * pointers the struct holds at that instant (aec.c's SuppressionGain
-     * recreate), so a swap in flight is carried through, not lost. */
+    /* Stash for the next hop. last_gain is copied because sg->gain must keep naming the same
+     * buffer; nearend and weighted_residual are rewritten in full each hop, so their stash is a
+     * pointer swap. */
     memcpy(sg->last_gain, sg->gain, (size_t)n * sizeof(float));
     {
         float *t = sg->last_nearend;
@@ -691,13 +589,8 @@ const float *suppression_gain_get_gain(
         sg->weighted_residual = t;
     }
 
-    /* Step 8: sqrt to amplitude domain. sqrt(max(G,0.0f)). The explicit
-     * negative clamp stays: under the default fast_sqrt it is redundant
-     * (fast_sqrt(v<=0)=0), but under USE_STANDARD_MATH fast_sqrt is plain
-     * sqrtf, where the clamp is what keeps negatives from becoming NaN —
-     * dropping it would change that build's semantics. sk_fast_sqrt_f32
-     * replicates fast_sqrt verbatim in both build modes, so clamp + kernel
-     * reproduces the original loop bit-exactly. */
+    /* Step 8: sqrt to amplitude domain. The explicit clamp at 0 keeps negatives from becoming NaN
+     * when fast_sqrt is plain sqrtf. */
     sk_clip_f32(sg->gain, 0.0f, (float)INFINITY, n);
     sk_fast_sqrt_f32(sg->gain, sg->gain, n);
     return sg->gain;

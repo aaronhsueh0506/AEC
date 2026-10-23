@@ -1,11 +1,4 @@
-"""AEC3-aligned residual + suppression chain.
-
-Phase 4.1 in this commit: ResidualEchoEstimator (R² = S²/ERLE | X²*gain²).
-Phase 4.2 in this commit: SuppressionGain (the AEC3 mask gate + smoother).
-
-Phase 4.3-4.5 follow: suppression_filter, comfort_noise, echo_audibility,
-orchestrator trunk reshape.
-"""
+"""AEC3-style residual echo estimation and suppression chain."""
 from .residual_echo_estimator import (
     EchoModelConfig,
     EpStrengthConfig,

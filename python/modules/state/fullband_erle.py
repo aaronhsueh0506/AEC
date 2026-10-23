@@ -1,33 +1,6 @@
-"""FullBandErleEstimator — fullband ERLE (single-channel) with quality estimate.
+"""FullBandErleEstimator: single-channel fullband ERLE (log2 units) with a linear-filter quality estimate.
 
-Mirrors docs/aec3_extracts/src/aec3/fullband_erle_estimator.{cc,h}.
-
-Single-channel port: AEC3's per-channel vector is collapsed to scalars
-since our pipeline is always num_capture_channels=1.
-
-Rate notes:
-  - ``kBlocksToHoldErle = 100`` AEC3 blocks (~400 ms), computed live from the
-    real hop_size/sample_rate at construction time.
-  - ``kPointsToAccumulate = 6`` is a count, not a time -> stays 6.
-  - ``quality_alpha``/``td_alpha`` are AEC3-native per-4ms-block EMA
-    constants that fire once per 6-hop accumulation window. Both our
-    accumulation window (6 hops) and AEC3's reference update period (6
-    native 4ms blocks = 24ms) scale by the same factor of 6, so they cancel:
-    rescaling is done by passing the *single-hop* period against
-    per_block_ema_alpha_to_per_hop's fixed single-native-block (4ms)
-    denominator, NOT ``6*hop_size`` -- passing 6*hop_size would compare 6
-    real hops against only 1 native block, inflating the exponent 6x. (A
-    2026-08 review caught this: the fix on 2026-08-01 initially passed
-    ``_POINTS_TO_ACCUMULATE * hop_size``, which was wrong for exactly this
-    reason.)
-  - The 0.0004 forget factor on max/min ERLE IS an AEC3-native per-block
-    constant after all (verified against docs/aec3_extracts: verbatim
-    literal + comment "Forget factor, approx 1dB every 3 sec." in
-    fullband_erle_estimator.cc's UpdateMaxMin(), gated on the identical
-    6-point accumulation cadence as quality_alpha/td_alpha). An earlier
-    in-file claim that this was already wall-clock-calibrated and should be
-    left verbatim was a provenance error; it is now rescaled the same way
-    as its two siblings.
+ERLE is accumulated over 6 hops; the ERLE hold is 400 ms at the live grid.
 """
 from typing import Optional
 
@@ -36,7 +9,7 @@ import numpy as np
 from .. import aec3_scale as _aec3_scale
 
 _EPSILON = 1e-3
-_AEC3_X2_BAND_ENERGY_THRESHOLD = 44015068.0  # AEC3 source value — scaled per hop in __init__
+_AEC3_X2_BAND_ENERGY_THRESHOLD = 44015068.0  # scaled per hop in __init__
 _POINTS_TO_ACCUMULATE = 6
 
 
@@ -45,7 +18,7 @@ def _fast_log2(x: float) -> float:
 
 
 class _ErleInstantaneous:
-    """Mirrors FullBandErleEstimator::ErleInstantaneous."""
+    """Instantaneous ERLE over 6-hop windows, with max/min envelope and quality estimate."""
 
     def __init__(
         self,
@@ -111,8 +84,7 @@ class _ErleInstantaneous:
         return value
 
     def _update_max_min(self) -> None:
-        # AEC3-native per-block forget factor, rescaled to wall-clock at
-        # construction time (see FullBandErleEstimator.__init__).
+        # Max/min envelope forget step (rescaled per hop at construction).
         self._max_erle_log2 -= self._maxmin_forget
         self._max_erle_log2 = max(self._max_erle_log2, self._erle_log2)
         self._min_erle_log2 += self._maxmin_forget
@@ -136,37 +108,22 @@ class FullBandErleEstimator:
 
     def __init__(self, *, min_erle: float = 1.0, max_erle_l: float = 4.0,
                  hop_size: int = 160, sample_rate: int = 16000) -> None:
-        # AEC3 fullband EMAs (quality 0.07, erle_time_domain 0.05) are
-        # per-4ms-block, and fire once per _POINTS_TO_ACCUMULATE(=6)-hop
-        # accumulation window (see update() below), not every hop. Both our
-        # update period (6*hop_size samples) and AEC3's reference period
-        # (6 native 4ms blocks = 24ms) carry the same factor of 6, so it
-        # cancels: rescale by comparing a *single* hop against
-        # per_block_ema_alpha_to_per_hop's fixed single-native-block (4ms)
-        # denominator -- pass plain hop_size, not 6*hop_size (passing
-        # 6*hop_size compares 6 real hops against only 1 native block,
-        # inflating the exponent 6x too far).
+        # Per-block EMA constants fire once per 6-hop window; the factor 6 cancels,
+        # so the rescale uses a single hop.
         _q_alpha = _aec3_scale.per_block_ema_alpha_to_per_hop(
             0.07, hop_size, sample_rate
         )
         self._td_alpha = _aec3_scale.per_block_ema_alpha_to_per_hop(
             0.05, hop_size, sample_rate
         )
-        # 0.0004 is AEC3's own literal ERLE max/min envelope forget *step*
-        # (fullband_erle_estimator.cc UpdateMaxMin(), same 6-point-gated
-        # cadence as quality_alpha/td_alpha) -- it is a fixed additive
-        # decrement per event, not a retention alpha, so the wall-clock-
-        # preserving rescale is the linear per_block_rate_to_per_hop (same
-        # hop_size-cancels-the-6x reasoning as above), not the EMA formula.
+        # 0.0004 is an additive per-block decrement, rescaled linearly.
         _maxmin_forget = _aec3_scale.per_block_rate_to_per_hop(
             0.0004, hop_size, sample_rate
         )
         self._x2_band_energy_threshold = _aec3_scale.per_bin_psd_threshold(
             _AEC3_X2_BAND_ENERGY_THRESHOLD, hop_size
         )
-        # AEC3 kBlocksToHoldErle=100 blocks (~400 ms). Was the module-level
-        # `_BLOCKS_TO_HOLD_ERLE = int(0.4 * HOPS_PER_SECOND)`, baked at the
-        # stale hop=160/sr=16000 assumption; computed live here instead.
+        # ERLE hold: 400 ms at the live grid.
         self._blocks_to_hold_erle = _aec3_scale.ms_to_hops(400.0, hop_size, sample_rate)
         self._min_erle_log2 = _fast_log2(min_erle + _EPSILON)
         self._max_erle_lf_log2 = _fast_log2(max_erle_l + _EPSILON)

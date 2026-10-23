@@ -1,22 +1,14 @@
 """Per-case A/B statistics, generated rather than hand-summarised.
 
-This exists because a hand-written summary already hid the thing the abort band
-is for. The simple-mu evidence README said "worst Δdeg anywhere is −0.034" while
-the same JSON contained case-level Δdeg of −0.349, −0.282, −0.232 and −0.207:
-−0.034 was a *bucket mean*, and calling it "anywhere" turned a bucket average
-into a claim about every case. Bucket means are close to neutral almost by
-construction when a change helps some clips and hurts others, so a report that
-only prints means cannot fail in the way that matters.
-
-So every report carries, per bucket and overall:
+Bucket means are close to neutral by construction when a change helps some
+clips and hurts others, so every report carries, per bucket and overall:
 
   * mean, median, p10 and the worst five cases, for Δecho and Δdeg separately;
-  * counts of cases below −0.05 and below −0.1 on either metric;
+  * counts of cases at or below −0.05 and −0.1 on either metric;
   * the single worst case on each metric, named.
 
 `--md` renders the same numbers as Markdown, and `--summary` folds several runs
-(engine x grid) into one cross-configuration table so an outlier that appears in
-one configuration cannot be averaged away by the others.
+(engine x grid) into one cross-configuration table.
 
     python3 eval/ab_report.py --base b.json --cand c.json --label "C 16k/256" \\
         --out report_c256.json
@@ -30,8 +22,8 @@ import math
 import statistics as st
 import sys
 
-# Anything at or below this is a regression the release rule cares about; the
-# second is the "investigate the individual case" threshold.
+# Cases at or below BAND count as regressions; DEEP is the
+# "investigate the individual case" threshold.
 BAND = -0.05
 DEEP = -0.10
 METRICS = ("echo", "deg")
@@ -42,9 +34,9 @@ class ReportError(ValueError):
 
 
 def percentile(values, q):
-    """Nearest-rank percentile. Deliberately not interpolated: with n=4 or n=5
-    buckets an interpolated p10 invents a value between two cases and reads as
-    if it were measured."""
+    """Nearest-rank percentile, deliberately not interpolated: with n=4 or n=5
+    an interpolated p10 would invent a value between two cases.
+    """
     if not values:
         return None
     s = sorted(values)

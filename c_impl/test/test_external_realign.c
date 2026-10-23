@@ -1,40 +1,24 @@
-/* Regression test for aec_apply_external_realign(): the 4ch shared-delay
- * wrapper's output discontinuity.
- *
- * An AEC_DELAY_EXTERNAL_ALIGNED instance converges while the caller serves
- * one far alignment; the caller then changes the alignment. A full
- * aec_reset() response wipes the converged filter, so the echo is
- * fully re-exposed for dozens of hops (bright broadband line) and the WOLA
- * restart adds a near-zero output hop (dark line). On this exact
- * scene with the full reset: linear residual jumped 0.030 -> 0.075 (~= the 0.076
- * echo) at the change hop.
+/* Regression test for aec_apply_external_realign(): the output discontinuity when an EXTERNAL_ALIGNED caller (e.g. a
+ * multi-lane shared-delay wrapper) changes its far alignment after the filter has converged. A full aec_reset() response
+ * wipes the converged filter, so the echo is re-exposed for dozens of hops and the WOLA restart adds a near-zero output
+ * hop; on this scene the linear residual jumps 0.030 -> 0.075 (about the 0.076 echo) at the change hop.
  *
  * What this proves:
- *   1. WARM TRANSFER HOLDS CANCELLATION (delta > 0, the first-acquisition
- *      raw->aligned move): after realign, residual stays BELOW half the echo
- *      on every one of the next hops.
- *   2. THE DEFECT REPRODUCES with aec_reset() on an identical twin scene:
- *      residual rebounds to >= 0.8x echo. Without this row, row 1 could
- *      pass on a scene where the filter never converged at all.
- *   3. SIGNED SHIFT (delta < 0, aligned->raw): the refill transient is
- *      bounded and cancellation resumes outright afterwards.
- *   4. API contract: 0 on delta==0, -1 on a non-external mode / NULL, and the
- *      generation token advances on BOTH outcomes.
- *   5. THE GATE SURVIVES FAR SILENCE. The inst-ERLE ring holds ~15 entries and
- *      every far-silent hop pushes a 0.0 into it, so a realign that arrives
- *      >= 16 hops after the last far burst -- a wrapper that re-measures its
- *      alignment between bursts, i.e. the common case -- would read "not
- *      cancelling" on a filter cancelling at 13 dB and fall to the reset
- *      branch for nothing. aec_linear_is_cancelling()'s windowed reading is
- *      what still knows. (Needs the post-filter chain to run -- context-only is
- *      enough -- since that is what maintains the windowed ERLE.)
- *   6. THE RESET BRANCH ACTUALLY RECONVERGES. When the gate legitimately
- *      rejects, the taps sit at the alignment the caller abandoned. Keeping
- *      them (a counters-only echo-path-change) leaves
- *      the filter SUBTRACTING a decorrelated echo copy: measured 1.3-1.5x the
- *      echo, above pass-through, for 300+ hops. Pinned against an aec_reset()
- *      twin, whose trajectory is the target the filter-only reset has to match
- *      without the twin's synthesis restart.
+ *   1. WARM TRANSFER HOLDS CANCELLATION (delta > 0, the first-acquisition raw->aligned move): after realign, the residual
+ *      stays BELOW half the echo on every one of the next hops.
+ *   2. THE FULL-RESET FAILURE REPRODUCES with aec_reset() on an identical twin scene: the residual rebounds to >= 0.8x
+ *      echo. Without this row, row 1 could pass on a scene where the filter never converged at all.
+ *   3. SIGNED SHIFT (delta < 0, aligned->raw): the refill transient is bounded and cancellation resumes outright afterwards.
+ *   4. API contract: 0 on delta==0, -1 on a non-external mode / NULL, and the generation token advances on BOTH outcomes.
+ *   5. THE GATE SURVIVES FAR SILENCE. The inst-ERLE ring holds ~15 entries and every far-silent hop pushes a 0.0 into it,
+ *      so a realign arriving >= 16 hops after the last far burst (a wrapper re-measuring its alignment between bursts, the
+ *      common case) would read "not cancelling" on a filter cancelling at 13 dB and take the reset branch for nothing.
+ *      aec_linear_is_cancelling()'s windowed reading still knows. This needs the post-filter chain to run (context-only is
+ *      enough), since that maintains the windowed ERLE.
+ *   6. THE RESET BRANCH RECONVERGES. When the gate legitimately rejects, the taps sit at the alignment the caller
+ *      abandoned; keeping them (a counters-only echo-path-change) leaves the filter subtracting a decorrelated echo copy,
+ *      measured at 1.3-1.5x the echo for 300+ hops. Pinned against an aec_reset() twin, whose trajectory the filter-only
+ *      reset has to match without the twin's synthesis restart.
  */
 #include <math.h>
 #include <stdio.h>
@@ -218,16 +202,13 @@ int main(void)
     CHECK(!back.has_shadow ||
           x2_mirror_mismatches(&back.shadow_filter) == 0,
           "retard realign leaves the shadow filter's |X|² mirror consistent with X_buf");
-    /* The retard direction (delta < 0) clears the far spectra (see the realign
-     * implementation), so the echo is exposed until the partition ring refills
-     * past the shifted response. The general bound is
-     * ceil((|delta| + tap offset)/hop) + 1 hops and the residual inside the
-     * window is NOT bounded by the echo (see the aec.h contract, which carries
-     * the measurements); THIS scene is the mildest corner of it -- |delta|=300
-     * with the response at tap 0 -- so two hops and 1.05x is what it costs
-     * here, and that is what is pinned. What matters generally is the second
-     * check: cancellation resumes OUTRIGHT once the ring has refilled, against
-     * the reset control that stays exposed for dozens of hops. */
+    /* The retard direction (delta < 0) clears the far spectra, so the echo is exposed until the
+     * partition ring refills past the shifted response. The general bound is ceil((|delta| + tap
+     * offset)/hop) + 1 hops and the residual inside the window is NOT bounded by the echo (see
+     * aec_apply_external_realign in aec.h). This scene is the mildest corner (|delta|=300, response
+     * at tap 0): two hops and 1.05x is what it costs and is what is pinned. The second check
+     * matters in general: cancellation resumes OUTRIGHT once the ring has refilled, against the
+     * reset control that stays exposed for dozens of hops. */
     worst = 0.0f;
     for (h = HOPS + 1; h < HOPS + 3; ++h) {
         resid = run_hop(&back, h, 0, out);
@@ -348,29 +329,16 @@ int main(void)
         aec_destroy(&sref);
     }
 
-    /* --- Row 7: the reset path leaves no coarse/leakage sustain evidence
-     * behind. Those counters accumulate evidence ABOUT the taps -- how the
-     * refined error compares to the coarse one, how many bins sit on the
-     * leakage-diverged branch -- so carrying them across a tap wipe lets the
-     * abandoned alignment's history drive the new filter's detectors.
-     *
-     * This is a STATE row on purpose, and the reason is worth stating: the
-     * contamination is invisible in the audio. After the wipe erl_per_bin is
-     * all zeros, so both arms of the H_error leakage refresh add the same
-     * zero and the output stream is bit-identical whether or not the counters
-     * were cleared (checked directly: 140 hops x 256 samples, byte-for-byte).
-     * The evidence is therefore the counter itself, plus the invariant that a
-     * counter starting at zero and stepping by at most one per hop cannot
-     * exceed the hop index -- which is what actually separates a cleared
-     * counter from one still draining its pre-realign value.
-     *
-     * The pre-call check is not decoration: without a scene that genuinely
-     * dirties the counter, everything below would be an identity. Only
-     * leakage_div_sustained_counter is dirty here -- poor_coarse_counter
-     * cannot be observed non-zero at all on this grid (its threshold is one
-     * hop, so it fires and self-clears within the hop that sets it), and
-     * coarse_reset_hangover only arms behind that fire. Those two are pinned
-     * by the same statement but carry no can-fail evidence of their own. */
+    /* --- Row 7: the reset path leaves no coarse/leakage sustain evidence behind. Those counters accumulate evidence about the
+     * taps (how the refined error compares to the coarse one, how many bins sit on the leakage-diverged branch), so carrying
+     * them across a tap wipe lets the abandoned alignment's history drive the new filter's detectors.
+     * This is a STATE row on purpose: the contamination is invisible in the audio. After the wipe erl_per_bin is all zeros,
+     * so both arms of the H_error leakage refresh add the same zero and the output is bit-identical whether or not the
+     * counters were cleared. The evidence is the counter itself, plus the invariant that a counter starting at zero and
+     * stepping by at most one per hop cannot exceed the hop index, which separates a cleared counter from one still draining
+     * its pre-realign value. Only leakage_div_sustained_counter is dirty here (the pre-call check ensures that):
+     * poor_coarse_counter cannot be observed non-zero on this grid, since its threshold is one hop and it self-clears within
+     * the hop that sets it, and coarse_reset_hangover only arms behind that fire; those two carry no can-fail evidence. */
     {
         Aec ctr;
         int k;

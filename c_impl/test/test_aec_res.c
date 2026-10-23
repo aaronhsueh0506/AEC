@@ -182,12 +182,11 @@ static void test_contract(void) {
     CHECK(target == floor_mild && live == floor_mild, "reset keeps the retargeted floor");
     aec_res_reset(NULL);
 
-    /* NO_FLOOR: the gate steps immediately (no ramp), and -- the point of
-     * this block -- survives aec_res_reset(). rebuild() re-inits
-     * suppression_gain_init(&r->sg, &r->sg_cfg, ...) from r->sg_cfg, so a
-     * setter that updated r->sg.cfg.split_floor_enabled but forgot the
-     * r->sg_cfg mirror (the same mirror split_floor_far_active/_dt already
-     * keep) would pass every check up to the reset and only fail here. */
+    /* NO_FLOOR: the gate steps immediately (no ramp) and survives aec_res_reset(). rebuild()
+     * re-inits suppression_gain_init(&r->sg, &r->sg_cfg, ...) from r->sg_cfg, so a setter that
+     * updated r->sg.cfg.split_floor_enabled but not the r->sg_cfg mirror (which
+     * split_floor_far_active/_dt already keep) would pass every check up to the reset and fail only
+     * here. */
     CHECK(r->sg.cfg.split_floor_enabled == 1,
           "no_floor: mild left the gate enabled");
     CHECK(aec_res_set_preset(r, AEC_PRESET_NO_FLOOR, 0.0f) == 0,

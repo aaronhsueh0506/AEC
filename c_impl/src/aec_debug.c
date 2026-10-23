@@ -1,16 +1,4 @@
-/* aec_debug.c — see aec_debug.h.
- *
- * Implementation kept tiny on purpose: fprintf to the trace stream, no ring
- * buffer, no async I/O. Maintenance > perf for debug code.
- *
- * With AEC_NO_STDIO, this is the only stdio translation unit
- * in the library (fprintf) — every symbol it defines has a static-inline no-op
- * replacement in aec_debug.h under AEC_NO_STDIO, so this whole file compiles
- * to nothing (not even an empty translation unit warning risk: no code, no
- * declarations) when that macro is set. Belt and braces with the Makefile,
- * which additionally excludes this file's object from the library sources
- * entirely under NO_STDIO=1 — either mechanism alone is sufficient to keep
- * libaec.a stdio-free; both together mean neither can regress silently. */
+/* aec_debug.c -- see aec_debug.h. Compiles to nothing under AEC_NO_STDIO. */
 #ifndef AEC_NO_STDIO
 #include "aec_debug.h"
 #include <stdio.h>
@@ -18,8 +6,8 @@
 static int   g_level         = 0;
 static FILE* g_fp            = NULL;
 static int   g_frame_idx     = 0;
-static FILE* g_trace_fp      = NULL;   /* NULL → trace off */
-static int   g_trace_header  = 0;      /* header written for current stream */
+static FILE* g_trace_fp      = NULL;
+static int   g_trace_header  = 0;      /* header written for the current stream */
 
 void aec_debug_set_level(int level) { g_level = level; }
 void aec_debug_set_log(FILE* fp)    { g_fp = fp; }
@@ -48,4 +36,4 @@ void aec_debug_set_frame(int frame_idx, int hop, int sample_rate) {
     g_frame_idx = frame_idx;
 }
 
-#endif /* AEC_NO_STDIO */
+#endif

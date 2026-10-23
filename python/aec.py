@@ -1,22 +1,9 @@
-"""AEC algorithm — top-level shim.
+"""AEC top-level module: re-exports the public symbols of ``modules/``.
 
-The algorithm itself lives under ``python/modules/``:
-
-* ``modules.config`` — AecConfig + single BALANCED preset
-* ``modules.orchestrator`` — AEC engine class + process_wav_files + main
-* ``modules.{enums, dataclasses, delay, erle, preprocessing, filters,
-  detectors, epc, state, residual, residual_estimator, render, filter,
-  debug_logger}`` — leaf modules
-
-This file re-exports every public symbol so existing callers can keep
-``from aec import AEC, AecConfig, AecMode, AecPreset, PBFDKF,
-PathChangeRegimeHandler, RegimeHandlerDecision, ...`` unchanged.
-
-CLI entry point: ``python3 python/aec.py mic.wav ref.wav out.wav --preset balanced``
+CLI: ``python3 python/aec.py mic.wav ref.wav out.wav --preset balanced``
 """
 __version__ = "4.0.0rc1"
 
-# Algorithm classes live under python/modules/.
 from modules.enums import (  # noqa: F401
     AecMode, AecPreset, AecFilterState,
 )

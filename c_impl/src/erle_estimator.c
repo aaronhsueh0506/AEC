@@ -1,6 +1,4 @@
-/* erle_estimator.c — C port of python/modules/state/erle_estimator.py.
- * Thin startup-gated wrapper composing FullBandErleEstimator +
- * SubbandErleEstimator. See erle_estimator.h for the spec. */
+/* erle_estimator.c -- see erle_estimator.h. */
 #include "erle_estimator.h"
 
 void erle_estimator_init(ErleEstimator *e,
@@ -16,11 +14,7 @@ void erle_estimator_init(ErleEstimator *e,
                          unsigned char *low_render_st) {
     e->startup_hops       = startup_phase_length_hops;
     e->blocks_since_reset = 0;
-    /* Python ctor: FullBandErleEstimator(min_erle, max_erle_l, hop_size). */
     fb_erle_init(&e->fullband, n_bins, min_erle, max_erle_l, hop_size, sample_rate);
-    /* Python ctor: SubbandErleEstimator(n_bins, min_erle, max_erle_l,
-     *   max_erle_h, use_onset_detection, hop_size). use_min_erle_during_onsets
-     *   defaults True in SubbandErleEstimator.__init__. */
     subband_erle_init(&e->subband, n_bins,
                       min_erle, max_erle_l, max_erle_h,
                       use_onset_detection, /*use_min_erle_during_onsets=*/1,
@@ -42,16 +36,7 @@ void erle_estimator_update(ErleEstimator *e,
                            const float *x2, const float *y2, const float *e2,
                            int converged_filter,
                            const unsigned char *coh_gate_mask) {
-    /* Ceilinged at startup_hops to avoid signed overflow (same shape as
-     * erl_estimator.c's blocks_since_reset): the ONLY consumer of
-     * blocks_since_reset in this file/header is the `< startup_hops` comparison
-     * right below (no test exercises the ErleEstimator wrapper struct that owns
-     * this field). Once the counter reaches startup_hops,
-     * further increments can never change that comparison's outcome (already
-     * false, stays false), so gating the increment on `< startup_hops` is
-     * observationally identical to an unbounded increment for every reachable
-     * state (an unbounded one would wrap after ~248 days of continuous uptime at
-     * 10 ms hops). */
+    /* The counter stops at startup_hops so it cannot overflow. */
     if (e->blocks_since_reset < e->startup_hops) e->blocks_since_reset += 1;
     if (e->blocks_since_reset < e->startup_hops) {
         return;

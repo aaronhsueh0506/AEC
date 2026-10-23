@@ -1,9 +1,4 @@
-"""AEC3-aligned per-frame state machine.
-
-AecState skeleton + 4 helpers (InitialState / FilterDelay /
-FilteringQualityAnalyzer / SaturationDetector) plus ErlEstimator,
-ErleEstimator, FilterAnalyzer.
-"""
+"""AEC3-style per-frame state: AecState and its analyzers/estimators."""
 from .aec_state import AecState, AecStateConfig
 from .erl_estimator import ErlEstimator
 from .erle_estimator import ErleEstimator

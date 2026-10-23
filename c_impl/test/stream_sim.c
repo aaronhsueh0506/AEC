@@ -1,31 +1,20 @@
-/* stream_sim.c — streaming API verification (no Python golden needed).
+/* stream_sim.c -- streaming API verification (no Python golden needed).
  *
- * Five checks, run on every supported grid (16 kHz/256, 16 kHz/512,
- * 48 kHz/1024 and the legacy 8 kHz/256):
- *   0. CAPACITY — fifo_cap_hops is the documented 320 ms of render hops,
- *      rounded up to a power of two (aec_derive_dims). It differs per grid:
- *      the hop is 8 ms at 16 kHz/256, so 320 ms is 40 hops and the ring is 64;
- *      the other grids land on 32. The later checks size their pushes from
- *      the instance's own fifo_cap_hops, so this is the check that pins the
- *      capacity rule itself.
- *   1. LOCKSTEP EQUIVALENCE — feeding the same (mic,ref) through aec_process()
- *      vs through aec_analyze_render()+aec_process_capture() in lockstep yields
- *      BYTE-IDENTICAL output. This is the bit-exact-preservation guarantee:
- *      the streaming wrapper does not alter the offline engine.
- *   2. OVERRUN (drop-new) — pushing > fifo_cap renders before any capture
- *      fires AEC_BUF_RENDER_OVERRUN on every render past capacity (exactly
- *      cap of them succeed, the rest are dropped) and does not crash /
- *      overflow.
- *   3. UNDERRUN — capturing with an empty FIFO fires AEC_BUF_RENDER_UNDERRUN,
- *      processes (silent render), and normal operation resumes afterwards.
- *   4. CONSUMER CATCH-UP — once the ring is completely full, the next
- *      capture skips straight to the freshest buffered hop (instead of
- *      draining the backlog oldest-first), reports AEC_BUF_RENDER_OVERRUN,
- *      heals the occupancy to <=1, and the following render+capture pair is
- *      back to NONE/NONE.
+ * Five checks, run on every supported grid (16 kHz/256, 16 kHz/512, 48 kHz/1024 and 8 kHz/256):
+ *   0. CAPACITY: fifo_cap_hops is the documented 320 ms of render hops, rounded up to a power of two (aec_derive_dims). It
+ *      differs per grid: the hop is 8 ms at 16 kHz/256, so 320 ms is 40 hops and the ring is 64; the other grids land on 32.
+ *      The later checks size their pushes from the instance's own fifo_cap_hops, so this pins the capacity rule itself.
+ *   1. LOCKSTEP EQUIVALENCE: feeding the same (mic,ref) through aec_process() vs through aec_analyze_render() +
+ *      aec_process_capture() in lockstep yields BYTE-IDENTICAL output, so the streaming wrapper does not alter the engine.
+ *   2. OVERRUN (drop-new): pushing > fifo_cap renders before any capture fires AEC_BUF_RENDER_OVERRUN on every render past
+ *      capacity (exactly cap of them succeed, the rest are dropped) and does not crash or overflow.
+ *   3. UNDERRUN: capturing with an empty FIFO fires AEC_BUF_RENDER_UNDERRUN, processes (silent render), and normal operation
+ *      resumes afterwards.
+ *   4. CONSUMER CATCH-UP: once the ring is completely full, the next capture skips straight to the freshest buffered hop
+ *      (instead of draining the backlog oldest-first), reports AEC_BUF_RENDER_OVERRUN, heals the occupancy to <=1, and the
+ *      following render+capture pair is back to NONE/NONE.
  *
- * Build and run (from c_impl/; the FFT wrapper lives in the shared
- * audiolib archive, which the Makefile resolves):
+ * Build and run (from c_impl/; the Makefile resolves the audiolib archive):
  *   make test-stream-sim
  *   make test-stream-sim SIMD=0
  */

@@ -1,40 +1,32 @@
 #!/usr/bin/env python3
 """Combined ERLE/SDR + AECMOS eval over the fixed, checked-in 90-case manifest.
 
-Background: eval_aec_challenge.py's doubletalk scoring used ONLY an
-ERLE-like metric (10*log10(mic_power/output_power)) with no near-end
-preservation term -- a run that destroys real near-end speech along with
-the echo scores BETTER than one that correctly preserves it. This script
-does not remove that ERLE reporting (still useful as a far-end echo-return
-measure) but stops treating it as sufficient on its own, per an external
-review:
+eval_aec_challenge.py's doubletalk ERLE has no near-end preservation term (a
+run that destroys near-end speech along with the echo scores better), so each
+category also reports AECMOS:
 
-  - far-end singletalk : ERLE (existing)              + AECMOS echo_mos
-  - doubletalk          : ERLE (existing)               + AECMOS echo_mos + AECMOS deg_mos
-  - near-end singletalk : SDR (existing)                + AECMOS deg_mos
+  - far-end singletalk : ERLE + AECMOS echo_mos
+  - doubletalk         : ERLE + AECMOS echo_mos + AECMOS deg_mos
+  - near-end singletalk: SDR  + AECMOS deg_mos
 
 Every category is reported with its static and movement subsets SEPARATE
-(never pooled into one mean) -- movement cases have systematically
-different delay-tracking behaviour and pooling hides that.
+(never pooled): movement cases track delay differently and pooling hides that.
 
-Cases come from a fixed, checked-in manifest (eval/manifest_90case.json,
-see eval/build_manifest_90case.py for how it was built) so any future
-baseline/candidate run reads the IDENTICAL case list -- 30 far-end / 30
-doubletalk / 30 near-end (near-end is all-static; this corpus, upstream,
-has no near-end-singletalk movement variant).
+Cases come from eval/manifest_90case.json (built by
+eval/build_manifest_90case.py), so every run reads the identical list: 30
+far-end / 30 doubletalk / 30 near-end (near-end is all static).
 
-Rendering reuses eval_aec_challenge.py's `run_ours` (the exact same AEC
-invocation + offline pre-align + online delay-est policy the standard
-800-case bench uses) so results are directly comparable to that harness's
-`_ours.wav` renders -- this script adds metrics, it does not reimplement
-the AEC call.
+Rendering reuses eval_aec_challenge.py's `run_ours` (same AEC invocation,
+offline pre-align and online delay-est policy as the 800-case bench), so
+results are directly comparable to that harness's `_ours.wav` renders; this
+script only adds metrics.
 
 Usage (standard bench config):
-    python3 python/eval_manifest90.py \
-        --manifest eval/manifest_90case.json \
-        --dataset-dir wav/aec_challenge_blind \
-        --preset balanced --filter 832 --cng \
-        --parallel --workers 4 \
+    python3 python/eval_manifest90.py \\
+        --manifest eval/manifest_90case.json \\
+        --dataset-dir wav/aec_challenge_blind \\
+        --preset balanced --filter 832 --cng \\
+        --parallel --workers 4 \\
         -o out_manifest90/ --result-dir results_manifest90/
 """
 import argparse
@@ -62,19 +54,12 @@ from bench_aecmos import FastAECMOS
 from preset_arg import PRESET_METAVAR, PRESET_NAMES, parse_preset_arg
 
 # ---------------------------------------------------------------------------
-# Run-provenance metadata: a run's scores.json is
-# only trustworthy/reproducible if it also records EXACTLY what produced the
-# numbers -- the resolved signal grid, whether NO_PREALIGN was set, every
-# other AEC-relevant env-var override, the fully-resolved AecConfig (not just
-# a preset name), and the exact code state (commit + dirty flag). All of this
-# is gathered unconditionally in main() below -- never optional/best-effort.
-#
-# Every env var found (by grep) to gate behavior reachable from run_ours():
-#   - eval_aec_challenge.py: NO_PREALIGN + 17 AEC_* campaign/tuning hooks
-#     (see run_ours() docstring/body for what each does).
-#   - modules/orchestrator.py: R7_EPV_WEAK_THR (EPV weak-filter damping gate,
-#     default '0.0' == OFF).
-# config.py itself has no os.environ/getenv references.
+# Run provenance: a run's scores.json records what produced the numbers (signal
+# grid, NO_PREALIGN and the other env-var overrides below, the fully resolved
+# AecConfig, commit + dirty flag), gathered unconditionally in main().
+# Env vars gating behaviour reachable from run_ours(): NO_PREALIGN and the AEC_*
+# hooks in eval_aec_challenge.py, plus R7_EPV_WEAK_THR in modules/orchestrator.py
+# (default '0.0' == off).
 _AEC_ENV_VARS = [
     'NO_PREALIGN',
     'AEC_MAX_DELAY_MS',
@@ -99,10 +84,9 @@ _AEC_ENV_VARS = [
 
 
 def _config_to_jsonable(config):
-    """Every field of a resolved AecConfig, via dataclasses.asdict() (not a
-    hand-picked subset) so knobs a preset name alone would hide -- env-var
-    overrides, config_overrides, movement-dependent delay-est kwargs -- are
-    all captured as the values actually live for this run.
+    """Every field of a resolved AecConfig via dataclasses.asdict(), so knobs a preset
+    name alone would hide (env overrides, config_overrides, movement-dependent
+    delay-est kwargs) are captured.
     """
     d = dataclasses.asdict(config)
     for k, v in d.items():
@@ -117,12 +101,9 @@ def _config_to_jsonable(config):
 
 
 def _git_provenance(repo_root):
-    """Commit hash + working-tree dirty state for the AEC repo specifically
-    (cwd pinned to repo_root regardless of where this script is invoked
-    from). Always attempts every command and always returns a populated
-    dict -- on any failure (git missing, not a repo, etc.) the 'error' key
-    is set instead of the block being silently omitted, so a run never
-    ships with unexplained-missing provenance.
+    """Commit hash + working-tree dirty state of the AEC repo (cwd pinned to
+    repo_root). On failure (git missing, not a repo) the 'error' key is set, so
+    provenance is never silently omitted.
     """
     info = {'repo_root': repo_root}
 
@@ -153,8 +134,8 @@ TALK_TYPE = {
     'nearend_singletalk': 'nst',
 }
 
-# Metrics the review's fix mandates per scenario. ERLE/SDR pick one each;
-# AECMOS sub-scores can list more than one.
+# Primary metric per scenario (ERLE or SDR, one each); AECMOS sub-scores may
+# list more than one.
 PRIMARY_METRIC = {
     'farend_singletalk': 'erle',
     'doubletalk': 'erle',
@@ -214,9 +195,9 @@ def _run_one_case(case_args):
     sf.write(os.path.join(out_dir, f"{stem}_ours.wav"), output, sr)
 
     result = {'stem': stem, 'scenario': scenario, 'split': split, 'sample_rate': int(sr)}
-    # Popped back out in main() to build the deduped run['resolved_config_variants']
-    # block -- kept per-case here because _run_one_case runs in a (possibly
-    # spawned) worker process and this is the only channel back to main().
+    # Popped in main() to build the deduped run['resolved_config_variants'];
+    # per-case because workers may be spawned processes and this is the only
+    # channel back.
     result['_resolved_config'] = _config_to_jsonable(_cfg_holder[0])
     if PRIMARY_METRIC[scenario] == 'erle':
         result['erle'] = eac.compute_erle(mic, output)
@@ -285,11 +266,9 @@ def main():
             results.append(_run_one_case(ca))
             print(f"  {i+1}/{len(case_args)}", file=sys.stderr, flush=True)
 
-    # ---- provenance: dedupe the resolved AecConfig each case actually ran
-    # with (movement vs static take different delay-est kwargs inside
-    # run_ours, so more than one distinct resolved config can legitimately
-    # occur in a single run -- pool by exact field-for-field content, not by
-    # assumption, so this never hides a real difference). ----
+    # ---- provenance: dedupe the resolved AecConfig each case ran with (movement and
+    # static take different delay-est kwargs in run_ours, so several distinct
+    # configs can occur in one run; pool by exact content) ----
     config_variants = {}
     for r in results:
         cfg_dict = r.pop('_resolved_config')
@@ -358,10 +337,8 @@ def main():
             'manifest': os.path.abspath(args.manifest),
             'dataset_dir': os.path.abspath(args.dataset_dir),
         },
-        # Provenance/reproducibility block -- unconditionally
-        # populated every run, never optional/best-effort: exact signal grid,
-        # NO_PREALIGN + every other AEC-relevant env override, the fully
-        # resolved AecConfig(s) actually live, and the exact code state.
+        # Provenance block: grid, env overrides, resolved config(s) and code state;
+        # always populated.
         'run': run_metadata,
         'summary': summary,
         'cases': results,
@@ -370,7 +347,6 @@ def main():
     with open(scores_path, 'w') as f:
         json.dump(out, f, indent=2)
 
-    # ---- print report ----
     print()
     print(f"{'='*78}")
     print(f"90-case manifest eval -- preset={args.preset} filter={args.filter} cng={args.cng}")

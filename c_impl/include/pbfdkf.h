@@ -1,28 +1,12 @@
-/* pbfdkf.h — C port of python/modules/filters.py PBFDAF + PBFDKF.
- *
- * Partitioned Block Frequency-Domain Adaptive Filter with overlap-save.
- *   PBFDAF — NLMS update (shadow / coarse filter).
- *   PBFDKF — per-bin H_error Kalman gain + leakage refresh
- *            (the reference refined-filter update gain).
- *
- * PBFDKF update:
- *   per-bin H_error state. mu[k] = H_error / (0.5·H_error·X² +
- *   n·E²_refined + δ); W[p] += mu·conj(X[p])·mu_scale·error_spec;
- *   H_error -= 0.5·mu·X²·H_error (decay, active branch only);
- *   always-on refresh H_error += leakage·erl, clamp[floor,ceil].
- *   leakage = converged/diverged chosen per-bin by E²_ref≤E²_coa,
- *   transient (initial_state) profile for the first 250 active hops.
- *
- * Design rules (parity):
- *   - All array dtypes mirror Python: np.complex64 ⇒ Complex; np.float32 ⇒
- *     float. The H_error / mu / leakage-refresh ARITHMETIC is exact given
- *     identical inputs, but its inputs (|error_spec|², |X|²) come THROUGH the
- *     FFT, so H_error / error_psd / R are rtol-bounded (<1e-4) against
- *     Python, NOT bit-exact. Only the integer control state (call_counter /
- *     partition_idx / initial_state) is bit-exact.
- *   - One struct per Python class. PBFDKF embeds a PBFDAF as `base`.
- *   - Built with -ffp-contract=off (Makefile) — no FMA fusion.
- */
+/* Partitioned-block frequency-domain adaptive filters with overlap-save: PBFDAF (NLMS update,
+ * shadow / coarse filter) and PBFDKF (per-bin H_error gain with leakage refresh, refined filter;
+ * embeds a PBFDAF as `base`).
+ * PBFDKF update: mu[k] = H_error / (0.5 * H_error * X^2 + n * E^2_refined + delta);
+ * W[p] += mu * conj(X[p]) * mu_scale * error_spec; in the active branch
+ * H_error -= 0.5 * mu * X^2 * H_error; always H_error += leakage * erl, clamped to [floor, ceil].
+ * Leakage is the converged or diverged rate per bin (E^2_ref <= E^2_coa), with a transient profile
+ * while the initial state lasts (2.5 s of active render). Python reference: modules/filters.py
+ * (PBFDAF, PBFDKF). */
 #ifndef AEC_PBFDKF_H
 #define AEC_PBFDKF_H
 
@@ -35,81 +19,59 @@ extern "C" {
 
 typedef struct PBFDAF {
     int     hop_size;
-    int     sample_rate;       /* drives every wall-clock-rescaled field below
-                                 * (initial_state_threshold_hops here;
-                                 * PBFDKF's leakage rates and its
-                                 * poor_excitation_counter reset, via
-                                 * base.sample_rate) */
-    int     block_size;        /* 2 * hop_size */
-    int     fft_size;          /* next pow2 >= block_size */
+    int     sample_rate;       /* drives the wall-clock-rescaled fields */
+    int     block_size;
+    int     fft_size;
     int     n_partitions;
-    int     n_freqs;           /* fft_size/2 + 1 */
+    int     n_freqs;
     float   mu;
     float   delta;
     int     enable_td_constraint;
 
-    float*  td_window;         /* [fft_size] */
-    float*  sqrt_hann;         /* [block_size] sqrt-Hann analysis window */
+    float*  td_window;
+    float*  sqrt_hann;
 
-    /* W [n_partitions][n_freqs] complex64 */
+    /* W [n_partitions][n_freqs] */
     Complex* W;
-    /* X_buf [n_partitions][n_freqs] complex64 (history of far_spec) */
+    /* X_buf [n_partitions][n_freqs] (far_spec history) */
     Complex* X_buf;
     int      partition_idx;
 
-    float*  near_buffer;       /* [block_size] */
-    float*  far_buffer;        /* [block_size] */
+    float*  near_buffer;
+    float*  far_buffer;
 
-    Complex* near_spec;        /* [n_freqs] */
-    Complex* echo_spec;        /* [n_freqs] */
-    Complex* error_spec;       /* [n_freqs] */
-    Complex* far_spec;         /* [n_freqs] */
-    Complex* error_spec_windowed; /* [n_freqs] */
+    Complex* near_spec;
+    Complex* echo_spec;
+    Complex* error_spec;
+    Complex* far_spec;
+    Complex* error_spec_windowed;
 
-    /* FFT dedup (main+shadow share an identical far_buffer: lockstep shift +
-     * paired reset). When the caller already computed far_spec this hop (the
-     * shadow runs pre-main), it points it here so the frontend reuses it instead
-     * of a redundant rfft; one-shot (cleared after use). `lightweight` (set on
-     * the shadow) skips near_spec + error_spec_windowed, which no consumer reads.
-     * Both are byte-equal. Borrowed pointer — not pool-owned. */
+    /* FFT sharing between main and shadow filters: when the caller already computed far_spec this
+     * hop it points it here and the frontend reuses it (one-shot, borrowed). `lightweight` (shadow)
+     * skips near_spec and error_spec_windowed. */
     const Complex* precomputed_far_spec;
     int      lightweight;
-    /* Far-end-FFT-sharing instrumentation: incremented exactly once per hop this
-     * filter ACTUALLY runs a far-end rfft (the else-branch in
-     * pbfdaf_frontend() below) -- i.e. NOT when precomputed_far_spec was
-     * set (internal shadow->main borrow OR an external caller's
-     * aec_process_context_shared_far()). Never read internally; exposed
-     * read-only via aec_far_fft_real_compute_count() for tests/instrumentation
-     * that need to prove a multi-lane caller's far-FFT count drops when
-     * its lanes use the shared-spectrum entry
-     * point, without conflating it with the near/error/W-tap FFTs that
-     * also flow through the same underlying fft_forward_scratch(). */
-    long     far_fft_real_compute_count; /* saturates at LONG_MAX */
+    /* Counts hops in which this filter itself ran a far-end rfft; read via
+     * aec_far_fft_real_compute_count(). */
+    long     far_fft_real_compute_count;
 
-    /* Round-robin TD constraint: constrain
-     * ONE partition per hop (cycling `partition_to_constrain`) instead of all
-     * partitions every hop — saves ~58% of the per-hop constraint FFTs and
-     * deepens convergence (constraining all of them every hop over-constrains). aec_create
-     * sets `constraint_round_robin`=1 on BOTH filters (production default). Each
-     * filter keeps its own counter. `constraint_round_robin` is pure config and
-     * never reset; the cursor beside it survives pbfdaf_reset() (the mid-stream
-     * relock path keeps cycling where it left off, mirroring Python) and is
-     * re-armed only by pbfdaf_reset_carried_state(), i.e. by aec_reset(). */
+    /* Round-robin time-domain constraint, one partition per hop. aec_create sets
+     * constraint_round_robin = 1 on both filters (config, never reset); the cursor survives
+     * pbfdaf_reset() and is re-armed only by pbfdaf_reset_carried_state(). */
     int      constraint_round_robin;
     int      partition_to_constrain;
 
-    /* Subtractor-output s_*_max_abs — time-domain peak of the echo
-     * predictor on the valid hop (max|echo_time[hop:block]|). Recomputed every
-     * frontend pass; consumed by AecState SaturationDetector. */
+    /* Time-domain peak max |echo_time[hop:block]| of the last frontend pass, used by the
+     * SaturationDetector. */
     float   last_s_max_abs;
 
-    /* Coarse-filter update-gain startup / poor-excitation / saturation gates */
+    /* Coarse-filter update-gain gates */
     long    call_counter;
     long    poor_excitation_counter;
     int     saturated_capture;
     int     block_stationary;
 
-    /* InitialState tracking (shared field; only PBFDKF consumes it). */
+    /* InitialState tracking (PBFDKF only) */
     int     initial_state_active;
     long    initial_state_active_render_hops;
     long    initial_state_threshold_hops;
@@ -118,293 +80,166 @@ typedef struct PBFDAF {
 
     /* FFT scratch (private) */
     FftHandle* fft;
-    float*     time_scratch;   /* [fft_size] */
-    Complex*   spec_scratch;   /* [n_freqs] */
+    float*     time_scratch;
+    Complex*   spec_scratch;
 
-    /* Per-hop scratch, instance storage (not stack) — keeps pbfdaf_process /
-     * pbfdaf_frontend / pbfdaf_warm_shift_ir stack
-     * usage independent of n_freqs / n_partitions (embedded task stacks are
-     * small; these were float[8192]/float[4096] locals, a stack-overflow
-     * hazard). Mirrors the e2_ref_scratch pattern below on PBFDKF. One field
-     * per distinct concurrent live range (see pbfdkf.c comments at each use). */
-    float*  scr_fsq;           /* [hop_size]     pbfdaf_frontend far_end**2 */
-    float*  scr_mu_local;      /* [n_freqs]      pbfdaf_process mu broadcast */
-    float*  scr_x2psum;        /* [n_freqs]      pbfdaf_process X_buf**2 partition sum */
-    float*  scr_mu_eff;        /* [n_freqs]      pbfdaf_process per-bin mu */
-    float*  scr_ir;            /* [n_partitions*hop_size] pbfdaf_warm_shift_ir IR concat */
+    /* Per-hop scratch in instance storage, not on the stack. */
+    float*  scr_fsq;
+    float*  scr_mu_local;
+    float*  scr_x2psum;
+    float*  scr_mu_eff;
+    float*  scr_ir;
 
-    /* Appended fields (kept last so every offset above is unchanged).
-     *
-     * x2_cache [n_partitions][n_freqs] float — |X_buf[p][k]|² mirrored row for
-     * row. The two X² partition sums (pbfdaf_process's NLMS gate and
-     * pbfdkf_update_weights's Kalman gain) re-derived this from X_buf with
-     * the scaled-hypot cmag2 kernel on every update call, over a history where
-     * exactly one row changes per hop and that row's |.|² is already computed
-     * by the frontend. The cached float IS the value cmag2 would return -- it
-     * is produced by the same kernel, once, at the hop the partition enters
-     * history -- so the sums stay byte-identical while the divide+sqrt per bin
-     * per partition disappears. Every X_buf writer must write this in the same
-     * breath: pbfdaf_zero_state, pbfdaf_reset_taps, the frontend's row store
-     * and pbfdaf_clear_far_history (the only spelling a caller outside this
-     * file has for wiping the far history).
-     *
-     * far_cmag2_hold [n_freqs] float — |far_spec[k]|², written by the frontend
-     * and zeroed exactly where far_spec is zeroed, so it tracks far_spec's
-     * lifecycle rather than X_buf's. That distinction is load-bearing: a
-     * realign clears X_buf (and x2_cache) but NOT far_spec, so a consumer
-     * wanting |far_spec|² must read this, not an x2_cache row. Read before this
-     * hop's frontend it holds the previous hop's spectrum; read after, the
-     * current one -- which is exactly how the orchestrator's two consumers
-     * (previous-hop RSA, current-hop stationarity) want it. */
+    /* x2_cache [n_partitions][n_freqs] holds |X_buf[p][k]|^2 row for row; every X_buf writer
+     * updates it in the same step. far_cmag2_hold [n_freqs] holds |far_spec[k]|^2 and is zeroed
+     * where far_spec is; before a hop's frontend it holds the previous hop's spectrum, after it the
+     * current one. */
     float*  x2_cache;
     float*  far_cmag2_hold;
 
-    /* Set by EVERY writer of W in this file -- the two update paths (including
-     * their round-robin TD constraint), copy_weights_from, warm_shift_ir,
-     * scale_filter, reset_taps, zero_state -- and by init, so the first hop
-     * always recomputes. It exists for one consumer: the orchestrator's
-     * per-bin ERL publish, Σ_p|W_p[k]|², which ran every hop over a W that
-     * changes on roughly a quarter of them. That consumer CLEARS the flag when
-     * it has taken the sum; a second consumer must not be added without giving
-     * it its own flag, because clearing is what makes the skip work. Anything
-     * that writes W without setting this serves a stale ERL to the H_error
-     * leakage refresh, which is audible, not cosmetic. */
+    /* Set by every writer of W and by init. Its one consumer (the per-bin ERL publish) clears it
+     * after taking the sum; a writer that skips it serves a stale ERL to the H_error refresh. */
     int     w_dirty;
 } PBFDAF;
 
-/* Sizing never includes a nested FFT: pbfdaf_init_static() always runs
- * against a caller-supplied `shared_fft` (one FftHandle shared by main filter /
- * shadow filter / aec_post within a single Aec instance, carved once by
- * aec_get_mem_size()/aec_carve() rather than once per sub-module).
- *
- * with_process_scratch: 1 carves the pbfdaf_process()-only scratch
- * (scr_mu_local/scr_x2psum/scr_mu_eff). Pass 0 when the instance is only
- * driven via pbfdaf_frontend() (the PBFDKF base) -- pbfdaf_process() must NOT
- * be called on such an instance. */
+/* Sizing never includes a nested FFT: pbfdaf_init_static() borrows a caller-supplied shared_fft.
+ * with_process_scratch = 1 carves the pbfdaf_process()-only scratch; pass 0 for an instance driven
+ * only via the frontend (the PBFDKF base). */
 size_t pbfdaf_get_mem_size(int block_size, int n_partitions, int hop_size,
                            int with_process_scratch);
-/* shared_fft: REQUIRED, non-NULL — an FftHandle already fft_init()'d by the
- * caller at this instance's fft_size (pbfdaf_compute_sizes(hop_size, ...)).
- * `p` borrows it for its lifetime and never destroys it; the caller (whoever
- * constructed shared_fft) remains solely responsible for fft_destroy()-ing it
- * exactly once, after every borrower is done with it. Precondition:
- * single-threaded, fully sequential use — at most one transform in flight
- * across ALL borrowers of shared_fft at any time, and no borrower may retain
- * a pointer into the handle's internal scratch across calls. Returns 0 on
- * success, -1 if the pool base/size checks reject the inputs (nothing written
- * to `mem`), shared_fft is NULL, or sample_rate/resolved hop is non-positive.
- * Invalid arguments are rejected before writing `p` or mem. */
+/* shared_fft: required, already fft_init()'d at this fft_size; borrowed, never destroyed here
+ * (its creator destroys it once). Use is single-threaded and sequential. Returns 0, or -1 if the
+ * pool checks reject the inputs, shared_fft is NULL or sample_rate/hop is non-positive (nothing is
+ * written). */
 int    pbfdaf_init_static(PBFDAF* p, void* mem, size_t mem_size,
                            int block_size, int n_partitions,
                            float mu, float delta, int hop_size,
                     int with_process_scratch, int sample_rate,
                     FftHandle* shared_fft);
-/* Teardown only drops the borrowed shared_fft reference: the arrays live in the
- * caller's pool and the FFT handle belongs to whoever created it. */
+/* Drops the borrowed shared_fft reference only. */
 void pbfdaf_free(PBFDAF* p);
 void pbfdaf_reset(PBFDAF* p);
 
-/* Adaptation-only wipe: taps (W), the per-partition far SPECTRUM history
- * (X_buf), leaving the time-domain analysis
- * buffers (near_buffer/far_buffer, the block_size overlap-save history that
- * feeds near_spec/far_spec/error_spec_windowed and supplies the near term of
- * the linear output) untouched. pbfdaf_reset() is this plus those buffers.
- *
- * For a caller that must restart the filter mid-stream WITHOUT splicing a
- * half-empty analysis frame into the spectra a post-filter consumes: the
- * taps are what a realign invalidates, the analysis history is not. */
+/* Adaptation-only wipe: taps (W) and far history (X_buf); the time-domain analysis buffers are
+ * kept. pbfdaf_reset() adds those buffers. */
 void pbfdaf_reset_taps(PBFDAF* p);
 
-/* Restore the construction-time value of every scalar pbfdaf_reset() carries
- * forward: the startup/excitation/saturation gates (call_counter,
- * poor_excitation_counter, saturated_capture, block_stationary), the
- * InitialState tracking pair, the round-robin constraint cursor, and the
- * last-hop SubtractorOutput peak.
- *
- * Separate from pbfdaf_reset() on purpose. pbfdaf_reset()'s other caller is
- * the mid-stream delay-relock path, which re-arms the excitation gates itself
- * at each of its call sites (pbfdkf_handle_echo_path_change for the main
- * filter, the explicit shadow counter writes beside it) and deliberately
- * carries the rest forward; folding these writes into pbfdaf_reset() would
- * change what that path does. aec_reset() has no such call site -- its
- * contract is a fresh instance -- so it calls this straight after.
- *
- * poor_excitation_counter is restored to the same rate-scaled expression
- * aec_carve() and pbfdkf_handle_echo_path_change() use, NOT to the
- * reference-grid literal the init path writes before aec_carve overwrites
- * it. */
+/* Restores every scalar pbfdaf_reset() carries forward to its construction value (gates,
+ * InitialState pair, round-robin cursor, last subtractor peak). Used by aec_reset(). */
 void pbfdaf_reset_carried_state(PBFDAF* p);
 
-/* Wipe the per-partition far SPECTRUM history (X_buf) and its |.|² mirror,
- * leaving taps and analysis buffers alone. The mirror is why this exists as a
- * function: a caller memset-ing X_buf on its own would leave x2_cache holding
- * the magnitudes of a history that is now zero, and the next update would
- * subtract echo against them. One spelling, both arrays. */
+/* Wipes X_buf and its |.|^2 mirror x2_cache together; taps and analysis buffers are kept. */
 void pbfdaf_clear_far_history(PBFDAF* p);
 
-/* mu_scale: NULL ⇒ scalar; else per-bin array of n_freqs fp32. Output written
- * to `output` (length hop_size). */
+/* mu_scale: NULL for a scalar, else per-bin float[n_freqs]. Writes hop_size samples to `output`. */
 void pbfdaf_process(PBFDAF* p,
                        const float* near_end, const float* far_end,
-                       const float* mu_scale,   /* NULL or [n_freqs] */
+                       const float* mu_scale,
                        float        mu_scale_scalar,
                        float*       output);
 
-/* Same process with optional exact |precomputed_far_spec|². Used only when
- * precomputed_far_spec is non-NULL; otherwise the frontend computes it.
- * The power must come from this library's cmag2 kernel, for the same spectrum
- * and hop. Copies into the normal persistent fields; caller storage is borrowed
- * only for this call. NULL preserves pbfdaf_process behavior. */
+/* As pbfdaf_process with an optional exact |far_spec|^2 from this library's cmag2 kernel; NULL
+ * makes the frontend compute it. */
 void pbfdaf_process_with_far_cmag2(PBFDAF* p,
                        const float* near_end, const float* far_end,
                        const float* mu_scale, float mu_scale_scalar,
                        float* output, const float* precomputed_far_cmag2);
 
 void pbfdaf_copy_weights_from(PBFDAF* dst, const PBFDAF* src);
-/* Warm tap-transfer: shift the learned IR by shift_samples (positive = left,
- * toward tap 0; negative = right). Returns 0 when the shift was applied and
- * -1 when it was REFUSED by the scr_ir span guard (a filter whose
- * n_partitions*hop_size falls outside the scratch this routine can stage the
- * concatenated IR in). A refusal leaves the filter untouched, so a caller
- * that changed its alignment must not report warm success on -1: the taps
- * still sit at the old alignment.
- *
- * Also owns the far-history decision for a RETARD (shift_samples < 0): on a
- * successful shift it calls pbfdaf_clear_far_history() itself, mirroring
- * filters.py's Filter.warm_shift_ir (`if s < 0: self.X_buf.fill(0)`), which
- * makes the same call internally for the same reason -- the held history is
- * ahead of the realigned stream and would re-expose echo for dozens of hops
- * if kept. Callers never need (and must not add) their own clear; the
- * decision lives here once, not once per call site. */
+/* Warm tap transfer: shifts the learned IR by shift_samples (positive: toward tap 0). Returns 0,
+ * or -1 when refused (n_partitions * hop_size exceeds the staging scratch; the filter is untouched
+ * and the caller must not report warm success). A negative shift also clears the far history. */
 int pbfdaf_warm_shift_ir(PBFDAF* p, int shift_samples);
 
-/* ── PBFDKF (per-bin H_error Kalman) ────────────────────────────── */
+/* PBFDKF */
 
 typedef struct PBFDKF {
     PBFDAF base;
 
-    /* Process noise [n_freqs] — kept as benign config state (orchestrator sets
-     * Q_high/Q_low/Q at construction); NOT consumed by the H_error update. */
-    float* Q_high;             /* config kalman_q_high */
-    float* Q_low;              /* config kalman_q_low */
+    /* Process noise [n_freqs]: config state, not used by the H_error update. */
+    float* Q_high;
+    float* Q_low;
     float* Q;
-    /* Measurement-noise EMA [n_freqs] (error_psd EMA + R = max(error_psd,δ)).
-     * R is computed in the active path but does not feed the H_error gain;
-     * retained because the Python class maintains it per hop. */
+    /* Measurement-noise EMA [n_freqs]; R does not feed the H_error gain. */
     float* R;
     float* error_psd;
-    float  alpha_r;            /* error-PSD EMA retention. AUTHORING value 0.95
-                                * at hop=160/16000 (10 ms); retimed at
-                                * construction, so it equals 0.95 only on a
-                                * 10 ms hop. Read the effective value, never
-                                * this comment. */
+    float  alpha_r;            /* error-PSD EMA retention, retimed from the 160 @ 16 kHz authoring grid */
 
-    /* === H_error per-bin state ======================================= */
-    float* H_error_per_bin;    /* [n_freqs], init 10000 */
-    float  h_error_floor;      /* 1e-3 */
-    float  h_error_ceil;       /* 2.0 */
-    float  leakage_converged;  /* 1.25e-4 steady */
-    float  leakage_diverged;   /* 0.125  steady */
-    float  leakage_converged_transient;  /* 0.0125 (initial_state) */
-    float  leakage_diverged_transient;   /* 1.25   (initial_state) */
+    /* H_error per-bin state */
+    float* H_error_per_bin;    /* init 10000 */
+    float  h_error_floor;
+    float  h_error_ceil;
+    float  leakage_converged;
+    float  leakage_diverged;
+    float  leakage_converged_transient;
+    float  leakage_diverged_transient;
 
-    /* Per-hop orchestrator-set inputs to the refresh formula. */
-    float* e2_coarse_per_bin;  /* [n_freqs] or NULL (then scalar fallback) */
+    /* Per-hop orchestrator-set inputs to the refresh. */
+    float* e2_coarse_per_bin;  /* [n_freqs] or NULL (scalar fallback) */
     int    e2_coarse_per_bin_valid;
-    float  e2_coarse_for_refresh;   /* scalar fallback */
-    float* erl_per_bin;        /* [n_freqs] = Σ_p|W_p|² (orchestrator-set) */
+    float  e2_coarse_for_refresh;
+    float* erl_per_bin;        /* [n_freqs] = sum_p |W_p|^2 */
     int    disallow_leakage_diverged;
-    float  h_error_refresh_erl_floor;   /* 0.0 = OFF */
-    /* Diag: fraction of bins on the diverged-leakage branch in the most
-     * recent H_error refresh (np.mean(~use_converged_mask)). Read by the
-     * orchestrator Track F sustained-leakage gate. */
+    float  h_error_refresh_erl_floor;   /* 0 = off */
+    /* Fraction of bins on the diverged-leakage branch in the last refresh. */
     float  last_leakage_div_frac;
 
-    long   partition_sum_x2_startup_hops;  /* 0 = partition-sum from hop 1 */
+    long   partition_sum_x2_startup_hops;
 
-    /* Per-hop scratch [n_freqs]: |error_spec|² computed once per hop in
-     * pbfdkf_process and shared by the error_psd EMA + the mu gate +
-     * the H_error refresh (they all read the same untouched error_spec).
-     * Instance storage, not stack — keeps aec_process stack usage
-     * independent of n_freqs (embedded task stacks are small). */
+    /* Per-hop |error_spec|^2 [n_freqs], computed once in pbfdkf_process and shared. */
     float* e2_ref_scratch;
 
-    /* More per-hop scratch (same rationale as e2_ref_scratch above), kept off
-     * the stack: each is n_freqs long (up to 8192). scr_mu_local and
-     * scr_X2/scr_mu_aec have overlapping live ranges within their call
-     * (mu_scale_arr / X2 / mu_aec are all read together at the tail of
-     * pbfdkf_update_weights), so each gets its own field — see the use
-     * sites in pbfdkf.c for the exact live-range reasoning. */
-    float* scr_mu_local;       /* [n_freqs] pbfdkf_process mu broadcast */
-    float* scr_X2;             /* [n_freqs] pbfdkf_update_weights X_buf**2 */
-    float* scr_mu_aec;        /* [n_freqs] pbfdkf_update_weights per-bin mu */
+    /* More per-hop scratch, n_freqs each. */
+    float* scr_mu_local;
+    float* scr_X2;
+    float* scr_mu_aec;
 
 } PBFDKF;
 
 size_t pbfdkf_get_mem_size(int block_size, int n_partitions, int hop_size);
-/* shared_fft: forwarded verbatim to the base filter's pbfdaf_init_static() —
- * see that function's doc comment (REQUIRED, non-NULL, borrowed not
- * owned). Returns 0 on success, -1 if the pool base/size checks reject the
- * inputs (nothing written to `mem`), shared_fft is NULL, or
- * sample_rate/resolved hop is non-positive. Invalid arguments are rejected
- * before writing `p` or mem. */
+/* shared_fft is forwarded to pbfdaf_init_static(). Returns 0, or -1 as that function does. */
 int    pbfdkf_init_static(PBFDKF* p, void* mem, size_t mem_size,
                            int block_size, int n_partitions,
                            float mu, float delta, int hop_size,
                            int sample_rate, FftHandle* shared_fft);
 void pbfdkf_free(PBFDKF* p);
 void pbfdkf_reset(PBFDKF* p);
-/* pbfdaf_reset_taps for the Kalman filter: same adaptation-only scope, plus
- * the per-bin R/error_psd/Q re-arm pbfdkf_reset performs. */
+/* pbfdaf_reset_taps plus the R / error_psd / Q re-arm. */
 void pbfdkf_reset_taps(PBFDKF* p);
-/* pbfdaf_reset_carried_state for the Kalman filter: the same scope on the
- * shared base, plus the four orchestrator-fed refresh inputs (the coarse
- * energy pair, the leakage-branch veto and its diagnostic fraction) and the
- * per-bin H_error the Kalman re-arm leaves alone. Same split rationale --
- * see the PBFDAF prototype. */
+/* pbfdaf_reset_carried_state plus the orchestrator-fed refresh inputs and the per-bin H_error. */
 void pbfdkf_reset_carried_state(PBFDKF* p);
 
-/* mu_scale: NULL ⇒ scalar broadcast; else per-bin [n_freqs] fp32 (already
- * post-RSA-mask, matching the array the Python weight update receives). */
+/* mu_scale: NULL for a scalar broadcast, else per-bin float[n_freqs] (after the narrow-band mask).
+ * */
 void pbfdkf_process(PBFDKF* p,
                        const float* near_end, const float* far_end,
                        const float* mu_scale,
                        float        mu_scale_scalar,
                        float*       output);
 
-/* Optional paired far magnitudes, with the same contract as the PBFDAF
- * variant. Returns 1 when e2_ref_scratch contains this hop's |error_spec|²;
- * returns 0 on the far-silent path, which leaves that scratch untouched. */
+/* As pbfdaf_process_with_far_cmag2. Returns 1 when e2_ref_scratch holds this hop's |error_spec|^2,
+ * 0 on the far-silent path. */
 int pbfdkf_process_with_far_cmag2(PBFDKF* p,
                        const float* near_end, const float* far_end,
                        const float* mu_scale, float mu_scale_scalar,
                        float* output, const float* precomputed_far_cmag2);
 
-/* Refined-filter update-gain HandleEchoPathChange — H_error reset to init
- * on delay_change + coarse-filter update-gain counter reset. */
+/* Resets H_error on a delay change and re-arms the coarse-filter gain counter. */
 void pbfdkf_handle_echo_path_change(PBFDKF* p, int delay_change, int gain_change);
 
-/* The filter's reach in taps (n_partitions * hop): the single spelling of
- * the span every warm-transfer eligibility check compares a delay against. */
+/* The filter's reach in taps, used by the warm-transfer eligibility checks. */
 static inline int pbfdaf_tap_span(const PBFDAF* p) {
     return p->n_partitions * p->hop_size;
 }
 
-/* get_time_domain_filter: concat per-partition irfft(W[p])[:hop] →
- * out[n_partitions × hop_size] (caller-owned). Mirrors the Python filter's get_time_domain_filter.
- *
- * _range materializes only partitions [first_partition, first_partition+
- * n_parts), writing them at their natural offsets in that same full-length
- * layout and leaving every other tap in `out` untouched; the whole-filter
- * call is exactly the all-partitions case of it. One irfft per partition is
- * the dominant cost here, so a consumer that reads back only part of the
- * impulse response should ask for that part: the taps it does not read must
- * not be paid for. The range is clamped to the partition count. */
+/* Concatenates irfft(W[p])[:hop] per partition into out[n_partitions * hop_size]; the _range
+ * variant writes only partitions [first_partition, first_partition + n_parts) and leaves other taps
+ * untouched. */
 void pbfdaf_get_time_domain_filter_range(PBFDAF* p, int first_partition,
                                          int n_parts, float* out);
 void pbfdaf_get_time_domain_filter(PBFDAF* p, float* out);
 
-/* scale_filter: W *= (float32)scale (in place, all partitions). */
+/* W *= scale, all partitions. */
 void pbfdaf_scale_filter(PBFDAF* p, float scale);
 void pbfdkf_scale_filter(PBFDKF* p, float scale);
 
@@ -412,4 +247,4 @@ void pbfdkf_scale_filter(PBFDKF* p, float scale);
 }
 #endif
 
-#endif /* AEC_PBFDKF_H */
+#endif

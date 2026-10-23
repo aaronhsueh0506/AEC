@@ -1,20 +1,16 @@
 #!/usr/bin/env bash
-# run_parity_e2e.sh -- `make test-parity-e2e`: the repo's own end-to-end Python<->C gate
-# (test/parity_aec_e2e.c), wired to the Makefile.
+# run_parity_e2e.sh -- `make test-parity-e2e`: the repo's end-to-end Python<->C gate (test/parity_aec_e2e.c).
 #
 #   usage: run_parity_e2e.sh <checker-binary> <aec-root> <workdir> [--json FILE]
 #   env  : PYTHON           interpreter with numpy/scipy/soundfile (default python3)
 #
 # What it does
-#   1. Verifies the source wavs against test/golden/parity_e2e_inputs.sha256 (missing file or hash
-#      mismatch => FAIL; wav/aec_challenge_blind/ is git-ignored so the pin is the only link).
-#   2. Regenerates every golden with python/diag/gen_aec_e2e_golden.py INTO <workdir> (never into
-#      git) and replays it through the C checker. The checker's TOL_E2E / TOL_E2E_48K are NOT touched
-#      or re-implemented here: pass/fail is the checker's own exit code.
-#   3. 16 kHz and 48 kHz rows must PASS. The 8 kHz row is a KNOWN RED (audit S-19: the checker's
-#      2e-2 tolerance was set for a Python fp64 mic HPF vs the C f32 HPF, which the 8 kHz grid
-#      amplifies past it). It is reported as EXPECTED_RED(S-19) with the measured numbers; if it ever
-#      turns green this script FAILS so the marker (and the S-19 entry) get removed.
+#   1. Verifies the source wavs against test/golden/parity_e2e_inputs.sha256 (missing file or hash mismatch => FAIL;
+#      wav/aec_challenge_blind/ is git-ignored, so the pin is the only link).
+#   2. Regenerates every golden with python/diag/gen_aec_e2e_golden.py into <workdir> (never into git) and replays it through
+#      the C checker. Pass/fail is the checker's own exit code; its TOL_E2E / TOL_E2E_48K are not re-implemented here.
+#   3. 16 kHz and 48 kHz rows must PASS. The 8 kHz row is the expected red (it exceeds the checker's tolerance): it is reported
+#      as EXPECTED_RED with the measured numbers, and if it turns green this script FAILS so the marker gets removed.
 #   Not covered here: 16 kHz fft=512 (the generator has no --fft; see test/pyc_parity_aec.sh).
 #
 # Exit: 0 = every row as expected; 1 = a row failed / an expected-red turned green; 2 = setup error.

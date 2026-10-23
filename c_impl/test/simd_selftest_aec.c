@@ -17,11 +17,9 @@
 /* ═══════════════════════════════ config ═══════════════════════════════ */
 
 #define SK_TEST_MAX_N 512
-/* Extended to n=0 (must be a zero-read/zero-write no-op,
- * see the canary section below) plus the COMPLETE 1..17 run (every kernel's
- * 4-lane NEON/scalar-tail boundary crossed at every possible remainder, not
- * just a sparse sample) -- on top of the original hand-picked lane/leaf/
- * split boundary values, which stay for their own documented reasons. */
+/* Includes n=0 (a zero-read/zero-write no-op, see the canary section below) and the complete 1..17
+ * run, so every kernel's 4-lane NEON/scalar-tail boundary is crossed at every possible remainder,
+ * plus hand-picked lane/leaf/split boundary values. */
 static const int N_LIST[] = {
     0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17,
     128, 129, 160, 255, 256, 257, 512
@@ -32,12 +30,11 @@ static const int N_LIST[] = {
 #define BENCH_N 257
 #define BENCH_REPS 200000
 
-/* ═══════════════════════════ input generation ═══════════════════════════
- * Deterministic LCG over raw uint32 bit patterns mapped to floats (25% of
- * draws), mixed with a curated special-value pool (75%... actually the
- * other way: special pool draws 25% of the time, see gen_float()). NaN
- * bit patterns from the raw-bits path are remapped to 0.0f -- NaN payload
- * propagation is explicitly out of the bit-exactness contract. */
+/* ═══════════════════════ input generation ═══════════════════════
+ * Deterministic LCG over raw uint32 bit patterns mapped to floats, mixed with a curated
+ * special-value pool (the special pool is drawn 25% of the time, see gen_float()). NaN bit patterns
+ * from the raw-bits path are remapped to 0.0f: NaN payload propagation is outside the bit-exactness
+ * contract. */
 
 static uint32_t g_lcg = 0x9E3779B9u;
 
@@ -98,20 +95,15 @@ static void fill_complex(Complex *a, int n) {
     for (i = 0; i < n; ++i) gen_complex(&a[i]);
 }
 
-/* ═══════════════════════ int32 input generation (kernels 24-26) ═══════════
- * hold_counters is int32 -- separate generator from gen_float()'s bit-LCG
- * (an int32 has no NaN/Inf concept, so no exclusion logic is needed there),
- * but same 25%-special-pool / 75%-raw-bits shape for consistency. Kernel 25
- * (sk_dec1_floorintmin_s32) decrements only while the element is > INT_MIN:
- * an unconditional `-= 1` on INT32_MIN is signed-integer-overflow UB in C,
- * and flooring at 0 instead would desync the raw value from Python's
- * unbounded counter (see that kernel's header comment in utility/simd_aec.h
- * for the full argument). INT32_MIN is a safe input (it equals INT_MIN, so
- * the kernel leaves it unchanged and never subtracts from it), so it stays
- * INCLUDED in both the special pool below and the raw-bits path (no
- * remapping), exercising exactly that corner; INT32_MIN+1 is also in the
- * special pool specifically to exercise the one lane where the NEON
- * speculative decrement fires the hop before hitting the floor. */
+/* ═══════════════════════ int32 input generation (kernels 24-26) ═══════════════════════
+ * hold_counters is int32: a separate generator from gen_float() (an int32 has no NaN/Inf, so no
+ * exclusion logic is needed), with the same 25% special-pool / 75% raw-bits shape. Kernel 25
+ * (sk_dec1_floorintmin_s32) decrements only while the element is > INT_MIN: an unconditional `-= 1`
+ * on INT32_MIN is signed-overflow UB in C, and flooring at 0 would desync the raw value from
+ * Python's unbounded counter (see that kernel's header comment in utility/simd_aec.h). INT32_MIN is
+ * a safe input (the kernel leaves it unchanged), so it stays in both the special pool and the
+ * raw-bits path; INT32_MIN+1 is also in the pool, to exercise the one lane where the NEON
+ * speculative decrement fires the hop before the floor. */
 #define SPECIAL_INT_POOL_COUNT 10
 static int32_t special_int_pool[SPECIAL_INT_POOL_COUNT];
 
@@ -137,9 +129,8 @@ static int32_t gen_int32(void) {
         uint32_t bits = lcg_next();
         int32_t v;
         memcpy(&v, &bits, sizeof v);
-        return v;   /* INT32_MIN included -- safe under kernel 25's
-                     * floor-at-INT_MIN contract, see the corpus comment
-                     * above. */
+        return v;   /* INT32_MIN included: safe under kernel 25's
+                     * floor-at-INT_MIN contract (see the corpus comment above). */
     }
 }
 
@@ -167,27 +158,16 @@ static void fill_bench_complex(Complex *a, int n) {
     for (i = 0; i < n; ++i) { a[i].r = gen_bench_float(); a[i].i = gen_bench_float(); }
 }
 
-/* ═══════════════════════════ NaN corpus ════════════════════════════════════
- * Dedicated NaN-carrying input generation, separate from gen_float()'s
- * special_pool (which deliberately EXCLUDES NaN, see that comment above) --
- * NaN inputs are the entire point of this section. Two uses:
- *
- *   1. The cabs_np/cmag2_np family (kernels 1/2/3/5, sharing the
- *      sk__cabs_np_neon4 helper): full pattern x length
- *      sweep, STRICT bitwise memcmp (check_bits_or_die, same zero-tolerance
- *      discipline as the finite corpus above) -- this is the gate that the
- *      compare/select NaN contract of that helper holds.
- *   2. Every other kernel in the file ("W-updates/EMA etc. process arbitrary
- *      floats too"): one NaN-sprinkled run per kernel, checked with
- *      check_bits_classify (classifies each divergence as bit-exact /
- *      both-NaN-payload-unspecified / HARD FAIL rather than a blanket
- *      report-and-continue) -- these kernels already avoid
- *      vmaxq_f32/vminq_f32/vabsq_f32 (see the header's "NaN semantics"
- *      note), so a HARD FAIL here would be a NEW finding outside the cabs
- *      family; a both-NaN classification is the expected, in-contract
- *      outcome for a multi-NaN-operand reduction (fmaf/pairwise-sum trees)
- *      tie-breaking payloads differently between scalar and NEON lane
- *      order -- see check_bits_classify's own comment. */
+/* ═══════════════════════ NaN corpus ═══════════════════════
+ * NaN-carrying input generation, separate from gen_float()'s special_pool (which excludes NaN). Two
+ * uses: (1) the cabs_np/cmag2_np family (kernels 1/2/3/5, sharing the sk__cabs_np_neon4 helper):
+ * full pattern x length sweep with STRICT bitwise memcmp (check_bits_or_die), gating the
+ * compare/select NaN contract of that helper; (2) every other kernel: one NaN-sprinkled run per
+ * kernel, checked with check_bits_classify (bit-exact / both-NaN-payload-unspecified / HARD FAIL).
+ * Those kernels avoid vmaxq_f32/vminq_f32/vabsq_f32 (see the header's "NaN semantics" note), so a
+ * HARD FAIL would be a finding outside the cabs family; a both-NaN classification is the
+ * in-contract outcome for a multi-NaN-operand reduction whose scalar and NEON orders tie-break
+ * payloads differently (see check_bits_classify). */
 
 #define NAN_POOL_COUNT 6
 static float nan_pool[NAN_POOL_COUNT];
@@ -202,14 +182,12 @@ static void init_nan_pool(void) {
     nan_pool[5] = -(float)INFINITY;
 }
 
-/* n=1..17 straddles every kernel's 4-lane NEON/scalar-tail boundary many
- * times over; 128/129/160/255/256/257 straddle the pairwise-sum leaf/split
- * cutovers (kernel 13/14's n<=128 leaf, kernel 21/22 share the same cutover
- * for n<=257 -- their own >257 recursion is covered by the finite corpus's
- * dedicated PW_TAILFOLD_N_LIST already, no separate NaN pass needed there). */
-/* n=0 prepended: a NaN-sprinkled
- * fill over zero elements is a no-op, same zero-touch contract as the
- * finite corpus's n=0 case, so it belongs in this list too. */
+/* n=1..17 straddles every kernel's 4-lane NEON/scalar-tail boundary many times over;
+ * 128/129/160/255/256/257 straddle the pairwise-sum leaf/split cutovers (kernel 13/14's n<=128
+ * leaf; kernels 21/22 share the n<=257 cutover, and their >257 recursion is covered by
+ * PW_TAILFOLD_N_LIST). */
+/* n=0 prepended: a NaN-sprinkled fill over zero elements is a no-op, the same zero-touch contract
+ * as the finite corpus's n=0 case. */
 static const int NAN_N_LIST[] = {
     0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17,
     128, 129, 160, 255, 256, 257
@@ -296,14 +274,11 @@ static void fill_complex_nan_sprinkle(Complex *z, int n) {
     }
 }
 
-/* ═══════════════════════════ mismatch reporting ═══════════════════════════
- * g_total_checks: a running count of individual
- * bit-pattern comparisons actually performed, incremented at each of the
- * chokepoints every check funnels through (check_bits_or_die,
- * check_scalar_bits_or_die, check_bits_classify, check_mask_classify, and
- * the new canary checks below) -- so main()'s printout is a real,
- * reproducible "how much did this run actually verify" number instead of a
- * hand count. */
+/* ═══════════════════════ mismatch reporting ═══════════════════════
+ * g_total_checks counts the individual bit-pattern comparisons performed, incremented at the
+ * chokepoints every check funnels through (check_bits_or_die, check_scalar_bits_or_die,
+ * check_bits_classify, check_mask_classify and the canary checks), so main()'s printout is a
+ * reproducible measure of how much the run verified. */
 
 static long g_total_checks = 0;
 
@@ -348,10 +323,9 @@ static void check_scalar_bits_or_die(const char *kernel, int n, int trial,
     }
 }
 
-/* int32 counterpart of check_bits_or_die: hold_counters (kernels 24/25/26)
- * has no NaN/payload-ambiguity concept at all -- an int32 is exact integer
- * arithmetic, always strict bit-for-bit equality expected, no classify
- * escape hatch needed or offered. */
+/* int32 counterpart of check_bits_or_die: hold_counters (kernels 24/25/26) have no NaN/payload
+ * ambiguity, so the comparison is always strict bit-for-bit equality, with no classify escape
+ * hatch. */
 static void check_ints_or_die(const char *kernel, int n, int trial,
                                const int *simd, const int *scalar, int count) {
     int i;
@@ -367,47 +341,18 @@ static void check_ints_or_die(const char *kernel, int n, int trial,
 }
 
 /* ═════════════════════ NaN classification gate ════════════════════════════
- * Upgrades the "every other kernel" NaN sweep from a report-only tally into
- * a real pass/fail gate. For every scalar-vs-NEON element compared, sorts
- * the outcome into exactly one of three buckets:
+ * A pass/fail gate for the "every other kernel" NaN sweep. Each scalar-vs-NEON element comparison lands in exactly one bucket:
  *
- *   1. bit-exact  -- simd and scalar bits are identical. The expected
- *      outcome for the overwhelming majority of elements (only a handful of
- *      NaN-pool draws land per call; everything else is an ordinary finite
- *      value that must still match bit-for-bit).
- *   2. both-NaN   -- bits differ, but BOTH values are NaN (checked via
- *      f32_is_nan(), an exponent-all-1s/mantissa-nonzero test, NOT `v != v`
- *      -- see that function's comment for why). This is IN CONTRACT: per
- *      utility/simd_aec.h's and simd_kernels.h's header comments, the
- *      documented per-lane contract for the arithmetic kernels here
- *      (wupdate_nlms/wupdate_kf/ema_delta/n2_track/
- *      n2_initial_track/mask_zero, and the four pairwise-sum-family
- *      reductions) is "NaN in -> NaN out, PAYLOAD UNSPECIFIED". A
- *      multi-NaN-operand fmaf/add/pairwise-sum-tree is free to tie-break
- *      which operand's NaN payload survives differently between the
- *      scalar C evaluation order and the NEON lane order -- C leaves
- *      multi-NaN payload selection implementation-defined, so scalar and
- *      NEON computing the "same" reduction via different instruction
- *      sequences legitimately disagreeing on WHICH NaN bit pattern comes out
- *      is not a bug: both sides correctly signal "invalid result", they just
- *      don't have to agree on which invalid-result bit pattern. Tallied, not
- *      fatal.
- *   3. HARD FAIL  -- anything else: exactly one side is NaN and the other
- *      finite/Inf (a genuine finite-vs-NaN divergence -- the class of bug
- *      the cabs_np/cmag2_np compare/select form exists to avoid, should it
- *      appear in one of these kernels), or both sides are finite/Inf with different bits (an
- *      ordinary bit-exactness regression that happens to have been found via
- *      the NaN corpus rather than the finite one). This is the actual
- *      contract violation this gate exists to catch -- main() returns
- *      nonzero iff any kernel's HARD FAIL count is nonzero.
- *
- * Empirically, the 60-mismatch baseline for this file (spread
- * across the removed cmac_np_f32, wupdate_nlms_f32, and the pairwise_sum/
- * sum_sq_pairwise/pairwise_sum_tailfold family) classifies as 100% both-NaN, 0% HARD FAIL:
- * every one of those 60 "NAN-SWEEP-MISMATCH" lines carried two differing
- * NaN bit patterns (e.g. simd=0x7fc12345 vs scalar=0x7fc00000), never a
- * NaN-vs-finite pair. This gate proves that fact mechanically on every
- * run instead of asserting it in a comment. */
+ *   1. bit-exact  -- identical bits (the expected outcome for nearly all elements).
+ *   2. both-NaN   -- bits differ, but BOTH values are NaN (tested via f32_is_nan(), an exponent/mantissa test, not `v != v`).
+ *      This is IN CONTRACT: per utility/simd_aec.h and simd_kernels.h, the arithmetic kernels here (wupdate_nlms/wupdate_kf/
+ *      ema_delta/n2_track/n2_initial_track/mask_zero and the four pairwise-sum-family reductions) promise "NaN in -> NaN
+ *      out, PAYLOAD UNSPECIFIED". C leaves multi-NaN payload selection implementation-defined, so the scalar and NEON
+ *      evaluation orders may surface different payloads; both sides still signal "invalid result". Tallied, not fatal.
+ *   3. HARD FAIL  -- anything else: exactly one side NaN and the other finite/Inf (the class of bug the cabs_np/cmag2_np
+ *      compare/select form exists to avoid), or both sides finite/Inf with different bits (an ordinary bit-exactness
+ *      regression found through the NaN corpus). main() returns nonzero iff any kernel's HARD FAIL count is nonzero.
+ */
 
 typedef struct {
     char name[64];
@@ -416,29 +361,21 @@ typedef struct {
     long fail;
 } kernel_tally_t;
 
-/* One tally row per distinct kernel name. The NaN corpus registers 15 names
- * (wupdate_nlms_f32_nan, wupdate_kf_f32_nan, the 4
- * pairwise-sum_*_nan kernels, coherence_ema_gate_f32_nan's 5 sub-buffers,
- * ema_delta_f32_nan, n2_track_f32_nan, n2_initial_track_f32_nan,
- * mask_zero_f32_nan) and the edge-case matrix registers the same 15 again
- * under a "_edge" suffix, so the table must hold at least 30 rows; running
- * out is a FATAL ("kernel tally table full"), not a silent drop. */
+/* One tally row per distinct kernel name. The NaN corpus registers 15 names and the edge-case
+ * matrix registers the same 15 again under a "_edge" suffix, so the table holds at least 30 rows;
+ * running out is a FATAL ("kernel tally table full"), not a silent drop. */
 #define MAX_TALLY_KERNELS 128
 static kernel_tally_t g_tally[MAX_TALLY_KERNELS];
 static int g_tally_count = 0;
 static int g_hard_fail_count = 0;
-/* Legacy running total (both-NaN + HARD FAIL combined) kept only so the
- * per-kernel "(soft mismatches so far: N)" progress prints
- * keep working unchanged; the real gate is g_hard_fail_count. */
+/* Running total (both-NaN + HARD FAIL combined) used only by the per-kernel "(soft mismatches so
+ * far: N)" progress prints; the real gate is g_hard_fail_count. */
 static int g_nan_soft_mismatch_count = 0;
 
-/* NaN test via exponent/mantissa bit pattern, NOT the `v != v` idiom: this
- * file's classification must treat a signaling NaN identically to a quiet
- * NaN (both are "NaN" for contract purposes), and on some platforms an sNaN
- * can be quieted by the mere act of loading it into a register before a C
- * comparison ever executes, which would make `v != v` unreliable for
- * distinguishing "is this bit pattern a NaN" from "did the compiler quiet it
- * first". Testing the raw bits sidesteps that entirely. */
+/* NaN test via the exponent/mantissa bit pattern, not the `v != v` idiom: classification must treat
+ * a signaling NaN like a quiet NaN, and on some platforms an sNaN can be quieted by loading it into
+ * a register before a C comparison runs, which would make `v != v` unreliable. Testing the raw bits
+ * sidesteps that. */
 static int f32_is_nan(float v) {
     uint32_t b;
     memcpy(&b, &v, sizeof b);
@@ -462,11 +399,9 @@ static kernel_tally_t *get_tally(const char *name) {
     }
 }
 
-/* Classifies + tallies every element of a float buffer pair (see the header
- * comment above for the three-way bit-exact/both-NaN/HARD-FAIL split).
- * Only a HARD FAIL affects main()'s exit
- * code; both-NaN divergences are printed (for auditability) but excluded
- * from the gate. */
+/* Classifies and tallies every element of a float buffer pair (see the header comment above for the
+ * three-way bit-exact/both-NaN/HARD-FAIL split). Only a HARD FAIL affects main()'s exit code;
+ * both-NaN divergences are printed for auditability but excluded from the gate. */
 static void check_bits_classify(const char *kernel, int n, int trial,
                                  const float *simd, const float *scalar, int count) {
     kernel_tally_t *t = get_tally(kernel);
@@ -716,9 +651,8 @@ static void test_sum_sq_pairwise(void) {
  * kernel 13 -- see kernel 21's header comment). Separate, larger backing
  * buffer (960) since this exceeds SK_TEST_MAX_N (512), used only here. */
 
-/* 0 and the complete 1..17 run prepended (same
- * rationale as N_LIST above), on top of the original boundary-specific
- * values, which stay for their own documented reasons. */
+/* 0 and the complete 1..17 run prepended (same rationale as N_LIST above), plus the
+ * boundary-specific values. */
 #define PW_TAILFOLD_MAX_N 960
 static const int PW_TAILFOLD_N_LIST[] = {
     0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17,
@@ -799,47 +733,25 @@ static void test_pairwise_sum_tailfold_b(void) {
 }
 
 /* ═══════════ alignment + canary edge-case matrix ══════════════════════════
- * This edge-case matrix is layered on top of every per-kernel
- * correctness test above (same design as audiolib/common/test/simd_selftest.c's
- * equivalent section -- see that file's header comment for the full
- * rationale; summarized here for this file's kernels):
+ * Layered on top of every per-kernel correctness test above (same design as audiolib/common/test/simd_selftest.c's
+ * equivalent section; see its header comment for the full rationale):
  *
- *   - n=0 / n=1..17: already covered by the extended N_LIST/NAN_N_LIST/
- *     PW_TAILFOLD_N_LIST above. For n=0 specifically the canary buffers
- *     below turn "the kernel touches nothing" from a code-inspection claim
- *     into something actually checked.
- *   - Unaligned float/Complex-element offsets 1..15: every buffer lives in
- *     its own 64-byte-aligned arena (posix_memalign); each kernel is called
- *     at a deliberately +1..+15-element offset into it (always naturally
- *     aligned for its own element type -- a whole-element offset can never
- *     construct a misaligned pointer -- but deliberately NOT 16-/64-byte
- *     aligned). Three forms per kernel with a distinct input/output role:
- *     input-offset-only, output-offset-only, both-different (via
- *     edge_offsets_for_form, shared with the common-file section, same
- *     derangement argument). Kernels with more than one read-only input
- *     (wupdate_nlms/kf's err/mu/mu_scale, coherence_ema_gate's
- *     near_spec/abs_echo/abs_near/sye_im/syy/see) keep every non-primary
- *     array fixed at offset 0 -- the finding's own wording is binary
- *     ("input offset only, output offset only, both"), documented per
- *     kernel below rather than left implicit. The four pairwise-sum-family
- *     reductions (kernels 13/14/21/22) return a float BY VALUE -- there is
- *     no output array to offset, so those four sweep only the one input
- *     array's offset (no 3-form split). sk_mask_zero_f32 (kernel 20) is a
- *     single in-place buffer (no separate output parameter at all -- see
- *     test_mask_zero_edge's own comment), same shape as sk_clip_f32's edge
- *     test in the common file.
- *   - Canary guard: every arena is entirely canary-filled before each call
- *     (float bit pattern 0x7fc0dead / mask byte 0xAA), then the payload
- *     window is overwritten with real generated data. After the call, every
- *     element OUTSIDE the payload window must still read back as the
- *     untouched canary value, in EVERY arena the kernel touched (including
- *     read-only ones, as a defense-in-depth cross-check against unexpected
- *     aliasing writes) -- catches an out-of-bounds write on either side of
- *     the payload, or literally any write at all when n==0, without a
- *     separate front/back special case.
+ *   - n=0 / n=1..17 are covered by the extended N_LIST/NAN_N_LIST/PW_TAILFOLD_N_LIST above. For n=0 the canary buffers
+ *     below turn "the kernel touches nothing" into something checked.
+ *   - Unaligned float/Complex-element offsets 1..15: every buffer lives in its own 64-byte-aligned arena (posix_memalign);
+ *     each kernel is called at a +1..+15-element offset (naturally aligned for its element type, but not 16-/64-byte
+ *     aligned). Three forms per kernel with distinct input/output roles: input-offset-only, output-offset-only and
+ *     both-different (edge_offsets_for_form, shared with the common-file section). Kernels with more than one read-only
+ *     input (wupdate_nlms/kf's err/mu/mu_scale, coherence_ema_gate's near_spec/abs_echo/abs_near/sye_im/syy/see) keep every
+ *     non-primary array at offset 0. The four pairwise-sum-family reductions (kernels 13/14/21/22) return a float by value,
+ *     so they sweep only the input array's offset. sk_mask_zero_f32 (kernel 20) is a single in-place buffer (see
+ *     test_mask_zero_edge), like sk_clip_f32's edge test in the common file.
+ *   - Canary guard: every arena is canary-filled before each call (float bit pattern 0x7fc0dead / mask byte 0xAA), then the
+ *     payload window is overwritten with generated data. After the call every element OUTSIDE the window must still read
+ *     back as the canary, in every arena the kernel touched (read-only ones too, as a cross-check against aliasing writes).
+ *     This catches an out-of-bounds write on either side of the payload, or any write at all when n==0.
  *
- * scalar-vs-NEON comparison is inherent to every check_bits_or_die/
- * check_scalar_bits_or_die call below, same as the rest of this file. */
+ * The scalar-vs-NEON comparison is inherent to every check_bits_or_die/check_scalar_bits_or_die call below. */
 
 #define EDGE_GUARD 32           /* guaranteed guard elements each side of the
                                  * payload window, regardless of offset/n */
@@ -1098,13 +1010,10 @@ static void test_wupdate_nlms_edge(void) {
                 sk_wupdate_nlms_f32_scalar(W_scalar_arena + out_off, X_arena + in_off, err_arena, mu_eff_arena, n);
                 sk_wupdate_nlms_f32(W_simd_arena + out_off, X_arena + in_off, err_arena, mu_eff_arena, n);
 
-                /* classified, not strict: wupdate_nlms is one of the
-                 * header's documented "NaN in -> NaN out, PAYLOAD
-                 * UNSPECIFIED" kernels (grad = err*conj(X), a multi-operand
-                 * fmaf term). The extreme-value special pool (+-Inf) can
-                 * legitimately produce a NaN, and different codegen can
-                 * select a different, still in-contract NaN payload
-                 * (found under UBSan). */
+                /* classified, not strict: wupdate_nlms is one of the header's documented "NaN in ->
+                 * NaN out, PAYLOAD UNSPECIFIED" kernels (grad = err*conj(X), a multi-operand fmaf
+                 * term). The extreme-value special pool (+-Inf) can produce a NaN, and different
+                 * codegen can select a different, still in-contract payload. */
                 check_bits_classify("wupdate_nlms_f32_edge", n, form * 100 + o,
                                      (const float *)(W_simd_arena + out_off),
                                      (const float *)(W_scalar_arena + out_off), 2 * n);
@@ -1151,11 +1060,8 @@ static void test_wupdate_kf_edge(void) {
                 sk_wupdate_kf_f32_scalar(W_scalar_arena + out_off, X_arena + in_off, err_arena, mu_arena, mu_scale_arena, n);
                 sk_wupdate_kf_f32(W_simd_arena + out_off, X_arena + in_off, err_arena, mu_arena, mu_scale_arena, n);
 
-                /* classified, not strict -- see wupdate_nlms_f32_edge's
-                 * comment above. Empirically confirmed necessary: reproduced under
-                 * UBSan at n=128 (this file's own finite-corpus
-                 * test_wupdate_kf() hits the identical class of divergence,
-                 * unrelated to this new matrix). */
+                /* classified, not strict; see wupdate_nlms_f32_edge's comment above (the
+                 * finite-corpus test_wupdate_kf() hits the same class of divergence). */
                 check_bits_classify("wupdate_kf_f32_edge", n, form * 100 + o,
                                      (const float *)(W_simd_arena + out_off),
                                      (const float *)(W_scalar_arena + out_off), 2 * n);
@@ -1284,14 +1190,11 @@ static void test_coherence_ema_gate_edge(void) {
     unsigned char *mask_simd_arena   = (unsigned char *)edge_aligned_alloc((size_t)EDGE_ARENA_LEN);
     const float alpha = 0.05f, threshold = 0.5f;
     int ni, form, o;
-    /* Primary input role = echo (Complex), primary output role = sye_re
-     * (float); every other buffer (sye_im/syy/see/near_spec/abs_echo/
-     * abs_near/mask) stays fixed at offset 0 -- a 9-buffer kernel doesn't
-     * fit the finding's binary input/output framing without a scope
-     * decision, documented here. sye_im/syy/see are still read-write, so
-     * each gets its own scalar/simd arena pair even though their offset
-     * never varies (a shared arena would let the scalar call's mutation
-     * leak into the simd call's "before" state). */
+    /* Primary input role = echo (Complex), primary output role = sye_re (float); every other buffer
+     * (sye_im/syy/see/near_spec/abs_echo/abs_near/mask) stays at offset 0, since a 9-buffer kernel
+     * does not fit the binary input/output framing. sye_im/syy/see are read-write, so each gets its
+     * own scalar/simd arena pair even though its offset never varies (a shared arena would let the
+     * scalar call's mutation leak into the simd call's "before" state). */
     for (ni = 0; ni < N_LIST_COUNT; ++ni) {
         int n = N_LIST[ni];
         for (form = 0; form < EDGE_FORM_COUNT; ++form) {
@@ -1336,14 +1239,11 @@ static void test_coherence_ema_gate_edge(void) {
                     echo_arena + in_off, near_spec_arena, abs_echo_arena, abs_near_arena,
                     alpha, threshold, mask_simd_arena, n);
 
-                /* classified, not strict: echo/near_spec are drawn from the
-                 * full special-value pool including +-Inf, and
-                 * pr=er*nr+ei*ni / pi=ei*nr-er*ni can legitimately produce a
-                 * NaN from finite/Inf operands (e.g. (+Inf)*(-Inf) +
-                 * (+Inf)*(+Inf) = -Inf+Inf = NaN) -- matches the
-                 * test_coherence_ema_gate_nan()'s own choice of
-                 * check_bits_classify/check_mask_classify for this kernel
-                 * above, for the same reason. */
+                /* classified, not strict: echo/near_spec are drawn from the full special-value pool
+                 * including +-Inf, and pr=er*nr+ei*ni / pi=ei*nr-er*ni can produce a NaN from
+                 * finite/Inf operands (e.g. (+Inf)*(-Inf) + (+Inf)*(+Inf) = -Inf+Inf = NaN);
+                 * test_coherence_ema_gate_nan() makes the same choice of
+                 * check_bits_classify/check_mask_classify for this kernel. */
                 check_bits_classify("coherence_ema_gate_f32_edge:sye_re", n, form * 100 + o,
                                      sye_re_simd_arena + out_off, sye_re_scalar_arena + out_off, n);
                 check_bits_classify("coherence_ema_gate_f32_edge:sye_im", n, form * 100 + o,
@@ -1508,19 +1408,12 @@ static void test_mask_zero_edge(void) {
     float *x_simd_arena = (float *)edge_aligned_alloc((size_t)EDGE_ARENA_LEN * sizeof(float));
     unsigned char *mask_arena = (unsigned char *)edge_aligned_alloc((size_t)EDGE_ARENA_LEN);
     int ni, o;
-    /* sk_mask_zero_f32 is the AEC header's other documented alias form
-     * (kernel 20's "in-place" doc comment in utility/simd_aec.h) -- unlike
-     * sk_capply_gain_f32's OPTIONAL out==z aliasing, this kernel has no
-     * separate output parameter at all: x is unconditionally both the read
-     * source and the write destination on every single call, by signature.
-     * Every call in this matrix (n=0/1..17/existing x offset 1..15) IS
-     * therefore already the only meaningful "in-place" exercise for this
-     * kernel -- there is no separate out-of-place form of this kernel to
-     * additionally test. Single-buffer offset sweep, same
-     * shape as sk_clip_f32's edge test in the common file, for the same
-     * reason (no distinct input/output roles to assign the 3-form matrix
-     * to). mask stays fixed at offset 0 (read-only, shared safely between
-     * the scalar and simd calls) and is itself byte-canary-guarded. */
+    /* sk_mask_zero_f32 is the AEC header's other documented alias form (kernel 20, "in-place" doc
+     * comment in utility/simd_aec.h): it has no separate output parameter, so x is both the read
+     * source and the write destination on every call, and every call in this matrix is already its
+     * only in-place exercise. A single-buffer offset sweep, like sk_clip_f32's edge test in the
+     * common file; mask stays at offset 0 (read-only, shared safely between the scalar and simd
+     * calls) and is byte-canary-guarded. */
     for (ni = 0; ni < N_LIST_COUNT; ++ni) {
         int n = N_LIST[ni];
         for (o = 1; o <= EDGE_OFFSET_MAX; ++o) {
@@ -1535,13 +1428,10 @@ static void test_mask_zero_edge(void) {
             sk_mask_zero_f32_scalar(x_scalar_arena + o, mask_arena, n);
             sk_mask_zero_f32(x_simd_arena + o, mask_arena, n);
 
-            /* classified for consistency with this section's other kernels
-             * (matches test_mask_zero_nan()'s own choice above), though in
-             * practice mask_zero can never actually produce a NaN-payload
-             * divergence: it is pure pass-through/zero-select with no
-             * arithmetic combination of two independent operands, so a
-             * both-NaN classification should never fire here -- if it ever
-             * does, that itself would be a meaningful signal. */
+            /* classified for consistency with this section's other kernels (matching
+             * test_mask_zero_nan()), though mask_zero is pure pass-through/zero-select with no
+             * arithmetic, so a both-NaN classification should never fire; if it does, that is a
+             * meaningful signal. */
             check_bits_classify("mask_zero_f32_edge", n, o, x_simd_arena + o, x_scalar_arena + o, n);
             edge_check_canary_f("mask_zero_f32_edge:x_scalar", x_scalar_arena, EDGE_ARENA_LEN, o, n);
             edge_check_canary_f("mask_zero_f32_edge:x_simd", x_simd_arena, EDGE_ARENA_LEN, o, n);
@@ -1614,13 +1504,11 @@ static void test_erl_bin_update_edge(void) {
     const int hold_hops = 400;
     const float min_erl = 0.01f;
     int ni, form, o;
-    /* Primary input role = x2, primary output role = erl; y2 (secondary
-     * read-only input) and hold (secondary in-place int32 array) stay fixed
-     * at offset 0 -- same >2-buffer scope decision as
-     * test_coherence_ema_gate_edge above. hold is still read-write, so it
-     * gets its own scalar/simd arena pair even though its offset never
-     * varies (a shared arena would let the scalar call's mutation leak into
-     * the simd call's "before" state). */
+    /* Primary input role = x2, primary output role = erl; y2 (secondary read-only input) and hold
+     * (secondary in-place int32 array) stay at offset 0, the same >2-buffer scope decision as
+     * test_coherence_ema_gate_edge above. hold is read-write, so it gets its own scalar/simd arena
+     * pair even though its offset never varies (a shared arena would let the scalar call's mutation
+     * leak into the simd call's "before" state). */
     for (ni = 0; ni < N_LIST_COUNT; ++ni) {
         int n = N_LIST[ni];
         for (form = 0; form < EDGE_FORM_COUNT; ++form) {
@@ -2412,14 +2300,11 @@ static void test_cmag2_np_acc_nan(void) {
     printf("PASS cmag2_np_acc_f32_nan\n");
 }
 
-/* ═══════════════ NaN corpus: every other kernel (CLASSIFIED) ═════════
- * Separate from the strict cabs/cmag2 gate above -- these kernels
- * don't use sk__cabs_np_neon4 and already avoid
- * vmaxq_f32/vminq_f32/vabsq_f32 (see header). Every kernel in the file runs
- * here; check_bits_classify()
- * sorts each divergence into bit-exact / both-NaN (in contract) / HARD FAIL,
- * and a HARD FAIL here now actually fails the build (see main()) instead of
- * only being printed for a human to notice. */
+/* ═══════════════════════ NaN corpus: every other kernel (CLASSIFIED) ═══════════════════════
+ * Separate from the strict cabs/cmag2 gate above: these kernels do not use sk__cabs_np_neon4 and
+ * avoid vmaxq_f32/vminq_f32/vabsq_f32 (see header). Every kernel in the file runs here;
+ * check_bits_classify() sorts each divergence into bit-exact / both-NaN (in contract) / HARD FAIL,
+ * and a HARD FAIL fails the build (see main()). */
 
 static void test_wupdate_nlms_nan(void) {
     Complex X[SK_TEST_MAX_N], err[SK_TEST_MAX_N];
@@ -2698,11 +2583,9 @@ static void test_erl_bin_update_nan(void) {
     printf("PASS erl_bin_update_f32_nan (soft mismatches so far: %d)\n", g_nan_soft_mismatch_count);
 }
 
-/* dec1_floorintmin_s32 has no NaN corpus test: it operates on int32 hold_counters,
- * which has no NaN/Inf concept at all -- exact integer compare-then-subtract,
- * already covered exhaustively (incl. every special_int_pool value, now
- * including INT32_MIN) by test_dec1_floorintmin_s32() and
- * test_dec1_floorintmin_s32_edge() above. */
+/* dec1_floorintmin_s32 has no NaN corpus test: it operates on int32 hold_counters, which have no
+ * NaN/Inf, and is covered exhaustively (every special_int_pool value, INT32_MIN included) by
+ * test_dec1_floorintmin_s32() and test_dec1_floorintmin_s32_edge() above. */
 
 static void test_erl_hold_expire_nan(void) {
     float erl_init[SK_TEST_MAX_N], erl_scalar[SK_TEST_MAX_N], erl_simd[SK_TEST_MAX_N];
@@ -3006,13 +2889,12 @@ static void bench_no_audible_echo_gain(void) {
     }
 }
 
-/* ═══════════════════ kernels added after the numbered set ═══════════════════
- * Each test below runs, per kernel: the finite corpus (random bit patterns and
- * the special-value pool) at every length of N_LIST, the NaN-sprinkle corpus,
- * and the offset + canary matrix (payload at element offsets 1..15 of a
- * canary-filled arena, untouched guard words checked afterwards). Scalar and
- * NEON results must be bit-identical; where a NaN can reach an output the
- * comparison is check_bits_classify, otherwise it is strict. */
+/* ═══════════════════════ additional kernels ═══════════════════════
+ * Each test below runs, per kernel: the finite corpus (random bit patterns and the special-value
+ * pool) at every length of N_LIST, the NaN-sprinkle corpus, and the offset + canary matrix (payload
+ * at element offsets 1..15 of a canary-filled arena, untouched guard words checked afterwards).
+ * Scalar and NEON results must be bit-identical; where a NaN can reach an output the comparison is
+ * check_bits_classify, otherwise it is strict. */
 
 #define NEW_BENCH(name, scalar_stmt, simd_stmt) do {                              \
         double t0_, t1_, t2_, t3_; int r_;                                        \
@@ -3698,11 +3580,9 @@ int main(void) {
     test_dec1_floorintmin_s32_edge();
     test_erl_hold_expire_edge();
     test_no_audible_echo_gain_edge();
-    /* Second call: the table below now reflects the edge
-     * matrix's own classify tallies too, cumulative with the first printout
-     * above -- g_tally/g_hard_fail_count are running totals for the whole
-     * process, not reset between calls, so this is purely an additional
-     * printout, not a second independent count. */
+    /* Second call: the table now also reflects the edge matrix's classify tallies.
+     * g_tally/g_hard_fail_count are running totals for the whole process, so this printout is
+     * cumulative with the first. */
     print_classification_summary();
 
     printf("\n--- microbenchmarks (n=%d, %d reps) ---\n", BENCH_N, BENCH_REPS);

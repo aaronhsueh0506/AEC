@@ -1,16 +1,15 @@
 """The product delay is the DOMINANT matched-filter peak, not the pre-echo one.
 
-AEC3 runs its delay estimator inside a RenderDelayController and wants the
-earliest echo-path onset, so upstream substitutes the pre-echo candidate for
-the reported delay while still qualifying it with the dominant peak's
-histogram. Our product path is different: LegacyDelayShim uses the reported
-sample delay directly to align a short PBFDKF, and when the onset sits further
-before the dominant echo than that filter spans, the echo it must cancel falls
-outside the filter entirely -- while confidence still reads 1.0, because
-confidence describes the dominant histogram and not the substituted delay.
+AEC3 wants the earliest echo-path onset, so upstream substitutes the pre-echo
+candidate for the reported delay while still qualifying it with the dominant
+peak's histogram. Here LegacyDelayShim uses the reported sample delay directly
+to align a short PBFDKF; if the onset sits further before the dominant echo
+than that filter spans, the echo it must cancel falls outside the filter while
+confidence still reads 1.0 (confidence describes the dominant histogram, not
+the substituted delay).
 
-These tests pin the selection seam only. The pre-echo computation stays: it is
-the upstream reference and a diagnostic, it just no longer decides where the
+These tests pin the selection seam only. The pre-echo computation remains as
+the upstream reference and a diagnostic; it does not decide where the
 production filter is aligned.
 
 Run:
@@ -39,7 +38,7 @@ MAX_FILTER_LAG = 2000
 # Downsampled samples. The separation is 400 ds = 1600 raw = 100 ms at 16 kHz,
 # far wider than the 832-sample (52 ms) PBFDKF the reported delay aligns -- the
 # case where picking the earlier candidate puts the dominant echo outside the
-# filter. Taken from the a6941aef far-end single-talk fixture.
+# filter.
 DOMINANT_LAG = 1552
 EARLY_LAG = 1152
 
@@ -93,9 +92,10 @@ def test_reported_delay_is_the_dominant_peak(sample_rate):
 
 @pytest.mark.parametrize('sample_rate', (16000, 48000))
 def test_quality_still_comes_from_the_dominant_histogram(sample_rate):
-    """The confidence and the delay must describe the SAME candidate. Reading
-    one from the dominant histogram while reporting the other is what let a
-    wrong delay carry confidence 1.0."""
+    """Confidence and delay must describe the SAME candidate (reading one from the
+    dominant histogram while reporting the other would let a wrong delay carry
+    confidence 1.0).
+    """
     aggregator = _aggregator(sample_rate)
     thresholds = DelaySelectionThresholds()
     early = _drive(aggregator, thresholds.initial + 1)
@@ -107,9 +107,10 @@ def test_quality_still_comes_from_the_dominant_histogram(sample_rate):
 
 
 def test_pre_echo_is_still_computed():
-    """Retained for the AEC3 reference and for diagnostics; only its role in
-    selecting the production delay is gone. A patch that deleted the
-    aggregator entirely would pass every test above."""
+    """The pre-echo candidate is still computed (AEC3 reference, diagnostics) though
+    it does not select the production delay. Deleting the aggregator entirely would
+    pass every test above, so this pins it.
+    """
     aggregator = _aggregator(16000)
     _drive(aggregator, DelaySelectionThresholds().converged + 5)
     assert aggregator._pre_echo is not None
@@ -117,8 +118,9 @@ def test_pre_echo_is_still_computed():
 
 
 def test_disabling_pre_echo_does_not_change_the_reported_delay():
-    """With the substitution gone the flag is diagnostic, so both settings must
-    now report the same delay for the same input."""
+    """The pre-echo flag is diagnostic: both settings report the same delay for the
+    same input.
+    """
     with_pre_echo = _aggregator(16000, detect_pre_echo=True)
     without = _aggregator(16000, detect_pre_echo=False)
     updates = DelaySelectionThresholds().converged + 5

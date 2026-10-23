@@ -25,7 +25,7 @@ from aec import AEC, AecConfig, AecMode
 from preset_arg import PRESET_METAVAR, PRESET_NAMES, parse_preset_arg
 
 _ENABLE_CNG = False  # global CNG flag, set by --cng CLI arg
-_CASES_LIST = None   # Tier-1 subset stem set; None = full 800-case rendering
+_CASES_LIST = None  # subset stem set; None = full 800-case rendering
 
 
 def _filter_mic_files(mic_files, tag):
@@ -88,14 +88,11 @@ def run_old_aec(mic_path, ref_path, sr):
 
 
 def estimate_delay(mic, ref, sr, max_delay_ms=1024.0):
-    """Pre-compute delay using full-signal cross-correlation.
+    """Pre-compute delay using full-signal cross-correlation: GCC-PHAT, falling
+    back to plain cross-correlation when the PHAT peak confidence is low.
 
-    Uses the entire signal for maximum accuracy.
-    Plain cross-correlation (no whitening) is most reliable for reverberant data.
-
-    max_delay_ms=1024 matches the online F-DelayTrack search window so the
-    pre-align never lands further away than the in-pipeline tracker can
-    correct. Override via env var AEC_MAX_DELAY_MS for A/B / regression work.
+    max_delay_ms=1024 equals AecConfig.max_delay_ms. Override via env var
+    AEC_MAX_DELAY_MS for A/B work.
     """
     _env_override = os.environ.get('AEC_MAX_DELAY_MS')
     if _env_override is not None:
@@ -135,25 +132,22 @@ def estimate_delay(mic, ref, sr, max_delay_ms=1024.0):
 
 def run_ours(mic, ref, sr, fl, enable_res=True, preset=None,
              is_movement=False, config_holder=None, **config_overrides):
-    """
-    config_holder: optional list. When provided, the real resolved AecConfig
-    instance actually used for this call is appended to it (index 0). Purely
-    a provenance/introspection hook for callers that need to record exactly
-    what config was live (e.g. eval_manifest90.py) -- default None keeps this
-    a complete no-op, so every existing caller's behavior is unchanged.
+    """config_holder: optional list; when given, the resolved AecConfig used for this
+    call is appended to it (index 0) for callers that record the live config
+    (e.g. eval_manifest90.py).
     """
     n = min(len(mic), len(ref))
 
     if os.environ.get('NO_PREALIGN'):
-        # Realistic mode (matches production + AEC3/Speex, which get raw ref):
-        # NO offline pre-align crutch — the in-pipeline matched-filter
-        # EchoPathDelayEstimator self-aligns online to the true delay. Online
-        # delay-est ON for ALL files (config defaults: period 0.5s / init 0.3s).
+        # Realistic mode (matches production + AEC3/Speex, which get raw ref): no
+        # offline pre-align; the in-pipeline matched-filter EchoPathDelayEstimator
+        # aligns online. Online delay-est is on for ALL files (config defaults:
+        # period 0.5s / init 0.3s).
         ref_aligned = ref[:n]
         delay_est_kw = dict(enable_delay_est=True)
     else:
-        # Legacy bench: offline GCC-PHAT pre-align (default; reproduces prior
-        # pre-align verdicts). Online delay-est only on movement files.
+        # Offline GCC-PHAT pre-align (default). Online delay-est only on movement
+        # files.
         delay = estimate_delay(mic, ref, sr)
         if delay > 0 and delay < n:
             ref_aligned = np.zeros(n, dtype=np.float32)
@@ -167,53 +161,42 @@ def run_ours(mic, ref, sr, fl, enable_res=True, preset=None,
         else:
             delay_est_kw = dict(enable_delay_est=False)
 
-    # AEC_GAIN_TYPE / res_gain_type chose between the legacy ResFilterEnr and
-    # ResFilterWiener gain stages; both were retired with the ResFilter chain
-    # (v3.21 cleanup R7, 26e9882) and `res_gain_type` is not an AecConfig
-    # field, so this hook would raise TypeError if AEC_GAIN_TYPE were ever
-    # set. The AEC3 chain (modules/state + modules/residual) has a single
-    # gain algorithm; there is no current equivalent to forward this to.
     # CNG override from global flag
     if _ENABLE_CNG and 'enable_cng' not in config_overrides:
         config_overrides['enable_cng'] = True
-    # v3.22: ERLE render-x2 PSD-scale fix (revives reverb model) — DEFAULT ON.
-    # AEC_ERLE_X2_SCALE=0 forces OFF to reproduce the pre-revival baseline.
+    # AEC_ERLE_X2_SCALE=0|1 sets erle_render_x2_psd_scale.
     _x2env = os.environ.get('AEC_ERLE_X2_SCALE')
     if _x2env in ('0', '1') and 'erle_render_x2_psd_scale' not in config_overrides:
         config_overrides['erle_render_x2_psd_scale'] = (_x2env == '1')
     _rts = os.environ.get('AEC_REVERB_TAIL_STRENGTH')
     if _rts is not None and 'reverb_tail_strength' not in config_overrides:
         config_overrides['reverb_tail_strength'] = float(_rts)
-    # v3.22 E1: windowed Y2 for ERLE Y2/E2 coordinate consistency (DEFAULT ON).
-    # AEC_ERLE_Y2_WIN=0 forces OFF to reproduce the pre-E1 (old) baseline.
+    # AEC_ERLE_Y2_WIN=0|1 sets erle_windowed_capture_psd.
     _e1env = os.environ.get('AEC_ERLE_Y2_WIN')
     if _e1env in ('0', '1') and 'erle_windowed_capture_psd' not in config_overrides:
         config_overrides['erle_windowed_capture_psd'] = (_e1env == '1')
-    # v3.22 E2: output base = raw capture Y when linear filter unusable (DEFAULT ON).
-    # AEC_OUT_CAPTURE_UNUSABLE=0 forces OFF.
+    # AEC_OUT_CAPTURE_UNUSABLE=0|1 sets output_capture_when_linear_unusable.
     _e2env = os.environ.get('AEC_OUT_CAPTURE_UNUSABLE')
     if _e2env in ('0', '1') and 'output_capture_when_linear_unusable' not in config_overrides:
         config_overrides['output_capture_when_linear_unusable'] = (_e2env == '1')
     _dprot_env = os.environ.get('AEC_DELAY_PROTECT')
     if _dprot_env in ('0', '1') and 'delay_acquire_protect_converged' not in config_overrides:
         config_overrides['delay_acquire_protect_converged'] = (_dprot_env == '1')
-    # soft_nearend_blend (v3.22 D3): sigmoid ENR interpolation replaces binary DNE switch.
-    # AEC_SOFT_NE_BLEND=1 → soft_nearend_blend_enabled=True.
+    # AEC_SOFT_NE_BLEND=0|1 sets soft_nearend_blend_enabled.
     _soft_ne_env = os.environ.get('AEC_SOFT_NE_BLEND')
     if _soft_ne_env in ('0', '1') and 'soft_nearend_blend_enabled' not in config_overrides:
         config_overrides['soft_nearend_blend_enabled'] = (_soft_ne_env == '1')
-    # P5: per-bin near-end blend (frequency-selective protection).
-    # AEC_SOFT_NE_PER_BIN=1 → soft_nearend_blend_per_bin=True.
+    # AEC_SOFT_NE_PER_BIN=0|1 sets soft_nearend_blend_per_bin.
     _soft_ne_pb_env = os.environ.get('AEC_SOFT_NE_PER_BIN')
     if _soft_ne_pb_env in ('0', '1') and 'soft_nearend_blend_per_bin' not in config_overrides:
         config_overrides['soft_nearend_blend_per_bin'] = (_soft_ne_pb_env == '1')
-    # A21 Stage 2 live observer. AEC_LIVE_OBSERVER=1 → live_observer_enabled=True.
+    # AEC_LIVE_OBSERVER=0|1 sets live_observer_enabled.
     _lo_env = os.environ.get('AEC_LIVE_OBSERVER')
     if _lo_env in ('0', '1') and 'live_observer_enabled' not in config_overrides:
         config_overrides['live_observer_enabled'] = (_lo_env == '1')
-    # erle_coh_gate (v3.22 C'): coherence-based ERLE gate Γ²(Ŷ, Y).
-    # AEC_ERLE_COH_GATE=<float>        → enable gate, threshold=<float>
-    # AEC_ERLE_COH_GATE_ALPHA=<float>  → override EMA alpha (default 0.05)
+    # AEC_ERLE_COH_GATE=<float> enables the coherence ERLE gate with that threshold
+    # (0 disables; values above 1 fall back to 0.5).
+    # AEC_ERLE_COH_GATE_ALPHA=<float> overrides the EMA alpha.
     _coh_env = os.environ.get('AEC_ERLE_COH_GATE')
     if _coh_env is not None and 'erle_coh_gate_enabled' not in config_overrides:
         try:
@@ -228,9 +211,7 @@ def run_ours(mic, ref, sr, fl, enable_res=True, preset=None,
             config_overrides['erle_coh_gate_alpha'] = float(_coh_alpha_env)
         except ValueError:
             pass
-    # nl_r2 (v3.22 L1): Kuech-Kellermann nonlinear R² addition.
-    # AEC_NL_ALPHA=<float> → nl_r2_enabled=True, nl_r2_alpha=<float>.
-    # AEC_NL_ALPHA=0 → disabled. AEC_NL_ALPHA=0.1 → default alpha.
+    # AEC_NL_ALPHA=<float> sets nl_r2_alpha and enables nl_r2 when > 0 (0 disables).
     _nl_alpha_env = os.environ.get('AEC_NL_ALPHA')
     if _nl_alpha_env is not None and 'nl_r2_enabled' not in config_overrides:
         try:
@@ -239,18 +220,15 @@ def run_ours(mic, ref, sr, fl, enable_res=True, preset=None,
             config_overrides['nl_r2_alpha'] = _nl_alpha_val
         except ValueError:
             pass
-    # far_active split-floor sweep (v3.22 3-preset operating-point scan).
-    # AEC_FAR_ACTIVE_FLOOR_DB=<amplitude dB> → min_gain_floor_far_active_db.
-    # TEMP sweep hook — proven the dominant DT/FS echo↔deg residual knob.
+    # AEC_FAR_ACTIVE_FLOOR_DB=<amplitude dB> sets min_gain_floor_far_active_db.
     _faf_env = os.environ.get('AEC_FAR_ACTIVE_FLOOR_DB')
     if _faf_env is not None and 'min_gain_floor_far_active_db' not in config_overrides:
         try:
             config_overrides['min_gain_floor_far_active_db'] = float(_faf_env)
         except ValueError:
             pass
-    # linear-filter cold-start deadlock breaker.
-    # AEC_ERL_REFRESH_FLOOR=<float> → h_error_refresh_erl_floor.
-    # AEC_HERROR_FLOOR=<float>      → h_error_floor_override.
+    # AEC_ERL_REFRESH_FLOOR=<float> sets h_error_refresh_erl_floor;
+    # AEC_HERROR_FLOOR=<float> sets h_error_floor_override.
     _erlf_env = os.environ.get('AEC_ERL_REFRESH_FLOOR')
     if _erlf_env is not None and 'h_error_refresh_erl_floor' not in config_overrides:
         try:
@@ -263,10 +241,9 @@ def run_ours(mic, ref, sr, fl, enable_res=True, preset=None,
             config_overrides['h_error_floor_override'] = float(_hef_env)
         except ValueError:
             pass
-    # Generic flag-override hook (campaign substrate testing). Any AecConfig
-    # field not already set by an explicit hook above can be driven via
-    # AEC_CFG_OVERRIDE="field1=val1;field2=val2". Values parse as
-    # true/false→bool, then int, then float, else str. Explicit hooks win.
+    # Generic override hook: any AecConfig field not already set by an explicit hook
+    # above can be driven via AEC_CFG_OVERRIDE="field1=val1;field2=val2". Values
+    # parse as true/false→bool, then int, then float, else str. Explicit hooks win.
     _cfg_ovr_env = os.environ.get('AEC_CFG_OVERRIDE')
     if _cfg_ovr_env:
         for _kv in _cfg_ovr_env.split(';'):
@@ -303,9 +280,7 @@ def run_ours(mic, ref, sr, fl, enable_res=True, preset=None,
         config = AecConfig(**common_kw)
     if config_holder is not None:
         config_holder.append(config)
-    # Per-case CNG determinism: seed numpy before each AEC instantiation
-    # so CNG noise is identical across runs (run-to-run AECMOS Δ otherwise
-    # masks small code-induced changes).
+    # Seed numpy before each AEC instantiation so CNG noise is identical across runs.
     np.random.seed(0)
     aec = AEC(config)
     hop = aec.hop_size
@@ -446,19 +421,16 @@ def eval_farend_singletalk(base_dir, fl, do_speex, do_aec3, do_aec3_linear, out_
         movement = _is_movement(mf)
         mv_tag = 'M' if movement else ' '
         out_suffix = mf.replace('_mic.wav', '')  # uuid_farend_singletalk[_with_movement]
-        # Ours
         output = run_ours(mic, ref, sr, fl, preset=preset, is_movement=movement)
         sf.write(os.path.join(out_dir, f"{out_suffix}_ours.wav"), output, sr)
         e_ours = compute_erle(mic, output)
         erles['ours'].append(e_ours)
 
-        # Ours (no RES) — raw PBFDAF output
         output_nores = run_ours(mic, ref, sr, fl, enable_res=False, preset=preset, is_movement=movement)
         sf.write(os.path.join(out_dir, f"{out_suffix}_ours_nores.wav"), output_nores, sr)
 
         line = f"{i:>5} {mv_tag:>2} {e_ours:>8.1f}"
 
-        # Speex
         if do_speex:
             out_sp = run_speex(mic, ref, sr)
             sf.write(os.path.join(out_dir, f"{out_suffix}_speex.wav"), out_sp, sr)
@@ -466,7 +438,6 @@ def eval_farend_singletalk(base_dir, fl, do_speex, do_aec3, do_aec3_linear, out_
             erles['speex'].append(e_sp)
             line += f" {e_sp:>8.1f}"
 
-        # AEC3
         if do_aec3:
             out_a3 = run_aec3(mic_path, lpb_path, sr)
             if out_a3 is not None:
@@ -478,7 +449,6 @@ def eval_farend_singletalk(base_dir, fl, do_speex, do_aec3, do_aec3_linear, out_
             else:
                 line += f" {'N/A':>8}"
 
-        # AEC3 Linear
         if do_aec3_linear:
             _, out_lin = run_aec3_linear(mic_path, lpb_path, sr)
             if out_lin is not None:
@@ -490,7 +460,6 @@ def eval_farend_singletalk(base_dir, fl, do_speex, do_aec3, do_aec3_linear, out_
             else:
                 line += f" {'N/A':>8}"
 
-        # Old AEC (AEC2)
         if do_old_aec:
             out_oa = run_old_aec(mic_path, lpb_path, sr)
             if out_oa is not None:
@@ -504,7 +473,6 @@ def eval_farend_singletalk(base_dir, fl, do_speex, do_aec3, do_aec3_linear, out_
 
         print(line)
 
-    # Summary
     print("-" * len(hdr))
     summary = f"{'MEAN':>5} {np.mean(erles['ours']):>8.1f}"
     if do_speex and erles['speex']:
@@ -564,19 +532,16 @@ def eval_nearend_singletalk(base_dir, fl, do_speex, do_aec3, do_aec3_linear, out
         movement = _is_movement(mf)
         mv_tag = 'M' if movement else ' '
         out_suffix = mf.replace('_mic.wav', '')
-        # Ours
         output = run_ours(mic, ref, sr, fl, preset=preset, is_movement=movement)
         sf.write(os.path.join(out_dir, f"{out_suffix}_ours.wav"), output, sr)
         s_ours = compute_sdr(mic, output)
         sdrs['ours'].append(s_ours)
 
-        # Ours (no RES) — raw PBFDAF output
         output_nores = run_ours(mic, ref, sr, fl, enable_res=False, preset=preset, is_movement=movement)
         sf.write(os.path.join(out_dir, f"{out_suffix}_ours_nores.wav"), output_nores, sr)
 
         line = f"{i:>5} {mv_tag:>2} {s_ours:>8.1f}"
 
-        # Speex
         if do_speex:
             out_sp = run_speex(mic, ref, sr)
             sf.write(os.path.join(out_dir, f"{out_suffix}_speex.wav"), out_sp, sr)
@@ -584,7 +549,6 @@ def eval_nearend_singletalk(base_dir, fl, do_speex, do_aec3, do_aec3_linear, out
             sdrs['speex'].append(s_sp)
             line += f" {s_sp:>8.1f}"
 
-        # AEC3
         if do_aec3:
             out_a3 = run_aec3(mic_path, lpb_path, sr)
             if out_a3 is not None:
@@ -596,7 +560,6 @@ def eval_nearend_singletalk(base_dir, fl, do_speex, do_aec3, do_aec3_linear, out
             else:
                 line += f" {'N/A':>8}"
 
-        # AEC3 Linear
         if do_aec3_linear:
             _, out_lin = run_aec3_linear(mic_path, lpb_path, sr)
             if out_lin is not None:
@@ -608,7 +571,6 @@ def eval_nearend_singletalk(base_dir, fl, do_speex, do_aec3, do_aec3_linear, out
             else:
                 line += f" {'N/A':>8}"
 
-        # Old AEC (AEC2)
         if do_old_aec:
             out_oa = run_old_aec(mic_path, lpb_path, sr)
             if out_oa is not None:
@@ -622,7 +584,6 @@ def eval_nearend_singletalk(base_dir, fl, do_speex, do_aec3, do_aec3_linear, out
 
         print(line)
 
-    # Summary
     print("-" * len(hdr))
     summary = f"{'MEAN':>5} {np.mean(sdrs['ours']):>8.1f}"
     if do_speex and sdrs['speex']:
@@ -683,19 +644,16 @@ def eval_doubletalk(base_dir, fl, do_speex, do_aec3, do_aec3_linear, out_dir, pr
         movement = _is_movement(mf)
         mv_tag = 'M' if movement else ' '
         out_suffix = mf.replace('_mic.wav', '')
-        # Ours
         output = run_ours(mic, ref, sr, fl, preset=preset, is_movement=movement)
         sf.write(os.path.join(out_dir, f"{out_suffix}_ours.wav"), output, sr)
         e_ours = compute_erle(mic, output)
         erles['ours'].append(e_ours)
 
-        # Ours (no RES) — raw PBFDAF output
         output_nores = run_ours(mic, ref, sr, fl, enable_res=False, preset=preset, is_movement=movement)
         sf.write(os.path.join(out_dir, f"{out_suffix}_ours_nores.wav"), output_nores, sr)
 
         line = f"{i:>5} {mv_tag:>2} {e_ours:>8.1f}"
 
-        # Speex
         if do_speex:
             out_sp = run_speex(mic, ref, sr)
             sf.write(os.path.join(out_dir, f"{out_suffix}_speex.wav"), out_sp, sr)
@@ -703,7 +661,6 @@ def eval_doubletalk(base_dir, fl, do_speex, do_aec3, do_aec3_linear, out_dir, pr
             erles['speex'].append(e_sp)
             line += f" {e_sp:>8.1f}"
 
-        # AEC3
         if do_aec3:
             out_a3 = run_aec3(mic_path, lpb_path, sr)
             if out_a3 is not None:
@@ -715,7 +672,6 @@ def eval_doubletalk(base_dir, fl, do_speex, do_aec3, do_aec3_linear, out_dir, pr
             else:
                 line += f" {'N/A':>8}"
 
-        # AEC3 Linear
         if do_aec3_linear:
             _, out_lin = run_aec3_linear(mic_path, lpb_path, sr)
             if out_lin is not None:
@@ -727,7 +683,6 @@ def eval_doubletalk(base_dir, fl, do_speex, do_aec3, do_aec3_linear, out_dir, pr
             else:
                 line += f" {'N/A':>8}"
 
-        # Old AEC (AEC2)
         if do_old_aec:
             out_oa = run_old_aec(mic_path, lpb_path, sr)
             if out_oa is not None:
@@ -741,7 +696,6 @@ def eval_doubletalk(base_dir, fl, do_speex, do_aec3, do_aec3_linear, out_dir, pr
 
         print(line)
 
-    # Summary
     print("-" * len(hdr))
     summary = f"{'MEAN':>5} {np.mean(erles['ours']):>8.1f}"
     if do_speex and erles['speex']:
@@ -782,10 +736,9 @@ def _run_scenario(scenario_args):
 def run_scenarios(base_dir, fl, do_speex, do_aec3, do_aec3_linear, out_dir, preset=None, parallel=False, do_old_aec=False, workers=6):
     """Run all three scenarios, optionally in parallel.
 
-    `workers` controls per-case parallelism: when parallel=True, scenarios
-    are sliced into n_chunks = max(1, workers // 3) chunks each, giving
-    `n_chunks * 3` worker processes. Default workers=6 → 2 chunks per
-    scenario → 6 concurrent processes (M-series 6-P-core throughput).
+    `workers` controls per-case parallelism: when parallel=True each scenario is
+    sliced into max(1, workers // 3) chunks, giving `n_chunks * 3` worker
+    processes (default workers=6 → 6 processes).
     """
     n_chunks = max(1, workers // 3)
     scenarios = []

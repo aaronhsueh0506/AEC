@@ -1,18 +1,16 @@
-"""Generate a binary golden for the C aec_state port (WS5 Phase 5.2 capstone).
+"""Generate a binary golden for the C aec_state port.
 
-This is the INTEGRATION/orchestration golden. Rather than synthesise inputs, it
-hooks the REAL balanced pipeline: it monkeypatches ``AecState.update`` (and
+This is the INTEGRATION golden. Rather than synthesise inputs, it hooks the REAL
+balanced pipeline: it monkeypatches ``AecState.update`` (and
 ``handle_echo_path_change``) on a real doubletalk case, dumps every ``update()``
 input + every public-query output AFTER each update, and writes a raw LE binary.
-A C parity harness rebuilds a fresh AecState from the same
-AecStateConfig, replays the SAME inputs frame-by-frame, and asserts every output
-bit-exact across the full case (startup -> first-converged transition -> evolved
-ERLE/ERL/quality).
+Replaying the SAME inputs frame-by-frame through a fresh AecState built from
+the same AecStateConfig must reproduce every output bit-exact across the full
+case (startup -> first-converged transition -> evolved ERLE/ERL/quality).
 
-A SECOND segment after the real case injects synthetic
-handle_echo_path_change events (gain_change, then a delay_change full-reset
-cascade) so the reset paths are exercised even though the real DT case has no
-EPV events.
+A SECOND segment after the real case injects synthetic handle_echo_path_change
+events (gain_change, then a delay_change full-reset cascade) so the reset paths
+are exercised even though the real DT case has no EPV events.
 
 Layout (LE), all sizes in elements:
   header:
@@ -126,11 +124,11 @@ def _w_f32arr(f, a):
 
 
 def _hops_or_auto(v):
-    """AecStateConfig.erle_startup_hops/erl_startup_hops are Optional[int]
-    ("None" == auto-resolve for the live grid). The int32 golden wire format
-    has no None, so mirror the C-side AEC_STATE_STARTUP_HOPS_AUTO sentinel
-    (-1, aec_state.c) here instead. Same convention as the sibling
-    gen_aec3_post_run_golden.py's _hops_or_auto()."""
+    """AecStateConfig.erle_startup_hops/erl_startup_hops are Optional[int] ("None" ==
+    auto-resolve for the live grid). The int32 golden wire format has no None, so
+    map it to the C-side AEC_STATE_STARTUP_HOPS_AUTO sentinel (-1, aec_state.c).
+    Same convention as gen_aec3_post_run_golden.py's _hops_or_auto().
+    """
     return -1 if v is None else int(v)
 
 
@@ -217,13 +215,12 @@ def main():
     last_state_id = {'id': None}
 
     def _maybe_emit_rebuild(self):
-        # Detect a mid-stream AecState REBUILD (orchestrator _reset_aec3_post
-        # creates a brand-new AecState — a full reset that, unlike
-        # handle_echo_path_change/_full_reset, ALSO zeroes
-        # filter_update_blocks_since_start). Emit a 'rebuild' control row so the
-        # C side re-inits its AecState from scratch and stays in lockstep. Both
-        # hepc and update see the new object; whichever runs first emits the
-        # marker (hepc precedes update inside one _aec3_post).
+        # Detect a mid-stream AecState REBUILD (orchestrator _reset_aec3_post creates a
+        # brand-new AecState: a full reset that, unlike handle_echo_path_change/
+        # _full_reset, ALSO zeroes filter_update_blocks_since_start) and emit a 'rebuild'
+        # control row so the C side re-inits from scratch. Both hepc and update see the
+        # new object; whichever runs first emits the marker (hepc precedes update inside
+        # one _aec3_post).
         cur = id(self)
         if last_state_id['id'] is not None and cur != last_state_id['id']:
             _ROWS.append({'kind': 2})  # rebuild marker
@@ -312,10 +309,7 @@ def main():
     first_usable = next((i for i, r in enumerate(upd_rows)
                          if r['out_usable']), -1)
 
-    # erle_startup_hops/erl_startup_hops are Optional[int] ("None" == auto-
-    # resolve for the live grid). The int32 golden wire format has no None,
-    # so mirror the C-side AEC_STATE_STARTUP_HOPS_AUTO sentinel (-1,
-    # aec_state.c) here instead -- same convention as gen_aec3_post_run_golden.py's
+    # Startup hops: None (auto) is written as the C-side AUTO sentinel, see
     # _hops_or_auto().
     erle_startup_wire = _hops_or_auto(sc.erle_startup_hops)
     erl_startup_wire = _hops_or_auto(sc.erl_startup_hops)

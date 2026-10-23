@@ -1,52 +1,36 @@
-/* bench_rtf.c — per-module real-time-factor (RTF) benchmark harness.
+/* bench_rtf.c -- per-module real-time-factor (RTF) benchmark harness.
  *
- * Standalone, zero-host-dependency timing harness: measures wall-clock cost
- * of aec_process() over a long synthetic (or --wav) input, with and without the post-filter (enable_res), so
- * the post-filter's own cost can be isolated as a derived third line.
+ * Standalone timing harness: measures the wall-clock cost of aec_process() over a long synthetic (or --wav) input, with and
+ * without the post-filter (enable_res), so the post-filter's own cost can be isolated as a derived third line. By default no
+ * Python, corpus or network is needed: a deterministic LCG generates the far-end/near-end signals in-process.
  *
- * No Python, no corpus, no network required by default — a deterministic
- * LCG generates the far-end/near-end signals in-process. --wav is available
- * for spot-checking against a real recording but is not needed for routine
- * profiling.
- *
- * Build: `make bench` from c_impl/ (respects SIMD and EXTRA_CFLAGS, same as
- * bin/aec_wav). Cross-compiles the same way any other
- * c_impl target does (set CC / EXTRA_CFLAGS for the target toolchain).
+ * Build: `make bench` from c_impl/ (respects SIMD and EXTRA_CFLAGS, like bin/aec_wav; set CC / EXTRA_CFLAGS to
+ * cross-compile).
  *
  * Usage:
  *   ./bin/bench_rtf [--seconds N] [--repeat M]
- *                    [--preset 0|1|2|mild|balanced|aggressive]
+ *                    [--preset 0|1|2|3|mild|balanced|aggressive|no_floor]
  *                    [--sr HZ] [--fft N] [--stage full|linear|both]
- *                    [--scene noise|bursts]
+ *                    [--scene noise|bursts] [--live-observer]
  *                    [--wav mic.wav ref.wav]
  *
  * Output (one line per stage, machine-diffable):
  *   stage=<name> hops=<n> total_s=<x.xxxxxx> us_per_hop=<x.xx> rtf=<x.xxxxxx>
  *                median_us_per_hop=<x.xx>
  *
- * total_s, us_per_hop and rtf come from the fastest pass; median_us_per_hop is
- * the median over all passes. A build with PROFILE=1 adds one line per stage,
- * "buckets_us_per_hop", with the mean of each stage-timing bucket over the
- * fastest pass.
+ * total_s, us_per_hop and rtf come from the fastest pass; median_us_per_hop is the median over all passes. A build with
+ * PROFILE=1 adds one line per stage, "buckets_us_per_hop", with the mean of each stage-timing bucket over the fastest pass.
  *
  * Stages:
- *   full   — production config (preset's enable_res=1, enable_cng=1; the
- *            same config aec_wav's `--preset <p> --cng` path builds).
- *   linear — identical config with enable_res=0 (linear-filter-only path).
- *   post   — derived (full.total_s - linear.total_s); an approximation of
- *            the post-filter chain's own cost, not an independently
- *            timed stage.
+ *   full   - production config (preset's enable_res=1, enable_cng=1; the same config aec_wav's `--preset <p> --cng` builds).
+ *   linear - identical config with enable_res=0 (linear-filter-only path).
+ *   post   - derived (full.total_s - linear.total_s); an approximation of the post-filter chain's own cost, not an
+ *            independently timed stage.
  *
- * `--scene` and any mechanism whose cost depends on whether an adaptive
- * filter's weight-update path actually runs (e.g. `--live-observer`):
- * the default `noise` scene is continuous stationary white noise, which
- * `block_stationary` (pbfdkf.c, the `if (p->block_stationary) { ...; return; }`
- * early-out before the update math) classifies as stationary on every hop,
- * so the update path never runs on that scene regardless of which filter is
- * being measured. A cost number measured on `noise` is therefore a LOWER
- * BOUND for any such mechanism, not its true cost — use `--scene bursts`
- * (non-stationary far-end, so the classifier lets updates through) or a
- * real `--wav` recording instead.
+ * `--scene`: the default `noise` scene is continuous stationary white noise, which `block_stationary` (pbfdkf.c, the early-out
+ * before the update math) classifies as stationary on every hop, so the weight-update path never runs on it. A cost measured
+ * on `noise` is therefore a LOWER BOUND for any mechanism whose cost depends on that path (e.g. `--live-observer`); use
+ * `--scene bursts` (non-stationary far-end) or a real `--wav` recording instead.
  */
 #include "aec.h"
 #include "wav_io.h"

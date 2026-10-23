@@ -1,42 +1,26 @@
-/* test_shared_far_spec.c — far-end-FFT sharing regression test.
+/* test_shared_far_spec.c -- far-end-FFT sharing regression test.
  *
- * aec_process_context_shared_far() lets one instance borrow another's
- * already-computed far-end spectrum instead of running its own FFT, for
- * multi-instance callers (e.g. a 4-lane wrapper) whose instances all see
- * the identical far-end signal every hop. This test proves:
+ * aec_process_context_shared_far() lets one instance borrow another's already-computed far-end spectrum instead of running its
+ * own FFT, for multi-instance callers (e.g. a 4-lane wrapper) whose instances see the identical far-end signal every hop.
+ * This test proves:
+ *   1. Borrowing produces BYTE-IDENTICAL AecResContext output to computing independently: two separately constructed,
+ *      identically configured instances fed the identical mic/ref sequence, one via aec_process_context() (own far FFT), the
+ *      other via aec_process_context_shared_far() fed the first's ctx.far_spec each hop, across shadow on/off (the borrow
+ *      insertion point differs: shadow.precomputed_far_spec when a shadow is present, main.precomputed_far_spec otherwise)
+ *      and the three contracted grids.
+ *   2. The shared spectrum is genuinely CONSUMED: a deliberately wrong (garbage) shared_far_spec gives a DIFFERENT result
+ *      than the correct one. Without this negative control, (1) could pass if the function quietly computed its own spectrum.
+ *   3. aec_reset() on an instance with an unconsumed precomputed_far_spec pending leaves no stale pointer behind (the
+ *      pbfdaf_reset() defensive clear).
+ *   4. aec_far_fft_real_compute_count() reflects "did this instance run its own far FFT this hop": it increments once per
+ *      hop on an aec_process_context() instance and stays flat on an aec_process_context_shared_far()-only instance. A
+ *      multi-lane caller (4aec_nr_res.c) uses it to prove its total per-hop far-FFT count dropped after lanes 1-3 share
+ *      lane 0's spectrum.
+ *   5. The hop and call counters (frame_count, shadow_frame_count, render_call_count, capture_call_count) saturate at
+ *      LONG_MAX, and a shadow hop count past INT_MAX still reads as past the shadow warm-up gate where the detectors narrow
+ *      it to int.
  *
- *   1. Borrowing produces BYTE-IDENTICAL AecResContext output to computing
- *      independently -- two separately-constructed, identically-configured
- *      instances fed the identical mic/ref sequence, one via plain
- *      aec_process_context() (computes its own far FFT), the other via
- *      aec_process_context_shared_far() fed the first's ctx.far_spec each
- *      hop -- across shadow on/off (the borrow insertion point differs:
- *      shadow.precomputed_far_spec when shadow is present, main.
- *      precomputed_far_spec directly when it isn't) and all three
- *      officially-contracted grids.
- *   2. The shared spectrum is genuinely CONSUMED, not silently ignored: a
- *      deliberately WRONG (garbage) shared_far_spec produces a DIFFERENT
- *      result than the correct one -- a negative control without which
- *      (1) alone could pass vacuously if aec_process_context_shared_far()
- *      quietly fell back to computing its own spectrum regardless of the
- *      argument.
- *   3. aec_reset() on an instance that has an unconsumed
- *      precomputed_far_spec pointer pending does not leave a stale pointer
- *      behind (the pbfdaf_reset() defensive-clear fix).
- *   4. aec_far_fft_real_compute_count() actually reflects "did this
- *      instance run its own far FFT this hop" -- it increments once per
- *      hop on a plain aec_process_context() instance, and stays flat
- *      forever on an aec_process_context_shared_far()-only instance. This
- *      is the counter a multi-lane caller (4aec_nr_res.c) uses to prove
- *      its own total per-hop far-FFT count actually dropped after
- *      switching lanes 1-3 over to share lane 0's spectrum.
- *   5. The hop and call counters (frame_count, shadow_frame_count,
- *      render_call_count, capture_call_count) saturate at LONG_MAX, and a
- *      shadow hop count past INT_MAX still reads as past the shadow warm-up
- *      gate where the detectors narrow it to int.
- *
- * Build (standalone, from c_impl/ — mirrors test_process_context.c's
- * documented recipe):
+ * Build (standalone, from c_impl/):
  *   make -C ../../audiolib/common BACKEND=ne10 lib
  *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=gnu99 -Iinclude -Iexample \
  *       -I../../audiolib/common/include \
@@ -228,15 +212,11 @@ static void test_wrong_shared_spec_changes_result(void) {
     aec_destroy(&wrong);
 }
 
-/* aec_reset() must not leave a stale precomputed_far_spec pointer behind
- * even if called right after a shared-far call (pbfdaf_reset() defensive
- * clear). This can't observe the pointer field directly (Aec's internal
- * PBFDAF/PBFDKF sub-structs are opaque to this test), so it instead proves
- * the OBSERVABLE consequence: post-reset, the instance behaves exactly
- * like a fresh instance computing its own spectrum, never silently
- * reusing a freed/stale borrowed pointer from before the reset (which
- * would produce garbage or crash under ASan/valgrind on the freed
- * memory). */
+/* aec_reset() must not leave a stale precomputed_far_spec pointer behind, even right after a
+ * shared-far call (pbfdaf_reset() defensive clear). The pointer field is not observable from here
+ * (the sub-structs are opaque), so this proves the observable consequence: post-reset the instance
+ * behaves exactly like a fresh instance computing its own spectrum, never reusing a stale borrowed
+ * pointer (garbage output, or a crash under ASan/valgrind on the freed memory). */
 static void test_reset_after_shared_far_is_clean(void) {
     AecConfig cfg;
     context_only_config(&cfg, 16000, 0, 1);

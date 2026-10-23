@@ -15,12 +15,11 @@ Standard plot panels:
     5. Long-term magnitude spectrum (frequency response): mic vs out
     6. Per-frame ERLE (dB) over time
 
-Demo mode (--demo) runs four configurations on the same input and
-stacks them for A/B comparison:
-    - bypass     (no linear filter, no RES, no CNG — mic passthrough)
+Demo mode (--demo) runs three configurations on the same input and writes two
+side-by-side comparison plots (linear vs +res, +res vs +res+cng):
     - linear     (linear AEC only; RES + CNG disabled)
     - +res       (linear + residual suppressor)
-    - +res +cng  (full pipeline; the recommended default)
+    - +res +cng  (full pipeline)
 """
 import argparse
 import os

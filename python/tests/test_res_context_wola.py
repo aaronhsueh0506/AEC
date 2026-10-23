@@ -66,16 +66,15 @@ def test_res_context_is_reconstructing_wola(
 
 
 def test_res_context_filter_converged_tracks_this_hop_not_last() -> None:
-    """S-05: AecResContext.filter_converged must reflect THIS hop's
-    update_convergence() result, not the value from before it ran. The gap
-    only showed up on the rising-edge hop (the single hop where convergence
-    flips False -> True), since self._convergence.converged does not change
-    on any other hop. Oracle: AEC.get_stats().filter_converged reads
-    self._filter_converged, which by the time the caller can observe it (the
-    hop's process() call has already returned) always reflects the post-
-    update_convergence state for that hop -- exactly the C twin's contract,
-    since aec_get_res_context() is a separate pull the caller makes only
-    after aec_process() returns. The two must therefore always agree."""
+    """AecResContext.filter_converged must reflect THIS hop's update_convergence()
+    result, not the value from before it ran. The difference only shows on the
+    rising-edge hop (the single hop where convergence flips False -> True), since
+    self._convergence.converged does not change on any other hop. Oracle:
+    AEC.get_stats().filter_converged reads self._filter_converged, which once the
+    hop's process() call has returned always reflects the post-update_convergence
+    state -- the C twin's contract, since aec_get_res_context() is a separate pull
+    made after aec_process() returns. The two must always agree.
+    """
     config = AecConfig.from_preset(AecPreset.BALANCED, sample_rate=16000, frame_size=512)
     config.return_res_context = True
     aec = AEC(config)

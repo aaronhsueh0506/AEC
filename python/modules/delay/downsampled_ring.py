@@ -1,37 +1,19 @@
-"""Decimator (cascaded biquad LP + HP) + downsampled-render ring buffer.
+"""Decimator (biquad low-pass + high-pass cascade) and downsampled render ring buffer.
 
-Mirrors:
-  - docs/aec3_extracts/src/aec3/decimator.{cc,h}
-  - docs/aec3_extracts/src/aec3/downsampled_render_buffer.{cc,h}
-  - utility/cascaded_biquad_filter.{cc,h}  (inlined here; trivial direct-form)
-
-Rate / size invariants:
-  - Decimator input block size = 64 samples (AEC3 ``kBlockSize``); output =
-    block / down_sampling_factor (16 samples at factor=4).
-  - The matched_filter pipeline is called with these 16-sample sub-blocks
-    at AEC3's native 1 ms rate. Our 10 ms hop carries 160 samples = 10
-    inner blocks of 64 samples = 10 sub-blocks after decimation. The
-    edge-chunker lives in echo_path_delay_estimator.py.
-  - Down-sampling factor 8 path (BandPass filter) is NOT ported — AEC3
-    uses it only at sample rates we don't run (48 kHz). Add only if
-    we ever support a non-16 kHz config.
-
-Biquad form: Direct Form II transposed; coefficients pulled verbatim
-from decimator.cc; state per-section.
+The decimator maps a 64-sample block to a 16-sample sub-block (factor 4 only, 16 kHz path).
+Biquads are direct form II transposed with per-section state.
 """
 import numpy as np
 
 
-# AEC3 kLowPassFilterDs4 — 6th-order elliptic LP at 1800 Hz (16 kHz / 8 = 2 kHz cutoff after decimation).
-# decimator.cc lines 23-29. Coefficients order is {b0,b1,b2} and {a1,a2} (a0 normalised).
+# 6th-order elliptic low-pass for factor-4 decimation; per section {b0,b1,b2},{a1,a2} with a0 normalised.
 _LP_DS4_SECTIONS = (
     ((0.0180919877, 0.00320961363, 0.0180919877), (-1.5183195, 0.633165865)),
     ((1.0, -1.24550459, 1.0),                       (-1.49784254, 0.853586692)),
     ((1.0, -1.4221681, 1.0),                        (-1.49791282, 0.969572384)),
 )
 
-# AEC3 kHighPassFilter — 2nd-order Butterworth HP at 1000 Hz; reduces near-end noise.
-# decimator.cc lines 47-52.
+# 2nd-order Butterworth high-pass at 1 kHz (near-end noise reduction).
 _HP_SECTIONS = (
     ((0.757076375, -1.51415275, 0.757076375), (-1.45424359, 0.574061915)),
 )
@@ -55,10 +37,6 @@ class _CascadedBiquad:
             xn = float(x[n])
             yn = xn
             for s in range(b.shape[0]):
-                # DF-II transposed:
-                #   out = b0*x + z0
-                #   z0  = b1*x - a1*out + z1
-                #   z1  = b2*x - a2*out
                 inp = yn
                 out = b[s, 0] * inp + z[s, 0]
                 z[s, 0] = b[s, 1] * inp - a[s, 0] * out + z[s, 1]
@@ -98,21 +76,12 @@ class Decimator:
 
 
 class DownsampledRenderBuffer:
-    """Circular buffer for downsampled render samples — forward-stored.
+    """Circular buffer of downsampled render samples, stored in forward time order.
 
-    Convention divergence from AEC3 ``downsampled_render_buffer.h`` (which
-    stores reversed with ``write`` decrementing on push). We use the natural
-    forward storage: samples written in temporal order at increasing
-    indices, ``write`` points one past the newest sample. Conceptually
-    equivalent; downstream ``MatchedFilter`` walks BACKWARD in index when
-    iterating over filter taps so the access pattern still gives
-    ``h[0]`` = newest, ``h[k]`` = k-samples-older.
-
-    ``newest_index()`` returns the position of the most recently written
-    sample. ``gather_back(start_offset, length)`` returns ``length`` samples
-    going backward in time starting ``start_offset`` samples before
-    ``newest_index()`` (returns a contiguous numpy array, copying across
-    wraparound — cheap at the size we use).
+    ``write`` points one past the newest sample; ``newest_index()`` is the newest
+    sample. ``gather_back(start_offset, length)`` returns a contiguous copy of
+    ``length`` samples going backward in time from ``start_offset`` samples before
+    the newest.
     """
 
     def __init__(self, capacity: int) -> None:
@@ -138,19 +107,12 @@ class DownsampledRenderBuffer:
         return (self.write - 1 + self.size) % self.size
 
     def gather_back(self, start_offset: int, length: int) -> np.ndarray:
-        """Return ``length`` samples in time-reversed order starting at
-        ``newest_index() - start_offset``. Index 0 of the returned array is
-        the sample ``start_offset`` ago; index ``length-1`` is
-        ``start_offset+length-1`` ago.
-
-        Uses two-chunk circular copy so the returned array is contiguous.
+        """Return ``length`` samples in newest-first order starting ``start_offset``
+        samples before the newest; index 0 is the sample ``start_offset`` ago.
         """
         if length > self.size:
             raise ValueError("length larger than ring capacity")
         end = (self.newest_index() - start_offset + self.size) % self.size
-        # We want indices end, end-1, ..., end-length+1 (with wrap).
-        # Equivalently: a slice [start, end+1) in REVERSED order, where
-        # start = end - length + 1.
         start = (end - length + 1 + self.size) % self.size
         if start <= end:
             return self.buffer[start : end + 1][::-1].copy()
@@ -170,12 +132,7 @@ def required_capacity(
     alignment_shift_sub_blocks: int,
     sub_block_size: int,
 ) -> int:
-    """Minimum ring capacity to cover the matched_filter span + safety margin.
-
-    Mirrors GetDownSampledBufferSize(down_sampling_factor, filter_length_blocks)
-    in spirit; our matched_filter geometry is direct so compute it explicitly.
-    Capacity must hold the deepest filter's window AND alignment shifts of
-    all preceding filters. +1 sub_block of headroom for the write cursor.
-    """
+    """Minimum ring capacity covering the deepest filter window plus the alignment
+    shifts of the preceding filters, plus one sub-block of headroom."""
     span_sub_blocks = window_size_sub_blocks + alignment_shift_sub_blocks * (num_filters - 1)
     return (span_sub_blocks + 1) * sub_block_size

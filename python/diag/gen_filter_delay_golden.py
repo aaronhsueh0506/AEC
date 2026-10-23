@@ -1,12 +1,12 @@
-"""Generate a binary golden for the C filter_delay port (WS5 Phase 5.2).
+"""Generate a binary golden for the C filter_delay port.
 
 Drives the Python FilterDelay (AecState::FilterDelay) over a deterministic
 multi-frame sequence and snapshots the FULL state after every call:
 ``filter_delays_blocks`` (per channel), ``min_direct_path_filter_delay``, and
-``external_delay_reported``. The C parity test replays the identical input
-sequence and asserts exact equality at every frame, verifying the integer
-state machine (branch selection + floor-division + external-delay caching +
-the analyzer length-mismatch error path).
+``external_delay_reported``. Replaying the identical input sequence must match
+exactly at every frame, verifying the integer state machine (branch selection +
+floor-division + external-delay caching + the analyzer length-mismatch error
+path).
 
 This module is PURELY INTEGER — there are no numpy dtypes to match. Inputs are
 block counts and array indices. Dtypes were captured from the real

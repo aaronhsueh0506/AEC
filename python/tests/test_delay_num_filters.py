@@ -1,35 +1,21 @@
 """Config pass-through for the matched-filter bank size
 (``AecConfig.delay_num_filters``).
 
-Why this test exists: ``EchoPathDelayEstimator`` has always taken a
-``num_filters`` argument and has always sized its downsampled ring and its
-aggregator histograms from it — but nothing could SET it. The orchestrator
-built ``LegacyDelayShim`` without it and the shim swallowed every kwarg it
-did not recognise, so the whole chain was pinned at the AEC3 default of 5.
-That is the right value for bench / dataset generation (it is what the
-published scores were measured at), but the embedded target compensates the
-measured system delay with ``fixed_delay_samples`` and only needs the
-matched filter to track the residual, where a smaller bank buys a large
-MAC saving (n=1 is -73% of the full-rate search cost).
-
-What is asserted:
-  1. DEFAULT IS UNCHANGED — ``AecConfig()`` and
-     ``AecConfig(delay_num_filters=5)`` produce bit-identical output on the
-     same input, and the estimator built at the default still has the exact
-     ring capacity (2064) and highest-peak histogram size (2433) it had
-     before this knob existed.
-  2. THE KNOB REALLY MOVES THE GEOMETRY (the can-fail core) — the bank's
-     reliable reach is ``(n-1)*384 + 501`` downsampled samples (0.25 ms
-     each), i.e. 125 / 221 / 317 / 413 / 509 ms for n = 1..5. So a 350 ms
-     echo is INSIDE reach at n=5 and OUTSIDE it at n=2, while a 150 ms echo
-     is inside reach at both. Driving the FULL stack (AecConfig -> AEC ->
-     orchestrator -> LegacyDelayShim -> EchoPathDelayEstimator) means the
-     n=2 "must not lock 350 ms" assertion fails the moment either wiring
-     hop stops forwarding the value, because both regressions land on the
-     same fallback of 5. ``test_mutation_*`` proves exactly that by
-     re-running the n=2 case with the shim's forwarding monkeypatched away.
-  3. RANGE IS ENFORCED — 0 and 6 raise, fail-fast like the signal-grid
-     check next to it in ``__post_init__``.
+``EchoPathDelayEstimator`` sizes its downsampled ring and aggregator histograms
+from ``num_filters``. The embedded target compensates the measured system delay
+with ``fixed_delay_samples`` and only needs the matched filter to track the
+residual, where a smaller bank buys a large MAC saving. Asserted:
+  - ``AecConfig()`` and ``AecConfig(delay_num_filters=5)`` give bit-identical
+    output, and the default estimator has ring capacity 2064 and highest-peak
+    histogram size 2433;
+  - the knob moves the geometry: the bank's reliable reach is
+    ``(n-1)*384 + 501`` downsampled samples (0.25 ms each), i.e.
+    125 / 221 / 317 / 413 / 509 ms for n = 1..5, so a 350 ms echo is INSIDE reach
+    at n=5 and OUTSIDE it at n=2, while a 150 ms echo is inside at both. The
+    full stack (AecConfig -> AEC -> orchestrator -> LegacyDelayShim ->
+    EchoPathDelayEstimator) is driven; ``test_mutation_*`` re-runs the n=2 case
+    with the shim's forwarding removed to prove the assertion can fail;
+  - 0 and 6 raise, fail-fast like the signal-grid check in ``__post_init__``.
 
 Run:
     python3 -m pytest python/tests/test_delay_num_filters.py
@@ -49,9 +35,9 @@ from modules.delay import legacy_compat
 from modules.delay.echo_path_delay_estimator import EchoPathDelayEstimator
 
 
-# Ring capacity / histogram size the AEC3-default geometry has always had.
-# Hard-coded rather than recomputed from the same formula the source uses --
-# a recomputed expectation would move together with a broken formula.
+# Ring capacity / histogram size of the AEC3-default geometry. Hard-coded rather
+# than recomputed from the formula the source uses -- a recomputed expectation
+# would move together with a broken formula.
 _DEFAULT_RING_CAPACITY = 2064          # (32 + 24*(5-1) + 1) * 16
 _DEFAULT_HP_HISTOGRAM_SIZE = 2433      # 5*384 + 512 + 1
 # One downsampled sample is 0.25 ms, so the tolerance below (160 raw samples
@@ -59,13 +45,8 @@ _DEFAULT_HP_HISTOGRAM_SIZE = 2433      # 5*384 + 512 + 1
 # (headroom 32 raw + ds granularity) yet far tighter than the ~180 ms gap
 # between the true delay and the deepest lag an out-of-reach bank can report.
 _LOCK_TOLERANCE_SAMPLES = 160
-# 350 ms, not 400: on a pure single-tap echo the PRE-FIX pre-echo
-# aggregator (the behaviour main carries while 700994b is branch-pending)
-# deterministically reports the 400 ms case one alignment shift early
-# (4800 vs 6400) -- same quirk test_delay_num_filters.c documents. 350 ms
-# behaves on both pre-echo variants, keeps the geometry point intact
-# (350 > n=2's 221 ms reach, < n=5's 509 ms), and lets this file pass on
-# main and on the branch alike.
+# 350 ms rather than 400: it keeps the geometry point intact (350 > n=2's 221 ms
+# reach, < n=5's 509 ms).
 
 
 def _synth_echo(sample_rate: int, seconds: float, delay_samples: int,
@@ -102,7 +83,7 @@ def _lock_delay(num_filters: int, delay_ms: float,
 
 
 class DelayNumFiltersDefaultTests(unittest.TestCase):
-    """The default path must be indistinguishable from before the knob."""
+    """AecConfig() and delay_num_filters=5 behave identically."""
 
     def test_explicit_five_is_bit_identical_to_the_default(self) -> None:
         seconds = 2.0
@@ -186,14 +167,13 @@ class DelayNumFiltersGeometryTests(unittest.TestCase):
                          2 * 384 + 512 + 1)                               # 1281
 
     def test_mutation_dropping_the_shim_forwarding_makes_n2_lock_350ms(self) -> None:
-        """Mutation control. Re-run the n=2 / 350 ms case with the shim's
-        num_filters forwarding removed (exactly the pre-fix behaviour, and
-        also what a dropped orchestrator kwarg degrades to -- both fall back
-        to 5). The bank silently becomes a 509 ms one, the echo comes into
-        reach, and the assertion in
-        ``test_two_filters_do_not_lock_a_350ms_echo`` would go red. If this
-        test ever fails, that assertion is passing for some reason other
-        than the geometry."""
+        """Mutation control: re-run the n=2 / 350 ms case with the shim's num_filters
+        forwarding removed (a dropped orchestrator kwarg degrades the same way: both
+        fall back to 5). The bank silently becomes a 509 ms one, the echo comes into
+        reach, and ``test_two_filters_do_not_lock_a_350ms_echo`` would go red. If this
+        test ever fails, that assertion is passing for some reason other than the
+        geometry.
+        """
 
         class _SwallowNumFilters(EchoPathDelayEstimator):
             def __init__(self, *, num_filters: int = 5, **kwargs) -> None:

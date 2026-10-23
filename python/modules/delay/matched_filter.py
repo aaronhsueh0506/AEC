@@ -1,27 +1,8 @@
-"""Matched filter — multi-hypothesis NLMS cross-correlator over a downsampled ring.
+"""Matched filter: bank of NLMS cross-correlators over a downsampled render ring.
 
-Mirrors docs/aec3_extracts/src/aec3/matched_filter.{cc,h} (scalar core only;
-NEON / SSE2 / AVX2 variants are not ported — numpy vectorises the inner
-tap loop).
-
-Rate / coverage notes:
-  - All sizes are in DOWNSAMPLED sub-block units, on the 4 kHz grid the
-    AEC3 4x decimator produces from 16 kHz. One ds sample = 0.25 ms, so
-    ``sub_block_size`` (16 samples) = 4 ms — one AEC3 kBlockSize of 64
-    raw samples. AEC3-native; do NOT rescale.
-  - ``window_size_sub_blocks`` (32), ``alignment_shift_sub_blocks`` (24)
-    and ``num_filters`` (5) are AEC3 defaults. In milliseconds that is a
-    128 ms window per filter, staggered by 96 ms, so the bank's geometric
-    span is (5-1) * 96 + 128 = 512 ms and the deepest RELIABLE lag is
-    509.25 ms (2037 ds) once the ``lag_estimate < filter_size - 10``
-    reliability condition is applied. ``get_max_filter_lag()`` reports a
-    larger 608 ms — that is a histogram-sizing bound, not reach; see its
-    docstring. Match coverage in MS, not in "N blocks at our 10 ms hop"
-    (user lock 2026-05-17).
-  - ``smoothing_fast`` / ``smoothing_slow`` are per-update constants
-    inside the sub-block loop. The faithful sub-block adapter (see
-    ``echo_path_delay_estimator.py``) drives the update at the AEC3-native
-    4 ms sub-block rate, so these values DO NOT rescale.
+Sizes are in downsampled units (4 kHz grid, 0.25 ms per sample, 16-sample sub-block = 4 ms).
+Defaults: window 32 sub-blocks (128 ms), alignment shift 24 sub-blocks (96 ms), 5 filters,
+so the bank spans 512 ms. Smoothing constants are per sub-block update and do not rescale.
 """
 from dataclasses import dataclass
 from typing import Optional
@@ -33,21 +14,19 @@ from .downsampled_ring import DownsampledRenderBuffer
 
 @dataclass(frozen=True)
 class LagEstimate:
-    lag: int          # downsampled samples; multiply by down_sampling_factor to get raw samples
+    lag: int  # downsampled samples (multiply by the decimation factor for raw samples)
     pre_echo_lag: int
 
 
-# AEC3 matched_filter.cc:43 — subsample rate for accumulated error.
+# Subsample rate for accumulated error.
 _ACCUMULATED_ERROR_SUBSAMPLE_RATE = 4
 _PRE_ECHO_UPDATES_TO_REPORT = 50
-# AEC3 saturation guard is 32000 in int16 amplitude scale. We operate
-# on float[-1, 1], so the equivalent threshold is 32000/32768.
+# Saturation guard (int16 32000 on the float [-1, 1] scale).
 _SATURATION_LIMIT = 32000.0 / 32768.0   # 0.9766
 
 
 def max_square_peak_index(h: np.ndarray) -> int:
-    """Index of the strongest squared tap. Mirrors MaxSquarePeakIndex
-    (matched_filter.cc:557-590). Returns 0 on |h| < 2."""
+    """Index of the strongest squared tap (0 when fewer than 2 taps)."""
     if h.size < 2:
         return 0
     sq = h * h
@@ -64,24 +43,13 @@ def matched_filter_core(
     h: np.ndarray,
     instantaneous_error_out: Optional[np.ndarray] = None,
 ) -> tuple[bool, float]:
-    """NLMS matched-filter core operating on a forward-stored ring.
+    """NLMS matched-filter core over a forward-stored ring; returns (filters_updated, error_sum).
 
-    Semantically equivalent to MatchedFilterCore (matched_filter.cc:496-555),
-    rewritten to use ``DownsampledRenderBuffer.gather_back`` instead of
-    AEC3's reverse-stored circular access.
-
-    For each sub-block sample ``i`` (oldest→newest in ``y``):
-      - Gather ``h.size`` render samples in time-reverse order starting
-        ``alignment_shift_back + (sub_block_size - 1 - i)`` samples
-        before the newest render sample.
-      - Compute ``e = y[i] - h·x_window``, accumulate ``error_sum``.
-      - NLMS update ``h += smoothing * e / x2_sum * x_window`` when
-        ``x2_sum > threshold`` and capture isn't saturated.
-
-    If ``instantaneous_error_out`` is provided (length filter_size /
-    _ACCUMULATED_ERROR_SUBSAMPLE_RATE), the squared error of the filter
-    PREFIX up to each tap-group is accumulated per bin (AEC3 parity), so
-    ComputePreEchoLag can locate the echo onset.
+    For each sub-block sample ``i`` it gathers ``h.size`` render samples ending
+    ``alignment_shift_back + (sub_block_size - 1 - i)`` before the newest, forms
+    ``e = y[i] - h.x`` and updates ``h`` when ``x2_sum > x2_sum_threshold`` and the
+    capture is not saturated. If ``instantaneous_error_out`` is given
+    (length filter_size / 4), the squared prefix error per 4-tap group is accumulated into it.
     """
     h_size = h.size
     error_sum = 0.0
@@ -101,13 +69,7 @@ def matched_filter_core(
         e2 = e * e
         error_sum += e2
         if instantaneous_error_out is not None:
-            # AEC3 MatchedFilterCoreWithAccumulatedError (matched_filter.cc:106-139):
-            # accumulate, per filter-tap GROUP of 4, the squared error of the filter
-            # PREFIX up to that group — accumulated_error[j] +=
-            # (Σ h[:g·(j+1)]·x[:g·(j+1)] − y[i])². ComputePreEchoLag then walks back
-            # for the earliest group whose prefix already explains the echo (= onset).
-            # (The previous code binned the FULL-filter error by output-sample index,
-            # leaving all but the first few bins zero → pre-echo always collapsed to 0.)
+            # Per 4-tap group: accumulate the squared error of the filter prefix up to that group.
             g = _ACCUMULATED_ERROR_SUBSAMPLE_RATE
             prefix = np.cumsum((h * x_window).reshape(-1, g).sum(axis=1))
             diff = prefix - float(y[i])
@@ -122,7 +84,7 @@ def matched_filter_core(
 def _update_accumulated_error(
     instantaneous: np.ndarray, accumulated: np.ndarray, one_over_anchor: float
 ) -> None:
-    """Mirrors UpdateAccumulatedError (matched_filter.cc:45-60)."""
+    """Update the accumulated per-group error: take the minimum, otherwise smooth upward."""
     SMOOTH_INC = 0.015
     norm = instantaneous * one_over_anchor
     mask = norm < accumulated
@@ -133,7 +95,7 @@ def _update_accumulated_error(
 def _compute_pre_echo_lag(
     accumulated_error: np.ndarray, lag: int, alignment_shift_winner: int
 ) -> int:
-    """Mirrors ComputePreEchoLag (matched_filter.cc:62-78)."""
+    """Walk back from the winner for the earliest tap group whose prefix explains the echo."""
     PRE_ECHO_THRESHOLD = 0.5
     if lag < alignment_shift_winner:
         return lag
@@ -149,16 +111,12 @@ def _compute_pre_echo_lag(
 
 
 class MatchedFilter:
-    """Bank of ``num_filters`` cross-correlation filters covering staggered lag
-    windows. ``update()`` is called once per sub-block (default 16 samples at
-    AEC3 1 ms). ``get_best_lag_estimate()`` returns the winning lag (in
-    downsampled samples) or None.
+    """Bank of ``num_filters`` cross-correlation filters covering staggered lag windows.
 
-    Lag computed as ``MaxSquarePeakIndex(h_n) + n * filter_intra_lag_shift``.
-    The winner is the filter with the smallest ``error_sum`` that is
-    ``reliable`` (peak in [3, size-10], error_sum < threshold * anchor).
-    Ties between adjacent filters on the same lag are broken toward the
-    earlier filter (preserves pre-echo discovery path).
+    ``update()`` is called once per sub-block. The winner is the reliable filter (peak
+    in [3, size-10], error_sum < threshold * anchor) with the smallest error_sum;
+    equal lags on adjacent filters resolve to the earlier filter.
+    ``get_best_lag_estimate()`` returns the lag in downsampled samples, or None.
     """
 
     def __init__(
@@ -205,18 +163,11 @@ class MatchedFilter:
         return self._reported_lag
 
     def get_max_filter_lag(self) -> int:
-        """Upper bound on the reported lag, in DOWNSAMPLED samples — used to
-        SIZE the aggregator histograms, not to describe reach.
+        """Histogram-sizing bound in downsampled samples; not a delay ceiling.
 
-        It over-counts by one full alignment shift: the deepest filter starts
-        at ``(num_filters - 1) * intra_shift`` and is ``filter_size`` long, so
-        the real geometric span is ``(num_filters - 1) * intra_shift +
-        filter_size`` (2048 ds = 512 ms at the AEC3 defaults) and the deepest
-        lag a peak can actually be accepted at is 11 ds less again
-        (``lag_estimate < filter_size - 10``), i.e. 2037 ds = 509.25 ms. This
-        formula returns 2432 ds = 608 ms. Upstream's GetMaxFilterLag has the
-        same over-count and the same sizing-only role, so it is kept verbatim;
-        do not read it as a delay ceiling."""
+        It exceeds the geometric span (2048 ds = 512 ms at the defaults) by one
+        alignment shift; the deepest accepted lag is 2037 ds = 509.25 ms.
+        """
         return self._num_filters * self._filter_intra_lag_shift + self._filter_size
 
     def filter_intra_lag_shift(self) -> int:
@@ -257,7 +208,6 @@ class MatchedFilter:
         previous_lag_estimate: Optional[int] = None
 
         for n in range(self._num_filters):
-            # Pass instantaneous_error_out for pre-echo tracking when enabled.
             _ie_out = (self._instantaneous_error
                        if self._detect_pre_echo else None)
             filters_updated, error_sum = matched_filter_core(
@@ -293,11 +243,9 @@ class MatchedFilter:
             self._reported_lag = LagEstimate(
                 lag=int(self._winner_lag), pre_echo_lag=int(self._winner_lag)
             )
-            # Pre-echo path — only fires when detect_pre_echo=True and the
-            # same filter remains winner across calls.
+            # Pre-echo tracking: only when enabled and the same filter wins on consecutive calls.
             if self._detect_pre_echo and self._last_detected_best_lag_filter == winner_index:
-                # AEC3 gate is in int16-scale (error_sum > 1.0 in Q15²).
-                # float[-1,1] equivalent: 1.0 / 32768² ≈ 9.3e-10.
+                # Gate at int16 error_sum > 1.0, i.e. 1 / 32768^2 on the float scale.
                 if error_sum_anchor > 1.0 / (32768.0 * 32768.0):
                     _update_accumulated_error(
                         self._instantaneous_error,

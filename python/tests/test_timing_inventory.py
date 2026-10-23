@@ -1,23 +1,18 @@
 """Gate for the timing-constant inventory: the data, the generator, the document.
 
 The inventory is release evidence -- it is what answers "is the wall-clock
-timing audit complete?". Its first version could not answer that, because it was
-internally inconsistent: the category counts summed to 83 against a stated total
-of 82, two of the six categories had no section at all, one candidate carried two
-mutually exclusive verdicts, five entries were truncated mid-sentence, and a
-trailing space broke `git diff --check`. None of that was visible without adding
-up the table by hand.
-
-So the document is generated, and this file asserts three separate things:
+timing audit complete?" -- so the document is generated, and this file asserts
+three separate things:
 
 1. the rendered document has the properties a reader relies on when treating it
-   as evidence (the original failure mode);
+   as evidence (category counts sum to the stated total, every category has a
+   section, one verdict per candidate, no truncated entries, no trailing
+   whitespace);
 2. `--check` really verifies, really refuses to write, and really fails when the
    committed text has drifted -- proved by mutating a sandbox copy, not by
    trusting the exit code of the happy path;
-3. the whole artifact rebuilds from repository state alone. The second version
-   of the generator read an absolute path under a developer's home directory, so
-   the document was reproducible on exactly one machine.
+3. the whole artifact rebuilds from repository state alone, with no absolute
+   path read from outside the repository.
 """
 from __future__ import annotations
 
@@ -111,8 +106,9 @@ def test_declared_count_matches_entries(sections):
 
 
 def test_candidate_ids_are_unique_across_the_whole_document(sections):
-    """One candidate, one verdict. This is the check that would have caught
-    shadow_copy_hysteresis being filed under both retime and dead-code."""
+    """One candidate, one verdict: e.g. shadow_copy_hysteresis must not be filed
+    under both retime and dead-code.
+    """
     seen = collections.defaultdict(list)
     for title, body in sections.items():
         for name in body["entries"]:
@@ -161,8 +157,9 @@ def test_no_entry_has_an_empty_or_missing_field(doc):
 
 
 def test_no_trailing_whitespace(doc):
-    """`git diff --check` failed on the first version because of exactly one
-    trailing space, which is enough to block a release gate."""
+    """`git diff --check` must pass: a single trailing space is enough to block a
+    release gate.
+    """
     bad = [i + 1 for i, line in enumerate(doc.splitlines())
            if line != line.rstrip()]
     assert not bad, f"trailing whitespace on lines {bad}"
@@ -176,8 +173,8 @@ def test_cited_source_paths_exist(doc):
     assert cited, "no source paths cited at all -- parser broken?"
     missing = sorted(p for p in cited
                      if not os.path.isfile(os.path.join(_REPO, p)))
-    # test/historical/ paths are deliberately retired; everything else must
-    # exist in the working tree.
+    # Paths under /historical/ are exempt; everything else must exist in the working
+    # tree.
     missing = [p for p in missing if "/historical/" not in p]
     assert not missing, f"cited but absent: {missing}"
 
@@ -193,10 +190,9 @@ def test_retime_section_is_not_silently_empty(sections):
 # ── the data ────────────────────────────────────────────────────────────────
 
 def test_one_entry_per_semantic_constant(data):
-    """alpha_power and alpha_r were each filed twice, once per port, so a single
-    unretimed value read as two findings and one port could be closed while the
-    other stayed open under a different name. Both ports now share one entry,
-    and the Consumer list is what carries the per-port detail."""
+    """alpha_power and alpha_r each have ONE entry shared by both ports, and the
+    Consumer list carries the per-port detail.
+    """
     both = [e for e in data["entries"]
             if any("Python:" in c for c in e["consumers"])
             or any(c.startswith("C:") for c in e["consumers"])]
@@ -215,8 +211,9 @@ def test_status_and_category_cannot_disagree(data):
 
 
 def test_the_two_alpha_bypasses_are_closed(data):
-    """Both were fixed at HEAD (5232ab6, d7e94f7). An inventory that still calls
-    them hardcoded would send a reader to re-fix a fixed bug."""
+    """pbfdaf-alpha-power and pbfdkf-alpha-r are closed: an inventory still calling
+    them hardcoded would send a reader to re-fix a fixed bug.
+    """
     by_id = {e["id"]: e for e in data["entries"]}
     for cid in ("pbfdaf-alpha-power", "pbfdkf-alpha-r"):
         e = by_id[cid]
@@ -230,10 +227,10 @@ def test_the_two_alpha_bypasses_are_closed(data):
 
 @pytest.mark.parametrize("path", [_DOC, _DATA])
 def test_no_process_vocabulary(path):
-    """The prose was full of words that only mean something inside the work that
-    produced the document. Matched on word boundaries, because `TransparentMode`
-    is an identifier -- a naive substring check on "parent" made an earlier pass
-    elide it out of a quoted commit subject."""
+    """The prose must not contain words that only mean something inside the work that
+    produced the document. Matched on word boundaries, because `TransparentMode` is
+    an identifier containing "parent".
+    """
     with open(path, encoding="utf-8") as fh:
         text = fh.read()
     hits = {}
@@ -253,11 +250,11 @@ def test_no_absolute_paths_in_the_document_or_the_data(path):
 
 
 def test_the_generator_holds_no_absolute_path_literal():
-    """THE reproducibility rule. The previous generator read the adjudication
-    data from an absolute path under a developer's home directory, so the
-    document could be rebuilt on exactly one machine. Checking string literals
-    rather than grepping for one particular home prefix means a different
-    machine layout cannot slip past."""
+    """THE reproducibility rule: the generator must not read data from an absolute
+    path outside the repository, or the document could be rebuilt on one machine
+    only. Checking string literals rather than grepping for one particular home
+    prefix means a different machine layout cannot slip past.
+    """
     import ast
     with open(_GEN, encoding="utf-8") as fh:
         tree = ast.parse(fh.read(), filename=_GEN)

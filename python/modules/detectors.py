@@ -1,40 +1,17 @@
-"""Render-activity, filter-convergence, double-talk, and plateau detectors.
+"""Render-activity, filter-convergence, double-talk and plateau detectors.
 
-The module provides four stateful detectors:
-
-* ``RenderActivityDetector`` — far-end activity + stationarity
-* ``FilterConvergenceAnalyzer`` — convergence state + divergence EMA
-* ``DoubleTalkAnalyzer`` — DT classifier (energy + shadow differential)
-* ``FilterPlateauDetector`` — ERLE plateau detector for adaptive tuning
-
-Read-only state snapshots use value types from ``modules.dataclasses``.
-
-Timing convention
------------------
-Per-hop EMA coefficients and explicitly duration-authored gates in this module
-were calibrated at hop=160 @ 16000 Hz (10 ms) and are retimed to the live grid
-in ``__init__`` via
-``aec3_scale.growth_rehop`` / ``aec3_scale.ms_to_hops``. The authored values are
-kept as the ``*_REF`` class attributes so the intent stays readable; the
-instance attributes are what the update methods use.
-
-Authoring-grid evidence, reproduced numerically rather than assumed:
-``ALPHA_CV_REF`` 0.99 -> TC 994.99 ms against its own "TC ~ 1 s" comment, and
-``GRACE_FRAMES_REF`` 400 -> 4000 ms against its "~4 s at 100 fps" comment
-(100 fps IS a 10 ms hop). Neither reproduces at 8.000 / 16.000 / 10.667 ms.
-
-NOT retimed, deliberately: ``CONV_FRAMES``, ``CONV_ERLE_DB``, ``DIV_ERLE_LIN``,
-``STATIONARY_CV2``, ``ERL_CEILING_FLOOR``, ``SAFETY_MARGIN`` and the
-``FilterPlateauDetector`` ratio/threshold defaults, retry budget and unresolved
-consecutive-evidence gate. These are evidence counts or dimensionless gates,
-not established durations; see each comment.
+``RenderActivityDetector`` (far-end activity and stationarity), ``FilterConvergenceAnalyzer``
+(convergence state, divergence EMA), ``DoubleTalkAnalyzer`` (energy and shadow-differential
+double-talk signals), ``FilterPlateauDetector`` (ERLE plateau, one-shot recovery).
+Per-hop EMA coefficients and duration gates are authored at hop 160 / 16 kHz (``*_REF``) and
+retimed to the live grid in ``__init__``; dimensionless gates and evidence counts are not.
 """
 import numpy as np
 
 from . import aec3_scale
 from .dataclasses import RenderActivityState, FilterConvergenceState
 
-# The grid every wall-clock constant in this module was authored against.
+# Grid the wall-clock constants were authored against.
 _REF_HOP = 160
 _REF_SR = 16000
 
@@ -51,21 +28,14 @@ def _rehop_ms(authored_ms: float, hop_size: int, sample_rate: int) -> int:
 
 
 class RenderActivityDetector:
-    """Far-end activity + stationarity detector.
+    """Far-end activity and stationarity detector.
 
-    Tracks far-end power envelope EMA and its variance to detect
-    stationary far-end (white noise / fans), which downstream blocks
-    use to gate EPC false-positives and to switch DT-detection branches.
-
-    State (private):
-        _env_mean       far-power EMA
-        _env_var        far-power variance EMA
-        _active_prev    True after first audible far-end frame; resets only when far drops to silence
-        _is_stationary  CV² < threshold this frame
+    Tracks the far-end power envelope EMA and its variance; low coefficient of variation
+    (CV^2 < ``STATIONARY_CV2``) marks a stationary far-end (noise, fans), used to gate
+    path-change false positives and DT branches.
     """
-    ALPHA_CV_REF = 0.99       # TC ≈ 1 s envelope smoothing, at the 10 ms ref hop
-    # Dimensionless CV² level gate: env_var / (env_mean² + eps) carries no time
-    # content (all of the timescale lives in ALPHA_CV), so it is grid-invariant.
+    ALPHA_CV_REF = 0.99  # envelope smoothing, about 1 s at the 10 ms ref hop
+    # Dimensionless CV^2 gate (grid-invariant).
     STATIONARY_CV2 = 0.02
 
     def __init__(self, hop_size: int = _REF_HOP, sample_rate: int = _REF_SR):
@@ -90,7 +60,7 @@ class RenderActivityDetector:
                 self._env_mean = far_pwr
                 self._env_var = 0.0
                 self._active_prev = True
-                # No variance data yet; don't declare stationarity on first frame.
+                # No variance data yet.
                 self._is_stationary = False
             else:
                 old_mean = self._env_mean
@@ -117,32 +87,22 @@ class RenderActivityDetector:
 
 
 class FilterConvergenceAnalyzer:
-    """Owns filter-convergence state machine + divergence-indicator EMA.
+    """Filter-convergence state machine and divergence-indicator EMA.
 
-    Convergence rule: 10 consecutive far-active frames with inst-ERLE > 5 dB
-    after warmup is exhausted.
-    Divergence rule: post-convergence EMA of (inst-ERLE_linear < 0.63 ↔ ERLE < -2 dB).
-
-    External signals (EPC, delay shift, echo-path change) call mark_diverged()
-    to invalidate convergence and reset the counter — the analyzer never
-    self-resets on those events.
+    Converged after ``CONV_FRAMES`` consecutive far-active frames with inst-ERLE above
+    ``CONV_ERLE_DB`` once warmup is done. Divergence is a post-convergence EMA of
+    "inst-ERLE < -2 dB". ``mark_diverged()`` is the only way external events invalidate
+    convergence.
     """
-    # dB level gate on a power ratio -- no time content, grid-invariant.
+    # dB gate, grid-invariant
     CONV_ERLE_DB = 5.0
-    # NOT a duration, so NOT retimed: update_convergence() early-returns without
-    # touching _conv_counter when far is inactive / warmup is unfinished /
-    # near_power is negligible, so non-qualifying hops are SKIPPED rather than
-    # resetting it. Only a qualifying-but-failing hop resets. The realised span
-    # is therefore far-end-duty dependent, which makes this a genuine
-    # consecutive-evidence count -- unlike config.py's ne_recent_sustain,
-    # whose counter (_ne_above) has no skip condition and so is NOT a true
-    # event count either (it stays unretimed for other reasons; see its
-    # own field comment).
+    # Consecutive-evidence count (not retimed): non-qualifying hops (far inactive, warmup
+    # unfinished, negligible near power) are skipped without resetting the counter.
     CONV_FRAMES = 10
-    # Dimensionless linear power ratio (-2 dB) -- grid-invariant.
+    # linear power ratio (-2 dB), grid-invariant
     DIV_ERLE_LIN = 0.63
-    DIV_ALPHA_REF = 0.9       # per-hop EMA over a boolean indicator, 10 ms ref
-    DIV_DECAY_REF = 0.95      # per-hop else-branch decay, 10 ms ref
+    DIV_ALPHA_REF = 0.9  # per-hop EMA over a boolean indicator, at the 10 ms ref hop
+    DIV_DECAY_REF = 0.95  # per-hop decay, at the 10 ms ref hop
 
     def __init__(self, hop_size: int = _REF_HOP, sample_rate: int = _REF_SR):
         self.DIV_ALPHA = _rehop(self.DIV_ALPHA_REF, hop_size, sample_rate)
@@ -198,27 +158,20 @@ class FilterConvergenceAnalyzer:
 
 
 class DoubleTalkAnalyzer:
-    """Aggregates the three pre-filter / cross-filter DT signals.
+    """Aggregates the pre-filter and cross-filter double-talk signals.
 
-    Owns:
-        _dt_from_energy   : pre-filter mic-energy excess over (far × ERL_ceiling × 2)
-                            EMA-smoothed (fast-rise 0.3/0.7, slow-decay 0.9/0.1).
-        _dt_from_shadow   : (shadow_advantage − offset) / scale, smoothed 70/30.
-        _shadow_advantage : main_err / shadow_err (raw, no EMA).
-
-    Coherence-based double-talk detection was retired; the
-    dt_from_coherence diagnostic is now permanently 0.0.
+    ``_dt_from_energy``: mic-energy excess over (far x ERL ceiling x margin), fast rise and
+    slow decay EMA. ``_dt_from_shadow``: (shadow_advantage - offset) / scale, smoothed.
+    ``_shadow_advantage``: main_err / shadow_err, raw.
     """
 
-    # Shadow-filter DT blind period, 200 ms (shortened from 500 ms). 20 hops only AT the 10 ms reference hop, hence the retime.
+    # Shadow-filter DT blind period; retimed from the 10 ms ref hop.
     SHADOW_FRAME_GATE_MS = 200.0
-    # Dimensionless level gates -- grid-invariant.
     ERL_CEILING_FLOOR = 0.01
     SAFETY_MARGIN = 2.0
-    # Per-hop retention EMAs at the 10 ms reference hop. Only the OLD term is
-    # retimed; NEW is 1-OLD by construction so the pair keeps summing to 1.
+    # Retention EMAs at the 10 ms ref hop; only the old term is retimed, new = 1 - old.
     DTE_RISE_OLD_REF = 0.3
-    DTE_DECAY_OLD_REF = 0.9      # the "TC~90ms" hangover named at orchestrator.py
+    DTE_DECAY_OLD_REF = 0.9
     DTS_OLD_REF = 0.7
     DTS_INACTIVE_DECAY_REF = 0.95
 
@@ -244,7 +197,7 @@ class DoubleTalkAnalyzer:
 
     def update_shadow_dt(self, *, shadow_frame_count: int, far_excited: bool,
                          main_err_smooth: float, shadow_err_smooth: float) -> None:
-        """Shadow-advantage based DT signal. Runs once per frame in the shadow block."""
+        """Shadow-advantage DT signal; once per frame in the shadow block."""
         if shadow_frame_count >= self.SHADOW_FRAME_GATE and far_excited:
             self._shadow_advantage = main_err_smooth / (shadow_err_smooth + 1e-10)
             raw = float(np.clip(
@@ -257,7 +210,7 @@ class DoubleTalkAnalyzer:
 
     def update_energy_dt(self, *, far_active: bool, far_pwr: float,
                          mic_pwr: float, erl_estimate: float) -> None:
-        """Pre-filter mic-energy DT signal. Runs once per frame in the RES block."""
+        """Pre-filter mic-energy DT signal; once per frame in the RES block."""
         if far_active and far_pwr > 1e-4:
             erl_ceiling = 1.0 / max(erl_estimate, self.ERL_CEILING_FLOOR)
             max_echo_expected = far_pwr * erl_ceiling * self.SAFETY_MARGIN
@@ -280,55 +233,23 @@ class DoubleTalkAnalyzer:
 
 
 class FilterPlateauDetector:
-    """Detect filter stuck at bad-convergence plateau and trigger a
-    one-shot recovery (taps reset + re-warmup).
+    """Detects a filter stuck at a bad-convergence plateau and triggers one-shot recovery.
 
-    Motivation
-    ----------
-    DT-from-frame-0 cases (NE talks from sample 0) cause the main filter
-    to learn NE leak in the first ~100 frames. Once these poisoned taps
-    are encoded, even a perfect DTD downstream only prevents *further*
-    learning — the existing taps stay wrong, ERLE stays low (~4 dB),
-    coherence DTD never recovers (the positive-feedback trap that
-    upstream DTD fixes mu_scale, but not at the tap level).
-
-    Trigger conditions (all must hold for `consecutive_required` frames)
-    ------------------------------------------------------------------
-      • frame_count > grace_frames    — give natural convergence time
-      • not once_converged            — never declared converged
-      • far_active_ratio > 0.5        — far-end has been active enough
-      • erle_windowed_db < erle_max   — filter not learning effectively
-      • dt_signal_ratio > 0.10        — DT pattern (NE present, suspect
-                                         DT-from-frame-0)
-
-    Recovery action (one-shot per session, capped by `max_attempts=2`)
-    ------------------------------------------------------------------
-      1. main filter taps reset
-      2. shadow filter taps reset
-      3. convergence state machine reset
-      4. RES reset (clears any garbage echo PSD estimate)
-      5. force a brief warmup-equivalent window with high mu
-
-    After 2nd attempt fails to converge, give up gracefully.
+    Trigger (all hold for ``CONSECUTIVE_REQUIRED`` frames): past the grace period, never
+    converged, far-end active more than ``far_active_ratio`` of the time, windowed ERLE
+    below ``erle_max_db``, a double-talk signal ratio above ``dt_signal_ratio`` and
+    double-talk present in the current frame. Recovery (the caller resets main/shadow
+    taps, convergence state and RES, then re-warms) fires at most ``max_attempts`` times.
     """
 
-    # NOTE: this class is currently instantiated NOWHERE in the repo. The
-    # durations below are retimed for consistency with the rest of the
-    # module, but that retiming is unexercised by any production path --
-    # treat it as unverified until the detector is actually wired in.
-    GRACE_FRAMES_MS = 4000.0           # "~4 s at 100 fps"; 100 fps IS a 10 ms hop
-    POST_RESET_GRACE_MS = 2000.0       # don't re-arm within this window after a reset
-    # Dimensionless ratio/level gates and a retry budget -- all grid-invariant.
+    # Not wired into the pipeline.
+    GRACE_FRAMES_MS = 4000.0
+    POST_RESET_GRACE_MS = 2000.0  # no re-arm within this window after a reset
     ERLE_MAX_DB_DEFAULT = 6.0
     FAR_ACTIVE_RATIO_DEFAULT = 0.5
     DT_SIGNAL_RATIO_DEFAULT = 0.10
     MAX_ATTEMPTS_DEFAULT = 2
-    # Classification UNRESOLVED, left at the authored value. It skips without
-    # resetting at three sites, which matches the evidence-count shape, but
-    # none of those skips is signal-duty-dependent, so the realised span is a
-    # duty-INDEPENDENT 500 ms debounce -- which is the duration shape. Settling
-    # it needs a measurement no production path can currently supply, because
-    # the detector is not wired in. Do not retime on a guess.
+    # Consecutive-evidence count kept at the authored value (not retimed).
     CONSECUTIVE_REQUIRED = 50
 
     def __init__(self,
@@ -348,18 +269,16 @@ class FilterPlateauDetector:
         self.far_active_ratio = far_active_ratio
         self.dt_signal_ratio = dt_signal_ratio
         self.max_attempts = max_attempts
-        # Session counters
         self._frame_count = 0
         self._far_active_count = 0
         self._dt_signal_count = 0
         self._consecutive_match = 0
         self._attempts = 0
         self._cooldown_remaining = 0
-        # Last reset frame (audio-passive trace)
         self._last_reset_frame = -1
 
     def reset(self) -> None:
-        """Full reset (call from AEC.reset)."""
+        """Full reset."""
         self._frame_count = 0
         self._far_active_count = 0
         self._dt_signal_count = 0
@@ -382,9 +301,7 @@ class FilterPlateauDetector:
             return False
 
         if once_converged:
-            # Filter recovered naturally — clear consecutive counter so we
-            # don't fire later if temporary divergence happens. Recovery
-            # attempts are still tracked across the session.
+            # Filter recovered: clear the consecutive counter; attempts persist.
             self._consecutive_match = 0
             return False
 
@@ -397,10 +314,7 @@ class FilterPlateauDetector:
         far_ratio = self._far_active_count / max(1, self._frame_count)
         dt_ratio = self._dt_signal_count / max(1, self._frame_count)
 
-        # Require current frame to also show DT presence, otherwise
-        # session-level cumulative dt_ratio could remain >threshold long after
-        # the DT-from-zero stretch ended and trigger plateau recovery during
-        # pure FS segments (where ERLE-low + far-active alone are not pathological).
+        # Also require DT in the current frame, so cumulative ratios cannot trigger recovery in far-end-only segments.
         criteria_met = (
             far_ratio > self.far_active_ratio
             and erle_windowed_db < self.erle_max_db
@@ -416,10 +330,7 @@ class FilterPlateauDetector:
         if self._consecutive_match < self.CONSECUTIVE_REQUIRED:
             return False
 
-        # Fire — recovery action. Reset cumulative far/dt counters so the
-        # next evaluation window judges post-reset behaviour, not the
-        # bad-startup history that caused this fire. _attempts and
-        # _last_reset_frame remain session-level (MAX_ATTEMPTS bounds retries).
+        # Fire: restart the cumulative counters; attempts and last_reset_frame persist.
         self._consecutive_match = 0
         self._attempts += 1
         self._cooldown_remaining = self.post_reset_grace_frames

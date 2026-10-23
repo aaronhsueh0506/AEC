@@ -1,26 +1,12 @@
-/* epc_shadow.c — port of aec.py EchoPathChangeDetector +
- * ShadowCopyController.
- *
- * All scalar math float32 (float32-by-design) + ints.
- */
+/* epc_shadow.c -- echo-path-change detector and shadow-copy controller (float32). */
 #include "epc_shadow.h"
 #include "aec_scale.h"
 #include <math.h>
 
 /* ── EchoPathChangeDetector ───────────────────────────────────── */
 
-/* Reference-grid EPV time constants (TC ~50 frames / ~1000 frames @
- * hop=160/sample_rate=16000 = 10 ms hop, i.e. ~500 ms / ~10 s wall-clock).
- * Project-native (NOT reference-sourced), authored against that grid. Both use the
- * RETENTION convention (epc_update_epv(): ``fast <- EPV_FAST_TC*fast +
- * (1-EPV_FAST_TC)*new`` -- the constant multiplies the OLD state directly),
- * so aec_growth_rehop (a direct power law), NOT
- * aec_per_block_ema_alpha_to_per_hop's new-sample-weight form, is the
- * correct helper. epc_init() retimes these into each EpcDetector instance's
- * epv_fast_tc/epv_slow_tc via aec_growth_rehop() so the wall-clock envelopes
- * match at every grid; epc_update_epv() reads the retimed per-instance
- * fields, NOT these module constants directly. Must match epc.py's
- * EchoPathChangeDetector.EPV_FAST_TC/EPV_SLOW_TC (Python side). */
+/* Retention-form EPV time constants (~500 ms / ~10 s) authored for hop=160 @ 16 kHz.
+ *  epc_init() retimes them per instance with aec_growth_rehop(). */
 static const float EPV_FAST_TC = 0.98f;
 static const float EPV_SLOW_TC = 0.999f;
 static const float EPV_LOW     = 0.25f;
@@ -40,9 +26,7 @@ void epc_init(EpcDetector* e, int hangover, float total_rise,
         e->epv_fast_tc = aec_growth_rehop(EPV_FAST_TC, 160, 16000, hop_size, sample_rate);
         e->epv_slow_tc = aec_growth_rehop(EPV_SLOW_TC, 160, 16000, hop_size, sample_rate);
     } else {
-        /* Invalid/unrecognized grid: fall back to the unscaled reference-grid
-         * literals rather than divide by zero inside the rehop helper -- mirrors
-         * aec.c's aec_legacy10ms_* fallback. */
+        /* Invalid grid: keep the authored constants. */
         e->epv_fast_tc = EPV_FAST_TC;
         e->epv_slow_tc = EPV_SLOW_TC;
     }
@@ -120,14 +104,11 @@ void epc_tick_hangover(EpcDetector* e) {
     }
 }
 
-/* ── ShadowCopyController ─────────────────────────────────────── */
+/* ── ShadowCopy ───────────────────────────────────────────────── */
 
 static const float SC_BASELINE_INIT       = 1e-6f;
 static const float SC_BASELINE_RETENTION  = 0.995f;
-/* A hop COUNT on every grid, not a duration: retiming it to 100 ms (12 hops
- * at 16 kHz/128) broke a near-end single-talk case, because the rescue streak
- * stopped completing and the output stayed ~5 dB under the capture; 11 fails
- * too, 10 passes. */
+/* Hop counts, not durations; not retimed (a 100 ms retime stops the rescue streak completing). */
 static const int   SC_HYS_STREAK_MIN      = 10;
 static const int   SC_STREAK_FRAMES  = 5;
 
@@ -147,16 +128,13 @@ void shadow_copy_init_for_grid(ShadowCopy* s, ShadowCopyGateMode mode,
     s->main_paused  = 0;
     s->pause_resume = 0;
     s->shadow_copy_threshold  = threshold;
-    /* `copy_counter >= hysteresis && streak >= SC_HYS_STREAK_MIN` would be
-     * two counters that advance and reset together, so it is one counter
-     * against the larger threshold. */
+    /* One counter against the larger threshold serves both the hysteresis and streak conditions. */
     s->shadow_copy_hysteresis = hysteresis > SC_HYS_STREAK_MIN
                               ? hysteresis : SC_HYS_STREAK_MIN;
     s->epc_hangover           = epc_hangover;
 }
 
-/* Fixed-grid entry point: the legacy 160/16000 grid, where the retention
- * is the authored 0.995. The product AEC calls shadow_copy_init_for_grid(). */
+/* Fixed-grid entry point (160 @ 16 kHz); the product AEC uses shadow_copy_init_for_grid(). */
 void shadow_copy_init(ShadowCopy* s, ShadowCopyGateMode mode,
                       float threshold, int hysteresis, int epc_hangover) {
     shadow_copy_init_for_grid(s, mode, threshold, hysteresis, epc_hangover,

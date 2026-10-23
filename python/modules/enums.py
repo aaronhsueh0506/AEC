@@ -1,7 +1,7 @@
 """AEC enums (mode / preset / filter state).
 
 Pure value types — no runtime dependencies on other modules. Imported
-by ``aec.py`` and by sibling modules under ``python.modules``.
+by ``aec.py`` and by sibling modules under ``modules/``.
 """
 from enum import Enum
 
@@ -10,7 +10,7 @@ class AecMode(Enum):
     FDAF = "fdaf"       # Frequency-domain Adaptive Filter (single block, n_partitions=1)
     PBFDAF = "pbfdaf"   # Partitioned Block FDAF (NLMS adaptation)
     PBFDKF = "pbfdkf"   # Partitioned Block FDKF (Kalman adaptation, recommended)
-    SUBBAND = "subband" # Backward compat alias (= PBFDKF)
+    SUBBAND = "subband"  # alias of PBFDKF
 
 
 # Frequency-domain modes (partitioned or single block)
@@ -21,32 +21,18 @@ _PB_MODES = (AecMode.PBFDAF, AecMode.PBFDKF, AecMode.SUBBAND)
 
 class AecPreset(Enum):
     MILD     = "mild"       # near-priority: more near-end kept, more echo leak
-    BALANCED   = "balanced"     # production: all four ship bars met (AEC3 residual chain)
+    BALANCED   = "balanced"  # default: balanced echo suppression / near-end preservation
     AGGRESSIVE = "aggressive"   # echo-priority: deeper suppression, more near-end loss
-    NO_FLOOR   = "no_floor"     # floor mechanism OFF: gain is purely R²-derived, most echo killed, most near-end loss
+    NO_FLOOR   = "no_floor"  # floor off: gain purely R2-derived, deepest suppression
 
 
 class AecDelayMode(Enum):
-    """How the far-end is aligned to the mic — the single source of truth.
+    """Far-end to mic alignment mode; integer values match the C ``AecDelayMode``.
 
-    Integer values are pinned to the C ``AecDelayMode`` enumerators
-    (``c_impl/include/aec.h``) so a config can cross the language boundary
-    (and land in a descriptor / behaviour hash) unambiguously.
-
-    MATCHED
-        The AEC3 matched-filter bank estimates the delay online and a
-        reference ring applies it. Requires ``delay_num_filters`` in [1, 5]
-        and ``fixed_delay_samples == -1``.
-    FIXED
-        No estimator. The caller MEASURED the system delay at bring-up and
-        the reference ring applies exactly ``fixed_delay_samples`` (>= 0).
-    EXTERNAL_ALIGNED
-        No estimator and no ring. The caller guarantees the far-end it
-        passes is ALREADY aligned to the mic. Requires
-        ``fixed_delay_samples == -1``.
-
-    Illegal mode/field combinations raise (``AecConfig.__post_init__``);
-    they are never silently normalised, on either side of the port.
+    MATCHED: online matched-filter estimate (``delay_num_filters`` in [1, 5], ``fixed_delay_samples == -1``).
+    FIXED: caller-measured delay applied by the reference ring (``fixed_delay_samples`` >= 0).
+    EXTERNAL_ALIGNED: far-end aligned by the caller, no estimator or ring (``fixed_delay_samples == -1``).
+    Illegal mode/field combinations raise in ``AecConfig.__post_init__``.
     """
 
     MATCHED = 0
@@ -55,11 +41,7 @@ class AecDelayMode(Enum):
 
     @classmethod
     def coerce(cls, value: object) -> 'AecDelayMode':
-        """Accept the enum itself, its int value, or its name (any case).
-
-        Mirrors ``AecPreset``'s string tolerance in ``AecConfig.from_preset``
-        so config files / CLI flags do not have to import the enum.
-        """
+        """Accept the enum, its int value, or its name (any case)."""
         if isinstance(value, cls):
             return value
         if isinstance(value, bool):

@@ -1,23 +1,14 @@
-/* aec_state.c — C port of python/modules/state/aec_state.py.
- * Integration / orchestration layer; see aec_state.h for the full spec and the
- * strict update() order. */
+/* aec_state.c -- see aec_state.h. */
 #include "aec_state.h"
 #include "aec_scale.h"
 
 #include <assert.h>
 
-/* DelayAdjustment enum (delay_types.py): NONE=0, BUFFER_FLUSH=1,
- * NEW_DETECTED_DELAY=2. */
+/* DelayAdjustment values: NONE=0, BUFFER_FLUSH=1, NEW_DETECTED_DELAY=2. */
 #define AEC_DELAY_ADJ_NONE 0
 
-/* Sentinel for AecStateConfig.erle_startup_hops/erl_startup_hops: "not
- * explicitly overridden" (aec_state_config_defaults()'s own default) is
- * read by resolve_startup_hops() as "compute the live, grid-correct hop
- * count instead". A caller that explicitly sets either field to ANY OTHER
- * value -- including 200, which happens to be the auto-computed value at
- * the reference hop=160/sr=16000 grid -- gets it honored verbatim. -1 (not a
- * reachable hop count) is used specifically so no legitimate explicit value
- * can ever collide with the "unset" marker. */
+/* Sentinel for erle_startup_hops/erl_startup_hops meaning "compute from the live grid"; -1 is not
+ * a reachable hop count, so it cannot collide with an explicit value. */
 #define AEC_STATE_STARTUP_HOPS_AUTO (-1)
 
 static int resolve_startup_hops(int configured_hops, int hop_size, int sample_rate) {
@@ -43,8 +34,8 @@ void aec_state_config_defaults(AecStateConfig *cfg) {
     cfg->hop_size = 160;
     cfg->sample_rate = 16000;
     cfg->enable_filter_analyzer = 1;
-    cfg->filter_taps_size = 960;  /* hop=160 -> fft=512 -> 6 part * 160 = 960 */
-    cfg->fa_scratch_size = 960;   /* default matches filter_taps_size at 16 kHz */
+    cfg->filter_taps_size = 960;
+    cfg->fa_scratch_size = 960;
 }
 
 void aec_state_init(AecState *s, const AecStateConfig *cfg,
@@ -65,9 +56,7 @@ void aec_state_init(AecState *s, const AecStateConfig *cfg,
            cfg->hop_size, cfg->sample_rate);
     saturation_detector_init(&s->saturation_detector);
 
-    /* erle_startup_hops/erl_startup_hops resolve independently -- see
-     * resolve_startup_hops() above -- instead of sharing one precomputed
-     * value, so a caller CAN still diverge them via an explicit override. */
+    /* erle_startup_hops and erl_startup_hops resolve independently. */
     erle_hops = resolve_startup_hops(cfg->erle_startup_hops, cfg->hop_size, cfg->sample_rate);
     erl_hops = resolve_startup_hops(cfg->erl_startup_hops, cfg->hop_size, cfg->sample_rate);
 
@@ -84,8 +73,7 @@ void aec_state_init(AecState *s, const AecStateConfig *cfg,
 
     s->has_filter_analyzer = cfg->enable_filter_analyzer ? 1 : 0;
     if (s->has_filter_analyzer) {
-        /* FilterAnalyzer() Python defaults: active_render_limit=100.0,
-         * bounded_erl=False, default_gain=1.0. */
+        /* FilterAnalyzer defaults: active_render_limit=100, bounded_erl=0, default_gain=1. */
         fa_init(&s->filter_analyzer, st->fa_h_highpass, cfg->filter_taps_size,
                 100.0, 0, 1.0,
                 st->fa_abs_scratch, cfg->fa_scratch_size,
@@ -96,12 +84,11 @@ void aec_state_init(AecState *s, const AecStateConfig *cfg,
     s->strong_not_saturated_render_blocks = 0;
     s->blocks_with_active_render = 0;
     s->capture_signal_saturation = 0;
-    /* 200 blocks x 4 ms = 800 ms wall-clock. Was frozen at 80 (correct
-     * only at hop=160/sr=16000); computed live here. */
+    /* 800 ms, computed from the live grid. */
     s->active_render_blocks = aec_ms_to_hops(800.0f, cfg->hop_size, cfg->sample_rate);
 }
 
-/* ── queries ───────────────────────────────────────────────────────────── */
+/* Queries */
 
 int aec_state_usable_linear_estimate(const AecState *s) {
     return fq_linear_filter_usable(&s->filter_quality)
@@ -114,7 +101,7 @@ int aec_state_saturated_echo(const AecState *s) {
 
 int aec_state_transparent_mode_active(const AecState *s) {
     (void)s;
-    return 0;   /* TransparentMode permanently None. */
+    return 0;
 }
 
 int aec_state_transition_triggered(const AecState *s) {
@@ -142,7 +129,7 @@ float aec_state_get_inst_linear_quality_estimate(const AecState *s, int *valid) 
                                                            valid);
 }
 
-/* ── mutators ──────────────────────────────────────────────────────────── */
+/* Mutators */
 
 void aec_state_set_taps_provider(AecState *s, FaTapsProvider fn, void *ctx) {
     if (!s->has_filter_analyzer) return;
@@ -191,27 +178,18 @@ void aec_state_update(AecState *s,
                       const float *x2_reverb_for_erle,
                       const float *capture_psd_erle,
                       const unsigned char *erle_coh_gate_mask) {
-    (void)echo_psd;  /* not consumed at this layer */
+    (void)echo_psd;
 
-    /* 1. any_filter_converged (= bridge.filter_converged). */
+    /* Step 1: any_filter_converged. */
     int any_filter_converged = bridge_filter_converged ? 1 : 0;
 
-    /* 1b. FilterAnalyzer (aec_state.cc:199-200). Runs BEFORE FilterDelay so the
-     * per-channel delays are fresh. analyzer_delays is None unless the analyzer
-     * is present AND both filter_taps_full and render_block are non-None. */
+    /* Step 1b: FilterAnalyzer, before FilterDelay so the delays are fresh. analyzer_delays stays
+     * NULL unless the analyzer is present and both filter_taps_full and render_block are given. */
     int  analyzer_delay_storage[1];
     const int *analyzer_delays = NULL;
     int  analyzer_delays_len = 0;
-    /* filter_taps_full_len is a live, per-hop value (aec.c recomputes it every
-     * hop as n_partitions*hop from the then-current dims), not a
-     * construction-time constant like cfg.filter_taps_size -- so, unlike the
-     * SuppressionGain tuning-table length check (a pure init-time assert), this
-     * gets BOTH a debug assert (catches a real per-hop wiring bug immediately)
-     * AND a release-path guard (skips fa_update instead of letting it read
-     * filter_taps_full against s->filter_analyzer's h_highpass/abs_scratch
-     * buffers, which are sized from cfg.filter_taps_size, with a mismatched
-     * length -- an OOB read if filter_taps_full_len is too short). Never fires:
-     * both are n_partitions*hop for the same np/hop pair every hop. */
+    /* filter_taps_full_len is a per-hop value, so it gets a debug assert and a release-path guard
+     * that skips fa_update on a length mismatch (it would read past the analyzer buffers). */
     assert(filter_taps_full == NULL
            || filter_taps_full_len == s->cfg.filter_taps_size);
     if (s->has_filter_analyzer && filter_taps_full != NULL
@@ -219,35 +197,20 @@ void aec_state_update(AecState *s,
             && filter_taps_full_len == s->cfg.filter_taps_size) {
         fa_update(&s->filter_analyzer, filter_taps_full, render_block,
                   render_block_len);
-        /* filter_delays_blocks() -> [delay_blocks] (single channel). */
+        /* One channel: the minimum filter delay. */
         analyzer_delay_storage[0] = fa_min_filter_delay_blocks(&s->filter_analyzer);
         analyzer_delays = analyzer_delay_storage;
         analyzer_delays_len = 1;
     }
 
-    /* 2. FilterDelay update (aec_state.cc:203-206). */
+    /* Step 2: FilterDelay update. */
     filter_delay_update(&s->delay_state, analyzer_delays, analyzer_delays_len,
                         external_delay,
                         s->strong_not_saturated_render_blocks);
 
-    /* 3. active_render + saturation block counters.
-     *
-     * Both counters are pure threshold-gate state (never read as a raw
-     * value, only ever compared against a fixed threshold), so each
-     * increment is saturated at the smallest cap that reproduces the
-     * unbounded original's comparison result identically forever, avoiding
-     * signed-integer-overflow UB on a very long streaming session:
-     *
-     *   blocks_with_active_render: only ever compared with
-     *     "> active_render_blocks". Cap at active_render_blocks + 1 (the smallest
-     *     value still `>` the threshold) by gating the increment on
-     *     `<= active_render_blocks`.
-     *   strong_not_saturated_render_blocks: passed into filter_delay_update()
-     *     (just below) which only ever tests
-     *     "< filter_adaptation_threshold_hops" (filter_delay.h). Cap at
-     *     exactly that threshold -- once the counter reaches it the "<"
-     *     comparison is permanently false either way.
-     */
+    /* Step 3: block counters. Each increment is capped at the smallest value that keeps its
+     * threshold comparison unchanged (active_render_blocks + 1; filter_adaptation_threshold_hops),
+     * which avoids signed overflow on long streams. */
     if (active_render) {
         if (s->blocks_with_active_render <= s->active_render_blocks) {
             s->blocks_with_active_render += 1;
@@ -260,7 +223,7 @@ void aec_state_update(AecState *s,
         }
     }
 
-    /* 4a. ERLE — transition-triggered soft reset BEFORE update. */
+    /* Step 4a: ERLE, with the soft reset on the initial-state transition first. */
     if (initial_state_transition_triggered(&s->initial_state)) {
         erle_estimator_reset(&s->erle_estimator, /*delay_change=*/0);
     }
@@ -274,12 +237,11 @@ void aec_state_update(AecState *s,
                               erle_converged, erle_coh_gate_mask);
     }
 
-    /* 4b. ERL update. */
+    /* Step 4b: ERL update. */
     erl_estimator_update(&s->erl_estimator, render_psd, capture_psd,
                          any_filter_converged);
 
-    /* 5. SaturationDetector. Reference echo_path_gain from FilterAnalyzer
-     * when the analyzer is present. */
+    /* Step 5: SaturationDetector; echo path gain from the FilterAnalyzer when present. */
     float epg = echo_path_gain;
     if (s->has_filter_analyzer) {
         epg = fa_max_echo_path_gain(&s->filter_analyzer);
@@ -294,15 +256,13 @@ void aec_state_update(AecState *s,
                                    epg);
     }
 
-    /* 6. InitialState (post-saturation flag). */
+    /* Step 6: InitialState. */
     initial_state_update(&s->initial_state, active_render,
                          s->capture_signal_saturation);
 
-    /* 7. TransparentMode — None in BALANCED → SKIPPED. */
+    /* Step 7: TransparentMode is never active; skipped. */
 
-    /* 8. FilteringQualityAnalyzer (last). transparent_mode_active()==0;
-     * filter_analyzer_consistent is a no-op in the Python fq.update so it is
-     * not part of the C update signature (header note). */
+    /* Step 8: FilteringQualityAnalyzer (last); transparent mode is off. */
     fq_update(&s->filter_quality,
               active_render,
               /*transparent_mode=*/0,

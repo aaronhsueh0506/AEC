@@ -1,41 +1,31 @@
-"""Generate a binary golden for the C aec3_post DRIVER port (WS5 Phase 5.5).
+"""Generate a binary golden for the C aec3_post DRIVER port.
 
-This is the INTEGRATION/orchestration golden for the AEC3 post-filter DRIVER —
-``AEC._aec3_post`` (orchestrator.py). The per-bin float math of the sub-modules
-(AecState / ResidualEchoEstimator / SuppressionGain / reverb models / ERLE /
-stationarity / ...) is already bit-exact in their own parity tests; this golden
-exercises the DRIVER's ASSEMBLY LOGIC + CNG + OLA stages that the .py owns:
+Integration golden for the AEC3 post-filter DRIVER, ``AEC._aec3_post``
+(orchestrator.py): the assembly logic + CNG + OLA stages the .py owns:
 
   * PSD derivation from the fp32 spectra (|c64|² · _PSD_SCALE, all-f32)
-  * E1 windowed-capture Y² (erle_windowed_capture_psd)
+  * windowed-capture Y² (erle_windowed_capture_psd)
   * avg-render-reverb x2_reverb_for_erle (+ erle_render_x2_psd_scale)
-  * coherence Γ²(Ŷ,Y) EMA + ERLE coh gate mask (erle_coh_gate, default ON)
+  * coherence Γ²(Ŷ,Y) EMA + ERLE coh gate mask (erle_coh_gate)
   * CNG N2 tracking (y2_smoothed EMA, n2 track/slow-up, n2_initial transient,
     noise-floor clamp) → comfort_noise
-  * E2 output-base select (output_capture_when_linear_unusable, |E|>|Y| guard)
+  * output-base select (output_capture_when_linear_unusable, |E|>|Y| guard)
   * gain apply + CNG injection (LCG sin-table indices + sqrt(2)sin LUT, DC/Nyq
     zeroed) + irfft + sqrt-Hann synth window + OLA
 
-Approach: monkeypatch ``AEC._aec3_post`` on the REAL balanced pipeline.
-Per hop we capture EVERY input the method reads (the raw filter spectra after
-the shadow-output selection — i.e. ``error_spec`` / ``_sel_echo_spec`` — plus
-``near_spec`` / ``far_spec`` for the PSDs and the coherence Γ², the X_buf slices
-+ delay + steady decay for the avg-reverb, the raw time-domain blocks, and the
-saturation level), the SUB-MODULE OUTPUTS we inject (``usable_linear`` /
-``saturated_echo`` / ``r2`` / ``r2_unb`` / the final ``gain``), and the returned
-``out[hop]``.  We ALSO capture the driver-derived intermediates
-(far/near/echo/error PSD, capture_psd_erle, x2_reverb_for_erle, coh_gate_mask,
-render_block_scaled, comfort_noise, pre-CNG e_out_spec) so the C side can assert
-each driver stage bit-exact (bisection), not just the final out.
+Approach: monkeypatch ``AEC._aec3_post`` on the REAL balanced pipeline. Per hop
+it captures every input the method reads (the raw filter spectra after the
+shadow-output selection, near/far spec, X_buf slices + delay + steady decay,
+the time-domain blocks, the saturation level), the sub-module outputs that are
+injected (``usable_linear`` / ``saturated_echo`` / ``r2`` / ``r2_unb`` / the
+final ``gain``), the driver-derived intermediates (far/near/echo/error PSD,
+capture_psd_erle, x2_reverb_for_erle, coh_gate_mask, render_block_scaled,
+comfort_noise, pre-CNG e_out_spec) and the returned ``out[hop]``, so each
+driver stage can be checked bit-exact, not just the final out.
 
-The C parity test re-derives all driver quantities from the captured raw inputs,
-runs its own CNG/avg-reverb/coherence/OLA state in lockstep, injects the
-sub-module outputs, and asserts every stage + the final out[hop] bit-exact.
-
-Run THREE real cases (DT / FS / NE) for CNG/gate branch coverage; the DT case
-is long enough to exercise the n2_initial transient release + the per-hop EMA.
-A reset marker is emitted whenever ``_reset_aec3_post`` fired before a hop so the
-C side re-inits its driver state (OLA / CNG / coherence / avg-reverb / form).
+Runs THREE real cases (DT / FS / NE) for CNG/gate branch coverage. A reset
+marker is emitted whenever ``_reset_aec3_post`` fired before a hop so the
+consumer re-inits its driver state (OLA / CNG / coherence / avg-reverb / form).
 
 Layout (LE), all sizes in elements.
 
@@ -71,7 +61,7 @@ CASES = [
 HOP = 160
 SR = 16000
 FL = 832
-MAX_FRAMES = 1200  # cap per case to bound the golden size (DT runs ~4187)
+MAX_FRAMES = 1200  # cap per case to bound the golden size
 _PSD_SCALE = (32768.0) ** 2
 
 
@@ -236,10 +226,8 @@ def main():
             _n_part = flt.n_partitions
             _curr_p = (flt.partition_idx - 1) % _n_part
             _delay = int(self._aec3_state.min_direct_path_filter_delay())
-            # MUST match orchestrator's clamp (_n_part - 2); the real method
-            # keeps _past_idx from wrapping to current. Using _n_part - 1 here
-            # made x2_at_delay/x2_past diverge from the captured x2r golden
-            # whenever the clamp was active (delay >= _n_part - 1).
+            # Must match the orchestrator's clamp (_n_part - 2), which keeps _past_idx
+            # from wrapping to the current slot.
             _delay = max(0, min(_delay, _n_part - 2))
             _delay_idx = (_curr_p - _delay) % _n_part
             _past_idx = (_curr_p - _delay - 1) % _n_part
@@ -268,11 +256,11 @@ def main():
         near_spec = np.asarray(flt.near_spec, np.complex64)
         far_spec = np.asarray(flt.far_spec, np.complex64)
         echo_coh = np.asarray(flt.echo_spec, np.complex64)
-        # E1 near_spec_win uses the ORIGINAL esw + echo (orchestrator line ~3049)
+        # near_spec_win uses the ORIGINAL esw + echo
         esw_orig = np.asarray(flt.error_spec_windowed, np.complex64)
         echo_orig = np.asarray(flt.echo_spec, np.complex64)
         near_spec_win_e1 = (esw_orig + echo_orig).astype(np.complex64)
-        # E2 y_base uses the SELECTED esw + sel_echo (orchestrator line ~3609)
+        # y_base uses the SELECTED esw + sel_echo
         y_base = (sel_esw + sel_echo).astype(sel_esw.dtype, copy=False)
 
         # numpy-internal abs(c64) is a SIMD path not portably reproducible in C;
@@ -292,7 +280,7 @@ def main():
 
         row = {
             'reset_before': int(rst),
-            # complex spectra (reproducible complex ops: sye EMA, E2 base,
+            # complex spectra (reproducible complex ops: sye EMA, output-base,
             # gain-apply, irfft)
             'near_spec': near_spec.copy(),
             'echo_coh': echo_coh.copy(),
@@ -305,7 +293,7 @@ def main():
             'abs_error': _absf(sel_esw),       # |error_spec|
             'abs_echo_coh': _absf(echo_coh),
             'abs_nsw_e1': _absf(near_spec_win_e1),
-            'abs_ybase': _absf(y_base),        # E2 guard |y_base|
+            'abs_ybase': _absf(y_base),  # output-base guard |y_base|
             # avg-render-reverb inputs (x2 already squared in f32)
             'x2_present': x2_present,
             'x2_at_delay': (x2_at_delay if x2_at_delay is not None

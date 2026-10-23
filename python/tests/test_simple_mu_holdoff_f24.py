@@ -1,26 +1,10 @@
-"""F2.4 regression: the mu holdoff counter must arm only on a FRESH DT onset.
+"""The mu holdoff counter must arm only on a FRESH DT onset.
 
-This test exists because the behaviour it pins was silently reverted and stayed
-reverted in shipped code for ten weeks (2f3699f, 2026-05-27 -> 2026-08-06).
-
-What happened: F2.4 (7b2cf04, an 800-case ablation, CONDITIONAL PASS ratio 0.9x
-worst -0.204) added a guard so that ongoing double-talk does not re-arm the
-holdoff counter -- without it, marginal-DT oscillation re-arms every hop and the
-adaptation step size never releases. It shipped behind
-`mu_holdoff_no_reset`, which lived in `AecConfig._LEGACY_HARDCODE_TRUE`, so the
-live expression was:
-
-    if not True or self._simple_mu_holdoff == 0:   ==   if self._simple_mu_holdoff == 0:
-
-A later "remove dead flag branches" cleanup collapsed that line to an
-UNCONDITIONAL assignment -- i.e. it kept the arm the flag had disabled. The
-comment above the line went on describing the guard, so reading the source
-looked correct; only the executed branch was wrong. The C port mirrored the
-same collapse.
-
-Nothing caught it: the counter is internal state, no test asserted on it, and
-the AECMOS effect of a mu freeze under marginal DT is not large enough to break
-a bucket average. Hence an explicit state-level assertion here.
+Ongoing double-talk must not re-arm the holdoff counter: otherwise
+marginal-DT oscillation re-arms it every hop and the adaptation step size never
+releases. The counter is internal state and the AECMOS effect of a mu freeze
+under marginal DT is too small to show in a bucket average, so these tests
+assert on the counter directly.
 """
 from __future__ import annotations
 
@@ -56,10 +40,9 @@ def _runout(aec):
 def _drive(aec, n_hops, far_scale, err_scale, rng):
     """Feed n_hops of (output, far) straight into the holdoff update.
 
-    Driving the private method rather than full frames is deliberate: the whole
-    defect is one branch inside it, and a full-pipeline test would have to get
-    the AEC into sustained marginal double-talk to reach that branch at all --
-    which is exactly why the regression survived a full test suite.
+    Driving the private method rather than full frames is deliberate: the guard is
+    one branch inside it, and a full-pipeline test would have to get the AEC into
+    sustained marginal double-talk to reach that branch at all.
     """
     hop = aec.config.hop_size
     seen = []
@@ -89,8 +72,9 @@ def test_holdoff_arms_on_a_fresh_onset():
 
 
 def test_ongoing_doubletalk_does_not_rearm_the_holdoff():
-    """THE regression. Sustained attack-branch hops must let the counter run
-    down, not pin it at its armed value."""
+    """Sustained attack-branch hops must let the counter run down, not pin it at its
+    armed value.
+    """
     aec = _aec()
     _force_attack(aec)
     rng = np.random.default_rng(2)
@@ -106,10 +90,8 @@ def test_ongoing_doubletalk_does_not_rearm_the_holdoff():
         f"(stuck at {armed}) -- the F2.4 guard is missing, so ongoing "
         f"double-talk re-arms the counter and mu can never release"
     )
-    # Reaching zero AT SOME POINT is the claim; `seen[-1] == 0` was the old
-    # form and depended on where in an arm/run-down cycle the trace happened to
-    # stop -- luck that held while the counter was 20 and stopped holding when
-    # it became 25.
+    # Reaching zero AT SOME POINT is the claim; `seen[-1] == 0` would depend on
+    # where in an arm/run-down cycle the trace happens to stop.
     assert 0 in seen, (
         f"holdoff never reached 0 across {len(seen)} hops: {seen[-8:]}"
     )
@@ -211,10 +193,9 @@ def test_attack_after_expiry_rearms():
     )
 
 
-# ── rejected retime: lock the frozen mechanism on every grid ──────────
-# The holdoff and three alphas form one state machine. Their wall-clock retime
-# failed the two-grid blind A/B gate, so production intentionally keeps the
-# validated hop-authored literals together.
+# Rejected retime: lock the frozen mechanism on every grid. The holdoff and three
+# alphas form one state machine; production keeps their hop-authored literals
+# together (not wall-clock retimed).
 
 GRIDS = [(8000, 256), (16000, 256), (16000, 512), (48000, 1024)]
 @pytest.mark.parametrize("sample_rate,frame_size", GRIDS)

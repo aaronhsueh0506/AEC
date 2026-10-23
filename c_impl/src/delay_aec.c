@@ -1,37 +1,22 @@
-/* delay_aec.c — C port of python/modules/delay/. See delay_aec.h for the
- * chain overview and parity notes. The whole delay chain (decimator biquads,
- * matched-filter dot products / NLMS update, error-sum / anchor scalars, the
- * confidence getter) runs float32 unconditionally (see the "matched-filter
- * arithmetic" note below) -- an intentional divergence from the Python
- * float64 reference, so this file is not bit-exact to Python.
- *
- * Standalone build (does NOT link aec.c): see the header of
- * test/test_delay_reset.c.
- */
+/* delay_aec.c -- see delay_aec.h. The delay chain runs in float32. */
 #include "delay_aec.h"
 #include "aec_scale.h"
-#include "utility/mem_align.h"   /* ALIGN16 / MEM_IS_ALIGNED16 / ck_* checked sizes */
-#include "utility/simd_kernels.h" /* sk_argmax_sq_f32(_scalar), sk_argmax_i32 */
+#include "utility/mem_align.h"
+#include "utility/simd_kernels.h"
 
 #include <limits.h>
 #include <math.h>
 #include <stdint.h>
 #include <string.h>
 
-/* float-domain equivalents of the int16 thresholds (matched_filter.py) */
-#define DA_EXCITATION_LIMIT   (150.0f   / 32768.0f)   /* 0.00457763671875 */
-#define DA_SATURATION_LIMIT   (32000.0f / 32768.0f)   /* 0.9765625 */
+/* float-domain equivalents of the int16 thresholds */
+#define DA_EXCITATION_LIMIT   (150.0f   / 32768.0f)
+#define DA_SATURATION_LIMIT   (32000.0f / 32768.0f)
 #define DA_SMOOTHING_FAST     0.7f
 #define DA_SMOOTHING_SLOW     0.1f
-#define DA_MATCHING_THRESHOLD 0.3f  /* used as f32 multiplier of anchor */
+#define DA_MATCHING_THRESHOLD 0.3f  /* used as a float32 multiplier of the anchor */
 
-/* ------------------------------------------------------------------ helpers */
-
-/* np.dot over float32 inputs.  numpy routes f32 dot through OpenBLAS SDOT
- * (not portably bit-reproducible); we accumulate the float32 products in a
- * float32 running sum, consistent with the rest of this file (float32
- * throughout, see the file banner). The downstream integer lag /
- * DelayQuality are robust to the sub-ULP difference. */
+/* float32 dot product with a float32 running sum. */
 static float delay_aec_dot(const float *a, const float *b, int n) {
     float s = 0.0f;
     int i;
@@ -39,47 +24,21 @@ static float delay_aec_dot(const float *a, const float *b, int n) {
     return s;
 }
 
-/* ======================= matched-filter arithmetic =========================
- * The two 512-tap dot products accumulate in float32 (as a NEON matched
- * filter does), and x²_sum SLIDES
- * across the 16 sub-block iterations (the window advances by one sample per
- * iteration: x2 += new² − old²) instead of being re-summed.
- * The saturation gate, the `x2_sum > x2_sum_threshold` excitation gate, the
- * `error_sum < 0.3·anchor` reliability test and the NLMS alpha formula keep
- * the SAME comparisons/expressions as the Python reference -- only the
- * precision of the x2_sum / h·x values feeding them differs (f32 vs f64
- * accumulation, sub-ULP-to-1e-4 relative). This intentionally DIVERGES from
- * the Python float64 reference; the integer lag / winner selection is robust
- * to the sub-ULP difference.
- *
- * On AArch64 NEON the f32 dot and the NLMS update use fmla intrinsics
- * and the h² peak search a two-pass max/match reduction; a scalar float path
- * is kept for non-NEON builds.
- *
- * The matched-filter kernels (dot, NLMS update, fused update + next dot) also
- * run on 32-bit ARM when the core has a fused multiply-add (VFPv4 NEON):
- * same four 4-lane accumulators at stride 16, same load/store order, same
- * reduction tree, so the result is bit-identical to AArch64 for finite inputs
- * whose intermediates are normal. ARMv7 NEON flushes subnormal inputs and
- * results to zero and returns the default NaN instead of propagating a
- * payload; AArch64 does neither, so only subnormal-producing data and NaN
- * payloads can differ. vmlaq_f32 is an unfused multiply then add (different
- * rounding), so cores that lack fused FMA (VFPv3 NEON) keep the scalar path
- * below rather than get a numerically different vector one.
- * DA_DISABLE_ARM32_NEON forces the scalar path on 32-bit ARM. Only these
- * three kernels use DA_MF_NEON; every other kernel in this file stays keyed
- * on SK_HAVE_NEON. */
+/* Matched-filter arithmetic: both 512-tap dot products accumulate in float32 and x2_sum slides
+ * across the 16 sub-block iterations (x2 += new^2 - old^2) instead of being re-summed. The NEON
+ * kernels (dot, NLMS update, fused update + next dot) use fused multiply-add on AArch64 and on
+ * 32-bit ARM cores with VFPv4 NEON, with the same accumulator layout and reduction tree; cores
+ * without fused FMA keep the scalar path, and DA_DISABLE_ARM32_NEON forces it. Only these three
+ * kernels use DA_MF_NEON; the others key on SK_HAVE_NEON. */
 #if SK_HAVE_NEON
 #define DA_MF_NEON 1
-/* faddp (pairwise) then faddp: (l0 + l1) + (l2 + l3). */
 #define DA_VADDV_F32(v) vaddvq_f32(v)
 #elif defined(__arm__) && defined(__ARM_NEON) && defined(__ARM_FEATURE_FMA) && \
       !defined(SIMD_KERNELS_FORCE_SCALAR) && !defined(DA_DISABLE_ARM32_NEON)
 #include <arm_neon.h>
 #define DA_MF_NEON 1
 #define DA_MF_NEON_ARM32 1
-/* AArch32 has no across-lane add; two vpadd steps add the lanes in the order
- * AArch64 vaddvq_f32 does, (l0 + l1) + (l2 + l3). */
+/* AArch32 has no across-lane add; two vpadd steps add the lanes in AArch64's order. */
 static inline float da_vaddv_f32(float32x4_t v) {
     float32x2_t p = vpadd_f32(vget_low_f32(v), vget_high_f32(v));
     return vget_lane_f32(vpadd_f32(p, p), 0);
@@ -92,15 +51,13 @@ static inline float da_vaddv_f32(float32x4_t v) {
 #if DA_MF_NEON
 
 #if defined(DA_MF_NEON_ARM32) && defined(__GNUC__) && !defined(__clang__)
-/* On 32-bit targets gcc's constant-propagated clone of the dot (n == 512,
- * pointers into the 527-float span) reports the dead scalar tail loop as
- * running off the array. The tail cannot execute for the shipped sizes. */
+/* gcc's constant-propagated clone of the dot warns about the dead scalar tail loop; the tail
+ * cannot run for the shipped sizes. */
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Waggressive-loop-optimizations"
 #endif
 
-/* float32 h·x, 4 independent NEON accumulators (n must be a multiple of 16;
- * DA_FILTER_SIZE = 512). */
+/* float32 dot product with 4 independent NEON accumulators (n a multiple of 16). */
 static float da_dot_f32(const float *a, const float *b, int n) {
     float32x4_t acc0 = vdupq_n_f32(0.0f), acc1 = vdupq_n_f32(0.0f);
     float32x4_t acc2 = vdupq_n_f32(0.0f), acc3 = vdupq_n_f32(0.0f);
@@ -119,11 +76,8 @@ static float da_dot_f32(const float *a, const float *b, int n) {
     }
 }
 
-/* h += alpha * x, 16 taps per iteration (4x fmla) with 4-wide and scalar
- * tails. Elementwise, so the width is invisible in the result: every tap
- * gets the same single vfmaq_f32 whatever iteration it lands in -- there is
- * no accumulator to re-associate, unlike the dot product above. Widened to
- * match that dot: at DA_FILTER_SIZE = 512 taps neither tail runs. */
+/* h += alpha * x, 16 taps per iteration with 4-wide and scalar tails (elementwise, so the width
+ * does not change the result). */
 static void da_nlms_update_f32(float *h, const float *x, float alpha, int n) {
     float32x4_t va = vdupq_n_f32(alpha);
     int i;
@@ -142,7 +96,8 @@ static void da_nlms_update_f32(float *h, const float *x, float alpha, int n) {
 #error "The fused delay update requires a filter size divisible by 16"
 #endif
 
-/* Reuse each updated tap in the next dot; keep da_dot_f32's four sums. */
+/* Fused NLMS update and next dot: each updated tap feeds the next dot; keeps da_dot_f32's four
+ * accumulators. */
 static float da_nlms_update_next_dot_f32(float *h, const float *x,
                                         const float *next_x, float alpha) {
     float32x4_t acc0 = vdupq_n_f32(0.0f), acc1 = vdupq_n_f32(0.0f);
@@ -165,7 +120,7 @@ static float da_nlms_update_next_dot_f32(float *h, const float *x,
 #if defined(DA_MF_NEON_ARM32) && defined(__GNUC__) && !defined(__clang__)
 #pragma GCC diagnostic pop
 #endif
-#else  /* scalar float fallback (no matched-filter NEON body) */
+#else
 static float da_dot_f32(const float *a, const float *b, int n) {
     float s0 = 0.0f, s1 = 0.0f, s2 = 0.0f, s3 = 0.0f;
     int i;
@@ -187,14 +142,12 @@ static void da_nlms_update_f32(float *h, const float *x, float alpha, int n) {
     int i;
     for (i = 0; i < n; ++i) h[i] += alpha * x[i];
 }
-#endif /* DA_MF_NEON */
+#endif
 
-/* First maximum index; shared sk_argmax_sq_f32_scalar/sk_argmax_sq_f32 preserve tie order. */
+/* First maximum index (ties resolve to the lowest). */
 static int da_max_square_peak_index(const float *h, int n) {
     return sk_argmax_sq_f32(h, n);
 }
-
-/* ------------------------------------------------------------------ biquad */
 
 static const float DA_LP_B[3][3] = {
     {0.0180919877f, 0.00320961363f, 0.0180919877f},
@@ -213,18 +166,9 @@ static const float DA_HP_A[1][2] = {
     {-1.45424359f, 0.574061915f},
 };
 
-/* 48kHz -> 16kHz pre-decimation anti-alias filter (DaResample48, decimate by
- * DA_RESAMPLE48_FACTOR=3). Elliptic lowpass, order 7 (4 SOS sections),
- * designed (not hand-tuned) via scipy.signal.ellipord/ellip for a 48kHz
- * input: passband edge 6800 Hz (1.0 dB ripple), stopband edge 8000 Hz (the
- * new 16kHz Nyquist, 60 dB attenuation target). Verified via
- * scipy.signal.sosfreqz: passband -0.99 dB @6800Hz, stopband -68.3 dB
- * @8000Hz, >=60 dB attenuation at every frequency that would alias into the
- * 0-8kHz post-decimation band (9/12/16/20/24 kHz all checked). Coefficients
- * are scipy's sosfilt convention ({b0,b1,b2,a0=1,a1,a2} per section,
- * Direct-Form-II-Transposed) -- da_biquad_process1() below implements the
- * identical recurrence, so this is a numerically-verifiable port, not a
- * from-scratch reimplementation. */
+/* 48 kHz -> 16 kHz pre-decimation anti-alias filter (decimate by 3): elliptic lowpass, order 7
+ * (4 sections), passband edge 6800 Hz (1 dB ripple), stopband edge 8000 Hz (60 dB). Coefficients
+ * use the {b0, b1, b2, a1, a2} per-section convention of da_biquad_process1(). */
 static const float DA_RESAMPLE48_B[4][3] = {
     {5.11914823e-03f, 4.05806316e-04f, 5.11914823e-03f},
     {1.0f,            1.0f,            0.0f},
@@ -242,7 +186,7 @@ static void da_biquad_reset(DaBiquad *bq) {
     memset(bq->z, 0, sizeof(bq->z));
 }
 
-/* anti-alias stage: ds4 = kLowPassFilterDs4 (elliptic LP, 3 sections). */
+/* Anti-alias stage: elliptic LP, 3 sections. */
 static void da_biquad_init_antialias(DaBiquad *bq) {
     int s;
     bq->n_sections = 3;
@@ -253,7 +197,7 @@ static void da_biquad_init_antialias(DaBiquad *bq) {
     da_biquad_reset(bq);
 }
 
-/* noise-reduction stage: ds4 = kHighPassFilter (butter HP @1 kHz). */
+/* Noise-reduction stage: Butterworth HP at 1 kHz. */
 static void da_biquad_init_noise_reduction(DaBiquad *bq) {
     bq->n_sections = 1;
     bq->b[0][0] = DA_HP_B[0][0]; bq->b[0][1] = DA_HP_B[0][1]; bq->b[0][2] = DA_HP_B[0][2];
@@ -261,13 +205,8 @@ static void da_biquad_init_noise_reduction(DaBiquad *bq) {
     da_biquad_reset(bq);
 }
 
-/* Process one sample through the cascade, returning the float32 output.
- * Direct-form-II transposed, all-float32 (unlike Python's
- * _CascadedBiquad.process, which runs float64; see the file banner).
- *   out = b0*x + z0
- *   z0  = b1*x - a1*out + z1
- *   z1  = b2*x - a2*out
- */
+/* Process one sample through the cascade (direct-form II transposed, float32):
+ * out = b0*x + z0; z0 = b1*x - a1*out + z1; z1 = b2*x - a2*out. */
 static float da_biquad_process1(DaBiquad *bq, float xn) {
     int s;
     float yn = xn;
@@ -280,8 +219,6 @@ static float da_biquad_process1(DaBiquad *bq, float xn) {
     }
     return yn;
 }
-
-/* -------------------------------------------------- 48kHz->16kHz sidechain */
 
 static void da_biquad_init_resample48(DaBiquad *bq) {
     int s;
@@ -308,16 +245,9 @@ static void da_resample48_reset(DaResample48 *r) {
     r->phase = 0;
 }
 
-/* Filter n_in samples through bq (state carries across calls -- every input
- * sample is fed through the cascade even though only every DA_RESAMPLE48_
- * FACTOR-th post-filter sample is kept, exactly like da_decimator_decimate's
- * ds4 stage above), keep every DA_RESAMPLE48_FACTOR-th sample with phase
- * continuity across calls (mirrors the 4ch pipeline's own delay_phase /
- * SharedMatchedDelayEstimator._to_16k_pair stride-pick, just with a real
- * anti-alias filter ahead of the stride instead of a naive pick). Returns
- * the count of samples written to out (<= out_cap, which the caller sizes
- * DA_RESAMPLE48_CAP_FOR(hop) = ceil(hop/3) at the one 48kHz grid, so the cap
- * is a defence-in-depth bound rather than a live truncation). */
+/* Filter n_in samples through bq (state carries across calls; every input sample is filtered)
+ * and keep every third post-filter sample with phase continuity across calls. Returns the number of
+ * samples written to out (<= out_cap, a defensive bound). */
 static int da_resample48_channel(DaBiquad *bq, const float *in, int n_in,
                                  float *out, int out_cap, int *phase) {
     int i, count = 0;
@@ -332,20 +262,14 @@ static int da_resample48_channel(DaBiquad *bq, const float *in, int n_in,
     return count;
 }
 
-/* ---------------------------------------------------------------- decimator */
-
 static void da_decimator_init(DaDecimator *dec) {
     da_biquad_init_antialias(&dec->anti_alias);
     da_biquad_init_noise_reduction(&dec->noise_reduction);
 }
 
-/* Generic cascade walk over a 64-sample block: every sample through both
- * cascades (state carries), output kept on the FIRST sample of every
- * DA_DOWN_SAMPLING_FACTOR group. DA_BLOCK_SIZE / DA_DOWN_SAMPLING_FACTOR
- * == DA_SUB_BLOCK_SIZE by construction (64 / 4 == 16). Nested so neither
- * `i % DOWN_SAMPLING_FACTOR` nor a per-sample branch runs in the inner loop.
- * This is the shape-independent form; da_decimator_decimate below runs it
- * whenever the cascade is not the 3-LP + 1-HP one da_decimator_init builds. */
+/* Generic cascade walk over a 64-sample block: every sample goes through both cascades and the
+ * output is kept on the first sample of each group of 4. Used when the cascade is not the 3-LP +
+ * 1-HP shape da_decimator_init builds. */
 static void da_decimator_decimate_generic(DaDecimator *dec, const float *in_block,
                                           float *out_sub) {
     int o, j;
@@ -361,30 +285,14 @@ static void da_decimator_decimate_generic(DaDecimator *dec, const float *in_bloc
     }
 }
 
-/* Decimate a 64-sample block to a 16-sample sub-block.
- * Python: x = lp.process(block) [f64], x = hp.process(x) [f64], then
- * x[::4].astype(f32).  The biquad chains run on ALL 64 samples (state
- * carries), but only every 4th post-HP sample is kept & cast to f32.
- *
- * Both decimators run on EVERY hop -- analysed or merely fed (see
- * da_estimator_process_inner_block) -- so this is the whole non-engaged
- * floor of the delay stage. da_decimator_init builds exactly one shape (3
- * anti-alias sections + 1 noise-reduction section), and for that shape the
- * per-sample da_biquad_process1 call re-reads five coefficients and
- * round-trips two state words through memory per section. Specialising it
- * holds all twenty coefficients and all eight state words in locals across
- * the block; the per-sample expressions are the same products, same
- * left-associative grouping and same order da_biquad_process1 evaluates,
- * which under -ffp-contract=off (see the Makefile's FP_POLICY) is the same
- * float32 arithmetic, not merely equivalent arithmetic. Any other cascade
- * shape takes the generic walk. */
+/* Decimate a 64-sample block to a 16-sample sub-block: all 64 samples run through the cascades
+ * (state carries) and every 4th post-HP sample is kept. For the shipped 3-LP + 1-HP shape the
+ * coefficients and states are held in locals; other shapes take the generic walk. */
 static void da_decimator_decimate(DaDecimator *dec, const float *in_block, float *out_sub) {
     DaBiquad *lp = &dec->anti_alias;
     DaBiquad *hp = &dec->noise_reduction;
 
-    /* the shape test comes FIRST: only sections the cascade actually declares
-     * have been initialised, so an off-shape cascade must reach the generic
-     * walk before any b/a/z row past its own section count is read */
+    /* Shape test first: only declared sections are initialised. */
     if (lp->n_sections != 3 || hp->n_sections != 1) {
         da_decimator_decimate_generic(dec, in_block, out_sub);
         return;
@@ -430,19 +338,13 @@ static void da_decimator_decimate(DaDecimator *dec, const float *in_block, float
     }
 }
 
-/* The render and capture decimators run back to back on every block, share
- * no data and (da_decimator_init) carry the same coefficients. The 3-LP + 1-HP
- * cascade is a long chain of dependent float32 multiplies and adds per
- * sample, so running both signals through it as the two lanes of one vector
- * halves the instruction count. Every lane executes exactly the scalar
- * expressions of da_decimator_decimate above -- the same products, the same
- * left-associative grouping, no fused multiply-add -- so outputs and filter
- * states are bit-identical (except the payload bits of a NaN). Off-shape
- * cascades, or two cascades whose coefficients differ, take two single calls. */
+/* The render and capture decimators run back to back, share no data and carry the same
+ * coefficients, so they run as the two lanes of one vector with the scalar expressions of
+ * da_decimator_decimate (no fused multiply-add). Off-shape cascades or differing coefficients take
+ * two single calls. */
 #if SK_HAVE_NEON
 static int da_biquad_same_coefficients(const DaBiquad *a, const DaBiquad *b) {
-    /* only the declared sections are initialised; the rows past them are not
-     * part of the filter */
+    /* Only the declared sections are part of the filter. */
     return a->n_sections == b->n_sections &&
            memcmp(a->b, b->b, (size_t)a->n_sections * sizeof(a->b[0])) == 0 &&
            memcmp(a->a, b->a, (size_t)a->n_sections * sizeof(a->a[0])) == 0;
@@ -485,7 +387,6 @@ static void da_decimator_decimate_pair(DaDecimator *da, const float *in_a, float
         for (o = 0; o < DA_SUB_BLOCK_SIZE; ++o) {
             const float32x4_t ga = vld1q_f32(in_a + o * DA_DOWN_SAMPLING_FACTOR);
             const float32x4_t gb = vld1q_f32(in_b + o * DA_DOWN_SAMPLING_FACTOR);
-            /* (a_j, b_j) pairs: zip1 -> j = 0,1 ; zip2 -> j = 2,3 */
             const float32x4_t z1 = vzip1q_f32(ga, gb), z2 = vzip2q_f32(ga, gb);
             for (j = 0; j < DA_DOWN_SAMPLING_FACTOR; ++j) {
                 float32x2_t x = (j == 0) ? vget_low_f32(z1) : (j == 1) ? vget_high_f32(z1)
@@ -526,17 +427,9 @@ static void da_decimator_decimate_pair(DaDecimator *da, const float *in_a, float
 }
 #endif
 
-/* The 48 kHz -> 16 kHz anti-alias cascades of the capture and render signals
- * share no data and carry the same coefficients, and each is a dependent chain
- * of float32 multiplies and adds per sample. Both are filtered together as the
- * two lanes of one vector, with the expressions of da_biquad_process1 and the
- * same left-associative grouping, no fused multiply-add, so outputs and
- * carried states are bit-identical to two da_resample48_channel() calls (except
- * the payload bits of a NaN). The kept-sample selection and the phase update
- * are those of da_resample48_channel(); both channels have one length, one cap
- * and one phase, so they produce the same count, which is returned. Cascades
- * that are not the 4-section shape, or whose coefficients differ, take two
- * single calls. */
+/* The 48 kHz -> 16 kHz cascades of capture and render share coefficients and run as the two
+ * lanes of one vector (no fused multiply-add); cascades of another shape or with differing
+ * coefficients take two single calls. */
 #if SK_HAVE_NEON
 static int da_resample48_pair(DaBiquad *bq_a, const float *in_a, float *out_a,
                               DaBiquad *bq_b, const float *in_b, float *out_b,
@@ -614,18 +507,12 @@ static int da_resample48_pair(DaBiquad *bq_a, const float *in_a, float *out_a,
 }
 #endif
 
-/* ------------------------------------------------------------------- ring */
-
 static void da_ring_reset(DaRing *r) {
     memset(r->buffer, 0, (size_t)r->capacity * sizeof(float));
     r->write = 0;
 }
 
 static void da_ring_push(DaRing *r, const float *sub, int n) {
-    /* Values identical to a per-sample-modulo walk, but written as at most two
-     * contiguous memcpy segments -- no integer division in the inner loop (n =
-     * DA_SUB_BLOCK_SIZE, currently 16, samples are pushed twice per 64-sample
-     * block). Same approach as da_ring_gather_back below. */
     int first = r->capacity - r->write;
     if (first >= n) {
         memcpy(r->buffer + r->write, sub, (size_t)n * sizeof(float));
@@ -638,14 +525,9 @@ static void da_ring_push(DaRing *r, const float *sub, int n) {
     }
 }
 
-/* gather_back: return `length` samples in time-reversed order starting at
- * newest_index() - start_offset.  out[0] = sample start_offset ago. */
+/* gather_back: `length` samples in time-reversed order starting at newest - start_offset;
+ * out[0] is the sample start_offset ago. */
 static void da_ring_gather_back(const DaRing *r, int start_offset, int length, float *out) {
-    /* Values identical to the per-sample-modulo walk, but copied as at most two
-     * contiguous reversed segments — no integer division in the inner loop.
-     * This gather runs 80x per 64-sample block (5 filters x 16 sub-samples,
-     * 512 taps each), so a per-sample `% capacity` would cost ~10M
-     * integer divisions/sec at 16 kHz and dominate the matched-filter cost. */
     int cap = r->capacity;
     int newest = (r->write - 1 + cap) % cap;
     int end = (newest - start_offset + cap) % cap;
@@ -660,35 +542,20 @@ static void da_ring_gather_back(const DaRing *r, int start_offset, int length, f
     }
 }
 
-/* -------------------------------------------------------- matched filter core */
-
-/* Mirrors matched_filter_core(). Returns filters_updated; writes *error_sum. */
 static int da_matched_filter_core(const DaRing *ring, int alignment_shift_back,
                                   float x2_sum_threshold, float smoothing,
                                   const float *y, float *h, float *error_sum_out) {
     float error_sum = 0.0f;
     int filters_updated = 0;
     int i;
-    /* All DA_SUB_BLOCK_SIZE windows of this call are subranges of ONE
-     * contiguous span: window_i[k] = ring sample (alignment_shift_back +
-     * (SUB_BLOCK_SIZE-1-i) + k) back = span[(SUB_BLOCK_SIZE-1-i) + k], where
-     * span = gather_back(alignment_shift_back, FILTER_SIZE+SUB_BLOCK_SIZE-1).
-     * One 527-sample gather replaces 16 gathers of 512 (8192 -> 527 floats
-     * copied per filter per block); every window is the identical value
-     * sequence the per-i gather produced (the ring is not written during the
-     * whole matched-filter update), so all downstream arithmetic is
-     * byte-identical. Deepest sample touched is alignment_shift_back +
-     * FILTER_SIZE+SUB_BLOCK_SIZE-2, i.e. (n-1)*384 + 526 at the last filter
-     * -- DA_RING_CAPACITY_FOR(n) is exactly that plus two at every bank
-     * size, so this is always in range (2062 < 2064 at the n=5 default). */
+    /* All sub-block windows of this call are subranges of one contiguous span: window_i[k] =
+     * span[(SUB_BLOCK_SIZE - 1 - i) + k], with span = gather_back(alignment_shift_back, FILTER_SIZE
+     * + SUB_BLOCK_SIZE - 1). The deepest sample touched is covered by DA_RING_CAPACITY_FOR(n). */
     float span[DA_FILTER_SIZE + DA_SUB_BLOCK_SIZE - 1];
     da_ring_gather_back(ring, alignment_shift_back,
                         DA_FILTER_SIZE + DA_SUB_BLOCK_SIZE - 1, span);
-    /* Sliding x²_sum: window i covers span[(SB-1-i) .. (SB-1-i)+511]; moving
-     * i→i+1 adds span[SB-2-i] (one newer sample at the front) and drops
-     * span[(SB-1-i)+512] (the oldest). Initialised once for i=0, then O(1)
-     * per iteration instead of a 512-tap re-sum. f32 accumulation — see the
-     * matched-filter arithmetic note above. */
+    /* Sliding x2_sum: moving from window i to i+1 adds span[SB-2-i] and drops span[(SB-1-i)+512];
+     * initialised once for i = 0. */
     float x2_slide = da_dot_f32(span + (DA_SUB_BLOCK_SIZE - 1),
                                 span + (DA_SUB_BLOCK_SIZE - 1), DA_FILTER_SIZE);
 #if DA_MF_NEON
@@ -699,8 +566,8 @@ static int da_matched_filter_core(const DaRing *ring, int alignment_shift_back,
         float x2_sum, s, e;
         int saturation;
         if (i > 0) {
-            float in_v  = x_window[0];               /* newly entered sample */
-            float out_v = x_window[DA_FILTER_SIZE];  /* just left the window */
+            float in_v  = x_window[0];
+            float out_v = x_window[DA_FILTER_SIZE];
             x2_slide += in_v * in_v - out_v * out_v;
         }
         x2_sum = x2_slide;
@@ -713,8 +580,7 @@ static int da_matched_filter_core(const DaRing *ring, int alignment_shift_back,
         saturation = (y[i] >= DA_SATURATION_LIMIT || y[i] <= -DA_SATURATION_LIMIT);
         error_sum += e * e;
         if (x2_sum > x2_sum_threshold && !saturation) {
-            /* alpha = smoothing * e / x2_sum, computed directly in float32;
-             * h += alpha*x runs in f32 via da_nlms_update_f32. */
+            /* alpha = smoothing * e / x2_sum in float32; h += alpha * x. */
             float alpha_f = smoothing * e / x2_sum;
 #if DA_MF_NEON
             if (i + 1 < DA_SUB_BLOCK_SIZE) {
@@ -736,9 +602,7 @@ static int da_matched_filter_core(const DaRing *ring, int alignment_shift_back,
     return filters_updated;
 }
 
-/* Row accessors for the two pool-carved row-major banks. Both row strides are
- * multiples of 16 bytes (2048 and 512), so every row inherits the block's
- * ALIGN16 base. */
+/* Row accessors for the pool-carved banks (strides 2048 B and 512 B, both 16-byte aligned). */
 static float *da_mf_row(const DaMatchedFilter *mf, int n) {
     return mf->filters + (size_t)n * DA_FILTER_SIZE;
 }
@@ -746,10 +610,7 @@ static float *da_mf_acc(const DaMatchedFilter *mf, int n) {
     return mf->accumulated_error + (size_t)n * DA_ACC_ERR_SIZE;
 }
 
-/* num_filters: runtime bank size. The pool holds EXACTLY this many rows (the
- * bank is carved to fit), so both loops below cover the whole allocation --
- * there is no inactive tail. The heap-vs-caller-pool byte-equality gate
- * (test_static_aec) therefore compares fully-defined memory: every carved
+/* num_filters is the runtime bank size; the pool holds exactly that many rows and every carved
  * byte is written here. */
 static void da_matched_filter_init(DaMatchedFilter *mf, int num_filters) {
     int n, k;
@@ -785,12 +646,9 @@ static void da_matched_filter_reset(DaMatchedFilter *mf, int full_reset) {
     }
 }
 
-/* Mirrors MatchedFilter.update, minus the pre-echo onset search: the
- * accumulated-error/onset estimate had no consumer (see
- * da_aggregator_aggregate's PRODUCT POLICY note -- the reported delay is
- * always the dominant peak), so the per-tap-prefix error it was derived from
- * is not computed and mf->accumulated_error / mf->instantaneous_error hold
- * their initialised values. */
+/* MatchedFilter.update without the pre-echo onset search (the reported delay is always the
+ * dominant peak), so the accumulated-error and instantaneous-error buffers keep their initialised
+ * values. */
 static void da_matched_filter_update(DaMatchedFilter *mf, const DaRing *ring,
                                      const float *capture, int use_slow_smoothing) {
     float smoothing = use_slow_smoothing ? DA_SMOOTHING_SLOW : DA_SMOOTHING_FAST;
@@ -806,13 +664,8 @@ static void da_matched_filter_update(DaMatchedFilter *mf, const DaRing *ring,
     mf->winner_lag_valid = 0;
     mf->reported_valid = 0;
 
-    /* mf->num_filters is both the loop bound AND the number of rows the pool
-     * actually holds (the bank is carved to fit -- there is no tail beyond
-     * it to walk off into). This loop is the entire search cost (~4.2 MMAC/s
-     * per filter at the full 250 block/s rate); together with the 5,728 B/
-     * filter the layout saves, a short bank is where the whole embedded
-     * saving comes from. At the default 5 this is the identical loop it
-     * always was. */
+    /* The loop covers exactly the rows the pool holds; it is the entire search cost, so a short
+     * bank saves compute as well as memory. */
     for (n = 0; n < mf->num_filters; ++n) {
         float error_sum;
         float *h = da_mf_row(mf, n);
@@ -844,16 +697,9 @@ static void da_matched_filter_update(DaMatchedFilter *mf, const DaRing *ring,
     if (winner_index != -1 && mf->winner_lag_valid) {
         mf->reported_valid = 1;
         mf->reported_lag = mf->winner_lag;
-        /* number_pre_echo_updates counts, saturating, the blocks on which the
-         * winner filter repeated over a non-degenerate anchor (the reference gate
-         * is int16-scale, error_sum > 1.0 in Q15²; the float[-1,1] equivalent
-         * is 1.0 / 32768² ≈ 9.3e-10, matching matched_filter.py). It is
-         * zeroed only by da_matched_filter_init() (construction) and
-         * da_matched_filter_reset(mf, full_reset=1) (a genuine delay/echo-
-         * path-change reset) -- neither fires just because the delay estimate
-         * stays locked, which is the ordinary steady state for a device that
-         * hasn't moved, so without the cap the count would run for the whole
-         * unbounded-lock timeframe and eventually overflow. */
+        /* number_pre_echo_updates counts, saturating at DA_PRE_ECHO_UPDATES_TO_REPORT, the blocks
+         * on which the winner filter repeated over a non-degenerate anchor (1 / 32768^2 in float
+         * scale). It is zeroed only by init and a full reset. */
         if (mf->last_detected_best_lag_filter == winner_index
             && error_sum_anchor > 1.0f / (32768.0f * 32768.0f)
             && mf->number_pre_echo_updates < DA_PRE_ECHO_UPDATES_TO_REPORT) {
@@ -863,77 +709,14 @@ static void da_matched_filter_update(DaMatchedFilter *mf, const DaRing *ring,
     }
 }
 
-/* ---------------------------------------------------- highest-peak aggregator */
-
-/* da_argmax_incremental_update -- O(1)-when-provable incremental maintenance
- * of (*candidate, *candidate_valid) as the FIRST index of the maximum value
- * in `histogram[0..hist_size)`, called by da_highest_peak_aggregate. The
- * aggregator's 0-initialized ring always evicts a prior occupant, so every
- * call both decrements histogram[A] and increments histogram[B]. This
- * function performs BOTH histogram writes AND the candidate/M bookkeeping --
- * callers must NOT separately apply them, and must NOT call this when
- * `A == B && *candidate_valid` (a pure net-unchanged wash the caller must
- * fast-path BEFORE calling: see the correctness note below for why that
- * combination breaks the general derivation and has to be excluded
- * structurally, not merely as an optimization).
- *
- * Correctness:
- *
- * Invariant maintained: whenever *candidate_valid is true, `c = *candidate`
- * is provably the first index of the maximum value `M = histogram[c]`
- * (equivalent to sk_argmax_i32(histogram, hist_size)).
- *
- *  - !*candidate_valid: state isn't trustworthy (fresh reset, or a prior
- *    call already gave up) -- mutate histogram, then do the one authoritative
- *    sk_argmax_i32 rescan and mark valid. Exact by construction; this is also
- *    the path a fresh A==B call takes (see below), so A==B is never actually
- *    unsafe THROUGH this branch, only through the two branches below it.
- *
- *  - A == c (the tracked candidate itself lost a count): after
- *    the decrement c's own value drops to M-1, so (c,M) cannot be
- *    trusted -- there may be an UNTRACKED bin already tied at value M (it
- *    must be at some index > c, since c was defined as the first index
- *    reaching M, so nothing below c could already equal M). If the insert at
- *    B produces a value > the OLD M, B is now strictly greater than every
- *    other bin (every other bin was <= M, including any untracked tie), so B
- *    is unambiguously the new unique argmax -- O(1) and exact regardless of
- *    what's hidden. Otherwise (Bval0+1 <= M) we cannot rule out an untracked
- *    tie or a third bin now being the true max, so we MUST rescan -- this is
- *    exactly the case the naive "compare against the candidate's own
- *    post-decrement value" heuristic gets wrong (counterexample:
- *    H=[3,5,5,2,0], candidate=1 (M=5, untracked tie at index 2); evicting
- *    bin 1 (->4) while inserting at bin 3 (2->3) has post-decrement 4 >= 3,
- *    which LOOKS safe under that heuristic, but the true new argmax is index
- *    2, not 1 or 3 -- comparing against the OLD M=5, not the post-decrement
- *    4, correctly routes this case to the rescan fallback instead).
- *
- *  - otherwise (A != c): (c,M) is UNCHANGED by the decrement, because decrementing a
- *    non-candidate bin can only lower a value already <= M, never raise any
- *    other bin above M, and never touches c. So (c,M) remains exactly
- *    correct going into the insert. Only B's value changed (to Bval0+1,
- *    since A != B guarantees the increment is the sole modification to B
- *    this call): if Bval0+1 > M, B is a strictly new unique max (every other
- *    bin, tracked or not, was <= M); if Bval0+1 == M, B ties the max and
- *    numpy argmax's first-index rule means the new answer is min(B,c) -- but
- *    nothing below c can already hold M (c is BY DEFINITION the first such
- *    index), so the comparison reduces to "B < c" alone (no untracked bin
- *    can be at a lower index than both); if Bval0+1 < M, nothing changes.
- *    O(1) and exact in every sub-case.
- *
- * The A == B fast-path exclusion: if it were allowed through,
- * `Bval0 = histogram[B]` (read before mutation) would ALREADY equal
- * histogram[A]'s pre-mutation value (since A==B), and the decrement+increment
- * nets to zero -- but the ">M"/"==M" comparisons above assume the decrement
- * and increment are on DIFFERENT bins (the decrement's effect on `M` is
- * "none, because A!=c" or "drop to M-1, because A==c" -- either way a
- * distinct bin from B). With A==B those two assumptions collide: e.g.
- * candidate=c (M), and A(=B) is a DIFFERENT bin ALSO already at value M
- * (untracked tie, index > c) -- Bval0=M, so "Bval0+1>M" is trivially true,
- * which would incorrectly move candidate to A even though the net histogram
- * change is exactly zero and the true answer is still c. Hence: the caller
- * must intercept A==B && *candidate_valid before ever reaching
- * here (net-unchanged, zero mutation needed, candidate/M already correct by
- * the standing invariant). */
+/* Incremental maintenance of (*candidate, *candidate_valid) as the first index of the maximum of
+ * histogram[0..hist_size). It performs both histogram writes (decrement at A, increment at B);
+ * callers handle A == B && *candidate_valid (a net-zero update) themselves.
+ * When *candidate_valid, c = *candidate is the first index of the maximum M = histogram[c]:
+ *  - !candidate_valid: mutate, then one authoritative sk_argmax_i32 rescan.
+ *  - A == c: if B's new value exceeds the old M, B is the unique argmax; otherwise rescan.
+ *  - Otherwise (c, M) is unchanged; B takes over if its new value exceeds M, or ties M at a lower
+ *    index. */
 static void da_argmax_incremental_update(int *histogram, int hist_size,
                                          int A, int B,
                                          int *candidate, int *candidate_valid) {
@@ -956,7 +739,6 @@ static void da_argmax_incremental_update(int *histogram, int hist_size,
             return;
         }
         if (Bval0 + 1 > M || (Bval0 + 1 == M && B < c)) *candidate = B;
-        /* else: unchanged, still c */
     }
 }
 
@@ -964,11 +746,8 @@ static void da_highest_peak_reset(DaHighestPeak *hp) {
     memset(hp->histogram, 0, (size_t)hp->hist_size * sizeof(int));
     memset(hp->ring, 0, (size_t)hp->window * sizeof(int));
     hp->ring_index = 0;
-    /* candidate is NOT reset in Python HighestPeakAggregator.reset; preserve.
-     * candidate_valid IS reset (internal-only guard, no Python equivalent --
-     * see the DaHighestPeak struct comment): forces the next aggregate()
-     * call to take the authoritative sk_argmax_i32 rescan path instead of
-     * trusting a candidate/M pair computed against the pre-reset histogram. */
+    /* The candidate is kept across a reset; candidate_valid is cleared so the next aggregate() call
+     * rescans instead of trusting a pre-reset candidate. */
     hp->candidate_valid = 0;
 }
 
@@ -986,8 +765,7 @@ static void da_highest_peak_aggregate(DaHighestPeak *hp, int lag) {
     hp->ring[hp->ring_index] = clamped_lag;
     hp->ring_index = (hp->ring_index + 1) % hp->window;
     if (old_lag == clamped_lag && hp->candidate_valid) {
-        /* net-unchanged: evicted bin == inserted bin, histogram provably
-         * untouched, existing candidate/M pair still exactly correct. */
+        /* Evicted bin == inserted bin: net-zero, the candidate stays correct. */
         return;
     }
     da_argmax_incremental_update(hp->histogram, hp->hist_size,
@@ -995,12 +773,7 @@ static void da_highest_peak_aggregate(DaHighestPeak *hp, int lag) {
                                  &hp->candidate, &hp->candidate_valid);
 }
 
-/* ---------------------------------------------- pre-echo histogram (inert) */
-
-/* Carved and reset like every other piece of estimator state so the block's
- * byte image is deterministic, but never fed: the reported delay is the
- * dominant peak (see da_aggregator_aggregate's PRODUCT POLICY note), so
- * there is no onset candidate to accumulate. */
+/* Carved and reset like the other state but never fed: the reported delay is the dominant peak. */
 
 static int da_get_ds_block_size_log2(int down_sampling_factor) {
     int ds_log2 = 0;
@@ -1028,8 +801,6 @@ static void da_pre_echo_init(DaPreEcho *pe, int window) {
     da_pre_echo_reset(pe);
 }
 
-/* ---------------------------------------------------------- lag aggregator */
-
 static void da_aggregator_init(DaLagAggregator *agg, int window) {
     da_highest_peak_init(&agg->highest_peak, window);
     da_pre_echo_init(&agg->pre_echo, window);
@@ -1050,8 +821,8 @@ static int da_aggregator_delay_at_highest_peak(const DaLagAggregator *agg) {
     return agg->highest_peak.candidate;
 }
 
-/* Mirrors MatchedFilterLagAggregator.aggregate. Returns 1 if an estimate was
- * produced (writes *quality, *delay in DOWNSAMPLED samples). */
+/* Lag aggregation. Returns 1 if an estimate is produced (writes
+ * *quality and *delay in down-sampled samples). */
 static int da_aggregator_aggregate(DaLagAggregator *agg, int lag_estimate_valid,
                                    int lag_estimate_lag,
                                    DelayQuality *quality_out, int *delay_out) {
@@ -1068,36 +839,20 @@ static int da_aggregator_aggregate(DaLagAggregator *agg, int lag_estimate_valid,
         (hist_val > DA_THRESH_INITIAL && !agg->significant_candidate_found)) {
         *quality_out = agg->significant_candidate_found ? DELAY_QUALITY_REFINED
                                                         : DELAY_QUALITY_COARSE;
-        /* PRODUCT POLICY, and a deliberate departure from upstream at this
-         * seam: the reported delay is the dominant peak. `quality` above is
-         * derived from the dominant histogram, so reporting an earliest-onset
-         * candidate instead would attach that confidence to a delay it does
-         * not describe -- which is how a 100 ms-early onset reached a PBFDKF
-         * spanning 52 ms while carrying confidence 1.0. Upstream wants the
-         * earliest onset because its estimator feeds a RenderDelayController;
-         * this one aligns a short filter directly, so the onset estimate has
-         * no consumer here and agg->pre_echo carries no live candidate.
-         * Mirrors python/modules/delay/lag_aggregator.py's aggregate(). */
+        /* The reported delay is the dominant histogram peak, so `quality` describes the delay it is
+         * attached to. The earliest-onset candidate has no consumer here (it would feed a render
+         * delay controller), so the pre-echo aggregator carries no live candidate. */
         *delay_out = candidate;
         return 1;
     }
     return 0;
 }
 
-/* ------------------------------------------------------------ clockdrift */
-
 static void da_clockdrift_init(DaClockdrift *cd, int sample_rate) {
     cd->delay_history[0] = cd->delay_history[1] = cd->delay_history[2] = 0;
     cd->level = CLOCKDRIFT_NONE;
     cd->stability_counter = 0;
-    /* 7500 blocks (~30 s at the native 4 ms/block cadence). Ticks are
-     * inner DA_BLOCK_SIZE(=64)-sample blocks, so the tick period is
-     * 64/sample_rate seconds -- rescale by real sample_rate, not by outer
-     * hop_size (matches python/modules/delay/clockdrift_detector.py).
-     * Routed through the canonical aec_ms_to_hops() (aec_scale.h) instead
-     * of a hand-rolled round-half-away-from-zero formula, matching that
-     * helper's own "never paste a raw ms-block count -- route it through
-     * here" contract and its lrintf (round-half-to-even) rounding. */
+    /* 30 s of inner 64-sample blocks (tick period 64 / sample_rate), via aec_ms_to_hops(). */
     cd->stability_reset_hops =
         aec_ms_to_hops(30000.0f, DA_BLOCK_SIZE, sample_rate);
 }
@@ -1105,13 +860,8 @@ static void da_clockdrift_init(DaClockdrift *cd, int sample_rate) {
 static void da_clockdrift_update(DaClockdrift *cd, int delay_estimate) {
     int d1, d2, d3, probable_up, verified_up, probable_down, verified_down;
     if (delay_estimate == cd->delay_history[0]) {
-        /* Ceilinged at stability_reset_hops+1 to avoid signed overflow: the ONLY
-         * consumer of stability_counter in this file/header is the
-         * `> stability_reset_hops` check on the very next line. Once the counter
-         * exceeds stability_reset_hops, further increments can never change that
-         * comparison's outcome (already true, stays true), so gating the increment at
-         * the smallest value that still satisfies `>` is observationally identical to
-         * an unbounded increment for every reachable state. */
+        /* Capped at stability_reset_hops + 1 to avoid signed overflow; only the `>` check below
+         * reads it. */
         if (cd->stability_counter <= cd->stability_reset_hops) cd->stability_counter += 1;
         if (cd->stability_counter > cd->stability_reset_hops) cd->level = CLOCKDRIFT_NONE;
         return;
@@ -1132,10 +882,8 @@ static void da_clockdrift_update(DaClockdrift *cd, int delay_estimate) {
     cd->delay_history[0] = delay_estimate;
 }
 
-/* --------------------------------------------------- EchoPathDelayEstimator */
-
-/* Ring entries in use by both lag aggregators: 1 s of 64-sample inner
- * blocks at the feed rate, clamped to the carved capacity DA_HIST_WINDOW. */
+/* Ring entries in use by both aggregators: 1 s of 64-sample inner blocks at the feed rate,
+ * clamped to the carved capacity DA_HIST_WINDOW. */
 static int da_hist_window_for_rate(int sample_rate) {
     int w = aec_ms_to_hops(1000.0f, DA_BLOCK_SIZE, sample_rate);
     if (w < 1) w = 1;
@@ -1143,7 +891,10 @@ static int da_hist_window_for_rate(int sample_rate) {
     return w;
 }
 
-static void da_estimator_init(DaEstimator *e, int sample_rate, int num_filters) {
+/* Zero the inner signal chain (decimators and render ring). da_decimator_init
+ * only zeroes coefficients/state, so re-running it is a safe, idempotent
+ * reset. */
+static void da_estimator_clear_chain(DaEstimator *e) {
     da_decimator_init(&e->capture_decimator);
     da_decimator_init(&e->render_decimator);
 #if SK_HAVE_NEON
@@ -1151,18 +902,16 @@ static void da_estimator_init(DaEstimator *e, int sample_rate, int num_filters) 
         da_decimator_same_coefficients(&e->capture_decimator, &e->render_decimator);
 #endif
     da_ring_reset(&e->render_ring);
+}
+
+static void da_estimator_init(DaEstimator *e, int sample_rate, int num_filters) {
+    da_estimator_clear_chain(e);
     da_matched_filter_init(&e->matched_filter, num_filters);
-    /* Histogram window = 1 s of inner blocks at the feed rate, the Python
-     * lag_aggregator._num_blocks_per_second (round(sr / 64)): 250 at 16 kHz
-     * (and at 48 kHz, which feeds this estimator its 16 kHz-equivalent
-     * stream), 125 at the LEGACY native 8 kHz feed. A bare capacity
-     * (250) at every rate would be a 2 s window at 8 kHz. Routed through the
-     * canonical aec_ms_to_hops() like the two thresholds around it. */
+    /* Histogram window = 1 s of inner blocks at the feed rate (250 at 16 kHz and at 48 kHz, 125 at
+     * 8 kHz). */
     da_aggregator_init(&e->aggregator, da_hist_window_for_rate(sample_rate));
     da_clockdrift_init(&e->clockdrift, sample_rate);
-    /* Half a second of blocks (125 at 4 ms/block, ~500 ms), computed live from the
-     * rate (same inner-block-rate basis as clockdrift above) via
-     * aec_ms_to_hops() -- see stability_reset_hops above. */
+    /* Half a second of inner blocks, computed from the rate. */
     e->consistent_estimate_threshold =
         aec_ms_to_hops(500.0f, DA_BLOCK_SIZE, sample_rate);
     e->old_agg_valid = 0;
@@ -1172,7 +921,6 @@ static void da_estimator_init(DaEstimator *e, int sample_rate, int num_filters) 
     e->pending_count = 0;
 }
 
-/* _reset (reset_lag_aggregator, reset_delay_confidence). */
 static void da_estimator_reset_internal(DaEstimator *e, int reset_lag_aggregator,
                                         int reset_delay_confidence) {
     if (reset_lag_aggregator)
@@ -1182,54 +930,22 @@ static void da_estimator_reset_internal(DaEstimator *e, int reset_lag_aggregator
     e->consistent_estimate_counter = 0;
 }
 
-/* public reset(reset_delay_confidence) -> full reset of the delay-estimator
- * signal chain (matched filter + aggregator + decimators + ring buffer +
- * pending edge-chunker samples).
- *
- * The only caller of delay_aec_reset() (which calls this) is aec_reset()
- * (aec.c) / AEC.reset() on the Python side -- a top-level cold-start-style
- * reset that recreates AecState/ResidualEchoEstimator/SuppressionGain, clears
- * CNG state, zeroes the OLA buffer, and resets every other subsystem (HPF,
- * saturation detectors, filter taps, regime handler, stationarity estimator,
- * ...). It is NOT a lightweight per-echo-path-change nudge -- that is the
- * SEPARATE da_estimator_reset_internal(e, 0, 0) call from
- * da_estimator_process_inner_block (fires on the consistent-estimate
- * stability counter, every ~500 ms in normal steady state), which leaves the
- * whole signal chain (sidechain, decimators, ring, pending) untouched.
- *
- * delay_aec_reset() therefore clears the ENTIRE chain consistently: the
- * outer 48kHz resample48 sidechain (reset by delay_aec_reset() itself) AND
- * this estimator's inner decimators / ring buffer / pending samples, so stale
- * pre-reset echo-path audio cannot contaminate the matched filter's first
- * correlation windows. da_decimator_init is reused as the reset (it only
- * zeroes coefficients/state, no allocation, so calling it again is a safe,
- * idempotent reset). clockdrift is deliberately left untouched: it tracks a
- * 30s-horizon hardware clock-drift estimate, not reset-scoped audio history. */
+/* Public reset: clears the whole delay-estimator signal chain (matched filter, aggregator,
+ * decimators, ring buffer, pending samples) so stale pre-reset audio cannot contaminate the first
+ * correlation windows; clockdrift is kept (a 30 s hardware drift estimate). The periodic partial
+ * reset on the consistent-estimate counter leaves the signal chain alone. */
 static void da_estimator_reset(DaEstimator *e, int reset_delay_confidence) {
     da_estimator_reset_internal(e, 1, reset_delay_confidence);
-    da_decimator_init(&e->capture_decimator);
-    da_decimator_init(&e->render_decimator);
-#if SK_HAVE_NEON
-    e->decimators_same_coefficients =
-        da_decimator_same_coefficients(&e->capture_decimator, &e->render_decimator);
-#endif
-    da_ring_reset(&e->render_ring);
+    da_estimator_clear_chain(e);
     e->pending_count = 0;
 }
 
-/* _process_inner_block. Returns 1 if an estimate was produced this block
- * (writes *quality / *delay in RAW samples).
- *
- * run_matched_filter (duty-cycle support, see delay_aec_accumulate_ex):
- * when 0, the block is FED but not ANALYSED — both decimators still run
- * (their biquad cascades carry state across every sample, so skipping them
- * would corrupt all later sub-samples) and the decimated render sub-block is
- * still pushed into the ring (the matched filter's x-window must see gapless
- * audio, else the next analysed block correlates against a buffer with holes
- * and reports garbage). Only the matched-filter NLMS update + lag
- * aggregation + clockdrift + stability bookkeeping are skipped; every piece
- * of estimator DECISION state (histograms, old_agg, counters) is left
- * exactly as the previous analysed block set it. */
+/* Process one 64-sample inner block. Returns 1 if an estimate was produced (writes *quality and
+ * *delay in raw samples). With run_matched_filter = 0 the block is fed but not analysed: both
+ * decimators still run and the decimated render sub-block is still pushed into the ring (the
+ * matched filter must see gapless audio); the matched-filter update, aggregation, clockdrift and
+ * stability bookkeeping are skipped, leaving all decision state as the previous analysed block set
+ * it. */
 static int da_estimator_process_inner_block(DaEstimator *e, const float *render_block,
                                             const float *capture_block,
                                             int run_matched_filter,
@@ -1247,7 +963,7 @@ static int da_estimator_process_inner_block(DaEstimator *e, const float *render_
                                &e->capture_decimator, capture_block, capture_sub,
                                e->decimators_same_coefficients);
     da_ring_push(&e->render_ring, render_sub, DA_SUB_BLOCK_SIZE);
-    if (!run_matched_filter) return 0;   /* fed, not analysed (see above) */
+    if (!run_matched_filter) return 0;
     da_matched_filter_update(&e->matched_filter, &e->render_ring, capture_sub,
                              da_aggregator_reliable_delay_found(&e->aggregator));
     produced = da_aggregator_aggregate(
@@ -1265,7 +981,6 @@ static int da_estimator_process_inner_block(DaEstimator *e, const float *render_
         agg_delay = delay_ds * DA_DOWN_SAMPLING_FACTOR;
     }
 
-    /* stability counter */
     if (e->old_agg_valid && agg_valid && e->old_agg_delay == agg_delay)
         e->consistent_estimate_counter += 1;
     else
@@ -1275,7 +990,7 @@ static int da_estimator_process_inner_block(DaEstimator *e, const float *render_
     e->old_agg_quality = agg_quality;
 
     if (e->consistent_estimate_counter > e->consistent_estimate_threshold)
-        da_estimator_reset_internal(e, 0, 0);  /* partial reset */
+        da_estimator_reset_internal(e, 0, 0);
 
     if (agg_valid) {
         *quality_out = agg_quality;
@@ -1285,18 +1000,15 @@ static int da_estimator_process_inner_block(DaEstimator *e, const float *render_
     return 0;
 }
 
-/* True when the n floats at `in` share bytes with the array `pend`; such an
- * input must not go through memcpy. */
+/* True when the n floats at `in` share bytes with `pend`; such input must not go through memcpy. */
 #define DA_OVERLAPS(in, n, pend)                                             \
     ((n) > 0 && (uintptr_t)(in) < (uintptr_t)(pend) + sizeof(pend) &&       \
      (uintptr_t)(pend) < (uintptr_t)(in) + (size_t)(n) * sizeof(float))
 
-/* estimate_delay: buffer raw hop into the edge-chunker, drain 64-sample
- * blocks.  Returns 1 if ANY estimate was produced during the drain (writes
- * the LATEST such estimate into *quality / *delay). The hop is appended in
- * runs up to the next block boundary; an input that overlaps either pending
- * array is appended one sample at a time so each store still sees the earlier
- * ones. */
+/* Buffer the raw hop into the edge-chunker and drain 64-sample blocks. Returns 1 if any estimate
+ * was produced during the drain (the latest one is written to *quality and *delay). The hop is
+ * appended in runs up to the next block boundary; an input overlapping a pending array is appended
+ * one sample at a time. */
 static int da_estimator_estimate_delay(DaEstimator *e, const float *render_hop,
                                        const float *capture_hop, int hop,
                                        int run_matched_filter,
@@ -1346,42 +1058,30 @@ static int da_estimator_estimate_delay(DaEstimator *e, const float *render_hop,
 
 #undef DA_OVERLAPS
 
-/* ====================== LegacyDelayShim (public API) ====================== */
-
-/* ─────────────────────── pool layout ─────────────────────────────
- * ONE description of the block, shared by delay_aec_get_mem_size() and
- * delay_aec_init(): the query returns `total`, the carve walks the fields in
- * the SAME order with the SAME ALIGN16 bumps and asserts it lands exactly on
- * `total`. There is no second size expression anywhere -- that is the whole
- * point of routing both through here. */
+/* Pool layout: one description of the block shared by delay_aec_get_mem_size() and
+ * delay_aec_init(). The carve walks the fields in the same order with the same ALIGN16 bumps and
+ * must land exactly on `total`. */
 typedef struct {
     int    num_filters;     /* validated: [1, DA_NUM_FILTERS] */
     int    ring_capacity;
     int    hp_hist_size;
     int    pe_hist_size;
     int    resample_cap;    /* 0 unless the 48 kHz sidechain is built */
-    size_t total;           /* ALIGN16-sized */
+    size_t total;
 } DaLayout;
 
-/* Reject, not clamp -- see delay_aec_get_mem_size()'s header comment. Sole
- * definition, so a query and an init can never disagree about whether a
- * request is admissible. A silent clamp here would let a direct low-level
- * caller run a different bank size than requested with no error signal. */
+/* Out-of-range bank sizes are rejected, not clamped; the query and init share this check. */
 static int da_valid_num_filters(int num_filters) {
     return num_filters >= 1 && num_filters <= DA_NUM_FILTERS;
 }
 
-/* Returns 1 on success (L fully populated), 0 on invalid input or on a size
- * computation that overflowed. Every add/multiply/align goes through
- * mem_align.h's saturating ck_* helpers, so one MEM_SIZE_INVALID() test at
- * the end catches an overflow anywhere in the walk. */
+/* Returns 1 with L populated, or 0 on invalid input or size overflow. All arithmetic uses the
+ * saturating ck_* helpers, so one MEM_SIZE_INVALID() test at the end catches overflow. */
 static int da_compute_layout(int sample_rate, int hop_size, int num_filters,
                              DaLayout *L) {
     size_t t = 0;
     int n;
     if (!L) return 0;
-    /* hop_size is bounded well below the point where hop/3+1 could overflow
-     * an int; sample_rate/hop_size <= 0 are the real caller mistakes. */
     if (sample_rate <= 0 || hop_size <= 0) return 0;
     if (!da_valid_num_filters(num_filters)) return 0;
 
@@ -1390,25 +1090,22 @@ static int da_compute_layout(int sample_rate, int hop_size, int num_filters,
     L->ring_capacity = DA_RING_CAPACITY_FOR(n);
     L->hp_hist_size  = DA_HP_HIST_SIZE_FOR(n);
     L->pe_hist_size  = DA_PE_HIST_SIZE_FOR(n);
-    /* 48 kHz-only sidechain scratch: nothing carved at any
-     * other rate, so a 16 kHz instance does not carry two 48 kHz buffers. */
     L->resample_cap  = (sample_rate == 48000)
                      ? DA_RESAMPLE48_CAP_FOR(hop_size) : 0;
 
-    /* ---- field walk; da_delay_carve() below MUST match this order ---- */
     t = ck_field_size(t, ck_mul_size((size_t)n, (size_t)DA_FILTER_SIZE),
-                      sizeof(float));                                   /* filters */
+                      sizeof(float));
     t = ck_field_size(t, ck_mul_size((size_t)n, (size_t)DA_ACC_ERR_SIZE),
-                      sizeof(float));                                   /* accumulated_error */
-    t = ck_field_size(t, (size_t)DA_ACC_ERR_SIZE, sizeof(float));       /* instantaneous_error */
-    t = ck_field_size(t, (size_t)L->ring_capacity, sizeof(float));      /* render ring */
-    t = ck_field_size(t, (size_t)L->hp_hist_size, sizeof(int));         /* highest-peak hist */
-    t = ck_field_size(t, (size_t)DA_HIST_WINDOW, sizeof(int));          /* highest-peak ring */
-    t = ck_field_size(t, (size_t)L->pe_hist_size, sizeof(int));         /* pre-echo hist */
-    t = ck_field_size(t, (size_t)DA_HIST_WINDOW, sizeof(int));          /* pre-echo ring */
+                      sizeof(float));
+    t = ck_field_size(t, (size_t)DA_ACC_ERR_SIZE, sizeof(float));
+    t = ck_field_size(t, (size_t)L->ring_capacity, sizeof(float));
+    t = ck_field_size(t, (size_t)L->hp_hist_size, sizeof(int));
+    t = ck_field_size(t, (size_t)DA_HIST_WINDOW, sizeof(int));
+    t = ck_field_size(t, (size_t)L->pe_hist_size, sizeof(int));
+    t = ck_field_size(t, (size_t)DA_HIST_WINDOW, sizeof(int));
     if (L->resample_cap > 0) {
-        t = ck_field_size(t, (size_t)L->resample_cap, sizeof(float));   /* near16 scratch */
-        t = ck_field_size(t, (size_t)L->resample_cap, sizeof(float));   /* far16 scratch */
+        t = ck_field_size(t, (size_t)L->resample_cap, sizeof(float));
+        t = ck_field_size(t, (size_t)L->resample_cap, sizeof(float));
     }
 
     if (MEM_SIZE_INVALID(t)) return 0;
@@ -1416,10 +1113,8 @@ static int da_compute_layout(int sample_rate, int hop_size, int num_filters,
     return 1;
 }
 
-/* Bind every pool pointer + its runtime size. Pure pointer bumps; no writes
- * to the pool itself (da_estimator_init() does all the initialisation, after
- * this, through the pointers bound here). Returns the byte count consumed so
- * the caller can assert the lockstep. */
+/* Bind every pool pointer and its runtime size (pure pointer bumps; da_estimator_init() does the
+ * initialisation). Returns the byte count consumed. */
 static size_t da_delay_carve(DelayAec *d, uint8_t *mem, const DaLayout *L) {
     uint8_t *p = mem;
     DaMatchedFilter *mf = &d->est.matched_filter;
@@ -1476,28 +1171,19 @@ int delay_aec_init(DelayAec *d, void *mem, size_t bytes,
     size_t used;
 
     if (!d || !mem) return -1;
-    /* Every f32 array below is ALIGN16-bumped off this base, so a misaligned
-     * base would misalign the 512-tap banks the NEON matched-filter kernels
-     * load from. Reject rather than silently de-align. */
+    /* Reject a misaligned base: the NEON matched-filter kernels load the 512-tap banks aligned. */
     if (!MEM_IS_ALIGNED16(mem)) return -1;
     if (!da_compute_layout(sample_rate, hop_size, num_filters, &L)) return -1;
     if (bytes < L.total) return -1;
 
     memset(d, 0, sizeof(*d));
     used = da_delay_carve(d, (uint8_t *)mem, &L);
-    /* Lockstep assertion: the carve must land EXACTLY on the
-     * byte count the query promised -- not "within", exactly. A mismatch
-     * means the two field walks have drifted, which is a programming error,
-     * so fail construction instead of running on a layout nobody sized. */
+    /* The carve must land exactly on the queried byte count; a mismatch means the two field walks
+     * have drifted. */
     if (used != L.total) return -1;
 
-    /* DaEstimator's internal clockdrift/consistent-estimate constants
-     * (da_estimator_init) are computed in real seconds FROM the sample_rate
-     * argument -- they are not hardcoded, so this must be the estimator's
-     * true feed rate, not always "16000". Only 48kHz is resampled down to a
-     * 16kHz-equivalent stream before reaching the estimator (the sidechain
-     * below); native 8kHz/16kHz feed the estimator directly at their own
-     * rate. */
+    /* The estimator's clockdrift and consistent-estimate constants derive from the sample_rate it
+     * is fed: 16000 for the 48 kHz sidechain, otherwise the native rate. */
     rate_factor = (sample_rate == 48000) ? DA_RESAMPLE48_FACTOR : 1;
     da_estimator_init(&d->est, (rate_factor > 1) ? 16000 : sample_rate,
                       L.num_filters);
@@ -1525,13 +1211,9 @@ int delay_aec_accumulate(DelayAec *d, const float *near, const float *far, int h
     return delay_aec_accumulate_ex(d, near, far, hop, 1);
 }
 
-/* Duty-cycle-aware accumulate (driven unconditionally by aec.c's always-on
- * duty-cycle state machine; a DIVERGENCE from the Python reference when
- * run_matched_filter=0 — the reference always analyses).
- * run_matched_filter=1 is byte-identical to delay_aec_accumulate.
- * With 0, this hop's samples are decimated + pushed into the ring (the
- * estimator's buffers stay gapless — the correctness crux) but no
- * matched-filter/aggregator work runs, so latest_* stays put. */
+/* Duty-cycle variant (driven by aec.c's duty-cycle state machine). run_matched_filter = 1 equals
+ * delay_aec_accumulate. With 0 the hop is decimated and pushed into the ring (buffers stay gapless)
+ * but no matched-filter or aggregator work runs, so latest_* is unchanged. */
 int delay_aec_accumulate_ex(DelayAec *d, const float *near, const float *far,
                             int hop, int run_matched_filter) {
     DelayQuality q = DELAY_QUALITY_COARSE;
@@ -1543,11 +1225,8 @@ int delay_aec_accumulate_ex(DelayAec *d, const float *near, const float *far,
     const float *far_fed = far;
     int hop_fed = hop;
     if (d->rate_factor > 1) {
-        /* Anti-alias-filter + decimate both channels to the estimator's
-         * fixed 16kHz-native feed rate before it ever sees a sample (see
-         * delay_aec_init()'s comment). The two channels are independent
-         * phase-continuous filter chains that are fed one hop length per
-         * call, so they share one phase and one output count. */
+        /* Anti-alias filter and decimate both channels to the estimator's 16 kHz feed rate; the two
+         * chains share one phase and one output count. */
         int phase = d->resample48.phase;
         hop_fed = da_resample48_pair(&d->resample48.near_lp, near, d->near16_scratch,
                                      &d->resample48.far_lp, far, d->far16_scratch,
@@ -1556,19 +1235,14 @@ int delay_aec_accumulate_ex(DelayAec *d, const float *near, const float *far,
         near_fed = d->near16_scratch;
         far_fed = d->far16_scratch;
     }
-    /* NOTE: estimate_delay takes (render, capture) = (far, near). */
     produced = da_estimator_estimate_delay(&d->est, far_fed, near_fed, hop_fed,
                                            run_matched_filter, &q, &delay);
     if (produced) {
         d->latest_valid = 1;
         d->latest_delay = delay;
         d->latest_quality = q;
-        /* estimate_count is a public diagnostic counter (delay_aec_n_updates()
-         * below) with no internal threshold comparison anywhere in this file
-         * -- external callers may read the raw value, so it is not safe to
-         * assume a boolean-threshold cap. Saturate at INT_MAX instead: keeps
-         * monotonic-increase-until-cap semantics for any reader, never
-         * invokes signed-integer-overflow UB. */
+        /* estimate_count is a public counter with no internal threshold, so it saturates at
+         * INT_MAX. */
         if (d->estimate_count < INT_MAX) d->estimate_count += 1;
         if (delay != prev_delay) emitted_new = 1;
     }
@@ -1577,10 +1251,7 @@ int delay_aec_accumulate_ex(DelayAec *d, const float *near, const float *far,
 
 int delay_aec_estimated_delay(const DelayAec *d) {
     if (!d->latest_valid) return -1;
-    /* latest_delay is always in the estimator's own fixed-16kHz-equivalent
-     * domain (see delay_aec_init()'s comment); rescale to the caller's
-     * native sample domain here so every external reader gets a
-     * ready-to-use value without needing to know rate_factor exists. */
+    /* latest_delay is in the estimator's 16 kHz-equivalent domain; rescale to the caller's rate. */
     return d->latest_delay * d->rate_factor;
 }
 

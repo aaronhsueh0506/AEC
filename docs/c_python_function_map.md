@@ -1,14 +1,14 @@
 # C ↔ Python 函式對照表（AEC）
 
-> 建立日期 2026-10-20　｜　範圍：`c_impl/src` 全部（27 個 `.c`）加 `c_impl/include` 內的 static inline 重要函式；Python 側為 `python/aec.py` 與 `python/modules/**`（唯讀，受行為雜湊保護，本文件與其測試都不修改它們）。
+> 範圍：`c_impl/src` 全部（27 個 `.c`）加 `c_impl/include` 內的 static inline 重要函式；Python 側為 `python/aec.py` 與 `python/modules/**`（唯讀，受行為雜湊保護，本文件與其測試都不修改它們）。
 
 ## 0. 用途、讀法、維護
 
 ### 0.1 用途
 
-演算法在 Python 端開發，C 要先和 Python 的效果同步，之後才能優化或改寫。第一波整理把 C 內的 `aec3_*`／`_aec3_*` 命名與指向 Python 的註解改掉了（`aec3_post.c`→`aec_post.c`、`aec3_scale.c`→`aec_scale.c`、`delay_aec3.c`→`delay_aec.c`，40 個函式改名，見附錄 A），函式級的追溯因此斷了。本表用「基準 C 的註解（含 `.py` 引用）加改名對照」重建：每個 C 函式對到哪個 Python 檔案的哪個符號、兩者關係是什麼、已知有哪些落差、有哪些對拍工具或測試。
+演算法在 Python 端開發，C 要先和 Python 的效果同步，之後才能優化或改寫。本表回答：每個 C 函式對到哪個 Python 檔案的哪個符號、兩者關係是什麼、已知有哪些落差、有哪些對拍工具或測試。
 
-注意 Python 側的名稱**沒有**跟著改：`AEC._aec3_post`、`AEC._aec3_select_linear_filter_output`、`AEC._fire_aec3_misadj_scale`、`AEC._reset_aec3_post`、`PBFDKF._update_weights_aec3`、`modules/aec3_scale.py`、`ReverbDecayEstimator._lazy_init_aec3` 等仍帶 `aec3`。C 與 Python 的名稱不對稱正是這份表要記下的追溯資訊，不是漏改。
+注意 C 與 Python 的名稱不對稱：Python 側仍帶 `aec3`，C 側沒有：`AEC._aec3_post`、`AEC._aec3_select_linear_filter_output`、`AEC._fire_aec3_misadj_scale`、`AEC._reset_aec3_post`、`PBFDKF._update_weights_aec3`、`modules/aec3_scale.py`、`ReverbDecayEstimator._lazy_init_aec3` 等。這份表記下的就是這種追溯資訊。
 
 ### 0.2 欄位與符號語法
 
@@ -18,9 +18,9 @@
 |---|---|
 | C 檔:函式 | `src/<檔>.c:<函式>` 或 `include/<檔>.h:<函式>`，路徑相對於 `c_impl/`。§3 的 Python-only 列此欄為 `—`，或 `struct:<C 型別名>`（表示 C 以該型別承載）。 |
 | Python 檔:符號 | `` `<路徑>:<符號>` ``，路徑相對於 `python/`，符號是點分隔的 `類別.方法` 或模組層函式／類別名。一格可有多個，以 `<br>` 分隔；`—` 表示範圍內沒有。可在符號後加 `#錨點字串`：表示 C 函式只對應該符號內的一段（例如部分方法內的局部計算只對應某個 C 函式），測試會驗證錨點字串確實出現在該符號的原始碼裡。**符號名為準，行號不寫**（行號會漂移）。 |
-| 關係 | 開頭是下列關鍵字之一，後面可接括號說明：`mirror`＝同一運算單元、同數學（數值差異另見落差欄）；`partial`＝只對應一部分，或 C 與 Python 拆分的方式不同，括號內寫缺什麼；`C-only`＝範圍內沒有對應的 Python 函式（記憶體、SIMD 核心、除錯、測試鉤子等 C 專屬基礎設施）；`Python-only`＝範圍內沒有任何 C 函式對應到這個 Python 符號；`未能判斷`＝證據不足，不硬湊。括號說明以「推定：」開頭者，表示對應是讀兩邊程式碼後得出，基準註解與函式名都沒有直接說明，建議 Wave S 動到該函式時複核。 |
-| 已知落差 | 稽核編號，`；` 分隔，`—` 表示沒有已登記的落差。編號意義見附錄 B。EXPECTED_RED(S-xx) 標記應引用這一欄的編號。 |
-| 對拍工具／測試 | 標記語法見附錄 C（`live:`、`e2e:`、`manual:`、`ctest:`、`pytest:`；舊 `hist:` 已退役）。`—` 表示沒有直接對拍或專屬測試，只被端到端間接覆蓋。 |
+| 關係 | 開頭是下列關鍵字之一，後面可接括號說明：`mirror`＝同一運算單元、同數學（數值差異另見落差欄）；`partial`＝只對應一部分，或 C 與 Python 拆分的方式不同，括號內寫缺什麼；`C-only`＝範圍內沒有對應的 Python 函式（記憶體、SIMD 核心、除錯、測試鉤子等 C 專屬基礎設施）；`Python-only`＝範圍內沒有任何 C 函式對應到這個 Python 符號；`未能判斷`＝證據不足，不硬湊。括號說明以「推定：」開頭者，表示對應是讀兩邊程式碼後得出，註解與函式名都沒有直接說明，動到該函式時應複核。 |
+| 已知落差 | 落差編號，`；` 分隔，`—` 表示沒有已登記的落差。編號意義見附錄 A。EXPECTED_RED(S-xx) 標記應引用這一欄的編號。 |
+| 對拍工具／測試 | 標記語法見附錄 B（`live:`、`e2e:`、`manual:`、`ctest:`、`pytest:`）。`—` 表示沒有直接對拍或專屬測試，只被端到端間接覆蓋。 |
 
 ### 0.3 計數規則（逐字，先於數字）
 
@@ -37,17 +37,17 @@
 <!-- stats:begin -->
 | key | 數值 | 說明 |
 |---|---|---|
-| `c_src_total` | 411 | `src/*.c` 的 C 函式總數（唯一 (檔, 函式名)） |
+| `c_src_total` | 417 | `src/*.c` 的 C 函式總數（唯一 (檔, 函式名)） |
 | `c_src_mirror` | 233 | 關係為 mirror |
 | `c_src_partial` | 102 | 關係為 partial |
-| `c_src_c_only` | 76 | 關係為 C-only（含 3 個 `aec_testing_*` 測試鉤子） |
+| `c_src_c_only` | 82 | 關係為 C-only（含 3 個 `aec_testing_*` 測試鉤子） |
 | `c_src_unknown` | 0 | 關係為 未能判斷 |
 | `c_hdr_total` | 6 | header 內 static inline 函式總數（規則 2；共用 SIMD 核心不列入） |
 | `c_hdr_c_only` | 5 | 其中 C-only |
 | `c_hdr_mapped` | 1 | 其中 mirror 或 partial |
-| `c_total` | 417 | C 函式合計（src 加 header） |
+| `c_total` | 423 | C 函式合計（src 加 header） |
 | `c_mapped` | 336 | 已對應（mirror 加 partial）合計 |
-| `c_c_only` | 81 | C-only 合計 |
+| `c_c_only` | 87 | C-only 合計 |
 | `c_unknown` | 0 | 未能判斷 合計 |
 | `inferred` | 26 | 關係說明以「推定：」開頭的列（已含在上列 mirror／partial 內） |
 | `py_total` | 570 | Python 符號總數（規則 4） |
@@ -60,20 +60,20 @@
 
 ### 0.5 未能判斷
 
-本次沒有留空的函式或符號：每個 C 函式都能由基準註解、名稱一一對應或讀程式碼比對判定。但判定的依據強度不同，其中 29 列標為「推定」（關係說明以「推定：」開頭），是這份表最該被複核的部分；其餘列要嘛有基準 C 註解或 Python 註解明載，要嘛函式名與方法名一一對應。
+沒有留空的函式或符號：每個 C 函式都能由名稱一一對應或讀程式碼比對判定。判定的依據強度不同，其中 26 列標為「推定」（關係說明以「推定：」開頭），是這份表最該被複核的部分；其餘列要嘛有 C 或 Python 註解明載，要嘛函式名與方法名一一對應。
 
 ### 0.6 如何維護
 
 1. 增、刪、改名 C 函式或 Python 符號之後，直接改本檔對應的列（沒有產生器，本檔就是唯一來源）。
 2. 在 `python/` 的上層目錄執行 `python3 -m pytest python/tests/test_c_python_map.py`。測試不匯入任何模組，用 `ast` 讀 `python/aec.py` 與 `python/modules/**`，用內建的小型 C 掃描器讀 `c_impl/src`、`c_impl/include`。失敗訊息會指出是哪一列、哪個符號。
-3. 測試依賴本檔的標題列與關係關鍵字；新增標記語法（例如日後的 `pyc:`）要同時改附錄 C 與測試。
+3. 測試依賴本檔的標題列與關係關鍵字；新增標記語法（例如日後的 `pyc:`）要同時改附錄 B 與測試。
 4. 新增一個 C 函式：在 §1 對應檔的表加一列，並更新 §0.4 的統計。新增 Python 符號：若有 C 函式對應就在該列引用；沒有就加進 §3。
-5. 這份表在 `AEC` 與 `Audio_ALG/lib/aec` 是同一份檔案、同一份測試（`lib/aec` 是鏡像），兩處要一起改。測試用自己所在位置推出 `python/` 與 `c_impl/`，所以原樣複製即可在兩處通過；兩處的 Python 符號集合與 C 函式集合完全相同（2026-10-20 前 `lib/aec` 的 `orchestrator.py` 在 `set_preset` 內少一個 NO_FLOOR 守衛分支，屬 S-20；兩邊的守衛已一起移除，S-20 關閉）。
+5. 這份表在 `AEC` 與 `Audio_ALG/lib/aec` 是同一份檔案、同一份測試（`lib/aec` 是鏡像），兩處要一起改。測試用自己所在位置推出 `python/` 與 `c_impl/`，所以原樣複製即可在兩處通過；兩處的 Python 符號集合與 C 函式集合完全相同。
 
 ### 0.7 與 `pyc_parity_aec.sh` 的關係
 
-`pyc_parity_aec.sh`（預定路徑 `c_impl/test/pyc_parity_aec.sh`）是整理計畫中規劃的 Python↔C 數值對拍腳本，由另一個工作項目同步建立；**撰寫本文件時（2026-10-20）它尚未交付**，Makefile 內對應的 target（`test-parity-e2e`、`pyc-parity-driver`、`test-pyc-parity`）也還在接線中，落地後本段與附錄 C 要跟著更新。分工是：
-該腳本以「情境」為單位量 C 對 Python 的數值差，兩層標準（std-math 建置貼近 Python、出貨建置落在固定近似預算內），並以 `EXPECTED_RED(S-xx)` 標記已知落差；本表以「函式」為單位回答「這段 C 對應 Python 哪裡、有哪些已登記落差」。情境紅燈時用本表由 C 函式反查 Python 符號，`EXPECTED_RED(S-xx)` 的編號則引用本表「已知落差」欄與附錄 B。本表不量任何數值，也不取代該腳本；腳本建立後，把它的情境名稱以新標記補進「對拍工具／測試」欄（並同步改附錄 C 與測試）。
+`c_impl/test/pyc_parity_aec.sh`（`make test-pyc-parity`）是 Python↔C 數值對拍腳本；端到端閘門是 `make test-parity-e2e`。分工是：
+該腳本以「情境」為單位量 C 對 Python 的數值差，兩層標準（std-math 建置貼近 Python、出貨建置落在固定近似預算內），並以 `EXPECTED_RED(S-xx)` 標記已知落差（登記在 `c_impl/test/pyc_parity/pyc_parity.py`）；本表以「函式」為單位回答「這段 C 對應 Python 哪裡、有哪些已登記落差」。情境紅燈時用本表由 C 函式反查 Python 符號，`EXPECTED_RED(S-xx)` 的編號則引用本表「已知落差」欄與附錄 A。本表不量任何數值，也不取代該腳本。
 
 ---
 
@@ -81,7 +81,7 @@
 
 ### 1.1 `aec.c`　aec.c（頂層引擎：設定、記憶體、逐 hop 主迴圈、串流 API）
 
-依據：基準 C 的註解逐段引用 orchestrator.py／config.py（`_update_simple_mu_ratio`、`_fire_aec3_misadj_scale`、`_reset_filter_derived_state`、`_reset_aec3_post`、`_get_simple_mu_scale`、`_update_misadjustment_estimator` 等）；Python 側註解亦回指 C（`aec_default_fft_size`、`aec_ref_ring_samples`、`aec_config_resolve_delay`、`aec_validate_config`、`aec_linear_is_cancelling`、`aec_reset`）。Python 的 `AEC.process` 按 capture、reference alignment、linear filter、RES 與診斷順序呼叫私有 helper；下表對應實際執行該步驟的方法，必要時以 `#錨點字串` 指出局部計算。
+依據：Python 的 `AEC.process` 按 capture、reference alignment、linear filter、RES 與診斷順序呼叫私有 helper（`_update_simple_mu_ratio`、`_fire_aec3_misadj_scale`、`_reset_filter_derived_state`、`_reset_aec3_post`、`_get_simple_mu_scale`、`_update_misadjustment_estimator` 等）；下表對應實際執行該步驟的方法，必要時以 `#錨點字串` 指出局部計算。
 
 | C 檔:函式 | Python 檔:符號 | 關係 | 已知落差 | 對拍工具／測試 |
 |---|---|---|---| --- |
@@ -89,10 +89,11 @@
 | `src/aec.c:aec_legacy10ms_alpha` | — | C-only（Python 在呼叫處直接用 `growth_rehop`） | — | `ctest:test_rate_structural.c` |
 | `src/aec.c:aec_legacy10ms_rate` | — | C-only（加法型逐 hop 速率的線性換算；C 註解載明 Python 側尚無對應的共用 helper） | — | `ctest:test_rate_structural.c` |
 | `src/aec.c:aec_config_defaults` | `modules/config.py:AecConfig` | partial（C 只填 balanced 預設值，缺 Python-only 旋鈕） | S-02；S-18；S-22；D-02；D-06；D-07 | `ctest:test_config_validation.c` |
+| `src/aec.c:aec_preset_row` | — | C-only（三個 preset 查表共用的列查找；Python 以 `AecConfig.from_preset` 內的分支取得同樣數值） | — | `ctest:test_runtime_preset.c` |
 | `src/aec.c:aec_preset_floor_db` | `modules/config.py:AecConfig.from_preset` | partial（只回 far-active 地板 dB） | D-04 | `ctest:test_aec_res.c` |
 | `src/aec.c:aec_preset_dt_floor_db` | `modules/config.py:AecConfig.from_preset` | partial（只回 DT 地板 dB） | D-04 | `ctest:test_aec_res.c` |
 | `src/aec.c:aec_preset_split_floor_enabled` | `modules/config.py:AecConfig.from_preset` | partial（只回 split-floor 閂的布林值） | D-04 | `ctest:test_aec_res.c` |
-| `src/aec.c:aec_config_from_preset` | `modules/config.py:AecConfig.from_preset` | mirror（NO_FLOOR 現在雙邊建構期都有） | D-04 | — |
+| `src/aec.c:aec_config_from_preset` | `modules/config.py:AecConfig.from_preset` | mirror（NO_FLOOR 雙邊建構期都有） | D-04 | — |
 | `src/aec.c:aec_resolve_signal_grid` | `modules/config.py:resolve_signal_grid` | mirror | — | `pytest:test_signal_grid.py`<br>`ctest:test_config_validation.c` |
 | `src/aec.c:aec_is_valid_sample_rate` | `modules/config.py:resolve_signal_grid`<br>`modules/config.py:default_fft_size` | partial（推定：Python 沒有獨立的「取樣率是否合法」函式，由格點表比對隱含） | — | `ctest:test_config_validation.c` |
 | `src/aec.c:aec_default_fft_size` | `modules/config.py:default_fft_size` | mirror | — | `pytest:test_signal_grid.py`<br>`ctest:test_config_validation.c` |
@@ -118,6 +119,8 @@
 | `src/aec.c:aec_testing_legacy10ms_rate` | — | C-only（測試專用鉤子，只在 `AEC_TESTING` 建置存在） | — | `ctest:test_rate_structural.c` |
 | `src/aec.c:next_pow2` | — | C-only（記憶體配置輔助） | — | — |
 | `src/aec.c:aec_fill_filter_taps` | — | C-only（FilterAnalyzer 的 tap provider 回呼；Python 直接傳 `get_time_domain_filter()` 結果） | — | — |
+| `src/aec.c:aec_state_bind` | — | C-only（把 AecState 設定與初始化集中在一處，供 `aec_carve_state` 與 `aec_post_chain_reset` 共用） | — | `ctest:test_memory_layout.c`<br>`pytest:test_aec_reset.py` |
+| `src/aec.c:aec_ree_bind` | — | C-only（把殘餘回音估計器的設定與初始化集中在一處，供 `aec_carve_residual` 與 `aec_post_chain_reset` 共用） | — | `ctest:test_memory_layout.c`<br>`pytest:test_aec_reset.py` |
 | `src/aec.c:aec_post_chain_reset` | `modules/orchestrator.py:AEC._reset_aec3_post` | mirror（對應 preserve_render_side=True 的路徑） | — | `pytest:test_aec_reset.py` |
 | `src/aec.c:aec_create` | `modules/orchestrator.py:AEC.__init__`<br>`modules/orchestrator.py:AEC._init_config` | partial（推定：C 另做驗證與記憶體配置） | D-06；D-07 | `ctest:test_config_validation.c`<br>`ctest:test_heap_alignment.c` |
 | `src/aec.c:aec_ref_ring_samples` | `modules/config.py:ref_ring_samples` | mirror（Python 註解：term for term） | — | `ctest:test_linear_context.c` |
@@ -154,6 +157,7 @@
 | `src/aec.c:aec_run_shadow` | `modules/orchestrator.py:AEC._process_linear`<br>`modules/orchestrator.py:AEC._update_shadow` | partial（逐 hop 子步驟；保留原始先後順序與 scratch 生命週期） | — | `ctest:test_process_context.c` |
 | `src/aec.c:aec_track_delay_shift` | `modules/orchestrator.py:AEC._track_delay_shift`<br>`modules/orchestrator.py:AEC._accept_delay_shift` | partial（逐 hop 子步驟；保留原始先後順序與 scratch 生命週期） | — | `ctest:test_process_context.c` |
 | `src/aec.c:aec_update_delay_estimator` | `modules/orchestrator.py:AEC._update_delay_estimate` | partial（逐 hop 子步驟；保留原始先後順序與 scratch 生命週期） | — | `ctest:test_process_context.c` |
+| `src/aec.c:aec_epc_gain_change_recovery` | — | C-only（EPV 與 shadow_rise 兩個觸發共用的回復步驟；Python 在兩處呼叫點各自內聯） | — | `ctest:test_process_context.c` |
 | `src/aec.c:aec_update_echo_path` | `modules/orchestrator.py:AEC._update_path_changes` | partial（逐 hop 子步驟；保留原始先後順序與 scratch 生命週期） | — | `ctest:test_process_context.c` |
 | `src/aec.c:aec_update_linear_only_steering` | `modules/orchestrator.py:AEC._update_linear_only_steering` | partial（逐 hop 子步驟；保留原始先後順序與 scratch 生命週期） | — | `ctest:test_process_context.c` |
 | `src/aec.c:aec_update_misadjustment_erle` | `modules/orchestrator.py:AEC._track_linear_error` | partial（逐 hop 子步驟；保留原始先後順序與 scratch 生命週期） | — | `ctest:test_process_context.c` |
@@ -167,7 +171,7 @@
 | `src/aec.c:aec_hop_size` | `modules/orchestrator.py:AEC.hop_size` | mirror | — | — |
 | `src/aec.c:aec_bump_delay_generation` | — | C-only（AecLinearContext 的對齊世代記號） | D-12 | `ctest:test_linear_context.c` |
 | `src/aec.c:aec_far_fft_real_compute_count` | — | C-only（遠端 FFT 共用的計數儀表） | D-12 | `ctest:test_shared_far_spec.c` |
-| `src/aec.c:aec_set_preset` | `modules/orchestrator.py:AEC.set_preset` | mirror（NO_FLOOR 現在雙邊執行期都可切換，無守衛） | D-04 | `pytest:test_runtime_preset.py`<br>`ctest:test_runtime_preset.c` |
+| `src/aec.c:aec_set_preset` | `modules/orchestrator.py:AEC.set_preset` | mirror（NO_FLOOR 雙邊執行期都可切換，無守衛） | D-04 | `pytest:test_runtime_preset.py`<br>`ctest:test_runtime_preset.c` |
 | `src/aec.c:aec_apply_external_realign` | `modules/orchestrator.py:AEC.apply_external_realign` | mirror | — | `pytest:test_external_realign.py`<br>`ctest:test_external_realign.c` |
 | `src/aec.c:aec_reset` | `modules/orchestrator.py:AEC.reset` | mirror | — | `pytest:test_aec_reset.py`<br>`ctest:test_reset_parity.c` |
 | `src/aec.c:misadj_update` | `modules/orchestrator.py:AEC._update_misadjustment_estimator` | mirror | — | — |
@@ -191,7 +195,7 @@
 
 ### 1.2 `aec_post.c`　aec_post.c（AEC 後處理驅動：對應 Python 的 `_aec3_post`）
 
-依據：基準 C 檔頭 "C port of the AEC3 post-filter DRIVER (AEC._aec3_post)"、`aec3_post_run — full orchestration of AEC._aec3_post (orchestrator.py …)`、`mirrors _reset_aec3_post`；步驟編號 stage 1–6 為 C 註解所載。Python 的 `AEC._aec3_post` 依序呼叫 spectra、state、residual、gain 與 synthesis helper；下表對應實際執行該階段的方法。
+依據：C 的 `aec_post_run` 對應 `AEC._aec3_post` 的整條編排，`aec_post_chain_reset` 對應 `_reset_aec3_post`。Python 的 `AEC._aec3_post` 依序呼叫 spectra、state、residual、gain 與 synthesis helper；下表對應實際執行該階段的方法。
 
 | C 檔:函式 | Python 檔:符號 | 關係 | 已知落差 | 對拍工具／測試 |
 |---|---|---|---| --- |
@@ -226,7 +230,7 @@
 | `src/aec_res.c:aec_res_process` | — | C-only（範圍內無 Python 對應；內部呼叫 `suppression_gain_get_gain`） | — | `ctest:test_aec_res.c` |
 | `src/aec_res.c:aec_res_set_preset` | — | C-only（範圍內無 Python 對應） | S-26；D-04 | `ctest:test_aec_res.c` |
 | `src/aec_res.c:aec_res_split_floor` | — | C-only（範圍內無 Python 對應） | — | `ctest:test_aec_res.c` |
-| `src/aec_res.c:aec_cng_fill` | `modules/orchestrator.py:AEC._post_add_comfort_noise#_aec3_cng_seed` | partial（與 `_aec3_post` 內的 CNG 注入同一組 LCG 與 sin 表；孿生另在 pipelines/cng_aec3.py） | S-23 | `ctest:test_aec_res.c` |
+| `src/aec_res.c:aec_cng_fill` | `modules/orchestrator.py:AEC._post_add_comfort_noise#_aec3_cng_seed` | partial（與 `_aec3_post` 內的 CNG 注入同一組 LCG 與 sin 表；孿生另在 pipelines/cng_aec3.py） | — | `ctest:test_aec_res.c` |
 
 ### 1.4 `aec_debug.c`　aec_debug.c（除錯記錄與逐 hop trace）
 
@@ -243,7 +247,7 @@
 
 ### 1.5 `aec_state.c`　aec_state.c（AEC 狀態彙整：可用線性、飽和、ERLE／ERL 查詢）
 
-依據：基準 C 檔頭 "C port of python/modules/state/aec_state.py"、`STRICT update() order (aec_state.cc:189-291 / aec_state.py)`；查詢函式名一一對應 Python 方法。
+依據：C 的 `aec_state.c` 對應 `python/modules/state/aec_state.py`；`update()` 的子分析器呼叫順序固定，兩邊一致；查詢函式名一一對應 Python 方法。
 
 | C 檔:函式 | Python 檔:符號 | 關係 | 已知落差 | 對拍工具／測試 |
 |---|---|---|---| --- |
@@ -267,7 +271,7 @@
 
 ### 1.6 `aec_scale.c`　aec_scale.c（單位換算：block／ms／hop／dB）
 
-依據：基準 C 檔頭 "C port of python/modules/aec3_scale.py conversion helpers"；函式名一一對應（基準名 `aec3_*` → 現行 `aec_*`，Python 側檔名與函式名不變）。`aec_ms_to_hops` 對的是 `ms_to_hops_f32`（專為對齊 C 而存在），double 版 `ms_to_hops` 在整半格案例差 1 hop（D-09）。
+依據：C 的 `aec_scale.c` 對應 `python/modules/aec3_scale.py` 的換算 helper；函式名一一對應（C 側為 `aec_*`，Python 側檔名與函式名仍帶 aec3）。`aec_ms_to_hops` 對的是 `ms_to_hops_f32`（專為對齊 C 而存在），double 版 `ms_to_hops` 在整半格案例差 1 hop（D-09）。
 
 | C 檔:函式 | Python 檔:符號 | 關係 | 已知落差 | 對拍工具／測試 |
 |---|---|---|---| --- |
@@ -284,7 +288,7 @@
 
 ### 1.7 `linear_filter_output.c`　linear_filter_output.c（線性濾波器輸出選擇：refined 對 coarse）
 
-依據：基準 C 檔頭 "AEC._aec3_select_linear_filter_output (orchestrator.py:2894-2999)"（第一波把檔頭中的 `_aec3_` 引用改掉了，這張表補回；Python 方法名仍帶 aec3）。
+依據：C 的 `linear_filter_output.c` 對應 `AEC._aec3_select_linear_filter_output`（Python 方法名仍帶 aec3）。
 
 | C 檔:函式 | Python 檔:符號 | 關係 | 已知落差 | 對拍工具／測試 |
 |---|---|---|---| --- |
@@ -294,7 +298,7 @@
 
 ### 1.8 `pbfdkf.c`　pbfdkf.c（分區頻域濾波器：PBFDAF 基底與 PBFDKF Kalman 增益）
 
-依據：基準 C 檔頭 "Port of python/modules/filters.py"；註解寫出 `matches PBFDAF.process lines 191-248`、`Mirrors filters.py's PBFDAF._initial_state_threshold_hops`、`Mirrors filters.py's PBFDKF …`。C 的 `PBFDAF` 結構同時是 shadow／observer 濾波器（NLMS 更新）與 `PBFDKF` 的基底，與 Python `PBFDKF(PBFDAF)` 的繼承一致。`pbfdkf_update_weights` 的基準名為 `pbfdkf_update_weights_aec3`，Python 方法名仍是 `_update_weights_aec3`。Python 有 FDAF／SUBBAND 模式與調校選項，C 只實作 PBFDKF 路徑（D-07）。
+依據：C 的 `pbfdkf.c` 對應 `python/modules/filters.py`。C 的 `PBFDAF` 結構同時是 shadow／observer 濾波器（NLMS 更新）與 `PBFDKF` 的基底，與 Python `PBFDKF(PBFDAF)` 的繼承一致。`pbfdkf_update_weights` 對 Python 的 `_update_weights_aec3`（方法名仍帶 aec3）。Python 有 FDAF／SUBBAND 模式與調校選項，C 只實作 PBFDKF 路徑（D-07）。
 
 | C 檔:函式 | Python 檔:符號 | 關係 | 已知落差 | 對拍工具／測試 |
 |---|---|---|---| --- |
@@ -311,7 +315,7 @@
 | `src/pbfdkf.c:pbfdaf_reset` | `modules/filters.py:PBFDAF.reset` | mirror | T-03 | `ctest:test_shared_far_spec.c` |
 | `src/pbfdkf.c:rfft_padded` | — | C-only（短輸入補零後的 rfft 輔助） | — | — |
 | `src/pbfdkf.c:pbfdaf_frontend` | `modules/filters.py:PBFDAF.process` | partial（共用前端：緩衝位移、FFT、遠端 PSD、回音估計、誤差、加窗誤差；PBFDAF／PBFDKF 共用） | T-03 | — |
-| `src/pbfdkf.c:pbfdaf_process` | `modules/filters.py:PBFDAF.process`<br>`modules/filters.py:PBFDAF.complete_update`<br>`modules/filters.py:PBFDAF._update_weights` | partial（NLMS 路徑；C 在單一函式內完成 Python 拆成三個方法的流程；`call_counter` 遞增順序 2026-10-20 已修為與 Python 一致——mu 全 0 的提早返回前一律先遞增） | T-03 | — |
+| `src/pbfdkf.c:pbfdaf_process` | `modules/filters.py:PBFDAF.process`<br>`modules/filters.py:PBFDAF.complete_update`<br>`modules/filters.py:PBFDAF._update_weights` | partial（NLMS 路徑；C 在單一函式內完成 Python 拆成三個方法的流程；`call_counter` 與 Python 一樣在 mu 全 0 的提早返回前先遞增） | T-03 | — |
 | `src/pbfdkf.c:pbfdaf_process_with_far_cmag2` | — | C-only（PBFDAF 精確遠端 magnitude² 快取入口；流程同 process） | T-03 | `ctest:test_spectral_reuse.c` |
 | `src/pbfdkf.c:pbfdaf_copy_weights_from` | `modules/filters.py:PBFDAF.copy_weights_from` | mirror | T-03 | — |
 | `src/pbfdkf.c:pbfdaf_warm_shift_ir` | `modules/filters.py:PBFDAF.warm_shift_ir` | mirror | T-03 | `pytest:test_external_realign.py` |
@@ -330,13 +334,13 @@
 | `src/pbfdkf.c:pbfdaf_scale_filter` | `modules/filters.py:PBFDAF.scale_filter` | mirror | T-03 | — |
 | `src/pbfdkf.c:pbfdkf_scale_filter` | `modules/filters.py:PBFDKF.scale_filter` | mirror | T-03 | — |
 | `src/pbfdkf.c:pbfdkf_h_error_refresh` | `modules/filters.py:PBFDKF._h_error_refresh` | mirror | T-03 | — |
-| `src/pbfdkf.c:pbfdkf_update_weights` | `modules/filters.py:PBFDKF._update_weights_aec3`<br>`modules/filters.py:PBFDKF._update_weights` | mirror（基準名 `pbfdkf_update_weights_aec3`；Python 的 `_update_weights` 是閘門加包裝） | T-03 | — |
+| `src/pbfdkf.c:pbfdkf_update_weights` | `modules/filters.py:PBFDKF._update_weights_aec3`<br>`modules/filters.py:PBFDKF._update_weights` | mirror（Python 的 `_update_weights` 是閘門加包裝） | T-03 | — |
 | `src/pbfdkf.c:pbfdkf_process` | `modules/filters.py:PBFDAF.process`<br>`modules/filters.py:PBFDAF.complete_update` | partial（PBFDKF 沒有自己的 `process`，繼承 PBFDAF；C 把 Kalman 路徑獨立成函式） | T-03 | — |
 | `src/pbfdkf.c:pbfdkf_process_with_far_cmag2` | — | C-only（PBFDKF 精確遠端 magnitude² 快取入口；回傳本 hop 的 error magnitude² cache 是否有效；流程同 process） | T-03 | `ctest:test_spectral_reuse.c` |
 
 ### 1.9 `delay_aec.c`　delay_aec.c（延遲估計鏈：降頻器、matched filter、lag 聚合、時脈漂移）
 
-依據：基準 C 的 `delay_aec3.c`（現名 `delay_aec.c`）註解寫出 `Mirrors python/modules/delay/lag_aggregator.py's aggregate()`、`matches python/modules/delay/clockdrift_detector.py`、`Mirrors matched_filter_core()`、`Mirrors MatchedFilter.update`、`_process_inner_block`、`estimate_delay`、`_CascadedBiquad`；對外包裝 `delay_aec_*` 對應 `legacy_compat.py` 的 `LegacyDelayShim`。C 的整條延遲鏈以 float32 實作，與 Python float64 的差異是刻意的（`delay_aec.h` 明載），不保證逐位元相同（D-03）；`aec.c` 的 duty-cycle 狀態機另以 `delay_aec_accumulate_ex` 驅動（`run_matched_filter=0` 時只餵不分析，Python 永遠分析）。Python 的 `RenderDelayController` 與 pre-echo 偵測在 C 內沒有對應（見 §3）。
+依據：C 的 `delay_aec.c` 對應 `python/modules/delay/` 內的 `lag_aggregator.py`（`aggregate()`）、`clockdrift_detector.py`、`matched_filter.py`（`matched_filter_core`、`MatchedFilter.update`）、`echo_path_delay_estimator.py`（`_process_inner_block`、`estimate_delay`）與 `downsampled_ring.py`（`_CascadedBiquad`）；對外包裝 `delay_aec_*` 對應 `legacy_compat.py` 的 `LegacyDelayShim`。C 的整條延遲鏈以 float32 實作，與 Python float64 的差異是刻意的（`delay_aec.h` 明載），不保證逐位元相同（D-03）；`aec.c` 的 duty-cycle 狀態機另以 `delay_aec_accumulate_ex` 驅動（`run_matched_filter=0` 時只餵不分析，Python 永遠分析）。Python 的 `RenderDelayController` 與 pre-echo 偵測在 C 內沒有對應（見 §3）。
 
 | C 檔:函式 | Python 檔:符號 | 關係 | 已知落差 | 對拍工具／測試 |
 |---|---|---|---| --- |
@@ -358,7 +362,7 @@
 | `src/delay_aec.c:da_decimator_decimate_generic` | `modules/delay/downsampled_ring.py:Decimator.decimate` | mirror（通用逐樣本走法，64 樣本區塊） | D-03 | `ctest:test_delay_kernels.c` |
 | `src/delay_aec.c:da_decimator_decimate` | `modules/delay/downsampled_ring.py:Decimator.decimate` | mirror（對外分派：NEON 版或通用版） | D-03 | `ctest:test_delay_kernels.c` |
 | `src/delay_aec.c:da_biquad_same_coefficients` | — | C-only（判斷近端／遠端兩路係數相同，以啟用成對 NEON 路徑） | — | — |
-| `src/delay_aec.c:da_decimator_same_coefficients` | — | C-only（同上；只在 NEON 建置存在，純量建置的 test-delay-kernels 曾因此編不過，已在 2026-10-20 的紅閘門修補中解決，兩種 SIMD 都通過） | T-04 | `ctest:test_delay_kernels.c` |
+| `src/delay_aec.c:da_decimator_same_coefficients` | — | C-only（同上；只在 NEON 建置存在） | — | `ctest:test_delay_kernels.c` |
 | `src/delay_aec.c:da_decimator_decimate_pair` | `modules/delay/downsampled_ring.py:Decimator.decimate` | partial（近端遠端成對降頻的 NEON 優化；NEON／純量雙胞，算一個函式） | D-03 | `ctest:test_delay_kernels.c` |
 | `src/delay_aec.c:da_resample48_pair` | `modules/delay/echo_path_delay_estimator.py:_Resample48.process_decimate` | partial（近端遠端成對的 NEON 優化；NEON／純量雙胞，算一個函式） | D-03 | `ctest:test_delay_kernels.c` |
 | `src/delay_aec.c:da_ring_reset` | `modules/delay/downsampled_ring.py:DownsampledRenderBuffer.reset` | mirror | — | — |
@@ -385,6 +389,7 @@
 | `src/delay_aec.c:da_clockdrift_init` | `modules/delay/clockdrift_detector.py:ClockdriftDetector.__init__` | mirror | — | — |
 | `src/delay_aec.c:da_clockdrift_update` | `modules/delay/clockdrift_detector.py:ClockdriftDetector.update` | mirror | — | — |
 | `src/delay_aec.c:da_hist_window_for_rate` | `modules/delay/lag_aggregator.py:_num_blocks_per_second` | partial（1 秒內的 64 樣本內層區塊數，另夾在 C 的靜態容量內） | — | — |
+| `src/delay_aec.c:da_estimator_clear_chain` | — | C-only（降頻器與 render ring 的清零，供 `da_estimator_init` 與 `da_estimator_reset` 共用） | — | `ctest:test_delay_reset.c` |
 | `src/delay_aec.c:da_estimator_init` | `modules/delay/echo_path_delay_estimator.py:EchoPathDelayEstimator.__init__` | mirror | — | — |
 | `src/delay_aec.c:da_estimator_reset_internal` | `modules/delay/echo_path_delay_estimator.py:EchoPathDelayEstimator._reset` | mirror | — | — |
 | `src/delay_aec.c:da_estimator_reset` | `modules/delay/echo_path_delay_estimator.py:EchoPathDelayEstimator.reset` | mirror | — | `ctest:test_delay_reset.c`<br>`pytest:test_delay_reset.py` |
@@ -406,7 +411,7 @@
 
 ### 1.10 `suppression_gain.c`　suppression_gain.c（殘餘回音抑制增益）
 
-依據：基準 C 檔頭 "C port of python/modules/residual/suppression_gain.py"；static 函式註解逐一寫出 Python 名稱（`_ne_state_for_gain_rules`、`LowNoiseRenderDetector.detect`、`DominantNearendDetector.update`、`_MovingAverageSpectrum.average`、`_get_max_gain`、`_get_min_gain`、`_gain_to_no_audible_echo`、`_limit_lf_gains`、`_limit_hf_gains`、`_lower_band_gain`）。C 的 `suppression_gain_get_gain` 內聯了 `_lower_band_gain` 與 `_sigmoid_blend_weight`。Python 的 `_DominantNearendDetector` 設定類別方法（`set_config`、`_derive_trigger_threshold`）與 `_build_gain_params`、`_MovingAverageSpectrum.update_memory_length` 在 C 內於初始化時展開（見 §3）。
+依據：C 的 `suppression_gain.c` 對應 `python/modules/residual/suppression_gain.py`；static 函式名對應 Python 名稱（`_ne_state_for_gain_rules`、`LowNoiseRenderDetector.detect`、`DominantNearendDetector.update`、`_MovingAverageSpectrum.average`、`_get_max_gain`、`_get_min_gain`、`_gain_to_no_audible_echo`、`_limit_lf_gains`、`_limit_hf_gains`、`_lower_band_gain`）。C 的 `suppression_gain_get_gain` 內聯了 `_lower_band_gain` 與 `_sigmoid_blend_weight`。Python 的 `_DominantNearendDetector` 設定類別方法（`set_config`、`_derive_trigger_threshold`）與 `_build_gain_params`、`_MovingAverageSpectrum.update_memory_length` 在 C 內於初始化時展開（見 §3）。
 
 | C 檔:函式 | Python 檔:符號 | 關係 | 已知落差 | 對拍工具／測試 |
 |---|---|---|---| --- |
@@ -435,7 +440,7 @@
 
 ### 1.11 `residual_echo_estimator.c`　residual_echo_estimator.c（殘餘回音功率估計）
 
-依據：基準 C 檔頭 "C port of residual_echo_estimator.py"；註解寫出 `UpdateRenderNoisePower (cc:325-359)`、`GetEchoPathGain`、`_reverb_decay`、`_update_reverb_linear (cc:390-392)`。C 版的殘響衰減走靜態設定路徑（未綁 decay estimator），因此 Python 的 `ReverbDecayEstimator` 與 `attach_reverb_decay_estimator` 在 C 內沒有對應（見 §3）。
+依據：C 的 `residual_echo_estimator.c` 對應 `python/modules/residual/residual_echo_estimator.py`（AEC3 的 `UpdateRenderNoisePower`、`GetEchoPathGain`，Python 的 `_reverb_decay`、`_update_reverb_linear`）。C 版的殘響衰減走靜態設定路徑（未綁 decay estimator），因此 Python 的 `ReverbDecayEstimator` 與 `attach_reverb_decay_estimator` 在 C 內沒有對應（見 §3）。
 
 | C 檔:函式 | Python 檔:符號 | 關係 | 已知落差 | 對拍工具／測試 |
 |---|---|---|---| --- |
@@ -448,12 +453,13 @@
 | `src/residual_echo_estimator.c:ree_update_render_noise_power` | `modules/residual/residual_echo_estimator.py:ResidualEchoEstimator._update_render_noise_power` | mirror | T-03 | — |
 | `src/residual_echo_estimator.c:ree_echo_path_gain` | `modules/residual/residual_echo_estimator.py:ResidualEchoEstimator._get_echo_path_gain` | mirror | T-03 | — |
 | `src/residual_echo_estimator.c:ree_reverb_decay` | `modules/residual/residual_echo_estimator.py:ResidualEchoEstimator._reverb_decay` | partial（只實作靜態設定路徑，decay estimator 未綁定） | T-03 | — |
+| `src/residual_echo_estimator.c:ree_add_reverb` | — | C-only（線性與非線性路徑共用的 AddReverb 迴圈；Python 在兩處呼叫點各自內聯） | — | — |
 | `src/residual_echo_estimator.c:ree_update_reverb_linear` | `modules/residual/residual_echo_estimator.py:ResidualEchoEstimator._update_reverb_linear` | mirror | T-03 | — |
 | `src/residual_echo_estimator.c:ree_estimate` | `modules/residual/residual_echo_estimator.py:ResidualEchoEstimator.estimate` | mirror | T-03 | — |
 
 ### 1.12 `reverb_model.c`　reverb_model.c（殘響能量模型）
 
-依據：基準 C 檔頭 "C port of reverb_model.py. All-float32 arithmetic"。`ReverbModel.reverb` 為 getter，C 以結構欄位存取（見 §3）。
+依據：C 的 `reverb_model.c` 對應 `reverb_model.py`，全部 float32。`ReverbModel.reverb` 為 getter，C 以結構欄位存取（見 §3）。
 
 | C 檔:函式 | Python 檔:符號 | 關係 | 已知落差 | 對拍工具／測試 |
 |---|---|---|---| --- |
@@ -464,7 +470,7 @@
 
 ### 1.13 `reverb_frequency_response.c`　reverb_frequency_response.c（殘響頻率響應）
 
-依據：基準 C 檔頭 "C port of reverb_frequency_response.py"。`tail_response`、`average_decay` 為 getter，C 以結構欄位存取（見 §3）。
+依據：C 的 `reverb_frequency_response.c` 對應 `reverb_frequency_response.py`。`tail_response`、`average_decay` 為 getter，C 以結構欄位存取（見 §3）。
 
 | C 檔:函式 | Python 檔:符號 | 關係 | 已知落差 | 對拍工具／測試 |
 |---|---|---|---| --- |
@@ -474,7 +480,7 @@
 
 ### 1.14 `stationarity_estimator.c`　stationarity_estimator.c（頻帶／區塊穩態判定）
 
-依據：基準 C 檔頭 "python/modules/state/stationarity_estimator.py"；static 函式名即 Python 私有方法名（`_NoiseSpectrum`、`_alpha_now`、`_update_hangover`、`_smooth_per_freq`）。Python 模組層函式 `get_residual_echo_scaling` 在 C 內沒有獨立函式（見 §3）。
+依據：C 的 `stationarity_estimator.c` 對應 `python/modules/state/stationarity_estimator.py`；static 函式名即 Python 私有方法名（`_NoiseSpectrum`、`_alpha_now`、`_update_hangover`、`_smooth_per_freq`）。Python 模組層函式 `get_residual_echo_scaling` 在 C 內沒有獨立函式（見 §3）。
 
 | C 檔:函式 | Python 檔:符號 | 關係 | 已知落差 | 對拍工具／測試 |
 |---|---|---|---| --- |
@@ -493,7 +499,7 @@
 
 ### 1.15 `filter_analyzer.c`　filter_analyzer.c（濾波器分析：延遲、一致性、峰值）
 
-依據：基準 C 檔頭 "python/modules/state/filter_analyzer.py"；`cd_*` 對應 Python 的 `_ConsistentFilterDetector`。Python 的 `filter_delays_blocks` 為 getter，C 以結構欄位存取（見 §3）。
+依據：C 的 `filter_analyzer.c` 對應 `python/modules/state/filter_analyzer.py`；`cd_*` 對應 Python 的 `_ConsistentFilterDetector`。Python 的 `filter_delays_blocks` 為 getter，C 以結構欄位存取（見 §3）。
 
 | C 檔:函式 | Python 檔:符號 | 關係 | 已知落差 | 對拍工具／測試 |
 |---|---|---|---| --- |
@@ -512,7 +518,7 @@
 
 ### 1.16 `filter_delay.c`　filter_delay.c（濾波器延遲彙整）
 
-依據：基準 C 檔頭 "C port of python/modules/state/filter_delay.py"。Python 的 `external_delay_samples`、`direct_path_filter_delays` 為 getter，C 以結構欄位存取（見 §3）。
+依據：C 的 `filter_delay.c` 對應 `python/modules/state/filter_delay.py`。Python 的 `external_delay_samples`、`direct_path_filter_delays` 為 getter，C 以結構欄位存取（見 §3）。
 
 | C 檔:函式 | Python 檔:符號 | 關係 | 已知落差 | 對拍工具／測試 |
 |---|---|---|---| --- |
@@ -522,7 +528,7 @@
 
 ### 1.17 `filter_quality.c`　filter_quality.c（線性濾波器可用性閘門）
 
-依據：基準 C 檔頭 "python/modules/state/filter_quality.py. See header for parity notes"。
+依據：C 的 `filter_quality.c` 對應 `python/modules/state/filter_quality.py`。
 
 | C 檔:函式 | Python 檔:符號 | 關係 | 已知落差 | 對拍工具／測試 |
 |---|---|---|---| --- |
@@ -533,7 +539,7 @@
 
 ### 1.19 `fullband_erle.c`　fullband_erle.c（全頻帶 ERLE 估計）
 
-依據：基準 C 檔頭 "C port of python/modules/state/fullband_erle.py"；`_ErleInstantaneous` 對應 C 的 `inst_*` static 函式。
+依據：C 的 `fullband_erle.c` 對應 `python/modules/state/fullband_erle.py`；`_ErleInstantaneous` 對應 C 的 `inst_*` static 函式。
 
 | C 檔:函式 | Python 檔:符號 | 關係 | 已知落差 | 對拍工具／測試 |
 |---|---|---|---| --- |
@@ -554,7 +560,7 @@
 
 ### 1.20 `subband_erle.c`　subband_erle.c（子頻帶 ERLE 估計）
 
-依據：基準 C 檔頭 "C port of python/modules/state/subband_erle.py"；static 函式名與註解逐一寫出對應的 Python 方法名（`_set_max_erle_bands`、`_smoothed_update`、`_update_accumulated_spectra`、`_update_bands`、`_decrease_erle_per_band_for_low_render_signals`）。
+依據：C 的 `subband_erle.c` 對應 `python/modules/state/subband_erle.py`；static 函式名對應 Python 方法名（`_set_max_erle_bands`、`_smoothed_update`、`_update_accumulated_spectra`、`_update_bands`、`_decrease_erle_per_band_for_low_render_signals`）。
 
 | C 檔:函式 | Python 檔:符號 | 關係 | 已知落差 | 對拍工具／測試 |
 |---|---|---|---| --- |
@@ -571,7 +577,7 @@
 
 ### 1.21 `erle_estimator.c`　erle_estimator.c（ERLE 估計器外殼：子頻帶加全頻帶）
 
-依據：基準 C 檔頭 "C port of python/modules/state/erle_estimator.py"；先 subband 後 fullband 的順序沿用 .py。
+依據：C 的 `erle_estimator.c` 對應 `python/modules/state/erle_estimator.py`；先 subband 後 fullband 的順序沿用 .py。
 
 | C 檔:函式 | Python 檔:符號 | 關係 | 已知落差 | 對拍工具／測試 |
 |---|---|---|---| --- |
@@ -585,7 +591,7 @@
 
 ### 1.22 `erl_estimator.c`　erl_estimator.c（逐頻帶 ERL 估計）
 
-依據：基準 C 檔頭 "C port of python/modules/state/erl_estimator.py"。
+依據：C 的 `erl_estimator.c` 對應 `python/modules/state/erl_estimator.py`。
 
 | C 檔:函式 | Python 檔:符號 | 關係 | 已知落差 | 對拍工具／測試 |
 |---|---|---|---| --- |
@@ -595,7 +601,7 @@
 
 ### 1.23 `initial_state.c`　initial_state.c（啟動階段旗標）
 
-依據：基準 C 檔頭 "C port of python/modules/state/initial_state.py"。
+依據：C 的 `initial_state.c` 對應 `python/modules/state/initial_state.py`。
 
 | C 檔:函式 | Python 檔:符號 | 關係 | 已知落差 | 對拍工具／測試 |
 |---|---|---|---| --- |
@@ -606,7 +612,7 @@
 
 ### 1.24 `render_signal_analyzer.c`　render_signal_analyzer.c（遠端訊號窄頻成分與激發度分析）
 
-依據：基準 C 檔頭 "python/modules/render/render_signal_analyzer.py"；註解寫出 `_identify_small_narrow_band_regions (cc:33-59)`、`_identify_strong_narrow_band_component (cc:62-121)`。`rsa_argmax_*`／`rsa_max_abs_*` 是共用 `sk_argmax_f32*`／`sk_max_abs_f32*` 的薄 wrapper（`np.argmax`／`np.max(np.abs())` 的等價掃描；max_abs 的 NaN 不參與最大值，numpy 則回傳 NaN）。
+依據：C 的 `render_signal_analyzer.c` 對應 `python/modules/render/render_signal_analyzer.py`（AEC3 的窄頻區域與強峰識別）。`rsa_argmax_*`／`rsa_max_abs_*` 是共用 `sk_argmax_f32*`／`sk_max_abs_f32*` 的薄 wrapper（`np.argmax`／`np.max(np.abs())` 的等價掃描；max_abs 的 NaN 不參與最大值，numpy 則回傳 NaN）。
 
 | C 檔:函式 | Python 檔:符號 | 關係 | 已知落差 | 對拍工具／測試 |
 |---|---|---|---| --- |
@@ -623,7 +629,7 @@
 
 ### 1.25 `saturation.c`　saturation.c（輸入飽和偵測與軟削波）
 
-依據：基準 C 檔頭 "1:1 port of python/aec.py SaturationDetector"、`Mirrors preprocessing.py SaturationDetector`；Python 類別現位於 `modules/preprocessing.py`。
+依據：C 的 `saturation.c` 對應 Python 的 `SaturationDetector`（`modules/preprocessing.py`）。
 
 | C 檔:函式 | Python 檔:符號 | 關係 | 已知落差 | 對拍工具／測試 |
 |---|---|---|---| --- |
@@ -634,7 +640,7 @@
 
 ### 1.26 `saturation_detector.c`　saturation_detector.c（回音飽和偵測，AEC3 SaturationDetector 的移植）
 
-依據：基準 C 檔頭 "python/modules/state/saturation_detector.py"。
+依據：C 的 `saturation_detector.c` 對應 `python/modules/state/saturation_detector.py`。
 
 | C 檔:函式 | Python 檔:符號 | 關係 | 已知落差 | 對拍工具／測試 |
 |---|---|---|---| --- |
@@ -644,7 +650,7 @@
 
 ### 1.27 `detectors.c`　detectors.c（遠端活動、濾波器收斂、雙講偵測）
 
-依據：基準 C 檔頭 "Mirrors python/modules/detectors.py"。三個偵測器都有常設 Python↔C 閘門 `make test-detectors-parity-all`（每次由 Python 重產 golden，四個格點）。Python 的 `RenderActivityDetector.is_active`／`is_stationary`、`FilterConvergenceAnalyzer.converged` 等為 getter，C 以結構欄位或回傳值取得（見 §3）。
+依據：C 的 `detectors.c` 對應 `python/modules/detectors.py`。三個偵測器都有常設 Python↔C 閘門 `make test-detectors-parity-all`（每次由 Python 重產 golden，四個格點）。Python 的 `RenderActivityDetector.is_active`／`is_stationary`、`FilterConvergenceAnalyzer.converged` 等為 getter，C 以結構欄位或回傳值取得（見 §3）。
 
 | C 檔:函式 | Python 檔:符號 | 關係 | 已知落差 | 對拍工具／測試 |
 |---|---|---|---| --- |
@@ -663,7 +669,7 @@
 
 ### 1.28 `epc_shadow.c`　epc_shadow.c（回音路徑變化偵測與影子濾波器複製控制）
 
-依據：基準 C 檔頭 "port of aec.py EchoPathChangeDetector + ShadowCopyController"（這兩個類別現位於 `modules/epc.py`，影子複製控制現名 `PathChangeRegimeHandler`）；註解寫出 `Must match epc.py's EchoPathChangeDetector.__init__`。`shadow_copy_init` 是 160／16000 舊格點的前多速率入口，產品只用 `shadow_copy_init_for_grid`。
+依據：C 的 `epc_shadow.c` 對應 `modules/epc.py` 的 `EchoPathChangeDetector` 與 `PathChangeRegimeHandler`（影子複製控制）。`shadow_copy_init` 是 160／16000 舊格點的前多速率入口，產品只用 `shadow_copy_init_for_grid`。
 
 | C 檔:函式 | Python 檔:符號 | 關係 | 已知落差 | 對拍工具／測試 |
 |---|---|---|---| --- |
@@ -768,7 +774,7 @@ PBF/Kalman H-error refresh、subband ERLE accumulation/release、render peak cou
 | — | `modules/detectors.py:DoubleTalkAnalyzer.dt_from_energy`、`modules/detectors.py:DoubleTalkAnalyzer.dt_from_shadow`、`modules/detectors.py:DoubleTalkAnalyzer.shadow_advantage` | Python-only（C 以結構欄位或回傳值直接取得；`DoubleTalk` 欄位） | — | — |
 | — | `modules/detectors.py:FilterPlateauDetector`、`modules/detectors.py:FilterPlateauDetector.__init__`、`modules/detectors.py:FilterPlateauDetector.reset`、`modules/detectors.py:FilterPlateauDetector.update`、`modules/detectors.py:FilterPlateauDetector.attempts`、`modules/detectors.py:FilterPlateauDetector.last_reset_frame` | Python-only（C 無此機制；Python 類別目前沒有任何實例化處，C 端沒有移植） | — | — |
 | — | `modules/enums.py:AecMode`、`modules/enums.py:AecFilterState` | Python-only（C 無此機制；Python 的濾波器模式與狀態列舉（FDAF／PBFDAF／PBFDKF／SUBBAND 等）；C 只實作 PBFDKF 路徑） | D-07 | — |
-| `struct:AecPreset` | `modules/enums.py:AecPreset` | Python-only（C 以資料結構、列舉或常數承載；C 的 `AecPreset` 列舉現在也有 `AEC_PRESET_NO_FLOOR=3`；pytest 比對 aec.h 的整數值） | D-04 | `pytest:test_preset_arg.py` |
+| `struct:AecPreset` | `modules/enums.py:AecPreset` | Python-only（C 以資料結構、列舉或常數承載；C 的 `AecPreset` 列舉有 `AEC_PRESET_NO_FLOOR=3`；pytest 比對 aec.h 的整數值） | D-04 | `pytest:test_preset_arg.py` |
 | `struct:AecDelayMode` | `modules/enums.py:AecDelayMode`、`modules/enums.py:AecDelayMode.coerce` | Python-only（C 以資料結構、列舉或常數承載；列舉，`coerce` 只在 Python（接受字串）） | — | `pytest:test_delay_mode.py` |
 | — | `modules/epc.py:classify_epc_event` | Python-only（C 無此機制；EpcEvent 到 AecEvent 的分類，orchestrator 未使用） | — | — |
 | `struct:EpcDetector` | `modules/epc.py:EchoPathChangeDetector` | Python-only（C 以資料結構、列舉或常數承載；方法已對照到 `epc_*`） | — | — |
@@ -781,7 +787,7 @@ PBF/Kalman H-error refresh、subband ERLE accumulation/release、render peak cou
 | — | `modules/filters.py:PBFDAF.zero_filter_partitions` | Python-only（C 無此機制；局部清零指定分區；C 的 PBFDAF 只有整體 `pbfdaf_reset_taps`） | — | — |
 | `struct:Aec` | `modules/orchestrator.py:AEC` | Python-only（C 以資料結構、列舉或常數承載；方法已對照到 `aec_*`） | — | — |
 | — | `modules/orchestrator.py:AEC._filter_converged`、`modules/orchestrator.py:AEC._filter_once_converged`、`modules/orchestrator.py:AEC._divergence_indicator`、`modules/orchestrator.py:AEC._shadow_advantage`、`modules/orchestrator.py:AEC.epc_active`、`modules/orchestrator.py:AEC.epc_hangover_count`、`modules/orchestrator.py:AEC._epv_gain_fast`、`modules/orchestrator.py:AEC._epv_gain_slow` | Python-only（C 以結構欄位或回傳值直接取得；orchestrator 對偵測器欄位的薄包裝 getter，C 直接讀結構欄位） | — | — |
-| — | `modules/orchestrator.py:AEC._apply_delay_shift_soft_revert` | Python-only（C 無此機制；AMEND_35 bad-relock 的 tap 還原；C 只鏡射 hard reset 分支） | D-15 | — |
+| — | `modules/orchestrator.py:AEC._apply_delay_shift_soft_revert` | Python-only（C 無此機制；bad-relock 的 tap 還原；C 只鏡射 hard reset 分支） | D-15 | — |
 | — | `modules/orchestrator.py:AEC._init_trace_state`、`modules/orchestrator.py:AEC._update_energy_diagnostics`、`modules/orchestrator.py:AEC._update_filter_state_diagnostics`、`modules/orchestrator.py:AEC._update_frequency_diagnostics`、`modules/orchestrator.py:AEC._update_state_diagnostics`、`modules/orchestrator.py:AEC._update_trajectory_diagnostics` | Python-only（C 無此機制；Python 的診斷狀態建立與逐 hop 追蹤） | D-12 | — |
 | — | `modules/orchestrator.py:AEC.get_diagnostics`、`modules/orchestrator.py:AEC.get_filter_state`、`modules/orchestrator.py:AEC.get_stats`、`modules/orchestrator.py:AEC.GetStats`、`modules/orchestrator.py:AEC.get_erle`、`modules/orchestrator.py:AEC.get_formed_output` | Python-only（C 無此機制；Python 的診斷與取值 API；C 對應的是 `aec_debug_status`／`aec_get_res_context`，欄位集合不同） | D-05；D-12 | — |
 | — | `modules/orchestrator.py:AEC.dump_p53_trace`、`modules/orchestrator.py:AEC.enable_res_audit`、`modules/orchestrator.py:AEC.get_res_audit` | Python-only（C 無此機制；Python-only 的研究／稽核介面） | D-12 | — |
@@ -826,98 +832,49 @@ PBF/Kalman H-error refresh、subband ERLE accumulation/release、render peak cou
 | `struct:StationarityEstimator` | `modules/state/stationarity_estimator.py:StationarityEstimator` | Python-only（C 以資料結構、列舉或常數承載；方法已對照到 `stationarity_estimator_*`） | — | — |
 | — | `modules/state/stationarity_estimator.py:get_residual_echo_scaling` | Python-only（C 無此機制；模組層函式；C 內沒有獨立函式，`src/` 也沒有呼叫者） | — | — |
 | `struct:SubbandErle` | `modules/state/subband_erle.py:SubbandErleEstimator` | Python-only（C 以資料結構、列舉或常數承載；方法已對照到 `subband_erle_*`） | — | — |
-| — | `modules/aec3_scale.py:fft_density_scale` | Python-only（C 無此機制；對應的 C 函式在 library 內沒有任何呼叫者，已移除） | — | — |
-| — | `modules/aec3_scale.py:nl_r2_norm_power` | Python-only（C 無此機制；對應的 C 函式在 library 內沒有任何呼叫者，已移除） | — | — |
-| — | `modules/aec3_scale.py:psd_int16_to_float` | Python-only（C 無此機制；對應的 C 函式在 library 內沒有任何呼叫者，已移除） | — | — |
-| — | `modules/filter/filter_state_bridge.py:build_filter_state_bridge` | Python-only（C 無此機制；對應的 C 函式在 library 內沒有任何呼叫者，已移除） | — | — |
-| — | `modules/filters.py:PBFDAF.get_error_energy` | Python-only（C 無此機制；對應的 C 函式在 library 內沒有任何呼叫者，已移除） | — | — |
-| — | `modules/filters.py:PBFDKF.copy_weights_from` | Python-only（C 無此機制；對應的 C 函式在 library 內沒有任何呼叫者，已移除） | — | — |
-| — | `modules/freq_utils.py:bin_to_hz` | Python-only（C 無此機制；對應的 C 函式在 library 內沒有任何呼叫者，已移除） | — | — |
-| — | `modules/freq_utils.py:hz_to_bin` | Python-only（C 無此機制；對應的 C 函式在 library 內沒有任何呼叫者，已移除） | — | — |
-| — | `modules/render/render_signal_analyzer.py:RenderSignalAnalyzer.narrow_peak_band` | Python-only（C 無此機制；對應的 C 函式在 library 內沒有任何呼叫者，已移除） | — | — |
-| — | `modules/state/aec_state.py:AecState.active_render` | Python-only（C 無此機制；對應的 C 函式在 library 內沒有任何呼叫者，已移除） | — | — |
-| — | `modules/state/aec_state.py:AecState.erl` | Python-only（C 無此機制；對應的 C 函式在 library 內沒有任何呼叫者，已移除） | — | — |
-| — | `modules/state/aec_state.py:AecState.erl_time_domain` | Python-only（C 無此機制；對應的 C 函式在 library 內沒有任何呼叫者，已移除） | — | — |
-| — | `modules/state/aec_state.py:AecState.filter_analyzer_consistent` | Python-only（C 無此機制；對應的 C 函式在 library 內沒有任何呼叫者，已移除） | — | — |
-| — | `modules/state/aec_state.py:AecState.filter_analyzer_max_echo_path_gain` | Python-only（C 無此機制；對應的 C 函式在 library 內沒有任何呼叫者，已移除） | — | — |
-| — | `modules/state/aec_state.py:AecState.filter_analyzer_peak_index` | Python-only（C 無此機制；對應的 C 函式在 library 內沒有任何呼叫者，已移除） | — | — |
-| — | `modules/state/aec_state.py:AecState.initial_state_active` | Python-only（C 無此機制；對應的 C 函式在 library 內沒有任何呼叫者，已移除） | — | — |
-| — | `modules/state/aec_state.py:AecState.saturated_capture` | Python-only（C 無此機制；對應的 C 函式在 library 內沒有任何呼叫者，已移除） | — | — |
-| — | `modules/state/erl_estimator.py:ErlEstimator.erl` | Python-only（C 無此機制；對應的 C 函式在 library 內沒有任何呼叫者，已移除） | — | — |
-| — | `modules/state/erl_estimator.py:ErlEstimator.erl_time_domain` | Python-only（C 無此機制；對應的 C 函式在 library 內沒有任何呼叫者，已移除） | — | — |
-| — | `modules/state/filter_analyzer.py:FilterAnalyzer.any_filter_consistent` | Python-only（C 無此機制；對應的 C 函式在 library 內沒有任何呼叫者，已移除） | — | — |
-| — | `modules/state/filter_analyzer.py:FilterAnalyzer.get_adjusted_filters` | Python-only（C 無此機制；對應的 C 函式在 library 內沒有任何呼叫者，已移除） | — | — |
-| — | `modules/state/filter_analyzer.py:FilterAnalyzer.peak_index` | Python-only（C 無此機制；對應的 C 函式在 library 內沒有任何呼叫者，已移除） | — | — |
-| — | `modules/state/filter_delay.py:FilterDelay.external_delay_reported` | Python-only（C 無此機制；對應的 C 函式在 library 內沒有任何呼叫者，已移除） | — | — |
-| — | `modules/state/filter_quality.py:FilteringQualityAnalyzer.gate1_pass` | Python-only（C 無此機制；對應的 C 函式在 library 內沒有任何呼叫者，已移除） | — | — |
-| — | `modules/state/filter_quality.py:FilteringQualityAnalyzer.gate2_pass` | Python-only（C 無此機制；對應的 C 函式在 library 內沒有任何呼叫者，已移除） | — | — |
-| — | `modules/state/filter_quality.py:FilteringQualityAnalyzer.reset_blocks` | Python-only（C 無此機制；對應的 C 函式在 library 內沒有任何呼叫者，已移除） | — | — |
-| — | `modules/state/filter_quality.py:FilteringQualityAnalyzer.startup_blocks` | Python-only（C 無此機制；對應的 C 函式在 library 內沒有任何呼叫者，已移除） | — | — |
-| — | `modules/state/initial_state.py:InitialState.initial_state_active` | Python-only（C 無此機制；對應的 C 函式在 library 內沒有任何呼叫者，已移除） | — | — |
-| — | `modules/state/stationarity_estimator.py:StationarityEstimator.is_band_stationary` | Python-only（C 無此機制；對應的 C 函式在 library 內沒有任何呼叫者，已移除） | — | — |
-| — | `modules/state/subband_erle.py:SubbandErleEstimator.erle_during_onsets` | Python-only（C 無此機制；對應的 C 函式在 library 內沒有任何呼叫者，已移除） | — | — |
+| — | `modules/aec3_scale.py:fft_density_scale` | Python-only（C 無此機制） | — | — |
+| — | `modules/aec3_scale.py:nl_r2_norm_power` | Python-only（C 無此機制） | — | — |
+| — | `modules/aec3_scale.py:psd_int16_to_float` | Python-only（C 無此機制） | — | — |
+| — | `modules/filter/filter_state_bridge.py:build_filter_state_bridge` | Python-only（C 無此機制） | — | — |
+| — | `modules/filters.py:PBFDAF.get_error_energy` | Python-only（C 無此機制） | — | — |
+| — | `modules/filters.py:PBFDKF.copy_weights_from` | Python-only（C 無此機制） | — | — |
+| — | `modules/freq_utils.py:bin_to_hz` | Python-only（C 無此機制） | — | — |
+| — | `modules/freq_utils.py:hz_to_bin` | Python-only（C 無此機制） | — | — |
+| — | `modules/render/render_signal_analyzer.py:RenderSignalAnalyzer.narrow_peak_band` | Python-only（C 無此機制） | — | — |
+| — | `modules/state/aec_state.py:AecState.active_render` | Python-only（C 無此機制） | — | — |
+| — | `modules/state/aec_state.py:AecState.erl` | Python-only（C 無此機制） | — | — |
+| — | `modules/state/aec_state.py:AecState.erl_time_domain` | Python-only（C 無此機制） | — | — |
+| — | `modules/state/aec_state.py:AecState.filter_analyzer_consistent` | Python-only（C 無此機制） | — | — |
+| — | `modules/state/aec_state.py:AecState.filter_analyzer_max_echo_path_gain` | Python-only（C 無此機制） | — | — |
+| — | `modules/state/aec_state.py:AecState.filter_analyzer_peak_index` | Python-only（C 無此機制） | — | — |
+| — | `modules/state/aec_state.py:AecState.initial_state_active` | Python-only（C 無此機制） | — | — |
+| — | `modules/state/aec_state.py:AecState.saturated_capture` | Python-only（C 無此機制） | — | — |
+| — | `modules/state/erl_estimator.py:ErlEstimator.erl` | Python-only（C 無此機制） | — | — |
+| — | `modules/state/erl_estimator.py:ErlEstimator.erl_time_domain` | Python-only（C 無此機制） | — | — |
+| — | `modules/state/filter_analyzer.py:FilterAnalyzer.any_filter_consistent` | Python-only（C 無此機制） | — | — |
+| — | `modules/state/filter_analyzer.py:FilterAnalyzer.get_adjusted_filters` | Python-only（C 無此機制） | — | — |
+| — | `modules/state/filter_analyzer.py:FilterAnalyzer.peak_index` | Python-only（C 無此機制） | — | — |
+| — | `modules/state/filter_delay.py:FilterDelay.external_delay_reported` | Python-only（C 無此機制） | — | — |
+| — | `modules/state/filter_quality.py:FilteringQualityAnalyzer.gate1_pass` | Python-only（C 無此機制） | — | — |
+| — | `modules/state/filter_quality.py:FilteringQualityAnalyzer.gate2_pass` | Python-only（C 無此機制） | — | — |
+| — | `modules/state/filter_quality.py:FilteringQualityAnalyzer.reset_blocks` | Python-only（C 無此機制） | — | — |
+| — | `modules/state/filter_quality.py:FilteringQualityAnalyzer.startup_blocks` | Python-only（C 無此機制） | — | — |
+| — | `modules/state/initial_state.py:InitialState.initial_state_active` | Python-only（C 無此機制） | — | — |
+| — | `modules/state/stationarity_estimator.py:StationarityEstimator.is_band_stationary` | Python-only（C 無此機制） | — | — |
+| — | `modules/state/subband_erle.py:SubbandErleEstimator.erle_during_onsets` | Python-only（C 無此機制） | — | — |
 
 ---
 
-## 附錄 A：基準到現行的改名（函式級）
+## 附錄 A：落差編號
 
-基準快照的 C 註解與舊筆記用左欄的名字，現行 C 用右欄。Python 側的名字不變。檔案改名：`aec3_post.c`／`aec3_post.h`→`aec_post.c`／`aec_post.h`；`aec3_scale.c`／`aec3_scale.h`→`aec_scale.c`／`aec_scale.h`；`delay_aec3.c`／`delay_aec3.h`→`delay_aec.c`／`delay_aec.h`；`aec3_balanced_config.h`→`aec_balanced_config.h`。型別改名：`Aec3Post*`→`AecPost*`（`Aec3PostConfig`、`Aec3PostAbs`、`Aec3PostRunIn`、`Aec3PostRunObj`、`Aec3PostRunScratch`、`Aec3PostTrace`）、`DelayAec3`→`DelayAec`、`Aec3BalancedRateDims`→`AecBalancedRateDims`。
-
-第一波只套用下表的改名：當時共 427 個 C 函式，沒有新增也沒有刪除，函式本體沒有改。右欄標「（已移除）」者後來被刪除或併入呼叫端，現行 C 已無此函式。
-
-| 基準名 | 現行名 |
-|---|---|
-| `aec3_block_energy_scale` | `aec_block_energy_scale` |
-| `aec3_blocks_to_hops` | `aec_blocks_to_hops` |
-| `aec3_db_to_linear` | `aec_db_to_linear` |
-| `aec3_ema_alpha_from_tau_ms` | `aec_ema_alpha_from_tau_ms` |
-| `aec3_fft_density_scale` | （已移除） |
-| `aec3_growth_rehop` | `aec_growth_rehop` |
-| `aec3_ms_to_hops` | `aec_ms_to_hops` |
-| `aec3_nl_r2_norm_power` | （已移除） |
-| `aec3_per_bin_psd_threshold` | `aec_per_bin_psd_threshold` |
-| `aec3_per_block_ema_alpha_to_per_hop` | `aec_per_block_ema_alpha_to_per_hop` |
-| `aec3_per_block_growth_to_per_hop` | `aec_per_block_growth_to_per_hop` |
-| `aec3_per_block_rate_to_per_hop` | `aec_per_block_rate_to_per_hop` |
-| `aec3_post_apply_output` | `aec_post_apply_output` |
-| `aec3_post_avg_reverb_slots` | `aec_post_avg_reverb_slots` |
-| `aec3_post_chain_reset` | `aec_post_chain_reset` |
-| `aec3_post_compute_coherence` | `aec_post_compute_coherence` |
-| `aec3_post_compute_comfort_noise` | `aec_post_compute_comfort_noise` |
-| `aec3_post_compute_psds` | `aec_post_compute_psds` |
-| `aec3_post_compute_x2_reverb` | `aec_post_compute_x2_reverb` |
-| `aec3_post_config_defaults` | `aec_post_config_defaults` |
-| `aec3_post_init` | `aec_post_init` |
-| `aec3_post_pairwise_sum_f32` | （已移除） |
-| `aec3_post_process` | （已移除） |
-| `aec3_post_reset` | `aec_post_reset` |
-| `aec3_post_run` | `aec_post_run` |
-| `aec3_post_run_observer_step` | `aec_post_run_observer_step` |
-| `aec3_psd_int16_to_float` | （已移除） |
-| `aec3b_rate_cfg` | `aecb_rate_cfg` |
-| `delay_aec3_accumulate` | `delay_aec_accumulate` |
-| `delay_aec3_accumulate_ex` | `delay_aec_accumulate_ex` |
-| `delay_aec3_confidence` | `delay_aec_confidence` |
-| `delay_aec3_dot` | `delay_aec_dot` |
-| `delay_aec3_estimated_delay` | `delay_aec_estimated_delay` |
-| `delay_aec3_get_mem_size` | `delay_aec_get_mem_size` |
-| `delay_aec3_has_clockdrift` | `delay_aec_has_clockdrift` |
-| `delay_aec3_init` | `delay_aec_init` |
-| `delay_aec3_is_solid` | `delay_aec_is_solid` |
-| `delay_aec3_n_updates` | `delay_aec_n_updates` |
-| `delay_aec3_reset` | `delay_aec_reset` |
-| `pbfdkf_update_weights_aec3` | `pbfdkf_update_weights` |
-
-## 附錄 B：落差編號
-
-編號出自 2026-10-20 的 Python／C 落差稽核報告（`PY_C_SYNC_AUDIT.md`，不隨 repo 發佈；稽核基準為 2026-10-19 的 AEC 快照）。這裡只收本表引用到的編號，說明是濃縮版，狀態以稽核當時為準。S＝稽核判定的 sync_bug、D＝文件或註解明載的刻意差異、T＝缺對拍。
+這裡只收本表引用到的編號。S＝sync_bug、D＝文件或註解明載的刻意差異、T＝缺對拍。
 
 | 編號 | 說明 |
 |---|---|
 | D-01 | mic-path HPF：C 為 float32 DF2T，Python 為 fp64，非逐位元（文件化） |
-| D-02 | `delay_est_period_s` 預設 Python 0.5／C 0.0（Python 欄位只傳給 no-op 參數） |
+| D-02 | `delay_est_period_s` 預設 Python 0.5／C 0.0 |
 | D-03 | matched-filter duty-cycle 節流、reject list 固定 8 格、延遲鏈為 float32 非逐位元 |
-| D-04 | preset 軸：NO_FLOOR 只在 Python（已於 2026-10-20 NO_FLOOR C 端 ABI 落地＋Python 執行期切換落地後關閉；殘留列為個別欄位 getter／設定粒度差異，不是 NO_FLOOR 缺口） |
+| D-04 | preset 軸的承載形式不同：C 為三個查表函式加 `aec_set_preset`，Python 為 `AecConfig.from_preset` 內的一張表加 `AEC.set_preset`；NO_FLOOR 兩邊在建構期與執行期都有 |
 | D-05 | `return_formed_output` 為 Python-only；`AecResContext` 欄位兩邊不同 |
 | D-06 | 預設為 True 的 AEC3 對齊旗標在 C 為編譯期寫死，無法在 runtime 關閉 |
 | D-07 | C 只實作 PBFDKF；Python 另有 FDAF／PBFDAF／SUBBAND 與調校選項 |
@@ -932,29 +889,24 @@ PBF/Kalman H-error refresh、subband ERLE accumulation/release、render peak cou
 | S-04 | HPF cutoff 範圍驗證（`0 < cutoff < 0.45·sr`）只有 C 檢查，Python 不檢查 |
 | S-08 | CLI 預設運作點不同（Python `aec.py` 與 C `aec_wav`，兩邊都不給旗標時） |
 | S-18 | `epc_mu_floor` 是 C-only 的死欄位 |
-| S-19 | 端到端閘門 `parity_aec_e2e` 覆蓋不足、容差偏寬，8 kHz 實測判 FAIL |
+| S-19 | 端到端閘門 `parity_aec_e2e` 的 8 kHz 列超出容差（`TOL_E2E` 2e-2）；`make test-parity-e2e` 把它當預期紅燈 |
 | S-22 | Python-only、預設 OFF 的研究旋鈕（C 沒有對應） |
-| S-23 | 文件與實作不符（版本字樣、CNG 種子描述、Python／C 預設差） |
 | S-26 | 4ch 後波束 RES 的 AEC preset：DT 地板（Python 版只設 far-active 地板，DT 地板留在預設 -20） |
 | S-34 | 設定範圍檢查不對稱：C 的 `validate` 嚴格 fail-closed，Python 幾乎不驗 |
-| T-02 | 端到端閘門的覆蓋與接線：手動建置、不在 Makefile、無 `--fft` 選項、只有 1 個場景 |
-| T-03 | 沒有模組級 Python golden 的 C 模組；歷史 harness 已封存，部分無法編譯或無法離線產生 golden |
-| T-04 | `make BACKEND=kiss SIMD=0 test-delay-kernels` 無法編譯（`da_decimator_same_coefficients` 只在 NEON 分支定義） |
+| T-02 | 端到端閘門 `parity_aec_e2e` 的覆蓋：只有一個場景（雙講）、產生器沒有 `--fft` 選項（16k/512 沒有端到端對拍）、容差 2e-2 |
+| T-03 | 沒有模組級 Python golden 的 C 模組：目前只有 `make test-detectors-parity-all` 是常設的模組級 Python↔C 閘門，其餘模組靠端到端閘門與 C 自洽測試間接覆蓋 |
 | T-05 | 48k/1024 純線性（`enable_res=0`、`return_res_context=0`）瞬態偏差：HPF 關、雙講時約 -65.5 dB，未找到單一歸因 |
-| T-06 | HPF 的 Python↔C 專屬 golden 已被移除，只剩端到端間接覆蓋 |
+| T-06 | HPF 沒有 Python↔C 專屬 golden，只有端到端間接覆蓋 |
 | T-17 | mono 端到端 C 對 Python 非逐位元，`error_spec` 若干 hop 後分岔（歸屬 lib/aec） |
 
-## 附錄 C：對拍工具／測試標記
+## 附錄 B：對拍工具／測試標記
 
 標記一律寫在反引號內，語法為 `<類別>:<名稱>`。測試會驗證每個標記指到的檔案或 Makefile target 仍然存在；它**不**驗證工具的結果，也不驗證該工具有沒有直接呼叫那一列的函式。`live:`、`manual:` 是模組級標記：harness 經由模組的公開函式驅動，同模組內部的 static 函式只被間接覆蓋；`ctest:` 與 `pytest:` 則附在確實涉及該函式（直接或經由其呼叫者）的列上。
 
 | 標記 | 意義 |
 |---|---|
 | `live:<make target>` | `c_impl/Makefile` 內存在的 target，會即時由 Python 重產 golden 再比對 C。目前唯一的常設 Python↔C 模組級閘門是 `test-detectors-parity-all`（四個格點，取樣率／hop：8k/128、16k/128、16k/256、48k/512），涵蓋 `RenderActivityDetector`、`FilterConvergenceAnalyzer`、`DoubleTalkAnalyzer`（C 端沒有 `FilterPlateauDetector`）。 |
-| `e2e:parity_aec_e2e` | `c_impl/test/parity_aec_e2e.c` 加 `python/diag/gen_aec_e2e_golden.py`：端到端對拍。撰寫本文件時需手動 gcc 建置（建置指令在 `parity_aec_e2e.c` 檔頭），不在任何 Makefile target（另一工作項目正把它接成 `make test-parity-e2e`，見 §0.7；接上後此標記可改為 `live:test-parity-e2e`）；產生器沒有 `--fft` 選項（16k/512 沒有端到端對拍）、稽核認定只有 1 個場景、容差 2e-2（T-02），稽核時 8 kHz 雙講判 FAIL（S-19）。撰寫本文件時不是常設閘門。 |
+| `e2e:parity_aec_e2e` | `c_impl/test/parity_aec_e2e.c` 加 `python/diag/gen_aec_e2e_golden.py`：端到端對拍，由 `make test-parity-e2e` 建置並執行（16／48 kHz 通過，8 kHz 列為預期紅燈，見 S-19）；覆蓋限制見 T-02。 |
 | `manual:<檔名>` | `c_impl/test/` 下沒有接任何 Makefile target 的 harness。`parity_saturation.c` 需要外部 dump 的 `sat.bin`、repo 內沒有產生器。 |
 | `ctest:<檔名>` | `c_impl/test/`（含 `test/modules/`）下的 C 測試。多數是 C 自洽的回歸或結構測試，不是 Python 數值對拍；`test_delay_*`、`test_external_realign`、`test_runtime_preset`、`test_res_nearend_gate`、`test_reset_parity` 與同名（或對應）的 pytest 用同一組場景。 |
 | `pytest:<檔名>` | `python/tests/` 下的 Python 測試。`test_signal_grid.py` 會讀 `c_impl/src/aec.c` 的文字比對格點表（`AEC_GRID_TABLE`），`test_preset_arg.py` 讀 `aec.h` 的整數值；其餘只測 Python 行為。 |
-
-舊 `hist:` 標記已退役，所指的歷史 harness 不在目前程式樹；本表不再使用。`live:`、`ctest:`、`pytest:` 的目標都是目前維護中的檔案。
-

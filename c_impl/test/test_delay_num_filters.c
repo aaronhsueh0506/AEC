@@ -1,61 +1,28 @@
-/* test_delay_num_filters.c — permanent regression test for the configurable
- * matched-filter bank size (AecConfig::delay_num_filters -> the pool layout
- * -> DaMatchedFilter::num_filters).
+/* test_delay_num_filters.c -- regression test for the configurable matched-filter bank size
+ * (AecConfig.delay_num_filters -> the pool layout -> DaMatchedFilter::num_filters).
  *
- * Background: DA_NUM_FILTERS is purely the validation upper bound; the
- * bank, the render ring and both lag histograms are POOL-CARVED to the
- * configured n, so a short bank saves BYTES as well as MACs. 5 is correct for
- * bench/dataset (it is what the published scores were measured at), but the
- * embedded target compensates the bring-up-measured system delay out-of-band
- * and only needs the matched filter to track the residual, where each dropped
- * filter removes ~4.2 MMAC/s of full-rate search.
+ * DA_NUM_FILTERS is only the validation upper bound; the bank, the render ring and both lag histograms are pool-carved to
+ * the configured n, so a short bank saves bytes as well as MACs (each dropped filter removes about 4.2 MMAC/s of full-rate
+ * search). 5 is the default for bench/dataset use; a target that compensates the system delay out of band can use fewer.
  *
  * What this test proves (nothing else in the suite can):
- *   1. The default is still 5, on aec_config_defaults AND on all three
- *      presets, and a default-configured Aec really builds a 5-filter bank.
- *      (The byte-equality of the default PATH is covered by the existing
- *      golden/parity gates — this only pins the value the config carries.)
- *   2. The knob genuinely moves the bank's GEOMETRY, end to end from
- *      AecConfig through aec_create. Reliable reach is
- *      (n-1)*DA_FILTER_INTRA_SHIFT + (DA_FILTER_SIZE - 11) downsampled
- *      samples at 0.25 ms, i.e. 221 ms at n=2 and 509 ms at n=5. So:
- *        - a 150 ms echo locks at n=2   (inside reach; proves a short bank
- *          still works and the no-lock case below is about REACH, not about
- *          a broken estimator),
- *        - a 350 ms echo does NOT lock at n=2 (outside 221 ms),
- *        - the same 350 ms echo DOES lock at n=5 (inside 509 ms) — the
- *          control that makes the previous assertion meaningful.
- *      Mutation-checked: reverting the loop bound in
- *      da_matched_filter_update() to DA_NUM_FILTERS, or hardcoding aec.c's
- *      delay_aec_init() call to DA_NUM_FILTERS, makes the n=2 /
- *      350 ms case lock and this test go red.
+ *   1. The default is 5 on aec_config_defaults and on all three presets, and a default Aec builds a 5-filter bank.
+ *   2. The knob moves the bank geometry end to end from AecConfig through aec_create. Reliable reach is
+ *      (n-1)*DA_FILTER_INTRA_SHIFT + (DA_FILTER_SIZE - 11) downsampled samples at 0.25 ms: 221 ms at n=2, 509 ms at n=5.
+ *      A 150 ms echo locks at n=2 (inside reach, so the no-lock case below is about reach, not a broken estimator); a
+ *      350 ms echo does not lock at n=2 (outside 221 ms) but does lock at n=5 (inside 509 ms), the control that makes the
+ *      previous assertion meaningful. Mutations that must fail: reverting the loop bound in da_matched_filter_update() to
+ *      DA_NUM_FILTERS, or hardcoding DA_NUM_FILTERS in aec.c's delay_aec_init() call (the n=2 / 350 ms case then locks).
+ *   3. Out-of-range config values are rejected by aec_validate_config (aec_create fails) rather than silently normalised.
+ *   4. delay_aec_get_mem_size()/delay_aec_init() reject out-of-range n too (get_mem_size -> 0, init -> nonzero; a silent
+ *      clamp would run a different bank than requested), plus the pool rejection contract (NULL / misaligned base / one
+ *      byte short).
+ *   5. On any one grid mem(n=1) < ... < mem(n=5), on all four grids. Non-MATCHED modes, which carve no estimator, land below
+ *      even n=1. 5b: the FIXED pool scales with fixed_delay_samples, exactly EXTERNAL_ALIGNED plus one
+ *      ALIGN16((fixed + hop) * 4) ring.
+ *   6. aec_create() (heap arena) and aec_init() (caller pool) stay sample-exact at every bank size.
  *
- *      Why 350 ms and not 400: on a PURE single-tap echo (no reverb tail)
- *      the pre-echo aggregator occasionally reports an onset one
- *      alignment shift early, and 400 ms at n=5 happens to be one of those
- *      points (reports 4800 instead of 6336, deterministically, on every
- *      seed tried). That is a property of the pre-echo aggregator, unrelated
- *      to the bank size, and matched_filter.py's own
- *      header already warns that detect_pre_echo can produce noisy
- *      estimates on material without real pre-echo. Sitting the control
- *      case on a known artifact would just make this test look flaky, so it
- *      uses the neighbouring clean point instead.
- *   3. Out-of-range config values are REJECTED by aec_validate_config
- *      (aec_create fails), matching the Python side's ValueError rather
- *      than silently normalising a caller's wrong mental model.
- *   4. The lower-level delay_aec_get_mem_size()/delay_aec_init() pair
- *      REJECTS out-of-range n as well (get_mem_size -> 0, init -> nonzero;
- *      a silent clamp would let direct callers run a different bank than
- *      requested with no error signal), plus the pool rejection
- *      contract (NULL / misaligned base / one byte short).
- *   5. On any one grid mem(n=1) < ... < mem(n=5), on all four grids.
- *      Non-MATCHED modes, which carve no estimator, land below even n=1.
- *   5b. The FIXED pool scales with fixed_delay_samples -- exactly
- *      EXTERNAL_ALIGNED plus one ALIGN16((fixed + hop) * 4) ring.
- *   6. aec_create() (heap arena) and aec_init() (caller pool) stay
- *      sample-exact at every bank size (the layout depends on it).
- *
- * Build (standalone, from c_impl/ — mirrors test_linear_context.c):
+ * Build (standalone, from c_impl/):
  *   make -C ../../audiolib/common lib
  *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=gnu99 -Iinclude -Iexample \
  *       -I../../audiolib/common/include \
@@ -67,7 +34,7 @@
  * Also wired into the Makefile: `make test-delay-num-filters`.
  */
 #include "aec.h"
-#include "utility/mem_align.h"   /* ALIGN16 -- was transitively reached via fft_wrapper.h */
+#include "utility/mem_align.h"   /* ALIGN16 */
 #include "delay_pool_test_util.h"
 #include <math.h>
 #include <stdio.h>
@@ -319,12 +286,9 @@ static void test_low_level_init_contract(void) {
               "get_mem_size rejects a non-positive rate or hop");
     }
 
-    /* End-to-end grid pass-through: aec_carve() must hand the estimator the
-     * RESOLVED hop, not a guess. The 48 kHz sidechain scratch is the only
-     * hop-dependent term, so it is the one place a wrong hop is observable
-     * from outside -- and it is observable, which is the point of asserting
-     * it here rather than trusting the call site.
-     * Mutation-checked: passing any other hop to delay_aec_init() in
+    /* End-to-end grid pass-through: aec_carve() must hand the estimator the RESOLVED hop, not a
+     * guess. The 48 kHz sidechain scratch is the only hop-dependent term, so it is the one place a
+     * wrong hop is observable from outside. Passing any other hop to delay_aec_init() in
      * aec_carve() turns this row red. */
     {
         static const struct { int sr, fft, hop, cap; } grids[] = {
@@ -376,25 +340,12 @@ static void test_low_level_init_contract(void) {
 
 /* ------------------------------------------- pool geometry, HAND-COMPUTED */
 
-/* The three n-dependent array lengths, pinned against LITERALS derived by
- * hand from the reference geometry -- NOT against DA_*_FOR(n), which is the very
- * thing under test (reading those macros back would make every row a
- * tautology: pinning the macros to a fixed n=5 bound, exactly the regression
- * this file exists to catch, would leave it green).
- *
- *   ring capacity = (32 + 24*(n-1) + 1) * 16
- *   highest-peak bins = n*384 + 512 + 1
- *   pre-echo bins     = ((n*384 + 513) * 4) >> 6
- *
- * and the pool cost of ONE extra filter is a constant 5728 B at every grid:
- *   coefficients   512 f32          = 2048 B
- *   accum. error   128 f32          =  512 B
- *   render ring    384 f32          = 1536 B
- *   highest-peak   384 int          = 1536 B
- *   pre-echo        24 int          =   96 B
- * Every one of those five terms is a multiple of 16, so the per-field ALIGN16
- * padding is identical at every n and the delta really is exact, not
- * approximate. */
+/* The three n-dependent array lengths, pinned against literals derived by hand from the reference geometry, not against
+ * DA_*_FOR(n), which is the thing under test (reading the macros back would make every row a tautology):
+ *   ring capacity = (32 + 24*(n-1) + 1) * 16;  highest-peak bins = n*384 + 512 + 1;  pre-echo bins = ((n*384 + 513) * 4) >> 6
+ * The pool cost of ONE extra filter is a constant 5728 B at every grid: coefficients 512 f32 = 2048 B, accumulated error
+ * 128 f32 = 512 B, render ring 384 f32 = 1536 B, highest-peak 384 int = 1536 B, pre-echo 24 int = 96 B. Each term is a
+ * multiple of 16, so the per-field ALIGN16 padding is identical at every n and the delta is exact. */
 #define DA_STEP_BYTES 5728
 
 static void test_pool_geometry_literals(void) {
@@ -436,10 +387,9 @@ static void test_pool_geometry_literals(void) {
 
 /* ----------------------------------------------- pool size vs the bank size */
 
-/* On any one grid the pool must SHRINK monotonically as the bank shrinks
- * (arrays carved at the 5-filter bound would give identical numbers). Prints the measured table as it goes --
- * that printout is the source of the byte table in the manual, rather than
- * any hardcoded expectation here. */
+/* On any one grid the pool must SHRINK monotonically as the bank shrinks (arrays carved at the
+ * 5-filter bound would give identical numbers). The measured table is printed as it goes; that
+ * printout is the source of the byte table in the manual. */
 static void test_mem_size_shrinks_with_bank(void) {
     static const struct { int sr, fft; const char *tag; } grids[] = {
         { 16000,  256, "16k/256"        },
@@ -475,12 +425,9 @@ static void test_mem_size_shrinks_with_bank(void) {
             }
             prev = got;
         }
-        /* The estimator is a MATCHED-only cost: with no estimator to carve,
-         * the pool must land strictly below even the smallest bank. The
-         * FIXED figure below is the FLOOR of that mode
-         * (fixed_delay_samples=0, i.e. a hop-sized ring), not one
-         * number for the whole mode -- see
-         * test_fixed_pool_scales_with_the_delay(). */
+        /* The estimator is a MATCHED-only cost: with no estimator to carve, the pool lands strictly
+         * below even the smallest bank. The FIXED figure below is the floor of that mode
+         * (fixed_delay_samples=0, a hop-sized ring); see test_fixed_pool_scales_with_the_delay(). */
         {
             AecConfig c1, cf, ce;
             size_t m1, mf, me;
@@ -504,26 +451,16 @@ static void test_mem_size_shrinks_with_bank(void) {
     }
 }
 
-/* The FIXED pool is a function of fixed_delay_samples, not one flat number
- * for the mode (a ring sized from the MATCHED search budget,
- * max(delay_buffer_ms, max_delay_ms + 4096), would give identical rows).
- *
- * Three separable claims:
- *   a) strictly monotonic in the delay, by the EXACT ALIGN16 ring step --
- *      "> prev" alone would still pass if the ring shrank by the wrong term;
- *   b) a small fixed delay is DRAMATICALLY cheaper than search-ring
- *      sizing -- pinned as a hard ratio against the MATCHED n=5 pool, not
- *      as a hardcoded KiB figure;
- *   c) the whole difference between EXTERNAL_ALIGNED and FIXED(d) is the
- *      ring array itself, which is what "EXTERNAL carries no delay bytes"
- *      means concretely.
+/* The FIXED pool is a function of fixed_delay_samples, not one flat number for the mode (a ring sized from the MATCHED
+ * search budget, max(delay_buffer_ms, max_delay_ms + 4096), would give identical rows). Three claims:
+ *   a) strictly monotonic in the delay, by the exact ALIGN16 ring step ("> prev" alone would pass if the ring shrank by
+ *      the wrong term);
+ *   b) a small fixed delay is far cheaper than search-ring sizing, pinned as a hard ratio against the MATCHED n=5 pool;
+ *   c) the whole difference between EXTERNAL_ALIGNED and FIXED(d) is the ring array itself.
  * The printed table is the source of the manual's per-mode byte figures. */
-/* The FIXED ring as aec_carve() lays it out: ALIGN16((fixed + hop) * 4).
- * Spelled ONCE so the exact-composition claim and the monotonic-step claim
- * below cannot drift apart -- two hand-inlined copies of the same formula
- * could be edited into agreeing with each other and with neither the carve.
- * Deliberately re-derived here rather than read from a library helper: this
- * is the independent expectation the assertions compare aec_get_mem_size()
+/* The FIXED ring as aec_carve() lays it out: ALIGN16((fixed + hop) * 4). Spelled once so the
+ * exact-composition and monotonic-step claims cannot drift apart. It is re-derived here rather than
+ * read from a library helper: it is the independent expectation aec_get_mem_size() is compared
  * against. */
 static size_t fixed_ring_bytes(int fixed, int hop) {
     return (((size_t)(fixed + hop) * sizeof(float)) + 15u) & ~(size_t)15u;
@@ -591,8 +528,7 @@ static void test_fixed_pool_scales_with_the_delay(void) {
             prev = got; prev_fixed = fixed;
         }
 
-        /* (b) the headline: a 25 ms fixed delay costs a small fraction of the
-         * MATCHED n=5 pool, where before step 3 it cost within ~9% of it. */
+        /* (b) a 25 ms fixed delay costs a small fraction of the MATCHED n=5 pool. */
         {
             AecConfig cf = cm;
             size_t got;

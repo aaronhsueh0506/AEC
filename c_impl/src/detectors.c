@@ -1,15 +1,9 @@
-/* detectors.c — RenderActivity / FilterConvergence / DoubleTalk ports.
- * All scalar math in float32 (drift versus the Python fp64 reference is
- * accepted).
- */
+/* detectors.c -- RenderActivity, FilterConvergence and DoubleTalk detectors (float32). */
 #include "detectors.h"
 #include "aec_scale.h"
 #include <math.h>
 
-/* Every wall-clock constant below is authored against the hop=160 @
- * 16000 Hz (10.000 ms) reference grid and retimed to the live grid in the
- * *_init functions. Mirrors python/modules/detectors.py; the values are
- * gated against it by test/modules/parity_detectors.c. */
+/* Wall-clock constants are authored for hop=160 @ 16 kHz and retimed in the *_init functions. */
 #define DET_REF_HOP 160
 #define DET_REF_SR  16000
 #define DET_REHOP(v, hop, sr) \
@@ -17,8 +11,8 @@
 
 /* ── RenderActivityDetector ──────────────────────────────────── */
 
-static const float RA_ALPHA_CV_REF = 0.99f;   /* TC ~ 1 s at the 10 ms ref hop */
-/* Dimensionless CV^2 level gate -- no time content, so not retimed. */
+static const float RA_ALPHA_CV_REF = 0.99f;   /* TC ~ 1 s at the reference hop */
+/* Dimensionless CV^2 gate; not retimed. */
 static const float RA_STATIONARY_C = 0.02f;
 
 void render_activity_init(RenderActivity* r, float* pairwise_scratch,
@@ -33,9 +27,7 @@ void render_activity_init(RenderActivity* r, float* pairwise_scratch,
     r->pairwise_scratch_len = pairwise_scratch_len;
 }
 void render_activity_reset(RenderActivity* r) {
-    /* Scalar state only -- pairwise_scratch/pairwise_scratch_len are
-     * caller-owned and set once at render_activity_init; reset must not
-     * clobber them (there is no pool-carved buffer to re-supply here). */
+    /* Scalar state only; the caller-owned scratch pointers set at init are kept. */
     r->env_mean      = 1e-10f;
     r->env_var       = 0.0f;
     r->active_prev   = 0;
@@ -44,13 +36,7 @@ void render_activity_reset(RenderActivity* r) {
 
 RenderActivityResult render_activity_update(RenderActivity* r,
                                                const float* far_end, int n) {
-    /* Guard (clang-analyzer): n<=0 would leave `blocks[0]` unwritten below
-     * (n_blocks would be 0, or negative n would skip the fill loop entirely)
-     * and then read it uninitialized at `far_pwr_raw = blocks[0] / n`. Every
-     * real call site passes n == hop_size (always > 0), so this never fires
-     * in production — pure guard, no behavior change for valid inputs.
-     * Returns current state unchanged, far_pwr floored the same way the
-     * silent-far branch below would (`far_pwr_raw=0` + epsilon). */
+    /* Guard: n <= 0 returns the current state with the power floored. */
     if (n <= 0) {
         RenderActivityResult res0 = {
             .far_pwr       = 1e-10f,
@@ -60,21 +46,10 @@ RenderActivityResult render_activity_update(RenderActivity* r,
         };
         return res0;
     }
-    /* far_pwr_raw = mean(far_end ** 2), computed in float32.
-     *
-     * np.mean of an fp32 array uses pairwise summation in fp32 then divides
-     * (also fp32). To reproduce numpy's pairwise summation we use 8-element
-     * blocks summed linearly, then a tree reduction over the block sums —
-     * this mirrors numpy's `pairwise_sum_FLOAT`
-     * (`numpy/core/src/umath/loops_utils.h.src`).
-     */
+    /* Mean power via 8-element block sums and a tree reduction over the block sums. */
     enum { PAIR_BLOCK = 8 };
     int n_blocks = (n + PAIR_BLOCK - 1) / PAIR_BLOCK;
-    /* Guard: pairwise_scratch is caller-owned (pool-carved by aec_carve,
-     * sized ceil(hop/PAIR_BLOCK) from the same runtime hop passed as `n`
-     * here), so this never fires in production -- but a corrupted or
-     * mis-sized carve must not silently overrun caller memory. Mirrors the
-     * n<=0 guard above: return current state unchanged. */
+    /* Guard: scratch too small for n returns the current state. */
     if (n_blocks > r->pairwise_scratch_len) {
         RenderActivityResult res_guard = {
             .far_pwr       = 1e-10f,
@@ -96,7 +71,7 @@ RenderActivityResult render_activity_update(RenderActivity* r,
         }
         blocks[b] = s;
     }
-    /* Tree reduction over blocks (fp32) */
+    /* Tree reduction over the block sums. */
     int len = n_blocks;
     while (len > 1) {
         int half = len / 2;
@@ -115,9 +90,7 @@ RenderActivityResult render_activity_update(RenderActivity* r,
             r->env_mean    = far_pwr;
             r->env_var     = 0.0f;
             r->active_prev = 1;
-            /* One observation has no variance estimate. Match the Python
-             * detector and wait for the next active hop before declaring
-             * the render stationary. */
+            /* One observation has no variance estimate; wait for the next active hop. */
             r->is_stationary = 0;
         } else {
             float old_mean = r->env_mean;
@@ -158,9 +131,7 @@ void filter_convergence_init(FilterConvergence* c, int hop_size, int sample_rate
     filter_convergence_reset(c);
 }
 void filter_convergence_reset(FilterConvergence* c) {
-    /* State only. div_alpha/div_decay are grid-derived and set once at init;
-     * reset must not clobber them (there is no hop/sample_rate to re-derive
-     * from here). Same rule as render_activity_reset's scratch pointers. */
+    /* State only; the grid-derived div_alpha/div_decay are kept. */
     c->converged       = 0;
     c->once_converged  = 0;
     c->conv_counter    = 0;
@@ -202,13 +173,12 @@ int filter_convergence_update_convergence(FilterConvergence* c,
 
 /* ── DoubleTalkAnalyzer ──────────────────────────────────────── */
 
-/* Shadow-filter DT blind period; kept as a duration so all grids and both
- * implementations use the same wall-clock gate. */
+/* Shadow-filter DT blind period, kept as a duration so it is the same on every grid. */
 static const float DT_SHADOW_FRAME_GATE_MS = 200.0f;
 static const float DT_ERL_CEILING_FLOOR = 0.01f;
 static const float DT_SAFETY_MARGIN     = 2.0f;
 static const float DTE_RISE_OLD_REF  = 0.3f;
-static const float DTE_DECAY_OLD_REF = 0.9f;  /* the "TC~90ms" hangover */
+static const float DTE_DECAY_OLD_REF = 0.9f;  /* ~90 ms hangover */
 static const float DTS_OLD_REF = 0.7f;
 static const float DTS_INACTIVE_DECAY_REF = 0.95f;
 
@@ -221,8 +191,7 @@ void doubletalk_init(DoubleTalk* d, float offset, float advantage_scale,
     d->shadow_dtd_advantage_scale  = advantage_scale;
     d->shadow_frame_gate = aec_ms_to_hops(DT_SHADOW_FRAME_GATE_MS,
                                           hop_size, sample_rate);
-    /* Only the OLD (retention) term is retimed; NEW is 1-OLD by construction
-     * so each pair keeps summing to 1 on every grid. */
+    /* Only the retention term is retimed; the new-sample weight is 1 - retention. */
     d->dte_rise_old  = DET_REHOP(DTE_RISE_OLD_REF, hop_size, sample_rate);
     d->dte_rise_new  = 1.0f - d->dte_rise_old;
     d->dte_decay_old = DET_REHOP(DTE_DECAY_OLD_REF, hop_size, sample_rate);

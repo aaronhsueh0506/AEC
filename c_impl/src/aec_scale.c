@@ -1,11 +1,4 @@
-/* aec_scale.c — C port of the Python scale-conversion helpers (python/modules/).
- *
- * Every function mirrors the Python semantics structurally, including the
- * round-half-to-even behaviour of Python's int(round(.)) via lrintf() under
- * the default FE_TONEAREST rounding mode. Float32 (init-only helpers; drift
- * versus Python accepted). Built with -ffp-contract=off (Makefile), so no
- * fused multiply-add reorders the float ops away from the reference.
- */
+/* aec_scale.c -- see aec_scale.h. Rounding is round-half-to-even (lrintf). */
 #include "aec_scale.h"
 
 #include <math.h>
@@ -61,11 +54,7 @@ float aec_block_energy_scale(float value_int16sq, int hop_samples) {
 
 float aec_per_block_growth_to_per_hop(double per_block_multiplier,
                                       int hop_samples, int sample_rate) {
-    /* double throughout, narrowed once at return -- see aec_scale.h. Python
-     * computes `per_block_multiplier ** (hop_seconds / block_seconds)` in
-     * float64 and only narrows to float32 when the result later multiplies a
-     * float32 array; mirroring that order (not powf() on a pre-narrowed
-     * float32 base) is required for bit-exactness. */
+    /* double throughout, narrowed once at return (see aec_scale.h). */
     double block_seconds = (double)AEC_BLOCK_SAMPLES_16K / 16000.0;
     double hop_seconds = (double)hop_samples / (double)sample_rate;
     return (float)pow(per_block_multiplier, hop_seconds / block_seconds);
@@ -83,18 +72,8 @@ float aec_growth_rehop(float retention_at_ref, int ref_hop_samples,
                        int ref_sample_rate, int hop_samples,
                        int sample_rate) {
     float ref_seconds, hop_seconds;
-    /* Guard here rather than at each call site: this is the single funnel every
-     * retimed constant passes through, and a non-positive rate/hop would make
-     * hop_seconds Inf or negative, so powf() returns 0 or NaN and silently
-     * poisons an EMA that is only ever read, never validated. Falling back to
-     * the authoring value is the one well-defined answer -- it degrades to "not
-     * retimed" instead of to a dead filter.
-     *
-     * The top-level AecConfig validator already rejects these, so this is
-     * unreachable through aec_create(); it exists for the direct pbfdaf_init_static()/
-     * pbfdkf_init_static()/saturation_init() entry points, which are public API and
-     * are called by tests and by out-of-tree integrations. saturation_init()
-     * in particular returns void and has no other way to refuse. */
+    /* Single funnel for every retimed constant: a non-positive rate or hop would make powf()
+     * return 0 or NaN, so the authoring value is returned (not retimed) instead. */
     if (sample_rate <= 0 || hop_samples <= 0 ||
         ref_sample_rate <= 0 || ref_hop_samples <= 0) {
         return retention_at_ref;

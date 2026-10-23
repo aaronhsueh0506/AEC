@@ -1,35 +1,31 @@
-/* filter_analyzer.c — C port (float32) of
- * python/modules/state/filter_analyzer.py. See header for the parity
- * contract. Build with -ffp-contract=off. */
+/* filter_analyzer.c -- see filter_analyzer.h. Float32 throughout. */
 #include "filter_analyzer.h"
 #include "aec_scale.h"
 
 #include "utility/simd_aec.h"
 
-#include <limits.h>   /* LONG_MAX */
+#include <limits.h>
 #include <math.h>
 #include <string.h>
 
-/* Minimum-phase HPF cutoff ~600 Hz (filter_analyzer.cc:170-172 verbatim,
- * stored as float32 in Python). */
+/* Minimum-phase high-pass taps, cutoff ~600 Hz. */
 static const float FA_HPF_COEFFS[3] = {
     0.7929742f, -0.36072128f, -0.47047766f
 };
 #define FA_HPF_LEN 3
 
-/* ConsistentFilterDetector thresholds (filter_analyzer.cc:264-265 verbatim). */
+/* ConsistentFilterDetector thresholds. */
 #define FA_FLOOR_RATIO        10.0f
 #define FA_SECONDARY_RATIO     2.0f
 #define FA_FLOOR_LOW_SAMPLES_16K    64
 #define FA_FLOOR_HIGH_SAMPLES_16K  128
 
 static int fa_floor_scale(int sample_rate) {
-    /* Preserve the established legacy-8-kHz behaviour. This correction is
-     * scoped to the 48-kHz product grid; both 16-kHz grids remain x1. */
+    /* Floor window scale: x3 on the 48 kHz grid, x1 otherwise. */
     return sample_rate == 48000 ? 3 : 1;
 }
 
-/* ----------------------- ConsistentFilterDetector ------------------------ */
+/* ConsistentFilterDetector */
 static void cd_reset(FaConsistentDetector *c) {
     c->significant_peak = 0;
     c->floor_accum = 0.0f;
@@ -40,7 +36,7 @@ static void cd_reset(FaConsistentDetector *c) {
     c->delay_ref = -10;
 }
 
-/* abs(float32 slice) pairwise-summed in f32 + f32 max over the same slice. */
+/* Accumulate the pairwise sum of |taps| and the max over [lo, hi). */
 static void cd_accumulate_slice(FaConsistentDetector *c, const float *taps,
                                 int lo, int hi /* exclusive */, float *scratch) {
     int i, n = hi - lo;
@@ -54,15 +50,13 @@ static void cd_accumulate_slice(FaConsistentDetector *c, const float *taps,
         scratch[i] = fabsf(taps[lo + i]);
         if (scratch[i] > seg_max) seg_max = scratch[i];
     }
-    /* np.abs(seg).sum() : float32 pairwise, accumulated directly (float32-by-design) */
     c->floor_accum += sk_pairwise_sum_tailfold_b_f32(scratch, (size_t)n);
-    /* np.abs(seg).max(initial=0.0) : float32 max, stored directly (float32-by-design) */
     if (seg_max > c->secondary_peak) {
         c->secondary_peak = seg_max;
     }
 }
 
-/* Mirrors FilterAnalyzer::ConsistentFilterDetector.detect. Returns bool. */
+/* Returns 1 when the peak is consistent for more than consistent_hold_hops hops. */
 static int cd_detect(FaConsistentDetector *c, const float *h, int size,
                      int region_start, int region_end,
                      const float *render_block, int render_block_len,
@@ -85,20 +79,20 @@ static int cd_detect(FaConsistentDetector *c, const float *h, int size,
                 : peak_index + floor_high_offset;
     }
 
-    /* Lower sweep: region_start .. min(region_end+1, floor_low_limit) */
+    /* Lower sweep: region_start .. min(region_end + 1, floor_low_limit). */
     hi_lower = region_end + 1;
     if (c->floor_low_limit < hi_lower) hi_lower = c->floor_low_limit;
     if (region_start < hi_lower) {
         cd_accumulate_slice(c, h, region_start, hi_lower, scratch);
     }
 
-    /* Upper sweep: max(floor_high_limit, region_start) .. region_end */
+    /* Upper sweep: max(floor_high_limit, region_start) .. region_end. */
     lo_upper = (c->floor_high_limit > region_start) ? c->floor_high_limit : region_start;
     if (lo_upper <= region_end) {
         cd_accumulate_slice(c, h, lo_upper, region_end + 1, scratch);
     }
 
-    /* End-of-sweep significance check (filter_analyzer.cc:258-266). */
+    /* End-of-sweep significance check. */
     if (region_end == size - 1) {
         int denom_i = c->floor_low_limit + size - c->floor_high_limit;
         float denom = (denom_i > 1) ? (float)denom_i : 1.0f;
@@ -115,16 +109,7 @@ static int cd_detect(FaConsistentDetector *c, const float *h, int size,
         active = (sk_sum_sq_pairwise_f32(render_block, (size_t)render_block_len)
                   > c->active_render_threshold);
         if (c->delay_ref == delay_blocks) {
-            /* Floored at LONG_MAX to avoid signed overflow (not at the
-             * consistent_hold_hops threshold the boolean below reads): unlike a pure
-             * boolean-gate counter, this field's raw value must track the Python
-             * ConsistentFilterDetector's own unbounded `_counter` accumulator.
-             * Capping at the threshold would still
-             * make the `> consistent_hold_hops` boolean below match, but would desync
-             * the raw value from Python the very next hop (same constraint as
-             * erl_estimator.c's hold_counter_time_domain). Capping at LONG_MAX is a
-             * no-op for every practically reachable state (this counter only advances
-             * on active-render hops with a held delay estimate). */
+            /* Saturates at LONG_MAX, not at the hold threshold: the raw value is observable. */
             if (active && c->counter < LONG_MAX) c->counter += 1;
         } else {
             c->counter = 0;
@@ -135,7 +120,7 @@ static int cd_detect(FaConsistentDetector *c, const float *h, int size,
     return c->counter > c->consistent_hold_hops;
 }
 
-/* ------------------------------ FilterAnalyzer --------------------------- */
+/* FilterAnalyzer */
 void fa_init(FilterAnalyzer *m, float *h_highpass_storage, int size,
              float active_render_limit, int bounded_erl, float default_gain,
              float *abs_scratch, int abs_scratch_len,
@@ -147,9 +132,7 @@ void fa_init(FilterAnalyzer *m, float *h_highpass_storage, int size,
     m->default_gain = default_gain;
     m->consistent.active_render_threshold =
         (active_render_limit * active_render_limit) * (float)hop_size;
-    /* Reference values: 5s convergence threshold, 1.5s consistency hold. Were
-     * frozen #defines (500/150, correct only at hop=160/sr=16000); computed
-     * live here. */
+    /* 5 s convergence threshold and 1.5 s consistency hold, from the live grid. */
     m->convergence_threshold_hops = aec_ms_to_hops(5000.0f, hop_size, sample_rate);
     m->consistent.consistent_hold_hops = aec_ms_to_hops(1500.0f, hop_size, sample_rate);
     cd_reset(&m->consistent);
@@ -166,10 +149,7 @@ void fa_init(FilterAnalyzer *m, float *h_highpass_storage, int size,
     m->abs_scratch_len = abs_scratch_len;
     m->render_sq_scratch = render_sq_scratch;
     m->render_sq_scratch_len = render_sq_scratch_len;
-    /* No provider by default: a caller that hands fa_update a fully
-     * materialized tap array (the parity harnesses) needs no hook, and one
-     * that materializes on demand installs it after init. fa_reset()
-     * deliberately leaves it alone -- it is wiring, not analyzer state. */
+    /* No provider by default; fa_reset() leaves it alone since it is wiring, not analyzer state. */
     m->taps_provider = NULL;
     m->taps_provider_ctx = NULL;
     if (m->h_highpass != NULL && size > 0) {
@@ -191,7 +171,7 @@ void fa_reset(FilterAnalyzer *m) {
     }
 }
 
-/* filter_analyzer.cc:194-206. Cycles one block forward; wraps at end. */
+/* Advance the region by one block, wrapping at the end. */
 static void fa_set_region(FilterAnalyzer *m, int size) {
     int block = m->hop_size;
     if (m->region_end >= size - 1) {
@@ -208,18 +188,13 @@ void fa_set_taps_provider(FilterAnalyzer *m, FaTapsProvider fn, void *ctx) {
     m->taps_provider_ctx = ctx;
 }
 
-/* filter_analyzer.cc:161-187: zero region, then causal 3-tap convolution.
- * h_highpass already sized to `size` (init/reset zeroed it). */
+/* Zero the region, then apply the causal 3-tap FIR. */
 static void fa_preprocess(FilterAnalyzer *m, const float *filter_taps) {
     int start, end, zero_hi, i;
-    start = FA_HPF_LEN - 1;                 /* _HPF_COEFFS.size - 1 = 2 */
+    start = FA_HPF_LEN - 1;
     if (m->region_start > start) start = m->region_start;
     end = m->region_end + 1;
-    /* h_highpass[region_start:region_end+1] = 0.0 -- but only the prefix
-     * [region_start, start) the FIR loop below will never reach; the rest
-     * of the original range gets unconditionally overwritten by that loop
-     * (or, if start>=end, the FIR loop doesn't run at all and this zeroes
-     * the whole [region_start,end) range, matching the degenerate case). */
+    /* Zero only the prefix [region_start, start) the FIR loop will not reach. */
     zero_hi = (start < end) ? start : end;
     for (i = m->region_start; i < zero_hi; ++i) {
         m->h_highpass[i] = 0.0f;
@@ -227,13 +202,12 @@ static void fa_preprocess(FilterAnalyzer *m, const float *filter_taps) {
     if (start >= end) {
         return;
     }
-    /* Causal FIR, 3 taps, all float32:
-     *   out = x[i]*c0 + x[i-1]*c1 + x[i-2]*c2 */
+    /* Causal 3-tap FIR: out = x[i]*c0 + x[i-1]*c1 + x[i-2]*c2. */
     for (i = start; i < end; ++i) {
         float v = filter_taps[i]     * FA_HPF_COEFFS[0]
                 + filter_taps[i - 1] * FA_HPF_COEFFS[1]
                 + filter_taps[i - 2] * FA_HPF_COEFFS[2];
-        m->h_highpass[i] = v;          /* astype(np.float32) no-op (already f32) */
+        m->h_highpass[i] = v;
     }
 }
 
@@ -246,51 +220,22 @@ void fa_update(FilterAnalyzer *m, const float *filter_taps,
     int sufficient;
     float peak_abs;
 
-    /* Guard (clang-analyzer): size<0 (an invalid-config path — m->size is
-     * derived from filter_length/hop) would clip region_end negative in
-     * fa_set_region below, then the peak-finding code reads h[region_start]
-     * = h[0] out of the h_highpass buffer (sized `size`, i.e. 0 bytes) —
-     * an OOB/uninitialized read. size==0 already returned here; widened to
-     * size<=0 to also close the negative case. Pure guard: any valid config
-     * always has size > 0 (n_partitions*hop, both positive), so this never
-     * fires in production. */
+    /* Guard: an invalid config (size <= 0) must not reach the peak search. */
     if (size <= 0) {
         return;
     }
-    /* Guard: abs_scratch/render_sq_scratch are caller-owned (pool-carved by
-     * aec_carve, sized from the same runtime n_partitions*hop / hop dims as
-     * `size`/render_block_len), so this never fires in production -- but a
-     * corrupted or mis-sized carve must not silently overrun caller memory
-     * (the largest abs-slice spans at most `size` elements; the render sum
-     * spans exactly render_block_len). */
+    /* Guard: the caller-owned scratch buffers must cover this call. */
     if (m->abs_scratch_len < size || m->render_sq_scratch_len < render_block_len) {
         return;
     }
-    /* Ceilinged at convergence_threshold_hops+1 to avoid signed overflow: the
-     * ONLY consumer of blocks_since_reset in this file is the
-     * `> convergence_threshold_hops` check below (the raw value is not
-     * part of the Python-parity surface, unlike `consistent.counter`). Once
-     * the counter exceeds
-     * convergence_threshold_hops, further increments can never change that
-     * comparison's outcome (already true, stays true), so gating the increment
-     * at the smallest value that still satisfies `>` is observationally
-     * identical to an unbounded increment for every reachable state. */
+    /* Capped at convergence_threshold_hops + 1 to avoid signed overflow; only the `>` comparison
+     * below reads it. */
     if (m->blocks_since_reset <= m->convergence_threshold_hops)
         m->blocks_since_reset += 1;
     fa_set_region(m, size);
     if (m->taps_provider != NULL) {
-        /* Ask the owner to materialize exactly the taps fa_preprocess() is
-         * about to read, and nothing else. That loop runs
-         * i = max(FA_HPF_LEN-1, region_start) .. region_end and touches
-         * filter_taps[i], [i-1], [i-2], so the closed span is
-         * [region_start-(FA_HPF_LEN-1), region_end] CLAMPED AT 0 -- the two
-         * HPF history taps are taken from before the region, never wrapped
-         * around from the far end of the buffer, so a region starting at 0
-         * needs no carry from the last block. Everything outside the span
-         * keeps its previous contents: this module is the only reader of
-         * filter_taps (the peak search, the gain and the consistency
-         * detector all run on h_highpass, which this object owns and which
-         * init/reset zero), and it never reads past the current span. */
+        /* Ask the owner for exactly the taps fa_preprocess() reads: [region_start - 2, region_end],
+         * clamped at 0. Everything else in filter_taps is never read by this module. */
         int span_lo = m->region_start - (FA_HPF_LEN - 1);
         if (span_lo < 0) span_lo = 0;
         m->taps_provider(m->taps_provider_ctx, span_lo, m->region_end);
@@ -298,18 +243,15 @@ void fa_update(FilterAnalyzer *m, const float *filter_taps,
     fa_preprocess(m, filter_taps);
     h = m->h_highpass;
 
-    /* Find peak (filter_analyzer.cc:127-130). Compare squared magnitudes. */
+    /* Find the peak by comparing squared magnitudes. */
     if (m->peak_index >= size) {
         m->peak_index = size - 1;
     }
     hp = h[m->peak_index];
-    cur_sq = hp * hp;                   /* float32 */
+    cur_sq = hp * hp;
     seg_lo = m->region_start;
-    seg_hi = m->region_end + 1;         /* exclusive */
-    /* np.argmax(seg*seg): first index of the maximum (strict-greater scan).
-     * sk_argmax_sq_f32 returns 0 for a 0- or 1-element range, matching this
-     * loop's own effective no-op there (its body never executes, leaving
-     * seg_amax=0 unconditionally). */
+    seg_hi = m->region_end + 1;
+    /* First index of the maximum of seg*seg. */
     seg_amax = sk_argmax_sq_f32(h + seg_lo, seg_hi - seg_lo);
     sp = h[seg_lo + seg_amax];
     best_sq = sp * sp;
@@ -318,21 +260,19 @@ void fa_update(FilterAnalyzer *m, const float *filter_taps,
     }
     m->delay_blocks = m->peak_index / m->hop_size;
 
-    /* UpdateFilterGain. The reference passes h_highpass_ to
-     * UpdateFilterGain and reads filter_time_domain[peak_index] from it, so the
-     * gain is |h_hpf[peak]| (matches filter_analyzer.py update()). */
+    /* Echo path gain = |h_highpass[peak]|. */
     sufficient = (m->blocks_since_reset > m->convergence_threshold_hops);
     peak_abs = fabsf(h[m->peak_index]);
     if (sufficient && m->consistent_estimate) {
         m->gain = peak_abs;
-    } else if (m->gain != 0.0f) {        /* `elif self._gain:` (truthy) */
+    } else if (m->gain != 0.0f) {
         m->gain = (m->gain > peak_abs) ? m->gain : peak_abs;
     }
     if (m->bounded_erl && m->gain != 0.0f) {
         m->gain = (m->gain > 0.01f) ? m->gain : 0.01f;
     }
 
-    /* ConsistentFilterDetector (filter_analyzer.cc:135-138). */
+    /* ConsistentFilterDetector. */
     m->consistent_estimate = cd_detect(
         &m->consistent, h, size, m->region_start, m->region_end,
         render_block, render_block_len, m->peak_index, m->delay_blocks,
@@ -340,7 +280,7 @@ void fa_update(FilterAnalyzer *m, const float *filter_taps,
         m->abs_scratch, m->render_sq_scratch);
 }
 
-/* ------------------------------ queries --------------------------------- */
+/* Queries */
 int fa_min_filter_delay_blocks(const FilterAnalyzer *m) {
     return m->delay_blocks;
 }

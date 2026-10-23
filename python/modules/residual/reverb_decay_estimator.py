@@ -1,26 +1,9 @@
 """Adaptive reverb decay estimator.
 
-Two paths:
-
-  * **Legacy (default)** — partition-energy linear regression over
-    ``log2(Σ_k |W_p[k]|²)`` per partition. Coarse but cheap.
-
-  * **AEC3-strict** (`use_aec3_block_energy=True`) — full port of
-    `docs/aec3_extracts/src/aec3/reverb_decay_estimator.{cc,h}`. Operates
-    on the time-domain impulse response sliced into ``kFftLengthBy2 = 64``
-    sample sub-blocks. Includes:
-      - ``BlockEnergyAverage`` / ``BlockEnergyPeak``
-      - ``AnalyzeBlockGain`` (adapt + above-noise-floor gates)
-      - ``EarlyReverbLengthEstimator`` (overlapping kBlocksPerSection=6
-        windows + per-section linear regressor; identifies early
-        reverberation region)
-      - ``LateReverbLinearRegressor`` (per-sample log2(h²) accumulation,
-        symmetric-arithmetic-sum closed form)
-      - ``EstimateDecay`` gating (``first_reverb_gain > 4·tail_gain``,
-        ``peak_energy < 100``, ``size_late_reverb >= 5``)
-
-The two paths are mutually exclusive per-instance: the orchestrator
-selects which input to provide. Default-OFF preserves byte-equal.
+Two paths, chosen by ``use_aec3_block_energy``: a partition-energy regression over
+``log2(sum_k |W_p[k]|^2)`` (cheap), and a time-domain path on 64-sample blocks of the impulse
+response (early-reverb length, late-reverb log2(h^2) regression); the decay is accepted when
+the first reverb block exceeds 4x the tail gain, peak energy is below 100 and the late region has >= 5 blocks.
 """
 from __future__ import annotations
 
@@ -36,21 +19,20 @@ _K_EARLY_REVERB_MIN_SIZE_BLOCKS = 3
 _K_BLOCKS_PER_SECTION = 6
 _K_MIN_DECAY = 0.02
 _K_MAX_DECAY = 0.95
-_K_FFT_LENGTH_BY_2 = 64           # AEC3 kFftLengthBy2 = 64 samples
-_K_FFT_LENGTH_BY_2_LOG2 = 6       # log2(64)
+_K_FFT_LENGTH_BY_2 = 64
+_K_FFT_LENGTH_BY_2_LOG2 = 6
 
-# log2(1.1) and log2(0.8) — see AEC3 cc:372-374.
 _LOG2_1_1 = 0.13750352374993502
 _LOG2_0_8 = -0.32192809488736229
 
 
 def _symmetric_arithmetic_sum(N: int) -> float:
-    """AEC3 cc:60-62 — Arithmetic sum of 2·Σ_{i=0.5}^{(N-1)/2} i² = N(N²-1)/12."""
+    """Sum of squares ``2 * sum_{i=0.5}^{(N-1)/2} i^2 = N (N^2 - 1) / 12``."""
     return N * (N * N - 1.0) / 12.0
 
 
 def _block_energy_average(h: np.ndarray, block_index: int) -> float:
-    """AEC3 cc:76-85 — mean of squared TD taps in a 64-sample block."""
+    """Mean of squared taps in a 64-sample block."""
     s = block_index * _K_FFT_LENGTH_BY_2
     e = s + _K_FFT_LENGTH_BY_2
     seg = h[s:e]
@@ -58,7 +40,7 @@ def _block_energy_average(h: np.ndarray, block_index: int) -> float:
 
 
 def _block_energy_peak(h: np.ndarray, peak_block: int) -> float:
-    """AEC3 cc:65-73 — max squared TD tap in a 64-sample block."""
+    """Maximum squared tap in a 64-sample block."""
     s = peak_block * _K_FFT_LENGTH_BY_2
     e = s + _K_FFT_LENGTH_BY_2
     seg = h[s:e].astype(np.float64)
@@ -68,21 +50,14 @@ def _block_energy_peak(h: np.ndarray, peak_block: int) -> float:
 
 
 class _LateReverbLinearRegressor:
-    """Port of `ReverbDecayEstimator::LateReverbLinearRegressor` (cc:277-304).
-
-    Linear regression on log2(h²) per sample, accumulating ``z[i] *
-    (i - (N-1)/2)`` for ``i = 0..N-1``. The denominator
-    ``Σ(i - (N-1)/2)²`` is a closed-form symmetric sum (``N(N²-1)/12``).
-    Slope estimate is ``nz / nn`` where ``nz = Σ z·(i - mid)`` and
-    ``nn = Σ (i - mid)²``.
-    """
+    """Linear regression of log2(h^2) per sample; slope = sum(z * (i - mid)) / sum((i - mid)^2)
+    with the denominator in closed form."""
 
     def __init__(self) -> None:
         self.reset(0)
 
     def reset(self, num_data_points: int) -> None:
         N = int(num_data_points)
-        # AEC3 RTC_DCHECK_EQ(0, N % 2) — must be even (we don't crash on odd).
         self._N = N
         self._n = 0
         self._nz = 0.0
@@ -104,16 +79,9 @@ class _LateReverbLinearRegressor:
 
 
 class _EarlyReverbLengthEstimator:
-    """Port of `ReverbDecayEstimator::EarlyReverbLengthEstimator` (cc:306-404).
-
-    Overlapping ``kBlocksPerSection=6`` block windows, each with its own
-    LinearRegressor numerator. Section ``k`` covers blocks ``[k, k+5]``.
-    Each TD coefficient appears in up to 6 sections; the per-section
-    numerator is updated using a closed-form increment formula.
-
-    ``Estimate()`` compares first 9 sections' numerator to the minimum
-    of the tail (sections ≥ 9) to identify early-reverb extent.
-    """
+    """Overlapping 6-block sections, each with its own regression numerator
+    (section k covers blocks k..k+5). ``estimate()`` compares the first 9 smoothed
+    numerators with the minimum of the rest to find the early-reverb extent."""
 
     def __init__(self, max_blocks: int) -> None:
         nsec = max(0, max_blocks - _K_BLOCKS_PER_SECTION)
@@ -130,14 +98,12 @@ class _EarlyReverbLengthEstimator:
             self._numerators[i] = 0.0
         self._coefficients_counter = 0
         self._block_counter = 0
-        # Note: AEC3 doesn't reset numerators_smooth in Reset().
 
     def accumulate(self, value: float, smoothing: float) -> None:
         first_section = max(self._block_counter - _K_BLOCKS_PER_SECTION + 1, 0)
         last_section = min(self._block_counter, len(self._numerators) - 1)
         if last_section < 0:
-            # Block beyond storage — still advance the coefficient counter
-            # so the block boundary trips correctly.
+            # Block beyond storage: still advance the counter so block boundaries trip.
             self._coefficients_counter += 1
             if self._coefficients_counter == _K_FFT_LENGTH_BY_2:
                 self._block_counter += 1
@@ -166,7 +132,7 @@ class _EarlyReverbLengthEstimator:
             self._coefficients_counter = 0
 
     def estimate(self) -> int:
-        """Returns size in blocks of early reverb. AEC3 cc:366-404."""
+        """Early-reverb size in blocks."""
         kNumSectionsToAnalyze = 9
         if self._n_sections < kNumSectionsToAnalyze:
             return 0
@@ -192,12 +158,8 @@ class _EarlyReverbLengthEstimator:
 
 
 class ReverbDecayEstimator:
-    """Adaptive per-hop reverb decay scalar.
-
-    Two operating modes selectable per-update:
-      - Legacy partition path: provide ``partition_energies`` only.
-      - AEC3-strict TD path: provide ``time_domain_filter`` only.
-    """
+    """Adaptive per-hop reverb decay scalar; ``update()`` takes either partition energies
+    or the time-domain filter, matching the mode chosen at construction."""
 
     def __init__(self, n_partitions: int, hop_size: int,
                  default_decay: float = 0.85,
@@ -215,9 +177,7 @@ class ReverbDecayEstimator:
         self._decay: float = float(default_decay)
         self._smoothing_constant: float = 0.0
 
-        # AEC3-strict state (cc:89-102).
-        # filter_length_blocks_ = number of kFftLengthBy2 sub-blocks in TD
-        # filter. Determined lazily on first update from TD length.
+        # Time-domain path state; the filter length in blocks is set on the first update.
         self._filter_length_blocks: int = 0
         self._early_reverb_estimator: Optional[_EarlyReverbLengthEstimator] = None
         self._late_reverb_decay_estimator = _LateReverbLinearRegressor()
@@ -244,7 +204,7 @@ class ReverbDecayEstimator:
         self._reset_decay_estimation()
 
     def _reset_decay_estimation(self) -> None:
-        """AEC3 cc:151-160."""
+        """Reset the estimation state."""
         if self._early_reverb_estimator is not None:
             self._early_reverb_estimator.reset()
         self._late_reverb_decay_estimator.reset(0)
@@ -272,13 +232,8 @@ class ReverbDecayEstimator:
                filter_delay_blocks: int = 0,
                usable_linear_filter: bool = False,
                stationary_signal: bool = False) -> None:
-        """Refresh the adaptive decay scalar.
-
-        Pass exactly one of ``partition_energies`` (legacy) or
-        ``time_domain_filter`` (AEC3-strict). If AEC3-strict mode is
-        enabled on the instance but ``time_domain_filter`` is not
-        provided, the call is a no-op.
-        """
+        """Refresh the decay scalar from ``partition_energies`` or ``time_domain_filter``
+        (per the mode); a missing input for the active mode is a no-op."""
         if self._use_aec3_block_energy:
             if time_domain_filter is None:
                 return
@@ -300,7 +255,6 @@ class ReverbDecayEstimator:
                 stationary_signal=stationary_signal,
             )
 
-    # ------------------------------------------------------------ legacy
 
     def _update_legacy(self, partition_energies: np.ndarray,
                        filter_quality: Optional[float],
@@ -341,10 +295,7 @@ class ReverbDecayEstimator:
         if den == 0.0:
             return
         slope_per_partition = num / den
-        # Store the fitted slope in AEC3's 4 ms-block convention: the consumer
-        # retimes this value from 4 ms to the live hop (a per-sample value
-        # retimed that way is 64x too sticky at 16 kHz and sample-rate
-        # dependent).
+        # Slope stored per 4 ms block; the consumer retimes it to the live hop.
         block_samples = (AEC3_BLOCK_SAMPLES_16K / 16000.0) * max(1, self._sample_rate)
         decay_log2_per_block = (
             slope_per_partition * block_samples / max(1, self._hop_size)
@@ -356,14 +307,13 @@ class ReverbDecayEstimator:
         self._decay += self._smoothing_constant * (decay_new - self._decay)
         self._smoothing_constant = 0.0
 
-    # -------------------------------------------------------- AEC3-strict
 
     def _update_aec3_strict(self, td_filter: np.ndarray,
                             filter_quality: Optional[float],
                             filter_delay_blocks: int,
                             usable_linear_filter: bool,
                             stationary_signal: bool) -> None:
-        """AEC3 reverb_decay_estimator.cc:106-149 verbatim port."""
+        """Time-domain update: gate feasibility, then analyse blocks sequentially and estimate."""
         if stationary_signal:
             return
         self._lazy_init_aec3(td_filter.size)
@@ -398,7 +348,7 @@ class ReverbDecayEstimator:
 
     def _analyze_block_gain(self, h2_block: np.ndarray,
                             previous_gain_idx: int) -> tuple[bool, bool]:
-        """AEC3 cc:47-57 — returns (adapting, decaying_gain)."""
+        """Returns (adapting, decaying_gain)."""
         gain = max(float(np.mean(h2_block)), 1e-32)
         prev = self._previous_gains[previous_gain_idx]
         adapting = (prev > 1.1 * gain) or (prev < 0.9 * gain)
@@ -407,7 +357,7 @@ class ReverbDecayEstimator:
         return adapting, decaying
 
     def _analyze_filter(self, td_filter: np.ndarray) -> None:
-        """AEC3 cc:226-264."""
+        """Analyse one sub-block of the filter."""
         idx = self._block_to_analyze
         s = idx * _K_FFT_LENGTH_BY_2
         e = s + _K_FFT_LENGTH_BY_2
@@ -423,13 +373,8 @@ class ReverbDecayEstimator:
         if not self._estimation_region_identified:
             self._estimation_region_candidate_size += 1
 
-        # AEC3 cc:250-263: inside the late region accumulate BOTH the
-        # late-decay regressor and the early-length estimator; before it,
-        # early only. The late regressor is Reset() in _estimate_decay to
-        # exactly ``size_late_reverb * kFftLengthBy2`` points and the late
-        # region spans exactly that many blocks*samples, so accumulation is
-        # called exactly N times by construction — AEC3 has NO
-        # ``estimate_available()`` gate here, so neither do we.
+        # In the late region accumulate both estimators, before it only the early one;
+        # the late regressor is reset to exactly the number of points accumulated.
         if idx <= self._late_reverb_end:
             if idx >= self._late_reverb_start:
                 for h2_k in h2:
@@ -448,7 +393,7 @@ class ReverbDecayEstimator:
                         )
 
     def _estimate_decay(self, td_filter: np.ndarray, peak_block: int) -> None:
-        """AEC3 cc:162-224."""
+        """Estimate the decay from the analysed region."""
         self._block_to_analyze = min(
             peak_block + _K_EARLY_REVERB_MIN_SIZE_BLOCKS,
             self._filter_length_blocks,

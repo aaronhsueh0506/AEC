@@ -1,11 +1,6 @@
 """Full 2^4 interaction matrix over the four simple-mu constants.
 
-Six points -- baseline, all-four, and each constant alone -- cannot tell an
-interaction from an accident. Four binary knobs have 16 settings, and the six
-that were measured first are the two extremes plus four of the fourteen
-interior points.
-
-They are also not four independent EMAs. The mechanism is a state machine:
+The four constants are not independent EMAs; the mechanism is a state machine:
 
   * the branch condition is re-evaluated every hop, so a change to any
     retention changes WHICH branch later hops take;
@@ -14,9 +9,8 @@ They are also not four independent EMAs. The mechanism is a state machine:
   * the holdoff limit changes how long the frozen branch lasts, which changes
     the ratio trajectory, which feeds back into the branch condition.
 
-So "each alpha and the holdoff are individually converted correctly" does not
-imply the state machine as a whole is wall-clock invariant. That claim needs the
-full matrix, and it is the matrix's real purpose -- not just picking a winner.
+So per-constant conversion does not imply the state machine as a whole is
+wall-clock invariant; that needs the full 16-setting matrix.
 
 Each setting is scored per clip with target-free physical measures (see
 `simple_mu_case_probe.py` for why SI-SDR/STOI are not computable on this

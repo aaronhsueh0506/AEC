@@ -1,34 +1,20 @@
-/* test_counter_saturation.c — regression test for counter-saturation
- * across this repo's C AEC implementation (a permanent `make
- * test-counter-saturation` target, plus a permanent UBSan build recipe, see
- * test/run_counter_saturation_ubsan.sh).
+/* test_counter_saturation.c -- regression test for counter saturation across this repo's C AEC implementation
+ * (`make test-counter-saturation`, and under UBSan via test/run_counter_saturation_ubsan.sh).
  *
- * For every struct-field increment/decrement site an exhaustive grep sweep
- * verified as genuinely unbounded, plus a representative sample of sites
- * that were already fixed and are reachable from a public API/struct
- * without excessive plumbing, this file exercises at minimum:
- *   - cap-1 -> cap   : one more increment from just below the cap lands
- *                      exactly on the cap.
- *   - cap -> cap     : an increment attempt AT the cap is a no-op.
- *   - runaway        : many (thousands of) more increments/calls past the
- *                      cap never move it further.
- *   - decision-invariance: the boolean/comparison the counter feeds
- *                      produces the IDENTICAL result at the cap as it would
- *                      at a synthetic huge value standing in for the
- *                      (no-longer-reachable) unbounded value the original
- *                      buggy code would eventually have produced.
+ * For every struct-field increment/decrement site that is genuinely unbounded, plus a representative sample of the
+ * bounded ones reachable from a public API/struct, this file exercises at minimum:
+ *   - cap-1 -> cap         : one more increment from just below the cap lands exactly on the cap.
+ *   - cap -> cap           : an increment attempt at the cap is a no-op.
+ *   - runaway              : thousands more increments/calls past the cap never move it further.
+ *   - decision-invariance  : the boolean/comparison the counter feeds gives the identical result at the cap as at a
+ *                            synthetic huge value standing in for the unreachable unbounded one.
  *
- * Build: `make test-counter-saturation` (wired the same way `bench`/`all`
- * are -- needs the audiolib archive for the full-Aec sections; see the
- * Makefile's test-counter-saturation target). Run:
+ * Build: `make test-counter-saturation` (needs the audiolib archive for the full-Aec sections). Run from c_impl/, because
+ * the delay_aec section reads a checked-in fixture at the relative path ../wav/aec_record/aec_record_{mic,ref}_10s.wav:
  *   ./bin/<backend>-<hash>/test_counter_saturation
- * (from c_impl/ -- the delay_aec section reads a checked-in fixture at the
- * relative path ../wav/aec_record/aec_record_{mic,ref}_10s.wav, matching
- * this repo's other cwd-relative test/example conventions).
  *
- * UBSan: test/run_counter_saturation_ubsan.sh builds and runs this SAME
- * source under -fsanitize=undefined -fno-sanitize-recover=all (same recipe
- * shape as test/run_selftest_ubsan.sh) and must exit 0 with no diagnostic.
+ * UBSan: test/run_counter_saturation_ubsan.sh builds and runs this same source under -fsanitize=undefined
+ * -fno-sanitize-recover=all and must exit 0 with no diagnostic.
  */
 #include "aec.h"
 #include "aec_scale.h"
@@ -55,10 +41,9 @@ static long g_fails  = 0;
     } while (0)
 
 /* ════════════════════════════════════════════════════════════════════
- * aec.c-embedded fixes: misadj_stable_count, ne_above,
- * stationarity_active_hops off-by-one -- plus confirming pokes for
- * aec_state.c's/pbfdkf.c's already-fixed counters (all reached through one
- * real Aec instance since they're embedded deep in aec_process()).
+ * aec.c-embedded counters: misadj_stable_count, ne_above, stationarity_active_hops, plus
+ * aec_state.c's and pbfdkf.c's counters (all reached through one real Aec instance, since they are
+ * embedded deep in aec_process()).
  * ════════════════════════════════════════════════════════════════════ */
 static void section_aec_level(void) {
     AecConfig cfg;
@@ -79,14 +64,12 @@ static void section_aec_level(void) {
      * counters under test. */
     for (i = 0; i < hop; i++) ref[i] = 0.05f * ((i % 7) - 3);
 
-    /* --- ref_ring_filled: cap = ref_ring_size (freeze-at-capacity fix in
-     * aec_process_core's ring-write step). Sole reader is
-     * ">= current_delay + hop" and current_delay is capped at rs - hop, so
-     * rs is the largest value ever meaningful. The old unbounded form is
-     * signed-overflow UB after ~37 h of continuous 16 kHz audio; the guard
-     * runs BEFORE the increment, so a value already at/above the cap is
-     * frozen rather than incremented (this is what makes the INT_MAX seed
-     * below UB-free -- the UBSan wrapper of this same binary proves it). */
+    /* --- ref_ring_filled: cap = ref_ring_size (frozen at capacity in aec_process_core's ring-write
+     * step). The sole reader is `>= current_delay + hop` and current_delay is capped at rs - hop,
+     * so rs is the largest value ever meaningful. An unbounded counter would be signed-overflow UB
+     * after ~37 h of 16 kHz audio. The guard runs BEFORE the increment, so a value already at/above
+     * the cap is frozen rather than incremented, which keeps the INT_MAX seed below UB-free (the
+     * UBSan wrapper of this binary proves it). */
     {
         int rs = a.ref_ring_size;
         a.ref_ring_filled = rs - 1;
@@ -108,13 +91,10 @@ static void section_aec_level(void) {
         a.ref_ring_filled = rs;  /* leave a sane value for later sections */
     }
 
-    /* --- misadj_stable_count: cap = cfg.filter_misadjustment_stable_frames,
-     * sole reader "< cap" (misadj_fire). Force+hold the "stable" precondition
-     * (converged && !epc.active && !regime.main_paused) directly every call
-     * -- aec_process()'s own EPC/regime logic is otherwise free to touch
-     * these fields, so re-poking before every call is what actually pins
-     * the precondition deterministically for this test, independent of
-     * what the rest of the (silent-ish) pipeline does. */
+    /* --- misadj_stable_count: cap = cfg.filter_misadjustment_stable_frames, sole reader `< cap`
+     * (misadj_fire). The "stable" precondition (converged && !epc.active && !regime.main_paused) is
+     * forced before every call, because aec_process()'s own EPC/regime logic is free to touch these
+     * fields. */
     {
         int cap = a.cfg.filter_misadjustment_stable_frames;
         a.misadj_hangover_remaining = 0;
@@ -133,8 +113,8 @@ static void section_aec_level(void) {
               "misadj_stable_count: still at cap after 2000 more calls (runaway-proof)");
         /* decision-invariance: the sole reader is "< cap". Two distinct
          * (non-tautological) locals standing in for "counter currently at
-         * the cap" vs "counter at a synthetic huge value the old unbounded
-         * code could have reached". */
+         * the cap" vs "counter at a synthetic huge value an unbounded
+         * counter could reach". */
         {
             int counter_at_cap = cap, counter_at_huge = cap + 1000000;
             int at_cap  = (counter_at_cap  < cap);
@@ -144,12 +124,10 @@ static void section_aec_level(void) {
         }
     }
 
-    /* --- ne_above: cap = cfg.ne_recent_sustain, sole reader ">= cap"
-     * (aec_process, held near-end-energy gate). Force dt_from_energy above
-     * ne_recent_threshold every call (aec_process's own DT analyzer
-     * recomputes dt_from_energy later in the SAME hop from the near-silent
-     * signal, decaying it back down -- so, same as above, re-poke before
-     * every call to pin the precondition this specific test cares about). */
+    /* --- ne_above: cap = cfg.ne_recent_sustain, sole reader `>= cap` (aec_process, held
+     * near-end-energy gate). dt_from_energy is forced above ne_recent_threshold before every call,
+     * because aec_process's DT analyzer recomputes it later in the same hop from the near-silent
+     * signal and decays it. */
     {
         int cap = a.cfg.ne_recent_sustain;
         a.ne_above = cap - 1;
@@ -173,10 +151,9 @@ static void section_aec_level(void) {
         }
     }
 
-    /* --- stationarity_active_hops: off-by-one fix. cap = EXACTLY
-     * a.stationarity_converge_hops (exactly, not one past it).
-     * non_zero_render_seen latches permanently once set, so the branch runs
-     * unconditionally on every subsequent hop without re-poking. */
+    /* --- stationarity_active_hops: cap = exactly a.stationarity_converge_hops.
+     * non_zero_render_seen latches permanently once set, so the branch runs on every subsequent hop
+     * without re-poking. */
     {
         int cap = a.stationarity_converge_hops;
         CHECK(cap > 0, "stationarity_converge_hops is a sane positive value");
@@ -201,14 +178,10 @@ static void section_aec_level(void) {
         }
     }
 
-    /* --- aec_state.c (already fixed): blocks_with_active_render
-     * (cap = live active_render_blocks+1, reader is strict ">"),
-     * strong_not_saturated_render_blocks (cap = live filter_adaptation_threshold_hops,
-     * reader is strict "<"). aec_state_update()'s internal wiring is deep
-     * (filter_analyzer/filter_delay/etc.), so rather than reverse-engineer
-     * every input aec_post_run threads into it, this poke-then-run-many
-     * form checks the property that actually matters: the field never moves
-     * past its cap no matter how many more real hops run, PLUS a direct
+    /* --- aec_state.c: blocks_with_active_render (cap = live active_render_blocks+1, reader strict
+     * `>`) and strong_not_saturated_render_blocks (cap = live filter_adaptation_threshold_hops,
+     * reader strict `<`). aec_state_update()'s wiring is deep (filter_analyzer/filter_delay/...),
+     * so this pokes and then runs many real hops: the field never moves past its cap, plus a direct
      * decision-invariance check against a synthetic huge value. */
     {
         /* active_render_blocks / filter_adaptation_threshold_hops are
@@ -236,7 +209,7 @@ static void section_aec_level(void) {
         }
     }
 
-    /* --- pbfdkf.c (already fixed, LONG_MAX-guarded): main_filter.base.call_counter. */
+    /* --- pbfdkf.c (LONG_MAX-guarded): main_filter.base.call_counter. */
     {
         a.main_filter.base.call_counter = LONG_MAX - 1;
         aec_process(&a, mic, ref, out);
@@ -253,10 +226,9 @@ static void section_aec_level(void) {
 }
 
 /* ════════════════════════════════════════════════════════════════════
- * delay_aec.c: number_pre_echo_updates driven through the
- * REAL production per-hop API with a checked-in real audio fixture (not a
- * synthetic reimplementation) -- plus a bonus invariant check on
- * pending_count (already-safe cyclic counter, same driven loop).
+ * delay_aec.c: number_pre_echo_updates driven through the real production per-hop API with a
+ * checked-in real audio fixture (not a synthetic reimplementation), plus an invariant check on
+ * pending_count (a cyclic counter) in the same loop.
  * ════════════════════════════════════════════════════════════════════ */
 static void section_delay_aec(void) {
     const char *mic_path = "../wav/aec_record/aec_record_mic_10s.wav";
@@ -271,11 +243,9 @@ static void section_delay_aec(void) {
     long hops_read = 0;
     long expected_min_hops;
 
-    /* A missing/unreadable fixture must FAIL the whole binary via CHECK():
-     * a silent `return` here would drop this section's ~2000+ checks (e.g.
-     * when invoked from the wrong cwd) while main()'s final tally still
-     * showed 0 fails and printed PASS, just with a smaller total-checks
-     * count. */
+    /* A missing/unreadable fixture must FAIL the whole binary via CHECK(): a silent `return` would
+     * drop this section's ~2000+ checks (e.g. when invoked from the wrong cwd) while main()'s tally
+     * still showed 0 fails and printed PASS. */
     if (!mr || !rr) {
         CHECK(0,
               "section_delay_aec: FIXTURE MISSING -- could not open "
@@ -291,25 +261,13 @@ static void section_delay_aec(void) {
         return;
     }
 
-    /* Minimum-hop-count assertion: the
-     * loop below's only exit condition is a short/EOF read, with no floor on
-     * how many hops it actually processed -- a truncated/corrupted fixture
-     * could silently satisfy every CHECK() in the loop by just running
-     * fewer iterations. The expected hop count is derived from the two WAV
-     * files' OWN headers (WavReader::info.num_samples, populated by
-     * wav_open_read's own chunk-size parsing) rather than assumed from the
-     * "_10s" filename convention, so a shrunk/corrupted fixture shrinks this
-     * expectation too and can't spuriously pass by silently reading fewer
-     * hops than a hardcoded literal would have demanded.
-     *
-     * The checked-in fixtures aec_record_{mic,ref}_10s.wav are mono/16 kHz/160000
-     * samples exactly
-     * (10.000s, evenly divisible by hop=160 with zero remainder), so a
-     * complete, untruncated read of either file processes EXACTLY 1000
-     * hops. The sanity CHECK just below ties that independently-verified
-     * number to the runtime-computed value -- if it ever fails, the
-     * checked-in fixture itself changed duration and this comment (and the
-     * "_10s" filename) need updating, not this test. */
+    /* Minimum-hop-count assertion: the loop below exits only on a short/EOF read, so a truncated
+     * fixture could satisfy every CHECK() by running fewer iterations. The expected hop count comes
+     * from the two WAV files' own headers (WavReader::info.num_samples), not the "_10s" filename,
+     * so a shrunk fixture shrinks the expectation too. The checked-in fixtures are mono/16
+     * kHz/160000 samples (10.000 s, divisible by hop=160), so a complete read processes exactly
+     * 1000 hops; the sanity CHECK below ties that number to the runtime value. If it fails, the
+     * fixture's duration changed and this comment (and the filename) need updating, not the test. */
     {
         long mic_hops = (long)mr->info.num_samples / hop;
         long ref_hops = (long)rr->info.num_samples / hop;
@@ -377,10 +335,9 @@ static void section_delay_aec(void) {
 }
 
 /* ════════════════════════════════════════════════════════════════════
- * detectors.c: FilterConvergence.conv_counter (already safe: the *whole*
- * update function early-returns once c->converged latches, so conv_counter
- * can never be touched again outside a paired mark_diverged/reset that
- * also zeroes it -- confirm).
+ * detectors.c: FilterConvergence.conv_counter is safe because the whole update function returns
+ * early once c->converged latches, so conv_counter is never touched again outside a paired
+ * mark_diverged/reset that also zeroes it. Confirmed here.
  * ════════════════════════════════════════════════════════════════════ */
 static void section_filter_convergence(void) {
     FilterConvergence c;
@@ -415,9 +372,8 @@ static void section_filter_convergence(void) {
 }
 
 /* ════════════════════════════════════════════════════════════════════
- * epc_shadow.c: EpcDetector.hangover (guarded countdown) + ShadowCopy
- * streak/copy_counter (self-terminating, SC_GATE_STREAK mode) + pause_resume
- * (guarded countdown) -- all already safe, confirm.
+ * epc_shadow.c: EpcDetector.hangover (guarded countdown), ShadowCopy streak/copy_counter (self-
+ * terminating, SC_GATE_STREAK mode) and pause_resume (guarded countdown) are safe. Confirmed here.
  * ════════════════════════════════════════════════════════════════════ */
 static void section_epc_shadow(void) {
     EpcDetector e;
@@ -555,8 +511,7 @@ static void section_epc_shadow(void) {
 }
 
 /* ════════════════════════════════════════════════════════════════════
- * filter_quality.c: all three INT_MAX-saturated counters (already fixed,
- * bit-exact-parity-sensitive -- confirm INT_MAX-1 -> INT_MAX -> INT_MAX).
+ * filter_quality.c: the three INT_MAX-saturated counters (INT_MAX-1 -> INT_MAX -> INT_MAX).
  * ════════════════════════════════════════════════════════════════════ */
 static void section_filter_quality(void) {
     FilteringQualityAnalyzer m;
@@ -588,8 +543,8 @@ static void section_filter_quality(void) {
 }
 
 /* ════════════════════════════════════════════════════════════════════
- * fullband_erle.c: num_points (exact-match cyclic reset, already safe) +
- * hold_counter_inst_erle (INT_MIN-floored, already fixed).
+ * fullband_erle.c: num_points (exact-match cyclic reset) and hold_counter_inst_erle (INT_MIN
+ * floor).
  * ════════════════════════════════════════════════════════════════════ */
 static void section_fullband_erle(void) {
     FullBandErleEstimator s;
@@ -617,8 +572,8 @@ static void section_fullband_erle(void) {
 }
 
 /* ════════════════════════════════════════════════════════════════════
- * erl_estimator.c: blocks_since_reset (startup_hops cap) +
- * hold_counter_time_domain (INT_MIN floor) -- both already fixed, confirm.
+ * erl_estimator.c: blocks_since_reset (startup_hops cap) and hold_counter_time_domain (INT_MIN
+ * floor).
  * ════════════════════════════════════════════════════════════════════ */
 static void section_erl_estimator(void) {
     ErlEstimator e;
@@ -629,17 +584,13 @@ static void section_erl_estimator(void) {
     int i, k;
 
     erl_estimator_init(&e, /*startup_phase_length_hops=*/1, nb, 160, 16000, erl_storage, hold_storage);
-    /* x2 deliberately kept BELOW the fullband gate's own x2_sum > x2_min*n_bins
-     * threshold (~3.5e8 for n_bins=8) -- an fp32 EMA converging toward a
-     * FIXED ratio approaches its target monotonically from above and can
-     * stick an epsilon short of it forever (confirmed empirically: with a
-     * constant 0.5 ratio, erl_time_domain converges to ~0.500000238, four
-     * ULPs above 0.5, so "new_erl(0.5) < erl_time_domain" never goes false
-     * and the block re-arms hold_counter_time_domain every single call --
-     * a test-setup trap, not a source bug). Keeping x2_sum under the gate
-     * instead means the fullband "arm to hold_hops" block never runs at
-     * all, isolating hold_counter_time_domain as a pure decrement-from-
-     * wherever-we-poke-it counter, which is what this specific test needs. */
+    /* x2 is kept BELOW the fullband gate's own x2_sum > x2_min*n_bins threshold (~3.5e8 for
+     * n_bins=8): an fp32 EMA converging toward a fixed ratio approaches it monotonically and can
+     * stick an epsilon short forever (with a constant 0.5 ratio, erl_time_domain converges to
+     * ~0.500000238), so "new_erl(0.5) < erl_time_domain" never goes false and the block would
+     * re-arm hold_counter_time_domain on every call. Staying under the gate means the
+     * arm-to-hold_hops block never runs, which isolates hold_counter_time_domain as a pure
+     * decrement-from-wherever-it-is-poked counter. */
     for (k = 0; k < nb; k++) { x2[k] = 1.0f; y2[k] = 1.0f; }
 
     /* first call: blocks_since_reset 0 -> 1 (== startup_hops), gate passes;
@@ -666,8 +617,8 @@ static void section_erl_estimator(void) {
 }
 
 /* ════════════════════════════════════════════════════════════════════
- * initial_state.c: strong_not_saturated_render_blocks (cap =
- * max(conservative_hops, initial_state_hops), already fixed, confirm).
+ * initial_state.c: strong_not_saturated_render_blocks (cap = max(conservative_hops,
+ * initial_state_hops)).
  * ════════════════════════════════════════════════════════════════════ */
 static void section_initial_state(void) {
     InitialState s;
@@ -690,10 +641,8 @@ static void section_initial_state(void) {
 }
 
 /* ════════════════════════════════════════════════════════════════════
- * filter_analyzer.c: blocks_since_reset (long, cap =
- * convergence_threshold_hops+1, reader is strict ">") + consistent.counter
- * (long, LONG_MAX-floored, bit-exact-parity-sensitive) -- both already
- * fixed, confirm.
+ * filter_analyzer.c: blocks_since_reset (long, cap = convergence_threshold_hops+1, reader strict
+ * `>`) and consistent.counter (long, LONG_MAX floor).
  * ════════════════════════════════════════════════════════════════════ */
 static void section_filter_analyzer(void) {
     FilterAnalyzer m;

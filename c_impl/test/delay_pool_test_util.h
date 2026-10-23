@@ -1,26 +1,18 @@
-/* delay_pool_test_util.h — one pool-first DelayAec construction for the
- * test/tool harnesses that need a bare estimator (no Aec around it).
+/* delay_pool_test_util.h -- one pool-first DelayAec construction for the test/tool harnesses that need a bare estimator (no
+ * Aec around it).
  *
- * DelayAec owns no arrays of its own: every instance needs a caller block
- * sized for its exact (sample_rate, hop, num_filters) triple. That makes the
- * construction sequence four steps that must stay in this order --
- * get_mem_size -> aligned alloc -> pre-dirty -> init -- and five harnesses
- * were each spelling it out, which is five chances for one of them to drift
- * into a weaker construction than the code under test actually faces
- * (an unaligned block, a conveniently zeroed one, an unchecked size).
+ * DelayAec owns no arrays of its own: every instance needs a caller block sized for its exact (sample_rate, hop, num_filters)
+ * triple, in four steps that must stay in this order: get_mem_size -> aligned alloc -> pre-dirty -> init. Sharing the sequence
+ * keeps each harness from drifting into a weaker construction than the code under test faces (an unaligned block, a zeroed
+ * one, an unchecked size).
  *
- * The 0xA5 pre-dirty is load-bearing, not hygiene: a field the estimator
- * fails to initialise then reads as garbage rather than as a plausible 0,
- * so a missed init surfaces as a failure instead of passing by luck.
+ * The 0xA5 pre-dirty is load-bearing: a field the estimator fails to initialise reads as garbage rather than a plausible 0, so
+ * a missed init fails instead of passing by luck.
  *
- * Header-only (static inline) on purpose: several of these harnesses are
- * built standalone from a single .c file with no shared object, so anything
- * requiring its own translation unit would have to be listed in each of
- * their build lines and in the Makefile.
+ * Header-only (static inline) because several harnesses are built standalone from a single .c file with no shared object.
  *
- * Reporting is left to the caller -- the harnesses disagree on it (CHECK
- * macros vs printf+counter vs fprintf+exit) -- so failure returns NULL and
- * hands back a reason string through *why instead of choosing one.
+ * Reporting is left to the caller (the harnesses use CHECK macros, printf + counter, or fprintf + exit): failure returns NULL
+ * and hands back a reason string through *why.
  */
 #ifndef DELAY_POOL_TEST_UTIL_H
 #define DELAY_POOL_TEST_UTIL_H

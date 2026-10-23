@@ -1,153 +1,96 @@
-/* residual_echo_estimator.h — C port of
- * python/modules/residual/residual_echo_estimator.py
- * (the reference residual echo estimator). Single-channel.
- *
- * Computes R² (residual echo power²) per-bin from:
- *   - Linear path  (usable_linear=True):  R² = S²_linear / ERLE + reverb tail
- *   - NonLinear   (usable_linear=False):  R² = X² · echo_path_gain² (+nl) + reverb
- *   - Saturated echo override: R² = Y² (capture power) in either path.
- *
- * PARITY (numpy 1.26 → C, real balanced pipeline shapes):
- *   - render_psd / capture_psd / s2_linear / erle / erle_unbounded are all
- *     float32[257]; frequency_response is float32 (n_partitions × 257).
- *   - r2 / r2_unbounded / _last_r2_* are float32 buffers (`np.empty(f32)` then
- *     f32 stores). All the arithmetic feeding them is all-float32 (the inputs
- *     are f32 and every scalar multiplier — 1e-30, echo_path_gain=1.0,
- *     noise_gate_slope=0.3, etc. — is value-cast to f32 in the array op, the
- *     numpy<2 in-place / array-op rule, NOT the opposite scalar rule).
- *   - nl_r2 = (nl_alpha * x2**2 / norm).astype(f32): x2 is f32, alpha=0.1 and
- *     norm=1.07e7 are python floats in an ARRAY expression → all-float32
- *     (0.1*x2² then /norm in f32), then explicit (float) cast (no-op).
- *   - nl_r2 is then tail-capped: np.minimum(nl_r2, r2 * nl_r2_cap_multiple),
- *     all f32 (r2 here is the pre-nl direct term, x2*echo_path_gain, already
- *     computed above). nl_r2_cap_multiple<=0.0 disables the cap (uncapped,
- *     prior behaviour).
- *   - reverb tail comes from ReverbModel + ReverbFrequencyResponse C ports.
- *   - decay = aec_per_block_growth_to_per_hop(0.83, hop_size, sample_rate):
- *     wall-clock-preserving rescale (accounts for BOTH hop_size AND
- *     sample_rate), computed in double precision and narrowed to float32
- *     once at the end (mirrors Python: float64 exponentiation, single
- *     narrowing when the result multiplies the float32 reverb array), then
- *     used as a float scaling. Mirrors residual_echo_estimator.py's
- *     _reverb_decay().
- *   Built with -ffp-contract=off so the per-op f32 roundings are not fused.
- *
- * The estimator OWNS a ReverbModel and a ReverbFrequencyResponse. The caller
- * must drive update_reverb_models() (freq-resp refresh) BEFORE estimate() each
- * hop, exactly as the orchestrator does.
- */
+/* Per-bin residual echo power R^2 (single channel), float32:
+ *  - Linear path (usable_linear): R^2 = S^2_linear / ERLE + reverb tail.
+ *  - Non-linear path: R^2 = X^2 * echo_path_gain^2 (+ non-linear term) + reverb.
+ *  - Saturated echo: R^2 = Y^2 (capture power) in either path.
+ * Owns a ReverbModel and a ReverbFrequencyResponse. The caller must call ree_update_reverb_models()
+ * before ree_estimate() every hop. The reverb decay is rescaled to the live grid in double
+ * precision. Python reference: modules/residual/residual_echo_estimator.py. */
 #ifndef RESIDUAL_ECHO_ESTIMATOR_H
 #define RESIDUAL_ECHO_ESTIMATOR_H
 
 #include "reverb_model.h"
 #include "reverb_frequency_response.h"
 
-#define REE_DELAY_BUF_SIZE 16   /* python _DELAY_BUF_SIZE */
+#define REE_DELAY_BUF_SIZE 16
 
-/* EchoModelConfig subset (frozen in Python). */
 typedef struct {
-    float  min_noise_floor_power;   /* fft-density-scaled at init (6553600 @ fft512) */
-    float  noise_gate_power;        /* legacy 27509562 (only used when !use_aec_residual_noise_gate) */
-    float  noise_gate_slope;        /* 0.3 */
-    float  stationary_gate_slope;   /* 10.0 */
-    int    model_reverb_in_nonlinear_mode; /* True */
+    float  min_noise_floor_power;
+    float  noise_gate_power;        /* used only when !use_aec_residual_noise_gate */
+    float  noise_gate_slope;
+    float  stationary_gate_slope;
+    int    model_reverb_in_nonlinear_mode;
 } ReeEchoModelConfig;
 
 typedef struct {
     int    n_bins;
 
-    /* config */
     ReeEchoModelConfig echo_model;
-    float  default_gain_early;      /* 1.0 */
-    float  default_gain_late;       /* 1.0 */
-    float  tm_gain_early;           /* 0.01 */
-    float  tm_gain_late;            /* 0.01 */
-    int    erle_onset_comp_in_dominant; /* False */
-    /* Authoring inputs to the per-hop decay below (together with hop_size /
-     * sample_rate). ree_init() folds them into reverb_decay_per_hop{,_mild}
-     * once and nothing reads them again, so writing them on a live instance
-     * changes nothing. */
-    float  reverb_decay;            /* 0.83 */
-    float  reverb_mild_decay_scale; /* 1.0 */
-    int    reverb_enabled;          /* True */
-    int    hop_size;                /* 160 */
-    int    sample_rate;             /* live rate; drives noise_floor_growth_per_hop
-                                      * and the reverb-decay wall-clock rescale below */
-    float  noise_floor_growth_per_hop; /* live-computed; see ree_init() */
-    /* Per-hop reverb decay, both dominant_nearend branches, resolved once in
-     * ree_init(). Every input is init-fixed, so the pow() is loop-invariant
-     * and the per-hop path only selects between these two. The mild branch
-     * cannot be derived from the steady one: the × scale happens in double
-     * precision BEFORE the exponentiation (mirroring Python's `d *=
-     * float(mild_decay_scale)`, float64 throughout), so each needs its own
-     * pow(). Both are 0 when reverb is disabled, which the readers already
-     * treat as "no reverb update". */
-    float  reverb_decay_per_hop;       /* dominant_nearend == 0 */
-    float  reverb_decay_per_hop_mild;  /* dominant_nearend != 0 */
-    float  reverb_tail_strength;    /* 1.0 */
-    int    use_aec_residual_noise_gate; /* True */
-    int    use_stationarity_properties;  /* True in production — when set, the
-                                          * nonlinear-path residual noise gate
-                                          * (cc:121-129) is SKIPPED (mirrors
-                                          * Python `not _use_stationarity_properties`). */
-    int    use_aec_echo_gen_window;     /* True */
-    int    nl_r2_enabled;           /* True */
-    float  nl_r2_alpha;             /* 0.1 */
-    float  nl_norm_power;           /* 1.07e7 */
-    float  nl_r2_cap_multiple;      /* 300.0; <=0.0 disables the cap */
-    float  residual_noise_gate_power; /* per_bin_psd_threshold(27509.42,hop) */
-    int    noise_floor_hold_hops;   /* 50 */
-    int    render_pre_window_size;  /* 1 */
-    int    render_post_window_size; /* 1 */
+    float  default_gain_early;
+    float  default_gain_late;
+    float  tm_gain_early;
+    float  tm_gain_late;
+    int    erle_onset_comp_in_dominant;
+    /* Authoring inputs to the per-hop decay; ree_init() folds them into
+     * reverb_decay_per_hop{,_mild}, so writing them on a live instance changes nothing. */
+    float  reverb_decay;
+    float  reverb_mild_decay_scale;
+    int    reverb_enabled;
+    int    hop_size;
+    int    sample_rate;             /* live rate; drives noise_floor_growth_per_hop and the reverb-decay rescale */
+    float  noise_floor_growth_per_hop; /* computed in ree_init() */
+    /* Per-hop reverb decay for both dominant_nearend branches, resolved once in ree_init()
+     * (0 when reverb is disabled). The mild value scales in double before the exponentiation, so it
+     * cannot be derived from the steady one. */
+    float  reverb_decay_per_hop;
+    float  reverb_decay_per_hop_mild;
+    float  reverb_tail_strength;
+    int    use_aec_residual_noise_gate;
+    int    use_stationarity_properties;  /* when set, the nonlinear-path residual noise gate is skipped */
+    int    use_aec_echo_gen_window;
+    int    nl_r2_enabled;
+    float  nl_r2_alpha;
+    float  nl_norm_power;
+    float  nl_r2_cap_multiple;      /* <= 0 disables the cap */
+    float  residual_noise_gate_power;
+    int    noise_floor_hold_hops;
+    int    render_pre_window_size;
+    int    render_post_window_size;
 
-    /* min-statistics render noise floor state */
-    float *x2_noise_floor;          /* owned; n_bins f32 */
-    int   *x2_noise_floor_counter;  /* owned; n_bins int32 */
+    float *x2_noise_floor;
+    int   *x2_noise_floor_counter;
 
-    /* reverb sub-models (storage owned by this struct) */
     ReverbModel              reverb_model;
     ReverbFrequencyResponse  reverb_freq_resp;
-    int                      have_reverb_freq_resp; /* use_freq_response */
+    int                      have_reverb_freq_resp;
 
-    /* legacy ring render history (only used when !use_aec_echo_gen_window) */
-    float *render_history;          /* (render_history_size × n_bins) f32 */
+    /* ring render history, used only when !use_aec_echo_gen_window */
+    float *render_history;
     int    render_history_size;
     int    render_history_idx;
     int    render_history_initialised;
 
-    /* delay-centered render deque (index 0 = current after appendleft).
-     * Stored as a ring of frames; `delay_buf_count` = current fill (<=16). */
-    float *delay_render_buf;        /* (REE_DELAY_BUF_SIZE × n_bins) f32 */
+    /* Delay-centred render deque stored as a ring of frames (index 0 = newest); delay_buf_count <=
+     * 16. */
+    float *delay_render_buf;
     int    delay_buf_count;
-    int    delay_buf_head;          /* index of element 0 (most recent) */
+    int    delay_buf_head;
 
-    /* reverb render history deque (index 0 = current after appendleft). */
-    float *reverb_render_history;   /* (REE_DELAY_BUF_SIZE × n_bins) f32 */
+    float *reverb_render_history;
     int    reverb_buf_count;
     int    reverb_buf_head;
 
-    /* diagnostics — last estimate() */
-    float *last_r2_direct;          /* n_bins f32 */
-    float *last_r2_reverb;          /* n_bins f32 */
+    float *last_r2_direct;
+    float *last_r2_reverb;
 
-    /* per-instance scratch (x2 window walk + fallback scaling); n_bins f32 */
     float *scratch;
 } ResidualEchoEstimator;
 
-/* Initialise. Caller supplies all backing storage (no malloc inside).
- * Storage sizes (floats unless noted):
- *   x2_noise_floor:        n_bins
- *   x2_noise_floor_counter:n_bins (int32)
- *   reverb_model_storage:  n_bins
- *   reverb_tail_storage:   n_bins
- *   render_history_storage:(pre+post+1) × n_bins   (pre=use_aec_echo_gen_window?1:0, post=1)
- *   delay_render_storage:  REE_DELAY_BUF_SIZE × n_bins
- *   reverb_render_storage: REE_DELAY_BUF_SIZE × n_bins
- *   last_r2_direct_store:  n_bins
- *   last_r2_reverb_store:  n_bins
- * reverb_freq_resp uses reverb_tail_storage; smoothing_base/use_conservative
- * supplied by the caller (orchestrator computes them).
- */
+/* Initialise. The caller supplies all backing storage (floats unless noted):
+ * x2_noise_floor, reverb_model_storage, reverb_tail_storage, last_r2_direct_store,
+ * last_r2_reverb_store, scratch_store: n_bins; x2_noise_floor_counter: n_bins int32;
+ * render_history_storage: (pre + post + 1) x n_bins with pre = use_aec_echo_gen_window ? 1 : 0 and
+ * post = 1; delay_render_storage, reverb_render_storage: REE_DELAY_BUF_SIZE x n_bins.
+ * reverb_smoothing_base and reverb_use_conservative are supplied by the caller. */
 void ree_init(ResidualEchoEstimator *r,
               int n_bins,
               int hop_size,
@@ -175,12 +118,8 @@ void ree_init(ResidualEchoEstimator *r,
 
 void ree_reset(ResidualEchoEstimator *r);
 
-/* update_reverb_models — refreshes the bound ReverbFrequencyResponse.
- * (The adaptive ReverbDecayEstimator is not bound in the production path, so
- *  only the freq-resp branch is ported.)
- *   frequency_response : flat row-major (n_partitions × n_bins) float32
- *   filter_quality_is_none : 1 → Python None (skip update)
- */
+/* Refreshes the bound ReverbFrequencyResponse. frequency_response is row-major
+ * (n_partitions x n_bins) float32; filter_quality_is_none != 0 skips the update. */
 void ree_update_reverb_models(ResidualEchoEstimator *r,
                               const float *frequency_response,
                               int n_partitions,
@@ -189,13 +128,10 @@ void ree_update_reverb_models(ResidualEchoEstimator *r,
                               int filter_quality_is_none,
                               int stationary_block);
 
-/* estimate — produces r2[n_bins] and r2_unbounded[n_bins] (both f32).
- *   render_psd / capture_psd / s2_linear : float32[n_bins]
- *   usable / saturated / transparent_mode : booleans (0/1)
- *   erle / erle_unbounded : float32[n_bins] (only read on the linear,
- *                           non-saturated path)
- * force_nonlinear_path forces usable=0 (matches Python).
- */
+/* Produces r2_out and r2_unbounded_out (n_bins floats each).
+ * render_psd, capture_psd, s2_linear: float32[n_bins]; usable, saturated, transparent_mode: 0/1;
+ * erle, erle_unbounded: float32[n_bins], read only on the linear non-saturated path.
+ * force_nonlinear_path forces usable = 0. */
 void ree_estimate(ResidualEchoEstimator *r,
                   const float *render_psd,
                   const float *capture_psd,
@@ -208,4 +144,4 @@ void ree_estimate(ResidualEchoEstimator *r,
                   int force_nonlinear_path,
                   float *r2_out, float *r2_unbounded_out);
 
-#endif /* RESIDUAL_ECHO_ESTIMATOR_H */
+#endif

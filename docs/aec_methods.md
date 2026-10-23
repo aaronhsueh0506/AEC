@@ -1,23 +1,11 @@
-# AEC Algorithm Methods (current through v3.23.0)
+# AEC Algorithm Methods
 
-**Release**: algorithm current through v3.23.0. The split min-gain floor (§3.4)
-was added in v3.22.0 on top of the v3.21 pipeline, the three Pareto presets
-(mild/balanced/aggressive) in v3.22.4, and the **DT-aware recovery stack**
-(matched-filter pre-echo fix + DT-aware soft recovery + DT-gated RES floor, §2.3
-and §3.4) in v3.23.0 — the work that closed the no-pre-align (production-faithful
-online self-align) delay-acquisition gap. **Float32 campaign (2026-07-15):**
-all production C is now float32 end-to-end (delay chain, orchestrator scalars,
-post/state modules, `residual_echo_estimator`, HPF). Python bit-exact parity
-is retired repo-wide — the Python reference (fp64) is the **algorithm spec**,
-the C port is the float32 **implementation**, and the end-to-end C output
-aligns with Python to a tolerance (correlation 0.99999958, ≈ −60 dB below
-signal, inaudible — not 0/0; see §7). The C structure mirrors Python class
-boundaries.
-
-This document is the deep algorithm specification for the production
-pipeline. The v3.21 release retires the legacy 9-stage `ResFilter`
-post-filter in favour of an AEC3-aligned chain
-(`AecState` + `ResidualEchoEstimator` + `SuppressionGain` + CNG).
+This document is the deep algorithm specification for the production pipeline:
+a PBFDKF linear stage followed by an AEC3-aligned post-filter chain
+(`AecState` + `ResidualEchoEstimator` + `SuppressionGain` + CNG). The Python
+reference (fp64) is the **algorithm spec**; the C port is the float32
+**implementation** and agrees with Python to a tolerance (§7). The C structure
+mirrors Python class boundaries.
 
 | Companion doc | Purpose |
 |---|---|
@@ -31,11 +19,11 @@ post-filter in favour of an AEC3-aligned chain
 
 ```
 mic ─► HPF ────────────────────────────────────────────────────────────────────────►
-ref ──────► Saturation ─► EchoPathDelayEstimator ─► RingBuf ─────────────┐
-                          (matched filter +                              │
-                           lag aggregator +                              ▼
-                           clock-drift detector)                    PBFDKF refined
-                                                                    filter (Kalman)
+ref ──────► Saturation ─► EchoPathDelayEstimator ─► reference ring ─────┐
+                          (matched filter +                             │
+                           lag aggregator +                             ▼
+                           clock-drift detector)                   PBFDKF refined
+                                                                   filter (Kalman)
                                                                           │
                                                                   Shadow filter (PBFDAF/NLMS,
                                                                   μ = 0.5) + PathChange-
@@ -49,7 +37,7 @@ ref ──────► Saturation ─► EchoPathDelayEstimator ─► RingBu
                                                                    AEC3 _aec3_post
                                                                    ├─ StationarityEstimator
                                                                    ├─ AecState (read-only ADT
-                                                                   │     over 12 sub-analyzers)
+                                                                   │     over its sub-analyzers)
                                                                    ├─ ResidualEchoEstimator
                                                                    │     (per-bin echo PSD)
                                                                    ├─ SuppressionGain
@@ -62,11 +50,10 @@ ref ──────► Saturation ─► EchoPathDelayEstimator ─► RingBu
                                                                          out
 ```
 
-### Presets — one production point + two Pareto operating points (v3.22.4)
+### Presets — one production point + three operating points
 
-`AecPreset.BALANCED` is the production preset (all four ship bars met; R1 / R2
-deleted the legacy MILD / SOFT / AGGRESSIVE / MAXIMUM 40-knob menu). It shares a
-narrow tuned base with the two new strength presets:
+`AecPreset.BALANCED` is the production preset. It shares a narrow tuned base
+with the other presets:
 
 ```python
 AecConfig.from_preset(AecPreset.BALANCED)  # base, equivalent to:
@@ -84,25 +71,22 @@ strength axis as `balanced`. `mild`/`balanced` differ in exactly one field —
 additionally deepens `min_gain_floor_dt_db` (the floor used in its place
 during double-talk, see §3.4): without that second field, `dt_protect_active`
 hard-overrides the far-active floor with the SAME shared −20 dB for every
-preset whenever it fires (including a measured ~30% false-arm rate on
-far-end-singletalk), so the three presets used to collapse to indistinguishable
-behavior on exactly the hops a user would expect to hear the strength
-difference. `no_floor` is a fourth tier that removes the floor mechanism
-(`min_gain_split_floor_enabled=False`) entirely instead of deepening it
-further — the deepest point on the axis, and the one with the most near-end
-cost; see `AecConfig.from_preset`'s docstring for the full rationale and the
-47-case dev-pool numbers behind the `aggressive` dt-floor value.
+preset whenever it fires (it also false-arms in far-end single talk), so the
+presets would be indistinguishable on exactly the hops where a user would
+expect to hear the strength difference. `no_floor` is a fourth tier that
+removes the floor mechanism (`min_gain_split_floor_enabled=False`) entirely
+instead of deepening it further — the deepest point on the axis, with the most
+near-end cost.
 
 | preset | far-active floor | dt floor | character |
 |---|---|---|---|
-| `mild` | −20 dB | −20 dB | near-priority — more near kept, more echo leak (DT_static deg ≈ AEC2; FS echo below balanced's 3.5 bar by design) |
-| `balanced` | −28 dB | −20 dB | production — all four ship bars met |
-| `aggressive` | −38 dB | −30 dB | echo-priority — beats AEC2 on DT+FS echo, deg >2.0 and above AEC3; dev-pool DT_static echo +0.17/+0.14 MOS vs the shared-floor point, at a real, bounded near-end cost (44-case mix battery's 200 ms clean-anchored guard 42/48→39/48 grid A, 44/48→43/48 grid B) |
-| `no_floor` | n/a (floor off) | n/a (floor off) | deepest point on the axis — purely audibility/R²-derived gain, no fixed-dB clamp at all; most near-end loss, including exposing a pre-existing cold-start R² pathology the floor had been masking |
+| `mild` | −20 dB | −20 dB | near-priority — more near kept, more echo leak |
+| `balanced` | −28 dB | −20 dB | production |
+| `aggressive` | −38 dB | −30 dB | echo-priority — dev-pool (47-case) DT_static echo +0.17/+0.14 MOS vs the shared-floor point, at a bounded near-end cost |
+| `no_floor` | n/a (floor off) | n/a (floor off) | deepest point on the axis — purely audibility/R²-derived gain, no fixed-dB clamp at all; most near-end loss, and it exposes the cold-start R² behaviour the floor otherwise masks |
 
-The DT-deg-vs-echo trade is a proven single-channel DSP Pareto wall; the strength
-axis exposes it honestly. See CHANGELOG `[3.22.4]` for the full-800 numbers
-(pre-dates the `no_floor` tier and the aggressive dt-floor split).
+The DT-deg-vs-echo trade is a single-channel DSP Pareto wall; the strength
+axis exposes it.
 
 Everything else uses `AecConfig` dataclass defaults; the AEC3 chain has
 its own tuning embedded in `AecStateConfig` / `SuppressionGainConfig`
@@ -110,19 +94,19 @@ its own tuning embedded in `AecStateConfig` / `SuppressionGainConfig`
 
 ### Determinism
 
-Per-case CNG seed: `np.random.seed(42)` before each `AEC(cfg)` instance.
-The maintained render tools (`eval_aec_challenge.py`, `eval_manifest90.py`,
-and `run_one_case.py`) seed before instantiation.
+Comfort noise uses an internal LCG (`seed = seed·69069 + 1`) seeded with 42 at
+construction and at reset, in both Python and C; the algorithm consumes no
+global RNG state, so a render is reproducible per instance.
 
 ### Tunable parameters (`AecConfig`)
 
-The full release surface is `AecConfig` (`modules/config.py`). mild/balanced
-differ **only** in `min_gain_floor_far_active_db` (−20 / −28); aggressive
-additionally sets `min_gain_floor_dt_db` to −30 (shared −20 default
-otherwise); `no_floor` instead sets `min_gain_split_floor_enabled=False`.
-`from_preset` additionally pins a shared base (`enable_cng=True`,
-`shadow_mu_min=0.5`, `warmup_frames=100`, `kalman_q_high=1e-3`). Everything
-below uses dataclass defaults. Fields are
+`AecConfig` (`modules/config.py`) is the full release surface; the table lists
+its principal fields. mild/balanced differ **only** in
+`min_gain_floor_far_active_db` (−20 / −28); aggressive additionally sets
+`min_gain_floor_dt_db` to −30 (shared −20 default otherwise); `no_floor`
+instead sets `min_gain_split_floor_enabled=False`. `from_preset` additionally
+pins a shared base (`enable_cng=True`, `shadow_mu_min=0.5`, `warmup_frames=100`,
+`kalman_q_high=1e-3`). Everything below uses dataclass defaults. Fields are
 grouped by subsystem; **ON**/**OFF** marks the default state of a feature flag.
 Frame-count fields marked as a 10 ms authored basis are converted at
 construction to preserve wall-clock duration on the selected grid; the table
@@ -136,7 +120,7 @@ shows their public configuration values, not necessarily the internal hop count.
 | | `mu` / `delta` | 0.3 / 1e-8 | step size / regularization |
 | Residual / CNG | `enable_res` | **ON** | post-filter master gate (§3.7) |
 | | `enable_cng` | OFF (preset **ON**) | comfort noise (§3.5) |
-| | `cng_n2_windowed_psd` | 0.0 (**OFF**) | feeds the N2 tracker a windowed capture PSD instead of a rectangular one, fixing a ~3 dB high bias vs AEC3's reference coordinate; NOT corpus-validated, not a promotion candidate (see CHANGELOG 2026-10-19) |
+| | `cng_n2_windowed_psd` | 0.0 (**OFF**) | feeds the N2 tracker a windowed capture PSD instead of a rectangular one |
 | | `comfort_noise_floor_dbfs` | −96.034 | |
 | | `enable_td_constraint` | **ON** | |
 | C′ ERLE coherence gate | `erle_coh_gate_enabled` | **ON** | Γ²(Ŷ,Y) per-bin ERLE freeze |
@@ -151,15 +135,15 @@ shows their public configuration values, not necessarily the internal hop count.
 | | `ne_recent_threshold` | 0.3 | near-recent gate arm threshold |
 | | `ne_recent_hold` | 150 | 10 ms authored basis; approximately 1.5 s after grid retiming |
 | | `ne_recent_sustain` | 3 | frames above threshold to arm |
-| Soft near-end blend | `soft_nearend_blend_enabled` | **ON** | sigmoid ENR tuning blend (D3) |
+| Soft near-end blend | `soft_nearend_blend_enabled` | **ON** | sigmoid ENR tuning blend |
 | | `soft_nearend_blend_enr_threshold` / `_softness` | 0.25 / 0.25 | |
 | | `soft_nearend_blend_per_bin` | **ON** | per-bin frequency-selective near protection |
 | Nonlinear residual | `nl_r2_enabled` | **ON** | Kuech-Kellermann 2nd-order R² (L1) |
 | | `nl_r2_alpha` | 0.1 | |
 | | `nl_r2_cap_multiple` | 300 | caps r2_nl at 300x the direct term; the raw formula is unbounded (fixed -20dBFS reference, not signal-level-relative) and reaches 1e16-1e18 on loud cold-start render |
-| ERLE coordinate fixes | `erle_render_x2_psd_scale` | **ON** | revives reverb model (PSD-scale bug fix) |
+| ERLE coordinate | `erle_render_x2_psd_scale` | **ON** | render PSD scale feeding the reverb model |
 | | `reverb_tail_strength` | 1.0 | reverb-tail R² scale |
-| | `erle_windowed_capture_psd` | **ON** | E1 Y2/E2 sqrt-Hann coordinate consistency |
+| | `erle_windowed_capture_psd` | **ON** | Y2/E2 sqrt-Hann coordinate consistency |
 | | `output_capture_when_linear_unusable` | **ON** | two mutually exclusive roles: E2 output base = Y on diverged frames under `enable_res`; capture admitted as the FORM step's third candidate in context-only (§3) |
 | Delay-acquire guard | `delay_acquire_protect_converged` | **ON** | reject spurious late FIRST acquisition (Path A only) |
 | Cold-start deadlock (OFF) | `h_error_refresh_erl_floor` | 0.0 (**OFF**) | Kalman-gain cold-start breakers |
@@ -168,17 +152,17 @@ shows their public configuration values, not necessarily the internal hop count.
 | | `shadow_mu_min` / `shadow_mu_nlms` | 0.5 / 0.5 | |
 | | `shadow_copy_threshold` / `_hysteresis` | 0.65 / 3 | |
 | | `shadow_err_alpha` | 0.80 | |
-| | `shadow_dtd_advantage_scale` / `_offset` | 3.0 / 1.5 | |
+| | `shadow_dtd_advantage_scale` / `shadow_dtd_offset` | 3.0 / 1.5 | |
 | Misadjustment estimator | `filter_misadjustment_*` | 100 / 30 / 0.5 / 2.0 | hangover/stable use 10 ms authored basis; scale min/max are dimensionless |
 | PBFDKF (Kalman) | `use_kalman` | **ON** | |
 | | `kalman_q_high` / `kalman_q_low` | 1e-3 / 1e-6 | |
 | | `warmup_frames` | 80 (preset 100) | 10 ms authored basis; preset remains approximately 1.0 s after grid retiming |
 | EPC | `epc_delta_threshold` / `epc_total_rise` / `epc_hangover` | 0.3 / 1.5 / 20 | |
-| Delay estimation | `enable_delay_est` | **ON** | |
+| Delay estimation | `enable_delay_est` | **ON** | deprecated mirror of `delay_mode` |
 | | `max_delay_ms` / `delay_buffer_ms` | 1024 / 2048 | |
 | | `delay_est_period_s` / `delay_est_init_s` | 0.5 / 0.3 | |
 | | `delay_par_low_threshold` / `_solid_threshold` | 5.0 / 8.0 | |
-| HPF | `enable_highpass` | **ON** | mic-path only (ref HPF retired) |
+| HPF | `enable_highpass` | **ON** | mic-path only |
 | | `highpass_cutoff_hz` | 80.0 | |
 | Saturation | `enable_saturation_detect` | **ON** | |
 | | `saturation_threshold` | 0.95 | |
@@ -187,7 +171,7 @@ shows their public configuration values, not necessarily the internal hop count.
 | | `return_res_context` | OFF | switches `process()` return type (§4); with `enable_res=False` it selects the context-only seam, whose FORM step admits the capture candidate (§3) |
 | | `clear_filter_history` | OFF | |
 
-The **DT-aware recovery group** (the v3.23.0 addition) has two halves:
+The **DT-aware recovery group** has two halves:
 `dt_aware_recovery_soft` softens the delay/EPC recovery (§2.3), gated on the
 `ne_recent_*` near-recent latch, and `dt_aware_res_floor_enabled` lifts the RES
 floor (§3.4), gated on the same `ne_recent_*` latch. The exact per-hop floor
@@ -199,25 +183,22 @@ decision is exported to fused consumers as `res_floor_protect`.
 
 ### 2.1 HPF (high-pass filter)
 
-80 Hz IIR Butterworth-style on the mic path only. Defaults locked
-post-v3.20:
+2nd-order Butterworth high-pass, 80 Hz, on the mic path only:
 
 * Mic-path HPF: **ON** (suppresses DC + sub-bass before delay alignment).
-* Reference HPF: **OFF / bypassed** — the ref-path HPF was retired
-  after the v3.19 HPF-flip verdict showed −0.04 nores deg with no echo
-  gain; the pipeline now feeds the raw reference straight into
-  `Saturation` → `EchoPathDelayEstimator`.
+* Reference HPF: **OFF / bypassed** — the pipeline feeds the raw reference
+  straight into `Saturation` → `EchoPathDelayEstimator`.
 
-`HighPassFilter` lives in `modules/preprocessing.py`; mirrors C
-`high_pass_filter.{h,c}`.
+`HighPassFilter` lives in `modules/preprocessing.py`; the C port uses the shared
+`audiolib` HPF (`hpf_init()`).
 
 ### 2.2 Saturation detector + soft-clip
 
-`SaturationDetector` (preprocessing.py) tracks the running fraction of
-clipped reference samples (|x| > 0.95). The detector populates
-`self._saturation_level` (∈ [0, 1]); downstream consumers use it to
-freeze the refined filter μ on heavy clipping and to skip the
-ResidualEchoEstimator render-based path.
+`SaturationDetector` (preprocessing.py) tracks the fraction of clipped
+samples (|x| > `saturation_threshold`, 0.95) and exposes a smoothed
+`saturation_level` ∈ [0, 1] (fast attack, slow release). The orchestrator combines the reference and
+mic levels; above 0.5 the capture counts as saturated (`AecState.update_capture_saturation`) and
+the filter step sizes are gated down.
 
 `saturation_softclip_ref=True` (default) soft-clips the reference
 prior to delay alignment so the refined filter sees a tractable
@@ -229,29 +210,32 @@ nonlinear envelope.
 
 * `EchoPathDelayEstimator` (matched filter + downsampled cross-correlation).
 * `MatchedFilter` (running matched-filter accumulator).
-* `LagAggregator` (decision over the matched-filter histogram).
+* `MatchedFilterLagAggregator` (decision over the matched-filter histogram).
 * `ClockdriftDetector` (drift over a 30 s window; AEC3 reference is
   7500 blocks ≈ 30 s).
-* `DownsampledRing` (delay-aligned render history).
+* `DownsampledRenderBuffer` (delay-aligned render history).
 * `RenderDelayController` (orchestrator-facing alignment + warmup).
 
-`legacy_compat.LegacyDelayShim` exposes the old `DelayEstimator.accumulate()`
-API on top of the new estimator; orchestrator imports it via the public
-alias so external callers (`from aec import DelayEstimator`) keep working.
+`legacy_compat.LegacyDelayShim` exposes the `DelayEstimator.accumulate()`
+API on top of the estimator; the orchestrator imports it via the public
+alias so external callers (`from aec import DelayEstimator`) work.
 
-The estimator supports up to 1024 ms of skew (v3.10.4 widening). It feeds
-the refined filter through `RingBuf` (a delay-line on the reference).
+The reference ring holds `max_delay_ms` (1024 ms by default) of skew; the
+matched filter's own reliable reach is about 509 ms (see
+[`delay_estimator_design_zh_TW.md`](delay_estimator_design_zh_TW.md)). The
+estimate feeds the refined filter through a delay-line on the reference.
 
 #### Pre-echo detection (matched-filter accumulated-error)
 
 `MatchedFilter` (`modules/delay/matched_filter.py`) is a bank of `num_filters=5`
-NLMS cross-correlators over staggered lag windows. The winning lag is
-`MaxSquarePeakIndex(h) + n·intra_lag_shift` — the strongest squared tap. AEC3
+NLMS cross-correlators over staggered lag windows (128 ms window, 96 ms
+alignment shift). The winning lag is
+`max_square_peak_index(h) + n·intra_lag_shift` — the strongest squared tap. AEC3
 additionally tracks a **pre-echo lag** so *its* reported delay snaps to the
 echo *onset* rather than the strongest tap (which, with reverb, can sit well
-after onset). `detect_pre_echo` is **default-True** (`echo_path_delay_estimator.py:121`,
-AEC3 strict default `echo_canceller3_config.h:73`) and the `PreEchoLagAggregator`
-runs, but this port **does not report its candidate**.
+after onset). `detect_pre_echo` defaults to True in `EchoPathDelayEstimator`
+and the pre-echo lag aggregator runs, but this port **does not report its
+candidate**.
 
 ⚠ **Deliberate divergence at the selection seam.** Upstream substitutes the
 pre-echo candidate for the reported delay while still qualifying it with the
@@ -265,26 +249,12 @@ dominant peak; the pre-echo histogram is still computed as the upstream
 reference and as a diagnostic. Pinned by `test_delay_dominant_selection`
 (Python and C).
 
-The pre-echo locator (`ComputePreEchoLag`, AEC3 `matched_filter.cc:516-524`)
+The pre-echo locator (`_compute_pre_echo_lag`, after AEC3 `ComputePreEchoLag`)
 walks the per-tap-group **accumulated squared error of the filter PREFIX** and
 returns the earliest group whose prefix already explains the capture (= onset).
-Correctly populating that curve was the load-bearing fix:
-
-```
-# matched_filter_core, lines ~97-108 — per sub-block sample i:
-g      = _ACCUMULATED_ERROR_SUBSAMPLE_RATE          # 4
-prefix = np.cumsum((h * x_window).reshape(-1, g).sum(axis=1))   # Σ h[:G]·x[:G]
-diff   = prefix - y[i]
-instantaneous_error_out[:diff.size] += diff * diff  # prefix-error per tap-group
-```
-
-The **bug this replaced**: the previous code binned the *full-filter* error by
-output-sample index, which left all but the first few bins zero — so the
-accumulated-error curve never developed a leading peak and `ComputePreEchoLag`
-always collapsed the pre-echo lag to ≈0. With `detect_pre_echo=True` overriding
-the highest-peak lag, the reported delay was pulled back toward 0, which broke
-online (no-pre-align) delay acquisition. The cumsum prefix-error binning above
-restores the AEC3 onset locator; the C port carries the same fix.
+The curve is built in `matched_filter_core` from the cumulative sum of
+`h · x_window` over tap groups of `_ACCUMULATED_ERROR_SUBSAMPLE_RATE` (4); the
+squared prefix error of each group is accumulated per sub-block sample.
 
 #### DT-aware soft recovery (`dt_aware_recovery_soft`, default ON)
 
@@ -297,29 +267,22 @@ tail overfits near-end speech that arrives shortly after, and the online
 When `dt_aware_recovery_soft=True` and near-end was seen recently
 (`_ne_recent_frames > 0`, the held gate described in §3.4), those triggers drop
 the full reset and instead **realign softly** — keep the converged filter,
-re-adapt at normal step size (`orchestrator.py:1386,1453,1899,1941`). Far-end
-single-talk never arms the gate, so its recoveries stay aggressive and FS echo
-depth is preserved. No-pre-align 800-case: DT_static deg 1.993→2.016,
-DT_movement 2.071→2.088, FS echo holds >3.5. This is the partner mechanism to
-the DT-gated RES floor (§3.4); together they make up the v3.23.0 DT-aware
-recovery stack that closed the no-pre-align acquisition gap.
+re-adapt at normal step size. Far-end single-talk never arms the gate, so its
+recoveries stay aggressive and FS echo depth is preserved. This is the partner
+mechanism to the DT-gated RES floor (§3.4).
 
 ### 2.4 PBFDKF refined filter
 
 `PBFDKF` (Partitioned Block Frequency Domain Kalman Filter,
-`modules/filters.py`) is the production filter. Block size 64 (4 ms at
-16 kHz), FFT size 128; partition count `n_partitions = filter_length / 64`.
-Kalman state per partition: filter coefficients `W[p, k]`, error
-covariance `P[k]`, process noise `Q[k]`.
+`modules/filters.py`) is the production filter. It is a `PBFDAF` with a per-bin
+Kalman gain: the overlap-save buffer is 2 × hop, the FFT size is the next power
+of two of that (256 on the 16 kHz default grid), and
+`n_partitions = ceil(filter_length / hop)`. Kalman state per partition: filter
+coefficients `W[p, k]`, error covariance `P[k]`, process noise `Q[k]`.
 
-Convergence schedule:
-
-```
-mu_scale     = 1.0 for warmup_frames=100 (forced high)
-Q_high       = 1e-3 (initial / re-converge mode)
-Q_low        = 1e-6 (steady state)
-P_max_override frames = 30  on EPC / delay change
-```
+Convergence schedule: `Q` runs at `kalman_q_high` (1e-3) on start and after an
+EPC / delay change, and settles to `kalman_q_low` (1e-6) in steady state;
+`warmup_frames` (preset 100) forces the high-step startup window.
 
 The refined filter consumes the `RenderSignalAnalyzer` per-bin mask
 (narrow-band tonal regions freeze the W update on those bins) and the
@@ -332,19 +295,19 @@ to the AEC3 post-filter chain.
 
 ### 2.5 Shadow filter (coarse adapter)
 
-v3.21 default: NLMS (`PBFDAF`) at μ = 0.5, the AEC3 coarse-filter role.
-The shadow runs in parallel with the refined filter; its job is to be
+The shadow filter is NLMS (`PBFDAF`) at μ = 0.5, the AEC3 coarse-filter role.
+It runs in parallel with the refined filter; its job is to be
 the fast-tracker that survives echo path changes, while the refined
 filter holds the converged tuning.
 
-`PathChangeRegimeHandler` (`modules/epc.py`, formerly `ShadowCopyController`)
-arbitrates between the two filters:
+`PathChangeRegimeHandler` (`modules/epc.py`) arbitrates between the two
+filters:
 
 * Fires `boost_q` / `reverse_copy` / `main_paused` decisions per frame
   based on relative error EMAs, render activity, and the shadow-DT
-  signals from `DoubleTalkAnalyzer` (energy-gated; the opt-in DTD detector
-  subsystem was retired in 3.22.5).
-* Load-bearing on ~7/800 cohort-tail cases.
+  signals from `DoubleTalkAnalyzer` (energy-gated).
+* Load-bearing on the cohort tail: without it the main filter can diverge to
+  anti-correlated output on a nonstationary echo path.
 * Must not be removed or bypassed.
 
 ### 2.6 Render signal analyzer
@@ -352,10 +315,11 @@ arbitrates between the two filters:
 `RenderSignalAnalyzer` (`modules/render/render_signal_analyzer.py`)
 mirrors AEC3's `render_signal_analyzer.cc`. Two outputs:
 
-1. Per-bin freeze mask for refined-filter gain compute (strong narrowband
-   peaks freeze for `strong_peak_freeze_duration = n_partitions` blocks).
+1. Per-bin freeze mask for refined-filter gain compute (sustained narrow-band
+   peaks zero mu around them).
 2. `poor_signal_excitation` flag that zeroes the refined-filter mu when
-   the reference is too quiet for ~1 s.
+   a narrow-band counter shows the reference is too tonal / too quiet to excite
+   the filter.
 
 ---
 
@@ -398,34 +362,29 @@ running coefficient-of-variation gate. Two consumers:
   steady far-end hum the filter has nothing to learn from does not drive the
   suppressor against a near end speaking over it. The zeroing fires whenever
   the filter has converged and the stationarity mask does, regardless of the
-  usable-linear verdict; this preserves the previous release's policy.
+  usable-linear verdict.
 * Refined filter skips W update on block-stationary frames, preventing
   the PBFDKF from learning mic-as-echo coupling against an uncorrelated
-  stationary input (the `9xJH` / `E0l0` / `wJVP` NE-outlier class).
+  stationary input.
 
 ### 3.2 AecState
 
-`modules/state/aec_state.py` is the v3.21 AEC3-aligned read-only ADT.
-It wraps 12 sub-analyzers under `modules/state/`:
+`modules/state/aec_state.py` is the AEC3-aligned read-only ADT and the single
+source of `usable_linear_estimate()`. It wraps the analyzers under
+`modules/state/`:
 
 ```
 AecState
+├─ InitialState          (startup gating)
+├─ FilterDelay           (filter-peak delay)
 ├─ FilterAnalyzer        (impulse-response shape consistency)
 ├─ FilteringQualityAnalyzer (multi-gate usable_linear_estimate)
 ├─ ErlEstimator          (ERL adaptive EMA)
-├─ ErleEstimator         (subband ERLE EMA)
-├─ FullbandErleEstimator (fullband ERLE EMA)
-├─ SubbandErleEstimator  (sub-band ERLE EMA — AEC3-aligned)
-├─ SaturationDetector    (proxy to preprocessing detector)
-├─ InitialState          (startup gating)
-├─ TransparentMode       (no-echo-to-cancel pass-through; default off)
-└─ ...                   (StationarityEstimator wiring + render activity)
+├─ ErleEstimator         (subband + fullband ERLE)
+│    ├─ SubbandErleEstimator
+│    └─ FullBandErleEstimator
+└─ SaturationDetector    (capture / render saturation flags)
 ```
-
-The legacy `AecState` aggregator (formerly `modules/legacy_state.py`)
-was retired in v3.21 cleanup R8 because it was a thin facade over the
-five legacy detectors with no AEC3-substrate value — the
-`modules/state/aec_state.py` port replaces it.
 
 ### 3.3 ResidualEchoEstimator
 
@@ -436,40 +395,29 @@ residual-echo PSD estimate R²(k). Two paths:
   Active when AecState reports `usable_linear_estimate`.
 * **Render-based**: `R² = ERL_subband × X²(k)` — uses the long-window
   far-PSD EMA when the linear path is unreliable (epc_active, saturation,
-  pre-convergence). Mirrors AEC3 `residual_echo_estimator.cc:269`.
+  pre-convergence).
 
 A reverb-tail term from `ReverbModel` (`modules/residual/reverb_model.py`)
 is added when reverb estimation is online; tracks per-bin reverb energy
 across the impulse response tail using `ReverbDecayEstimator` +
 `ReverbFrequencyResponse`.
 
-The legacy two-path attribution (`attribute_legacy` in
-`modules/residual_estimator.py`) is kept for backward-compat callers but
-no longer driven by the production path.
+#### Live observer (default OFF)
 
-#### Live observer (A21 campaign, 2026-10-17; research, default OFF, not part of this doc's v3.23.0 line)
-
-`live_observer_enabled` (default 0; byte-exact when off) adds a third,
-independent PBFDAF instance (`modules/residual/tail_observer.py` design
-note; C: `aec_post_run_observer_step()` in `aec_post.c`, not the main
-hop loop, since it needs the current hop's `dominant_ne`/
-`usable_linear_estimate` verdicts). It reads the far-end ring
+`live_observer_enabled` (default OFF) adds a third, independent PBFDAF
+instance (C: `aec_post_run_observer_step()` in `aec_post.c`, called from the
+post chain rather than the main hop loop because it needs the current hop's
+`dominant_ne` / `usable_linear_estimate` verdicts). It reads the far-end ring
 `live_observer_shift_ms` earlier than the main filter's own
 delay-compensated read, so its echo estimate covers the span just ahead
 of the main filter's current window. Its evidence is injected as
 `R² = max(R², min(|observer.echo - sel_echo|², |sel_esw|²) × PSD_SCALE)`,
 bounded to `live_observer_max_hz` and gated on a corroboration check: the
 observer's own residual-error EMA must be no worse than the EMA of the
-*selected* linear output's own residual (not an unconditional `self.filter`
-reference — whichever of main/shadow R² actually used that hop) over a
-`live_observer_corrob_ms` time constant, within `live_observer_corrob_margin_db`.
-This never touches the linear filter, the delay estimate, or ERLE —
-only R² before SuppressionGain. Status: mechanism validated (fid0 ERLE
-+0.64/+7.12 dB at the two product grids; 300-case FS Rule A 300/300 grid A,
-298/300 grid B with the two grid-B residual grazes accepted-but-flagged
-by the user); the measured compute cost (+10-15% at the C level, three
-grids) is an open acceptance question, not yet decided. See
-`SE/.research/2026-10-16/a21/` for the full trace.
+*selected* linear output's residual over a `live_observer_corrob_ms` time
+constant, within `live_observer_corrob_margin_db`; injection is also limited by
+`live_observer_inject_dt_energy_max`. It never touches the linear filter, the
+delay estimate, or ERLE — only R² before SuppressionGain.
 
 ### 3.4 SuppressionGain
 
@@ -486,12 +434,12 @@ with α a frame-state-dependent over-estimation factor. The gain is then
 band-limited (HF cap), temporally smoothed (asymmetric attack / release),
 and floored by a per-bin spectral-floor mask.
 
-**Split min-gain floor (v3.22.0, default ON).** The AEC3 min-gain floor
+**Split min-gain floor (default ON).** The AEC3 min-gain floor
 `min_gain = min_echo_power / R²` collapses to ~0 in double-talk: near-end
 inflates the error → ERLE drops → R² spikes → the floor that should protect
 near-end vanishes exactly when near-end is present (RES over-suppresses
 near-end up to −8 dB; the linear filter only cuts −1.4..−2.9 dB). A
-coherence double-talk discriminator was proven unworkable (single-lag X–Y
+coherence double-talk discriminator does not work (single-lag X–Y
 coherence cannot separate reverberant FS from DT). The fix is a power-domain
 floor on the deepest suppression, **split by far-end activity**:
 
@@ -499,7 +447,7 @@ floor on the deepest suppression, **split by far-end activity**:
 min_gain(k) = max( min_echo_power / R²(k),  floor )
 floor = 10^(-28/10)  if far-active (FS/DT)   # balanced; deep far-active
                                              #   suppression for more echo
-                                             #   cancellation → FS echo > AEC2
+                                             #   cancellation
       = 10^(-12/10)  if far-silent (pure NE) # lifts NE near-end, zero echo
                                              #   cost (no echo to leak)
 ```
@@ -513,10 +461,10 @@ never active keep the strong floor. Config (`AecConfig`):
 mild −20 / aggressive −38 — the preset strength knob),
 `min_gain_floor_far_silent_db` (−12), `min_gain_far_latch_power` (1e6). The
 floors are amplitude-domain dB; the orchestrator constructs `SuppressionGain`
-with these as `split_floor_*` (`orchestrator.py:960`). The far-active floor
-above is further lifted in double-talk by the DT-aware floor gating below.
+with these as `split_floor_*`. The far-active floor above is further lifted in
+double-talk by the DT-aware floor gating below.
 
-**Double-talk floor protection (DT-aware floor gating, v3.23.0, default ON).**
+**Double-talk floor protection (DT-aware floor gating, default ON).**
 The far-active floor (balanced −28 dB) is deliberately aggressive so pure
 far-end single-talk cancels deep echo — but applying that same deep floor
 *during double-talk* over-suppresses near-end. The DT-gated floor lifts the
@@ -525,7 +473,7 @@ near-end is present*, selectively protecting near-end in DT while keeping the
 aggressive far-active floor in pure FS:
 
 ```python
-# suppression_gain.py ~1067 (_get_min_gain):
+# suppression_gain.py (_get_min_gain):
 if self._far_active_latched:
     base_floor = (self._split_floor_dt if self._dt_protect_active   # DT
                   else self._split_floor_far_active)                # FS
@@ -533,20 +481,14 @@ else:
     base_floor = self._split_floor_far_silent                       # pure NE: −12 dB
 ```
 
-The `-20 dB` dt-floor default (mild/balanced) is a measured Pareto choice, not
-a free detector improvement.  Against `-16 dB` on 832 paired files it recovers
-roughly 0.46--0.53 dB far-end-single-talk ERLE and 0.053--0.064 echo MOS, while
-double-talk degradation MOS falls 0.027--0.030; near-end-only is neutral.
-The earlier `-16 dB` setting deliberately spent that echo headroom on near-end
-protection after the round-robin filter-constraint change.  Returning to
-`-20 dB` reverses that small policy exchange; it does not make the near/far
-latch more accurate. **aggressive deepens this floor to −30 dB** instead —
-without a distinct value here, `dt_protect_active` (which also false-arms on
-~30% of pure far-end-singletalk hops) hard-overrides the far-active floor with
-the SAME −20 dB for every preset, masking most of the strength-axis
-difference exactly when a user would expect to hear it. See `AecConfig.
-from_preset`'s docstring for the dev-pool measurement behind that value and
-its near-end cost.
+The `-20 dB` dt-floor default (mild/balanced) is a Pareto choice, not a free
+detector improvement: against `-16 dB` it buys far-end-single-talk ERLE and echo
+MOS at a small double-talk degradation cost (numbers in the CHANGELOG), and it
+does not make the near/far latch more accurate. **aggressive deepens this floor
+to −30 dB** instead — without a distinct value here, `dt_protect_active` (which
+also false-arms on pure far-end-singletalk hops) hard-overrides the
+far-active floor with the SAME −20 dB for every preset, masking most of the
+strength-axis difference exactly when a user would expect to hear it.
 
 The orchestrator sets `sg._dt_protect_active` immediately before `get_gain`:
 
@@ -559,15 +501,11 @@ self._aec3_sg._dt_protect_active = bool(
 The floor is armed by the energy-based `_ne_recent_frames` latch alone — the
 same gate `dt_aware_recovery_soft` uses. Config (`AecConfig`):
 `dt_aware_res_floor_enabled`, `min_gain_floor_dt_db` (−20; −30 for aggressive),
-`ne_recent_threshold`/`ne_recent_hold`/`ne_recent_sustain`. Enabling
-`dt_aware_res_floor_enabled` itself with the default latch source, on the
-no-pre-align baseline (on top of `dt_aware_recovery_soft`): DT_static deg 2.016→2.074, DT_movement 2.088→2.140
-(both exceed the pre-align result), at a bounded echo cost (DT echo
-4.28→4.22, FS echo 3.59→3.54), all ship bars held.
+`ne_recent_threshold`/`ne_recent_hold`/`ne_recent_sustain`.
 
 ### 3.5 Comfort noise (CNG)
 
-When `enable_cng = True` (default), `_aec3_post` adds per-bin shaped
+When `enable_cng = True` (preset default), `_aec3_post` adds per-bin shaped
 noise scaled by `sqrt(1 - G²)` to mask the suppressed spectrum. State:
 per-bin noise PSD EMA + smoothed cn gain (init in `AEC.__init__`).
 
@@ -579,11 +517,10 @@ windowed inverse FFT into the output stream.
 
 ### 3.7 enable_res = False bypass
 
-The byte-equal harness renders each case twice — once with
-`enable_res=True` (production) and once with `enable_res=False`. The
-latter skips the entire `_aec3_post` body and emits the linear residual
-straight from the refined filter into `_ours_nores.wav`. The gate at
-`orchestrator.py:_aec3_post` block-open uses
+With `enable_res=False` the `_aec3_post` body is skipped and the linear residual
+is emitted straight from the refined filter; `eval_aec_challenge.py` writes
+that render as `_ours_nores.wav` next to the production render. The gate at
+`_aec3_post` block-open uses
 `self.config.enable_res or self.config.return_res_context`.
 
 ---
@@ -610,8 +547,7 @@ matched set. `AecConfig.return_formed_output` requires this flag or
 `enable_res` and raises at construction otherwise — the formed seam is
 produced by the post chain and cannot be requested without it.
 
-### `trace_p52_regime_handler`
-Per-frame regime-handler trace flag (default OFF). Classifier in
+### Regime classifier
 `modules/p52_regime_classifier.py` is analysis-only; the
 `AntiLoopholeTests` in `python/tests/test_p52_regime.py` enforce that the
 classifier never modifies audio.
@@ -624,7 +560,7 @@ classifier never modifies audio.
 * `python/eval_aec_challenge.py` — render 800-case AEC Challenge corpus.
   Standard config: `--preset balanced --filter 832 --cng --parallel --workers 4`.
 * `python/bench_aecmos.py` — AECMOS scoring driver
-  (needs `speechmos` + `onnxruntime ≤ 1.16.3` + `numpy < 2`).
+  (needs `onnxruntime`, `librosa` and `soundfile`).
 * `python/eval_manifest90.py` — fixed 90-case partial blind benchmark with
   ERLE/SDR and scenario-correct AECMOS metrics.
 * `python/run_one_case.py` — single-case dev tool with diagnostic
@@ -638,101 +574,41 @@ classifier never modifies audio.
 
 ---
 
-## 6. Reference scores (current — no pre-alignment)
+## 6. Reference scores
 
-The numbers below are the **production-faithful** 800-case AECMOS bucket means
-for the **BALANCED** preset with **no pre-alignment** — the delay is acquired
-online by the in-pipeline matched-filter self-align (§2.3), exactly as the
-shipped algorithm runs. This is the only result presentation that reflects
-production: offline GCC pre-align is a benchmark-only crutch and its numbers are
-**not** a current result.
-
-| Bucket       |  echo (↑) |  deg (↑) |
-|--------------|----------:|---------:|
-| FS_static    |     3.544 |        — |
-| FS_movement  |     3.519 |        — |
-| DT_static    |     4.218 |    2.074 |
-| DT_movement  |     4.114 |    2.140 |
-| NE           |         — |    4.021 |
-
-All four ship bars are met:
-
-* **FS echo > 3.5** — FS_static 3.544, FS_movement 3.519 ✓
-* **DT echo > 4** — DT_static 4.218, DT_movement 4.114 ✓
-* **DT deg > 2.0** — DT_static 2.074, DT_movement 2.140 ✓
-* **NE deg ≥ 4** — NE 4.021 ✓
-
-These reflect the v3.23.0 DT-aware recovery stack (matched-filter pre-echo fix
-§2.3 + `dt_aware_recovery_soft` §2.3 + DT-gated RES floor §3.4), which closed the
-no-pre-align acquisition gap — the DT deg figures (2.074 / 2.140) now exceed what
-the offline pre-align crutch produced.
-
-Reference points (AEC2 / AEC3 anchors from the AEC Challenge corpus):
-
-* **AEC2 reference** — DT static / movement deg ≈ 2.39; NE deg ≈ 4.10.
-* **AEC3 reference** — DT static / movement deg ≈ 1.85; NE deg ≈ 3.45.
-
-BALANCED beats AEC3 on every DT/NE deg bucket and holds all four echo/deg ship
-bars under online self-align.
-
-> **Historical (pre-align, NOT a current result).** The retired v3.21 anchor
-> (commit `3aadd2d`; the old result bundle is not part of this release tree) was scored *with*
-> offline GCC pre-alignment, which inflates FS deg to ≈5.0 and shifts the echo
-> means; those numbers are kept only as a historical anchor and must never be
-> presented as a current production result.
+The production-faithful 800-case AECMOS bucket means (ours vs WebRTC AEC3 vs
+Speex; `balanced / fl=832 / --cng`, no pre-alignment, official per-bucket
+segmentation, 16 kHz 256/128 grid) are in the root
+[README](../README.md#status-snapshot) with their measurement conditions. "No
+pre-alignment" means the delay is acquired online by the in-pipeline
+matched-filter self-align (§2.3), exactly as the shipped algorithm runs.
+Offline GCC pre-alignment is a benchmark-only crutch; its numbers are not a
+production result.
 
 ---
 
 ## 7. Python ↔ C precision model
 
 The `c_impl/` port is the production C implementation of the **same algorithm**
-as `python/aec.py`. Through v3.23.0 (under `-DUSE_STANDARD_MATH` with a
-numpy-precision FFT) the non-FFT C logic was verified **bit-exact** to the
-Python reference — every per-module parity test (the now-removed
-`c_impl/test/historical/parity_*.c` — PBFDKF, delay, AecState,
-ResidualEchoEstimator, SuppressionGain, the ERLE/reverb estimators, etc.)
-plus the end-to-end `parity_aec_e2e` passed with 0 mismatches across all
-three presets over the full ≈4186-hop doubletalk case.
-That 0-mismatch record is now historical.
-
-**Float32 campaign (2026-07-15) — Python bit-exact parity retired repo-wide.**
-All production C is float32 end-to-end: delay chain, orchestrator scalars,
-post/state modules, `residual_echo_estimator`, and the mic-path HPF. The relationship between the two
-implementations is no longer "port that must match bit-for-bit" — it is:
+as `python/aec.py`. All production C is float32 end-to-end: delay chain,
+orchestrator scalars, post/state modules, `residual_echo_estimator`, and the
+mic-path HPF. The relationship between the two implementations is:
 
 * **Python (fp64) is the algorithm spec.**
 * **C (float32) is the implementation.**
-* **Python↔C comparison is tolerance-based** (~−60 dB class, correlation
-  0.99999958), not 0/0.
+* **Python↔C comparison is tolerance-based**, not 0/0.
 
-The delay-estimator matched filter was already float32 fast-math + duty-cycled
-**unconditionally**, predating and separate from the wider campaign (sampled
-at zero AECMOS cost on the 60-case stratified gate; see §2.3 and
-`c_impl/include/delay_aec.h`).
+The delay-estimator matched filter is float32 fast-math and duty-cycle capable
+(see §2.3 and `c_impl/include/delay_aec.h`).
 
 The **FFT backend is NE10 (float32, ARM NEON)** (via the shared
 `audiolib` layer), which is not bit-exact to numpy's fp64 `np.fft`. Because
 PBFDKF and the post-filter are frequency-domain, this float32 FFT difference
 propagates through the whole pipeline, so the **end-to-end C output aligns
-with Python to ~float32 precision, not 0/0**: correlation 0.99999958, RMS
-error ≈ −60 dB below signal, per-sample max ~6e-3 (inaudible).
-`parity_aec_e2e.c` asserts the linear `raw_output` and final `out[hop]` stay
-within a **2e-2 float32 tolerance** (not strict equality) and is the
-**authoritative C regression gate**.
-
-**Regression anchors going forward**:
-
-* `c_impl/test/parity_aec_e2e.c` (tolerance gate) is the maintained regression
-  test.
-* Staged gates vs the `fp64-baseline` git tag: 60-case stratified AECMOS
-  (worst per-case delta −0.021 echo, all bucket means ≤0.002 — within the
-  established noise bar), waveform drift median −95 dB, and a 1-hour soak
-  (delay trajectory identical, power-EMA worst rel diff 1.3e-5, final ERLE
-  matching to 4 digits).
-* The remaining per-module `parity_*.c` harnesses are kept as **historical**
-  diagnostics against fp64 Python goldens predating the campaign; they are
-  not deleted, but drift on them is expected and not a regression signal by
-  itself.
+with Python to ~float32 precision, not 0/0**. `parity_aec_e2e.c` asserts the
+linear `raw_output` and final `out[hop]` stay within a **2e-2 float32
+tolerance** at 16 kHz (1e-1 at 48 kHz; measured maxima are tabulated in the
+file header) and is the **authoritative C regression gate**.
 
 ### Math backends
 
@@ -748,21 +624,16 @@ FFT-backend choice above):
   worst relative error of **3.9e-3** (about 0.034 dB on a gain), which reaches
   the stages that call `exp` (SuppressionGain near-end sigmoid, CNG gain, dB
   conversions) on top of the float32-FFT tolerance above; the ARM
-  `fast_sqrt` is correctly rounded and adds none. The E2E parity gate measures
-  the combined effect at ~1.7e-5 (linear) / ~7e-4 (final output) against the
-  2e-2 tolerance.
+  `fast_sqrt` is correctly rounded and adds none.
 * **`-DUSE_STANDARD_MATH`: libm.** Swaps the approximations for `expf`/`logf`/
-  `sqrtf` (the `USE_STANDARD_MATH` block at the top of `fast_math.h`). Historically this isolated the non-FFT logic
-  for the bit-exact parity checks; with all production math now float32 by
-  design (not just approximated), this flag no longer implies a parity claim
-  — it remains available as a precision/perf toggle only.
+  `sqrtf` (the `USE_STANDARD_MATH` block at the top of `fast_math.h`); a
+  precision/perf toggle only.
 
 `-ffp-contract=off -fno-math-errno` is mandatory in `CFLAGS` on both backends
-and on both math modes — the first flag retains build determinism (no fused
-multiply-add reassociation), independent of any Python-parity target; the
-second makes guarded AArch64 `sqrtf` lower to `FSQRT` without an errno
-fallback. The DSP pipeline does not read math `errno`. The C
-structure mirrors the Python class boundaries one-to-one (`PBFDKF`,
-`ShadowFilter`, `AecState`, `SuppressionGain`, `EchoPathDelayEstimator`, …), so
-a module-level regression isolates any divergence to a single stage. See
+and on both math modes — the first flag keeps builds deterministic (no fused
+multiply-add reassociation), the second makes guarded AArch64 `sqrtf` lower to
+`FSQRT` without an errno fallback. The DSP pipeline does not read math
+`errno`. The C structure mirrors the Python class boundaries one-to-one
+(`PBFDKF`, `AecState`, `SuppressionGain`, `EchoPathDelayEstimator`, …), so a
+module-level regression isolates any divergence to a single stage. See
 `docs/c_user_manual_zh_TW.md` (build + integration).

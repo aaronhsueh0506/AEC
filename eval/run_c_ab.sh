@@ -1,11 +1,8 @@
 #!/bin/bash
 # C-path 90-case blind A/B.
 #
-# Why this exists: eval_aec_challenge.py drives the PYTHON AEC ("from aec import
-# AEC"), so it cannot observe a C-only change at all -- it reports a zero delta
-# for a reason that has nothing to do with the change. That is how a C/Python
-# divergence in alpha_power sat in main with every benchmark green. This drives
-# the C CLI instead.
+# eval_aec_challenge.py drives the Python AEC ("from aec import AEC"), so it
+# cannot observe a C-only change; this script drives the C CLI (aec_wav).
 #
 # Baseline and candidate are separate git WORKTREES, each built from its own
 # checkout. Nothing is swapped in the working tree, so a build cannot pick up
@@ -16,19 +13,22 @@
 # GCC-PHAT crutch. aec_wav has no pre-align path at all and always runs the
 # online estimator, which is the stricter condition.
 #
-# Every completeness claim this harness makes is checked, because each of them
-# has already been wrong once:
-#   - renders are counted by SUCCESS, not by loop iteration (the first version
-#     reported "rendered 90" while all 90 had exited 2 on an invalid flag);
+# Completeness checks:
+#   - renders are counted by SUCCESS, not by loop iteration;
 #   - the rendered, scored and manifest stem SETS must be equal, not merely the
 #     same size;
 #   - "byte-identical" is decided by eval/ab_compare.py from file digests and
 #     per-sample statistics, never inferred from equal AECMOS deltas.
 #
+# Both sides are built after `make clean` with SIMD=1 WERROR=1; the run aborts
+# if the two binaries are byte-identical. PYBIN selects the interpreter.
+# OUT_DIR receives out_*/, res_*/, score_*.log, build_*.log and
+# wav_comparison_g<fft>.json per grid.
+#
 # Usage:
 #   eval/run_c_ab.sh BASE_WORKTREE CAND_WORKTREE OUT_DIR ["256 512"] [aec_wav args...]
 #
-# e.g. to A/B a change that is only reachable with the shadow filter disabled:
+# e.g. a change only reachable with the shadow filter disabled:
 #   eval/run_c_ab.sh /tmp/wt-base /tmp/wt-cand /tmp/out "256 512" --no-shadow
 set -euo pipefail
 
@@ -41,9 +41,9 @@ CAND_WT="$1"; shift
 OUT="$1"; shift
 GRIDS="${1:-256 512}"
 if [ "$#" -gt 0 ]; then shift; fi
-# Forwarded verbatim to aec_wav, e.g. --no-shadow. The ${EXTRA[@]+...} guard is
-# not decoration: under `set -u` bash 3.2 (the macOS system shell) treats an
-# empty array expansion as an unbound variable and aborts mid-run.
+# Forwarded verbatim to aec_wav. The ${EXTRA[@]+...} guard in render is needed:
+# under `set -u` bash 3.2 (the macOS system shell) treats an empty array
+# expansion as unbound.
 EXTRA=("$@")
 
 AEC=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -67,15 +67,13 @@ echo "extra:    ${EXTRA[*]:-<none>}"
 
 build () {  # build <worktree> -> echoes the aec_wav path
   local wt="$1"
-  # WERROR=1: a warning introduced by the candidate is a difference between the
-  # two builds and must stop the run, not decorate its log.
+  # WERROR=1: a warning introduced by the candidate must stop the run.
   make -C "$wt/c_impl" clean >/dev/null 2>&1 || true
   make -C "$wt/c_impl" SIMD=1 WERROR=1 COMMON_DIR="$COMMON_DIR" \
       >"$OUT/build_$(basename "$wt").log" 2>&1 || {
     echo "make failed in $wt -- see $OUT/build_$(basename "$wt").log" >&2
     exit 1; }
-  # `make clean` is not optional here: a stale .o from an incremental build has
-  # produced spurious segfaults in this tree before.
+  # `make clean` above guarantees no stale object survives between builds.
   local bin
   bin=$(ls -t "$wt"/c_impl/bin/ne10-*/aec_wav 2>/dev/null | head -1)
   [ -n "$bin" ] && [ -x "$bin" ] || { echo "no aec_wav under $wt" >&2; exit 1; }

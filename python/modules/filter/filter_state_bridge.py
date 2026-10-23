@@ -1,30 +1,8 @@
-"""Read-only view of the linear-filter family for the AEC3 state machine.
+"""Read-only snapshot of the linear-filter family (PBFDKF, shadow filter, regime handler) for AecState.
 
-The AEC3 ``AecState`` (Phase 3) reads several signals from the linear
-filter to make per-frame decisions (UsableLinearEstimate gates,
-HandleEchoPathChange triggers, reverb_decay_estimator filter taps,
-filter_quality gating). Those signals live across three of our modules:
-
-  - PBFDKF (``python/modules/filters.py``): filter weights / Kalman P /
-    error spectrum / far-end power.
-  - ShadowFilter (``python/modules/filters.py``, instantiated as a
-    second PBFDKF or NLMS): divergence indicator via shadow err ratio.
-  - PathChangeRegimeHandler (``python/modules/epc.py``): regime classifier
-    (POS / CTL_FS / CTL_TAIL), main_paused flag, copy_counter.
-
-This bridge gives AecState a stable, typed surface to read from
-without coupling it to PBFDKF / Shadow / Regime internals. The
-orchestrator builds one per hop with ``build_filter_state_bridge`` and
-hands the snapshot to ``aec_state.update``.
-
-Notes:
-  - ``filter_taps`` is recovered from ``PBFDKF.W`` via inverse FFT of
-    partition 0 (the most recent block's impulse response). Used by
-    ``reverb_decay_estimator`` to extract reverb tail slope. Other
-    partitions are NOT exposed here — reverb decay only needs the
-    head response.
-  - ``divergence_indicator`` is a unitless [0, ∞) scalar; high values
-    mean the filter has likely diverged.
+The orchestrator builds one per hop with ``build_filter_state_bridge``. ``filter_taps``
+is the IFFT of partition 0 of ``PBFDKF.W``; ``divergence_indicator`` is a unitless
+scalar in [0, inf), high when the filter has likely diverged.
 """
 from dataclasses import dataclass
 from typing import Optional
@@ -98,15 +76,8 @@ def build_filter_state_bridge(
     any_coarse_filter_converged: bool = False,
     all_filters_diverged: bool = False,
 ) -> FilterStateBridge:
-    """Snapshot the linear-filter family into a FilterStateBridge.
-
-    ``pbfdkf`` is the main filter; ``regime_handler`` is a
-    PathChangeRegimeHandler instance; ``shadow_filter`` is optional. Reads
-    only — no mutation of any source state.
-    """
-    # Time-domain filter taps from W[0]. Partition 0 carries the most
-    # recent impulse response in PBFDKF/PBFDAF. Cast to float32 so the
-    # reverb_decay_estimator can run real-only.
+    """Snapshot the linear-filter family into a FilterStateBridge (reads only)."""
+    # Time-domain taps from partition 0 of W, as float32.
     W = getattr(pbfdkf, "W", None)
     fft_size = getattr(pbfdkf, "fft_size", None)
     if W is not None and fft_size is not None and W.shape[0] > 0:
@@ -114,8 +85,7 @@ def build_filter_state_bridge(
     else:
         w_time = np.zeros(1, dtype=np.float32)
 
-    # Divergence indicator: mean Kalman P_trace * (shadow_err / main_err).
-    # Reasonable default 0 if any input is missing.
+    # Divergence indicator: mean Kalman P * (shadow_err / main_err - 1), 0 when inputs are missing.
     div = 0.0
     P = getattr(pbfdkf, "P", None)
     if P is not None and P.size > 0:
@@ -134,9 +104,7 @@ def build_filter_state_bridge(
                 e_ratio = 1.0
         div = p_trace * max(0.0, e_ratio - 1.0)
 
-    # Regime: handler exposes implementation-specific state. Compress to
-    # an int code (0=stable, 1=main_paused, 2=any active state). AecState
-    # only needs the coarse classification.
+    # Coarse integer regime code: 1 if the main filter is paused, else 0.
     if getattr(regime_handler, "main_paused", False):
         regime_code = 1
     else:

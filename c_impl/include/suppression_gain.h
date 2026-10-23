@@ -1,19 +1,8 @@
-/* suppression_gain.h — C port of python/modules/residual/suppression_gain.py
- * Single-channel + single-band SuppressionGain.
- *
- * PRECISION: float32 (drift versus Python accepted). Produces gain[n_bins]
- * (amplitude domain, sqrt'd) at float32 precision throughout:
- * ENR/EMR/min/max/CNG math and every per-bin array (gain, tuning tables) are
- * float32, single rounding per op. Pairwise float32 sums (np.sum /
- * np.mean-equivalent) replicated by sk_pairwise_sum_tailfold_b_f32
- * (utility/simd_aec.h).
- *
- * Build: gcc -Wall -Wextra -O2 -ffp-contract=off -std=gnu99 -Ic_impl/include
- *   link: suppression_gain.c aec_scale.c reverb_frequency_response.c
- *
- * The caller owns all per-bin storage (passed at init) to keep the port
- * malloc-free in the audio path, matching the other state modules.
- */
+/* Single-channel, single-band suppression gain. Produces gain[n_bins] (amplitude, sqrt'd) in
+ * float32; the ENR/EMR, min/max-gain and comfort-noise math, the per-bin arrays and the tuning
+ * tables are all float32 (pairwise sums via sk_pairwise_sum_tailfold_b_f32).
+ * The caller owns all per-bin storage (passed at init); no allocation.
+ * Python reference: modules/residual/suppression_gain.py. */
 #ifndef SUPPRESSION_GAIN_H
 #define SUPPRESSION_GAIN_H
 
@@ -23,24 +12,21 @@
 extern "C" {
 #endif
 
-/* All config that the balanced path (and the default-OFF levers) needs.
- * Power-domain floors are precomputed by the caller (10^(db/10)). */
+/* Configuration. Power-domain floors are precomputed by the caller (10^(db/10)). */
 typedef struct {
     int    n_bins;
     int    sr;
     int    hop_size;
 
-    /* derived bin indices */
     int    last_lf_band;
     int    first_hf_band;
     int    last_lf_smoothing_band;
     int    last_permanent_lf_smoothing_band;
-    int    lf_smoothing_during_initial_phase;   /* bool */
-    int    lf_clamp_bin;                        /* hz_to_bin(250 Hz): 8 @ 16kHz/512-pt */
-    int    dne_lf_end;                           /* D3/D5 LF sum endpoint bin */
-    int    nearend_smoother_n;                   /* moving-avg window in hops */
+    int    lf_smoothing_during_initial_phase;
+    int    lf_clamp_bin;
+    int    dne_lf_end;
+    int    nearend_smoother_n;                   /* moving-average window in hops */
 
-    /* audibility (WeightEchoForAudibility) */
     int    aud_lf_end_bin;
     int    aud_mf_end_bin;
     float  floor_power;
@@ -50,59 +36,48 @@ typedef struct {
     float  low_render_limit;
     float  normal_render_limit;
 
-    /* HF limiter */
     int    hf_lgb;
     int    hf_biq;
-    int    conservative_hf;                      /* bool */
+    int    conservative_hf;
 
-    /* gain ratchet (wallclock-scaled by caller) */
     float  max_inc_normal;
     float  max_inc_nearend;
     float  max_dec_lf_normal;
     float  max_dec_lf_nearend;
     float  floor_first_increase;
 
-    /* LowNoiseRender */
     float  low_render_threshold;
 
-    /* split min-gain floor (default ON) */
-    int    split_floor_enabled;                  /* bool */
-    float  split_floor_far_active;               /* power */
-    float  split_floor_far_silent;               /* power */
-    /* DT-gated floor: used in place of far_active when the orchestrator sets
-     * dt_protect_active (double-talk). Default == near far_active so an un-set
-     * flag is behaviourally neutral (mirrors Python _split_floor_dt). */
-    float  split_floor_dt;                       /* power */
+    int    split_floor_enabled;
+    float  split_floor_far_active;
+    float  split_floor_far_silent;
+    /* DT-gated floor, used instead of far_active when dt_protect_active is set. */
+    float  split_floor_dt;
     float  split_floor_latch_power;
 
-    /* soft nearend blend (default ON in balanced) */
-    int    soft_blend_enabled;                   /* bool */
-    int    soft_blend_per_bin;                   /* bool */
+    int    soft_blend_enabled;
+    int    soft_blend_per_bin;
     float  soft_blend_enr_thr;
     float  soft_blend_softness;
 
-    /* DominantNearend thresholds */
     float  dne_enr_threshold;
     float  dne_enr_exit_threshold;
     float  dne_snr_threshold;
-    int    dne_use_during_initial_phase;         /* bool */
-    int    dne_use_unbounded_echo;               /* bool */
+    int    dne_use_during_initial_phase;
+    int    dne_use_unbounded_echo;
     int    dne_lf_endpoint_bin;
     int    dne_trigger_threshold_hops;
     int    dne_hold_duration_hops;
 
-    int    stat_aware_ne_proxy_enabled;          /* bool */
+    int    stat_aware_ne_proxy_enabled;
     float  stat_aware_ne_proxy_threshold;
 
-    /* LowNoiseRenderDetector power IIR rate conversion (mirrors Python's
-     * _LowNoiseRenderDetector use_wallclock_ema_alpha kwarg). Default OFF
-     * (0, matching the caller's memset-to-zero SuppressionGainConfig and
-     * Python's `bool = False` default): keeps the literal 0.9f/0.1f IIR. The
-     * wall-clock form is not validated; leave this at 0. */
-    int    use_wallclock_ema_alpha;              /* bool */
+    /* LowNoiseRenderDetector power IIR rate conversion. Keep at 0 (literal 0.9f/0.1f IIR); the
+     * wall-clock form is not validated. */
+    int    use_wallclock_ema_alpha;
 } SuppressionGainConfig;
 
-/* Per-bin tuning tables (n_bins each), supplied by caller. */
+/* Per-bin tuning tables (n_bins each), supplied by the caller. */
 typedef struct {
     const float *nearend_enr_tr;
     const float *nearend_enr_su;
@@ -111,66 +86,49 @@ typedef struct {
     const float *normal_enr_su;
     const float *normal_emr_tr;
 
-    /* Length the caller's per-rate lookup row baked the six arrays above at
-     * (aecb_rate_cfg(sr)->sg_table_len -- pointer-identical to AECB_N_BINS at
-     * 16 kHz). suppression_gain_init asserts this == cfg->n_bins; appended here
-     * (not inserted above) so existing field offsets are unchanged. */
+    /* Length the per-rate lookup row baked the six tables at; must equal cfg->n_bins. */
     int table_len;
 } SuppressionGainTuning;
 
-/* Mutable per-instance state. All n_bins arrays are caller-owned scratch. */
+/* Mutable per-instance state. All n_bins arrays are caller-owned. */
 typedef struct {
     SuppressionGainConfig cfg;
     SuppressionGainTuning tun;
 
-    /* persistent state across hops */
-    float *last_gain;           /* [n_bins] */
-    float *last_nearend;        /* [n_bins] */
-    float *last_echo;           /* [n_bins] */
+    float *last_gain;
+    float *last_nearend;
+    float *last_echo;
     float  low_render_avg_power;
-    float  low_render_iir_decay;  /* set in suppression_gain_init() from
-                                    * cfg->use_wallclock_ema_alpha */
-    float  low_render_iir_weight; /* set in suppression_gain_init() from
-                                    * cfg->use_wallclock_ema_alpha */
-    int    far_active_latched;  /* bool */
-    int    dt_protect_active;   /* bool — set by orchestrator before get_gain
-                                 * (== Python _dt_protect_active); lifts the
-                                 * floor to split_floor_dt during double-talk. */
-    /* Runtime retarget of cfg.split_floor_far_active. cfg holds the TARGET;
-     * split_floor_far_active_live is what get_min_gain applies. Seeded equal
-     * in suppression_gain_init and only ever separated by
-     * suppression_gain_set_split_floor_far_active_db, so an instance whose
-     * setter is never called performs exactly the pre-ramp arithmetic.
-     * State and not cfg deliberately: aec_reset() carries cfg/tun forward
-     * verbatim, so a target parked here would survive a reset while ramp
-     * PROGRESS must not. */
+    float  low_render_iir_decay;  /* set in suppression_gain_init() */
+    float  low_render_iir_weight; /* set in suppression_gain_init() */
+    int    far_active_latched;
+    int    dt_protect_active;   /* set by the orchestrator before get_gain; lifts the floor to split_floor_dt */
+    /* Runtime retarget of cfg.split_floor_far_active: cfg holds the target, the live value is what
+     * get_min_gain applies; they differ only after the _set_split_floor_far_active_db setter. */
     float  split_floor_far_active_live;
     float  split_floor_ramp_ratio;  /* per-hop power-domain factor; 1 = idle */
-    int    initial_state;       /* bool */
+    int    initial_state;
     float  stat_mask_frac;
 
-    /* DominantNearend state */
     int    dne_trigger_counter;
     int    dne_hold_counter;
-    int    dne_nearend_state;   /* bool */
+    int    dne_nearend_state;
 
-    /* moving-average ring buffer for the nearend smoother: stores up to
-     * nearend_smoother_n most-recent input spectra, oldest..newest. */
-    float *ma_buf;              /* [nearend_smoother_n * n_bins] */
-    int    ma_count;            /* number of valid rows (<= n) */
-    int    ma_head;             /* index of oldest row */
+    /* Moving-average ring of the nearend_smoother_n most recent spectra, oldest to newest. */
+    float *ma_buf;
+    int    ma_count;
+    int    ma_head;
 
-    /* scratch (caller-owned) */
-    float *nearend;             /* [n_bins] smoothed input */
-    float *weighted_residual;   /* [n_bins] */
-    float *min_gain;            /* [n_bins] */
-    float *max_gain;            /* [n_bins] */
-    float *g_raw;               /* [n_bins] */
-    float *gain;                /* [n_bins] output */
-    float *sum_scratch;         /* [n_bins] pairwise-sum helper */
+    float *nearend;
+    float *weighted_residual;
+    float *min_gain;
+    float *max_gain;
+    float *g_raw;
+    float *gain;
+    float *sum_scratch;
 } SuppressionGain;
 
-/* Initialise. Caller provides cfg/tuning and all the scratch/state arrays. */
+/* Initialise. The caller provides cfg, tuning and all state and scratch arrays. */
 void suppression_gain_init(SuppressionGain *sg,
                            const SuppressionGainConfig *cfg,
                            const SuppressionGainTuning *tun,
@@ -182,92 +140,48 @@ void suppression_gain_init(SuppressionGain *sg,
 
 void suppression_gain_set_initial_state(SuppressionGain *sg, int state);
 
-/* Retarget the far-active split floor on a RUNNING instance.
- *
- * `db` is the same dB-power quantity AecConfig.min_gain_floor_far_active_db
- * carries, and is validated against the same [-300, 50] range the config
- * validator applies -- a runtime call must not be able to install a value
- * init would have rejected. The target conversion is the same expression
- * aec_carve() uses, so ramp_ms == 0 lands on exactly the float a fresh
- * instance constructed with that dB would hold.
- *
- * ramp_ms == 0 applies on the next hop. ramp_ms > 0 walks there instead, one
- * step per get_gain() call, geometrically in the power domain -- which is
- * linearly in dB, so no logarithm is evaluated per hop. The walk lands on the
- * target exactly rather than approaching it asymptotically. ramp_ms is bounded
- * at 60 s: aec_ms_to_hops() ends in a float->int conversion that is undefined
- * for a large finite input, so the hop count is computed and range-checked in
- * a wider type here before that helper is ever reached.
- *
- * Touches nothing else: no smoothing history, no far-active latch, no
- * DominantNearend counter, no initial_state. A call made while a ramp is
- * running restarts from the CURRENT live value, neither snapping back to the
- * old target nor inheriting the old ratio.
- *
- * Call between hops, serialised with get_gain(); not thread-safe.
- * Returns 0 on success, -1 on a NULL instance or an out-of-range argument,
- * in which case NOTHING is written -- every value is computed and validated
- * before the first store. */
+/* Retargets the far-active split floor on a running instance. `db` is range-checked to [-300, 50].
+ * ramp_ms == 0 applies on the next hop; ramp_ms > 0 (at most 60 s) walks to the target one step per
+ * get_gain() call, linearly in dB. A call during a ramp restarts from the live value. Call between
+ * hops; not thread-safe. Returns 0, or -1 on a NULL instance or out-of-range argument (nothing is
+ * written). */
 int suppression_gain_set_split_floor_far_active_db(SuppressionGain *sg,
                                                    float db, float ramp_ms);
 
-/* The DT-lifted floor's runtime retarget. No ramp_ms: unlike the far-active
- * floor above, split_floor_dt is a hard per-hop override, not a value the
- * gain rule reads continuously while converging, so there is no "live" vs
- * "target" to walk between -- the new value is in force for the very next
- * hop where dt_protect_active is true. Touches nothing else.
- *
- * Returns 0 on success, -1 on a NULL instance or an out-of-range db, in
- * which case nothing is written. */
+/* Retargets the DT-lifted floor (no ramp; applies from the next hop with dt_protect_active).
+ * Returns 0, or -1 on a NULL instance or out-of-range db. */
 int suppression_gain_set_split_floor_dt_db(SuppressionGain *sg, float db);
 
-/* The gate's own runtime retarget. split_floor_enabled is a boolean --
- * there is no continuous path for a ramp to walk, so unlike the far-active
- * floor it STEPS immediately, same discipline as the DT setter above (see
- * its comment). Gates all three floor variants in get_min_gain (far-active,
- * far-silent/pure-NE, DT-lifted): going False->True re-enables all three at
- * once; going True->False disables all three at once. Does NOT reset
- * _far_active_latched -- a latch that could not arm while disabled resumes
- * from wherever it was, not from scratch.
- *
- * Returns 0 on success, -1 on a NULL instance (coerces `enabled` to 0/1, so
- * no other input is rejected). */
+/* Enables or disables all three split floors at once (`enabled` coerced to 0/1, immediate).
+ * Returns 0, or -1 on a NULL instance. */
 int suppression_gain_set_split_floor_enabled(SuppressionGain *sg, int enabled);
 
-/* is_dominant_nearend — returns the RAW DominantNearendDetector hold state
- * (== _dominant_nearend.is_nearend_state()). The orchestrator reads this BEFORE
- * get_gain (one-hop lag: it reflects the previous hop's get_gain update). */
+/* Raw DominantNearend hold state; lags one hop. */
 int suppression_gain_is_dominant_nearend(const SuppressionGain *sg);
 
-/* State-updating prefix of get_gain(), factored out so a caller that never
- * consumes the gain array itself (e.g. a per-lane AEC feeding a downstream
- * beamform-then-fuse suppression stage) can keep the DominantNearend hold
- * state advancing -- which the NEXT hop's ERLE onset decision and residual-
- * echo estimate depend on -- without paying for the rest of get_gain()'s
- * per-bin work, whose only consumer is the gain array this path discards.
- * get_gain() itself calls this internally; this is the single source of
- * truth for what dominant_nearend_update() is fed. */
+/* State-updating prefix of get_gain(): advances the DominantNearend hold state without computing
+ * the gain array, for callers that never consume the gain. get_gain() calls it internally. */
 void suppression_gain_update_dominant_nearend(
     SuppressionGain *sg,
-    const float *nearend_spectrum,        /* [n_bins] Y^2 / E^2 */
-    const float *residual_echo,           /* [n_bins] R^2 */
-    const float *residual_echo_unbounded, /* [n_bins] R^2_unb */
-    const float *comfort_noise);          /* [n_bins] CN power */
+    const float *nearend_spectrum,
+    const float *residual_echo,
+    const float *residual_echo_unbounded,
+    const float *comfort_noise);
 
-/* One hop. Inputs are the f32 spectra (n_bins) + the f32 render block
- * (hop_size). Returns the gain pointer (== sg->gain). */
+/* One hop. Inputs are float32 spectra (n_bins) and the render block (hop_size). Returns
+ * sg->gain. */
 const float *suppression_gain_get_gain(
     SuppressionGain *sg,
-    const float *nearend_spectrum,        /* [n_bins] Y^2 / E^2 */
-    const float *residual_echo,           /* [n_bins] R^2 */
-    const float *residual_echo_unbounded, /* [n_bins] R^2_unb */
-    const float *comfort_noise,           /* [n_bins] CN power */
+    const float *nearend_spectrum,
+    const float *residual_echo,
+    const float *residual_echo_unbounded,
+    const float *comfort_noise,
     const float *render_block,            /* [hop_size] time-domain render */
-    int          clock_drift,             /* bool */
-    int          saturated_echo);         /* bool (aec_state.saturated_echo) */
+    int          clock_drift,
+    int          saturated_echo);
 
 #ifdef __cplusplus
 }
 #endif
 
-#endif /* SUPPRESSION_GAIN_H */
+#endif

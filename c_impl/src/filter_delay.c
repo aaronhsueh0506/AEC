@@ -1,32 +1,23 @@
-/* filter_delay.c — C port of python/modules/state/filter_delay.py.
- * Pure integer state machine (no float math). See the header for the parity
- * contract. Built with -ffp-contract=off for consistency with the rest of the
- * port (no float ops here, so it is a no-op for this TU). */
+/* filter_delay.c -- see filter_delay.h. Integer state machine. */
 #include "filter_delay.h"
 #include "aec_scale.h"
 
-#include <stddef.h>  /* NULL */
+#include <stddef.h>
 
 void filter_delay_init(FilterDelay *fd, int *delays_storage,
                        int delay_headroom_samples, int num_capture_channels,
                        int hop_size, int sample_rate) {
     int c;
 
-    /* delay_headroom_blocks = int(delay_headroom_samples) // hop_size.
-     * Python `//` is floor division; for the non-negative headroom (always
-     * >= 0 in practice) C's `/` on non-negative ints is identical. Clamp to
-     * floor semantics defensively in case of a negative input. Uses the live
-     * hop_size (numerically inert while delay_headroom_samples stays well under
-     * any real hop_size, but not silently wrong if it ever isn't). */
+    /* Headroom in blocks, floored toward -inf for a negative input. */
     int blocks = delay_headroom_samples / hop_size;
     if (delay_headroom_samples < 0 &&
         blocks * hop_size != delay_headroom_samples) {
-        blocks -= 1;  /* floor toward -inf, matching Python `//` */
+        blocks -= 1;
     }
 
     fd->delay_headroom_blocks = blocks;
-    /* 2 s (= 500 blocks) filter-adaptation threshold, computed live from
-     * the grid. */
+    /* 2 s filter-adaptation threshold, computed from the live grid. */
     fd->filter_adaptation_threshold_hops =
         aec_ms_to_hops(2000.0f, hop_size, sample_rate);
     fd->num_channels = num_capture_channels;
@@ -47,7 +38,7 @@ int filter_delay_update(FilterDelay *fd, const int *analyzer, int analyzer_len,
     int delay_estimator_unconverged;
     int c, mn;
 
-    /* if external_delay is not None: self._external_delay = external_delay */
+    /* Cache a reported external delay. */
     if (external != NULL && external->reported) {
         fd->external_delay = *external;
     }
@@ -56,14 +47,12 @@ int filter_delay_update(FilterDelay *fd, const int *analyzer, int analyzer_len,
         blocks_with_proper_filter_adaptation < fd->filter_adaptation_threshold_hops;
 
     if (delay_estimator_unconverged && fd->external_delay.reported) {
-        /* filter_delays_blocks[*] = delay_headroom_blocks */
+        /* Unconverged with a cached external delay: reset all channels to the headroom. */
         for (c = 0; c < fd->num_channels; ++c) {
             fd->filter_delays_blocks[c] = fd->delay_headroom_blocks;
         }
     } else if (analyzer != NULL) {
-        /* len(analyzer) must equal num_channels, else Python raises ValueError.
-         * The Python raise aborts BEFORE the assignment and the min recompute,
-         * so we return -1 with state unmodified. */
+        /* The analyzer length must equal num_channels; state stays unmodified on mismatch. */
         if (analyzer_len != fd->num_channels) {
             return -1;
         }
@@ -71,9 +60,8 @@ int filter_delay_update(FilterDelay *fd, const int *analyzer, int analyzer_len,
             fd->filter_delays_blocks[c] = analyzer[c];
         }
     }
-    /* else: filter_delays_blocks untouched */
 
-    /* min_filter_delay = min(filter_delays_blocks) */
+    /* min over channels */
     if (fd->num_channels > 0) {
         mn = fd->filter_delays_blocks[0];
         for (c = 1; c < fd->num_channels; ++c) {

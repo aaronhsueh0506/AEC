@@ -1,26 +1,15 @@
 #!/usr/bin/env bash
 #
-# cli_delay_flags.sh — regression test for aec_wav's --delay-mode /
-# --delay-num-filters / --fixed-delay / --print-mem-size options.
+# cli_delay_flags.sh -- test of aec_wav's --delay-mode / --delay-num-filters / --fixed-delay / --print-mem-size options.
 #
-# SCOPE: this tests the CLI PLUMBING only — that a value typed on the command
-# line lands in the AecConfig handed to aec_create()/aec_get_mem_breakdown(),
-# that an illegal mode/field combination is REJECTED rather than silently
-# clamped (aec_validate_config is the single authority), and
-# that --print-mem-size reports the SAME number the library itself would
-# return. It does not duplicate what the C regression tests already cover:
-# the bank-size GEOMETRY is test_delay_num_filters.c's job, the ring-size
-# FORMULA is test_linear_context.c's, and the mode × field validation matrix
-# is test_config_validation.c's — this script only proves the CLI wiring
-# reaches those already-tested mechanisms.
+# Scope: CLI plumbing only. A value typed on the command line must land in the AecConfig handed to aec_create() and
+# aec_get_mem_breakdown(); an illegal mode/field combination must be rejected, not clamped (aec_validate_config is the
+# single authority); and --print-mem-size must report the number the library itself returns. Bank-size geometry, the
+# ring-size formula and the mode x field validation matrix belong to test_delay_num_filters.c, test_linear_context.c and
+# test_config_validation.c.
 #
-# Run it by hand (no Makefile required, paths resolve from this script):
-#
-#   cd c_impl && make && test/cli_delay_flags.sh
-#
-# or via the wired target (builds both binaries first): make test-cli-delay-flags
-#
-# Exit 0 + "cli_delay_flags: PASS" means the options still reach the engine.
+# Run: cd c_impl && make && test/cli_delay_flags.sh   (or `make test-cli-delay-flags`, which builds both binaries first)
+# Exit 0 and "cli_delay_flags: PASS" mean the options reach the engine.
 
 set -euo pipefail
 
@@ -103,18 +92,12 @@ for d in 0 1600 8000; do
 done
 
 # ============================================================================
-# 5. Illegal mode/field combinations are REJECTED (aec_validate_config is the
-#    sole authority — a bad combination must fail the run, never be silently
-#    clamped or ignored into a different configuration than the one asked
-#    for). MUTATION TARGET: --fixed-delay negative under FIXED must be
-#    rejected — this is check (a) below.
+# 5. Illegal mode/field combinations are REJECTED (aec_validate_config is the sole authority): a bad combination must fail
+#    the run, never be clamped or ignored into a different configuration. Check (a) below is the mutation target.
 # ============================================================================
-# (a) --fixed-delay negative under FIXED (the "unset" sentinel is -1; FIXED
-#     demands >= 0, so every negative value, -1 included, must be rejected).
-#     Mutation-verified: silently clamping a negative value to 0 in aec_wav.c
-#     BEFORE the cfg assignment (instead of handing it to aec_create()
-#     unvalidated, per the CLI's own documented contract) turns this and two
-#     downstream checks (§6, §9) red — restored and re-run green.
+# (a) --fixed-delay negative under FIXED (the "unset" sentinel is -1; FIXED demands >= 0, so every negative value, -1
+#     included, must be rejected). Clamping a negative value to 0 in aec_wav.c before the cfg assignment turns this check
+#     and the checks of sections 6 and 9 red.
 for bad in -1 -2 -100; do
     if "$AEC_WAV" "$MIC" "$REF" "$TMP/o5a.wav" --cng --delay-mode fixed --fixed-delay "$bad" >/dev/null 2>&1; then
         ck no "--delay-mode fixed --fixed-delay $bad rejected"
@@ -168,10 +151,8 @@ if [ -s "$TMP/o6.wav" ]; then ck no "rejected config writes no output"
 else ck ok "rejected config writes no output"; fi
 
 # ============================================================================
-# 7. The default run is byte-identical to explicit
-#    --delay-mode matched --delay-num-filters 5 (the documented defaults;
-#    proves the new options are behaviour-neutral at their default values
-#    rather than taking a different code path)
+# 7. The default run is byte-identical to explicit --delay-mode matched --delay-num-filters 5 (the documented defaults):
+#    the options are behaviour-neutral at their default values rather than taking a different code path
 # ============================================================================
 "$AEC_WAV" "$MIC" "$REF" "$TMP/def.wav"      --cng >/dev/null 2>&1
 "$AEC_WAV" "$MIC" "$REF" "$TMP/explicit.wav" --cng --delay-mode matched --delay-num-filters 5 >/dev/null 2>&1

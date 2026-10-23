@@ -1,8 +1,8 @@
-"""Generate a binary golden for the C fullband_erle port (WS5 Phase 5.2).
+"""Generate a binary golden for the C fullband_erle port.
 
 Runs the Python FullBandErleEstimator over a deterministic multi-frame
 float32 (x2, y2, e2, converged_filter) sequence and snapshots the FULL state
-each frame so the C parity replay verifies the EMA / quality / max-min / hold
+each frame so a replay can verify the EMA / quality / max-min / hold
 evolution bit-for-bit (not just a final scalar).
 
 The sequence is designed to exercise every branch:

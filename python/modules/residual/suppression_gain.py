@@ -1,24 +1,8 @@
-"""SuppressionGain — port of AEC3 suppression_gain.cc.
+"""SuppressionGain: per-bin suppression gain from the residual echo estimate (single channel, single band).
 
-Mirrors docs/aec3_extracts/src/aec3/suppression_gain.{cc,h}.
-
-Single-channel + single-band port (we run 16 kHz single-band; no
-UpperBandsGain). DominantNearendDetector is an inner instance ported
-inline here (the legacy port at python/modules/res_filter.py:DominantNearendDetector
-will be retired in Phase 5).
-
-Pipeline (per hop):
-  1. DominantNearendDetector.update(nearend, residual_echo, comfort_noise).
-  2. LowNoiseRenderDetector.detect(render).
-  3. LowerBandGain (the 6-stage interior):
-     a. GetMaxGain  : limit upward step from last_gain * max_inc_factor.
-     b. nearend_smoother (MovingAverageSpectrum over input).
-     c. WeightEchoForAudibility (per-band downweight if echo < floor).
-     d. GetMinGain : `min_echo_power / weighted_residual_echo`, clamped 1.
-     e. GainToNoAudibleEcho : ENR/EMR mask gate (per-bin clip 0..1).
-     f. Clamp g into [min_gain, max_gain], LF / HF limiters, sqrt to amplitude.
-
-AEC3 source-file:line references inline.
+Per hop: DominantNearendDetector, LowNoiseRenderDetector, then the lower-band gain:
+max-gain step limit, nearend smoothing, audibility weighting of the echo, minimum-gain
+clamp, ENR/EMR mask gate, [min_gain, max_gain] clamp, LF/HF limiters, sqrt to amplitude.
 """
 from collections import deque
 from dataclasses import dataclass, field
@@ -30,12 +14,10 @@ from ..freq_utils import hz_to_bin
 
 
 def _db_to_power_f32(db: float) -> float:
-    """Mirror C ``powf(10.0f, db / 10.0f)`` including float32 operands."""
+    """``10 ** (db / 10)`` evaluated in float32 (powf semantics)."""
     db32 = np.float32(db)
     return float(np.float32(10.0) ** (db32 / np.float32(10.0)))
 
-
-# --------------------------------------------------------------- AEC3 defaults
 
 @dataclass(frozen=True)
 class MaskTuning:
@@ -52,13 +34,8 @@ class SuppressorTuning:
     max_dec_factor_lf: float = 0.25
 
 
-# AEC3 production defaults pulled from echo_canceller3_config.h:
-#   normal_tuning   = (mask_lf=(0.3, 0.4, 0.3),  mask_hf=(0.07, 0.1, 0.3))
-#   nearend_tuning  = (mask_lf=(1.09, 1.1, 0.3), mask_hf=(0.1, 0.3, 0.3))
-# Tuple order: (enr_transparent, enr_suppress, emr_transparent).
-# AEC3's nearend tuning is 2.7-4× tighter than a (0.4,0.4,0.4) placeholder
-# would be; looser values suppress nearend-state gain rules much less
-# aggressively than design intent.
+# Mask tuning defaults as (enr_transparent, enr_suppress, emr_transparent).
+# Normal: lf (0.3, 0.4, 0.3), hf (0.07, 0.1, 0.3); nearend: lf (1.09, 1.1, 0.3), hf (0.1, 0.3, 0.3).
 _DEFAULT_NEAREND_TUNING = SuppressorTuning(
     mask_lf=MaskTuning(1.09, 1.1, 0.3),
     mask_hf=MaskTuning(0.1, 0.3, 0.3),
@@ -71,18 +48,7 @@ _DEFAULT_NORMAL_TUNING = SuppressorTuning(
 
 @dataclass(frozen=True)
 class HighFrequencySuppressionConfig:
-    # AEC3 echo_canceller3_config.h:HighFrequencySuppression production defaults:
-    #   limiting_gain_band = 16   → 2000 Hz @ kFftLength=128 (125 Hz/bin)
-    #   bands_in_limiting_gain = 1 → single resolution cell (1 bin count)
-    # Anchor freq: expressed in Hz so it scales correctly to any fft_size.
-    # Anchor width: AEC3's `bands_in_limiting_gain` is a BIN COUNT (single
-    # spectral cell), not a freq width. At higher fft resolution the same
-    # 125 Hz freq band covers 4 bins, and MIN over 4 bins finds deeper
-    # spectral nulls than MIN over 1 bin → "HF black block" propagation.
-    # Use 1-bin width (= 31.25 Hz @ our fft=512) to match AEC3's strict
-    # single-cell semantic. Prior 125 Hz freq-width interpretation made
-    # the cap 4× more aggressive at our fft resolution.
-    # AEC3 strict single-cell.
+    # Limiting-gain anchor in Hz and a one-bin width (31.25 Hz at fft 512), so the cap scales with fft_size.
     limiting_gain_freq_hz: float = 2000.0
     limiting_gain_width_hz: float = 31.25
 
@@ -96,13 +62,7 @@ class EchoAudibilityConfig:
     low_render_limit: float = 4.0 * 64.0     # min_echo_power when render quiet
     normal_render_limit: float = 64.0
     use_stationarity_properties: bool = False
-    # Audibility-weighting band boundaries — AEC3 strict.
-    # AEC3 `WeightEchoForAudibility` (suppression_gain.cc:108-120) hardcodes
-    # bin spans 0-3 / 3-7 / 7-end at fft=128 → 0/375/875 Hz. Scaling by
-    # frequency keeps the same physical bands at our fft=512.
-    # All three audibility_threshold_* default to 10.0, so band boundaries
-    # are behaviour-neutral at default but become load-bearing as soon as
-    # per-band thresholds diverge.
+    # Audibility-weighting band boundaries in Hz (bin spans 0-3 / 3-7 / 7-end at fft 128).
     lf_band_end_hz: float = 375.0
     mf_band_end_hz: float = 875.0
 
@@ -112,60 +72,23 @@ class DominantNearendConfig:
     enr_threshold: float = 0.25
     enr_exit_threshold: float = 10.0
     snr_threshold: float = 30.0
-    # hold_duration_ms — minimum NE-state dwell, wall-clock milliseconds.
-    # PHYSICAL MEANING: speech-phoneme stability (wall-clock) + downstream
-    # NE-vs-non-NE gain-rule coupling.
-    # 500 ms = ~2.5 phonemes; empirically co-tuned on our 800-case cohort
-    # with the SuppressionGain mask shapes. Stored as ms so the derived
-    # hop count auto-scales with hop_size at SuppressionGain construction
-    # (ms_to_hops(500, 160, 16000) = 50 hops at our default). SCALING:
-    # wall-clock derivation captures the phoneme part; minor re-tune may
-    # still be needed at very different hop sizes due to behavioural
-    # coupling with downstream gain rule.
-    # v3.22 candidate: AEC3 strict 200 ms (= 50 blocks @ 4 ms = 20 hops
-    # @ 10 ms) may be re-evaluable once use_aec3_wallclock_gain_ratchet
-    # is shipped ON, since the original 500 ms co-tune compensated in
-    # part for the 2.5× slower wall-clock gain recovery. Not v3.21.x
-    # alignment (the 500 ms is an intentional divergence, not a port
-    # bug); listed here so the dependency is visible to future tuners.
+    # hold_duration_ms: minimum near-end-state dwell in wall-clock ms (converted to hops).
     hold_duration_ms: int = 500
-    # trigger_threshold — net-positive evidence depth (+1/-1 random walk)
-    # before NE state triggers.
-    # AEC3 (echo_canceller3_config.h:234) stores this as a BLOCK COUNT
-    # at kBlockSize=64 (= 4 ms wall-clock @ 16 kHz); the value 12 there
-    # means 48 ms of consecutive +1 evidence. The legacy Python comment
-    # claimed this was dimensionless and that 12→5 regressed both FS+DT,
-    # but the regression context did NOT also shorten hold_duration
-    # proportionally, so trigger-fast + hold-still-2.5×-AEC3 created
-    # sticky false-positives. Strict AEC3 wall-clock alignment uses
-    # `trigger_threshold_ms = 48` at hop=160/sr=16k → 5 hops (via
-    # ms_to_hops), gated by `use_wallclock_trigger_threshold` to keep
-    # byte-equal default. `trigger_threshold` (12) remains the legacy
-    # hop-count path used when the flag is OFF.
+    # trigger_threshold: evidence depth (+1/-1 random walk) before the near-end state triggers,
+    # in hops. With use_wallclock_trigger_threshold, trigger_threshold_ms is converted to hops instead.
     trigger_threshold: int = 12
     trigger_threshold_ms: int = 48
     use_wallclock_trigger_threshold: bool = False
     use_during_initial_phase: bool = True
     use_unbounded_echo_spectrum: bool = True
-    # LF-only sum endpoint for nearend detection. AEC3 canonical 2000 Hz
-    # (= bin 16 exclusive @ fft=128 = `spectrum.begin()+16` in
-    # dominant_nearend_detector.cc:43-44). Covers F0+F1+F2 — speech
-    # formant peak band.
-    # Earlier widening to 2000 Hz regressed bench because of DC
-    # contamination inflating ne_sum at LF; with bin 1+ slice (AEC3
-    # parity) the regression mechanism is gone, and 2000 Hz matches
-    # AEC3 strict alignment.
+    # Upper edge in Hz of the low-frequency sum used for near-end detection.
     lf_endpoint_hz: float = 2000.0
 
 
 @dataclass
 class SuppressorConfig:
-    # LF<->HF mask coefficient interpolation boundaries. AEC3 canonical
-    # values @ fft_size=128 are last_lf=5 (625 Hz) / first_hf=8 (1000 Hz),
-    # meaning F0 lives in the LF-mask zone, F1 lives in the interpolation
-    # zone, and F2+ live in the HF-mask zone. The pre-refactor port had
-    # bin 5/8 hardcoded which silently landed at 156/250 Hz @ fft_size=512,
-    # mis-applying aggressive mask_hf to every formant.
+    # LF/HF mask interpolation boundaries in Hz: speech F0 sits in the LF-mask zone, F1 in the
+    # interpolation zone, F2 and above in the HF-mask zone.
     last_lf_freq_hz: float = 625.0
     first_hf_freq_hz: float = 1000.0
     nearend_tuning: SuppressorTuning = field(default_factory=lambda: _DEFAULT_NEAREND_TUNING)
@@ -182,22 +105,15 @@ class SuppressorConfig:
     dominant_nearend_detection: DominantNearendConfig = field(
         default_factory=DominantNearendConfig
     )
-    # Stationary-mask-aware NE-presence proxy at gain-policy consumer sites.
     stat_aware_ne_proxy_enabled: bool = False
     stat_aware_ne_proxy_threshold: float = 0.10
-    # AEC3 EchoAudibility config wiring. EchoAudibilityConfig carries
-    # audibility_threshold_lf/mf/hf + render-floor knobs consumed by
-    # SuppressionGain's ``_weight_echo_for_audibility``. The orchestrator
-    # overrides ``use_stationarity_properties`` so its zeroing block fires
-    # (load-bearing safety net on cohort tail).
+    # Echo-audibility knobs consumed by ``_weight_echo_for_audibility``; the orchestrator
+    # overrides ``use_stationarity_properties``.
     echo_audibility: EchoAudibilityConfig = field(default_factory=EchoAudibilityConfig)
 
 
-# --------------------------------------------------------- helper components
-
 class _MovingAverageSpectrum:
-    """Sliding-window mean over per-bin spectra. Mirrors
-    moving_average_spectrum.cc's per-bin average over N most recent inputs."""
+    """Sliding-window per-bin mean over the N most recent inputs."""
 
     def __init__(self, n_bins: int, n_blocks: int) -> None:
         self._n = max(1, int(n_blocks))
@@ -216,19 +132,16 @@ class _MovingAverageSpectrum:
 
 
 class _LowNoiseRenderDetector:
-    """Mirrors LowNoiseRenderDetector (suppression_gain.cc:461-478).
+    """Low-noise render detector: average render power below a threshold with no strong peak.
 
-    AEC3 uses ``threshold = 50² × kBlockSize = 160000`` for a 4 ms (64
-    sample) block. At our 10 ms hop the same physical RMS produces 2.5×
-    more energy per frame; ``use_wallclock_block_energy_threshold=True``
-    rescales the threshold via ``block_energy_scale`` so the detector
-    fires at the same wall-clock render level as AEC3."""
+    The threshold is 50^2 * 64; ``use_wallclock_block_energy_threshold`` rescales it to the hop size.
+    """
 
     def __init__(self, *, hop_samples: int = 64, sample_rate: int = 16000,
                  use_wallclock_block_energy_threshold: bool = False,
                  use_wallclock_ema_alpha: bool = False) -> None:
         self._average_power = 32768.0 * 32768.0
-        self._hop_samples = hop_samples  # needed to normalize peak-rejection
+        self._hop_samples = hop_samples
         if use_wallclock_block_energy_threshold:
             from .. import aec3_scale as _aec3_scale
             self._threshold = float(
@@ -236,9 +149,7 @@ class _LowNoiseRenderDetector:
             )
         else:
             self._threshold = 50.0 * 50.0 * 64.0
-        # AEC3 power IIR (average_power = 0.9·avg + 0.1·x2) per-4ms-block.
-        # Literal 0.1 (NOT 1.0-0.9, which is 0.0999…9) keeps the math
-        # bit-identical to the original `* 0.9 + x2_sum * 0.1`.
+        # Render power IIR: 0.9 * avg + 0.1 * x2.
         if use_wallclock_ema_alpha:
             from .. import aec3_scale as _aec3_scale
             _alpha = _aec3_scale.per_block_ema_alpha_to_per_hop(
@@ -256,9 +167,7 @@ class _LowNoiseRenderDetector:
         x2 = render_block.astype(np.float64) ** 2
         x2_sum = float(np.sum(x2))
         x2_max = float(np.max(x2))
-        # Normalize average_power to per-sample scale before peak comparison.
-        # AEC3 uses 64-sample blocks; at 160-sample hop, average_power is 2.5×
-        # larger for the same RMS level → peak_rejection is 2.5× too loose.
+        # Normalise average power to a 64-sample block before the peak comparison.
         avg_per_sample = self._average_power * (64.0 / self._hop_samples)
         low_noise = self._average_power < self._threshold and x2_max < 3.0 * avg_per_sample
         self._average_power = self._average_power * self._iir_decay + x2_sum * self._iir_weight
@@ -268,8 +177,7 @@ class _LowNoiseRenderDetector:
 def _build_gain_params(
     n_bins: int, last_lf_band: int, first_hf_band: int, tuning: SuppressorTuning
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Per-bin enr_transparent / enr_suppress / emr_transparent from LF/HF
-    tuning via linear interpolation (suppression_gain.cc:487-512)."""
+    """Per-bin enr_transparent / enr_suppress / emr_transparent: linear interpolation from the LF to the HF tuning."""
     lf, hf = tuning.mask_lf, tuning.mask_hf
     enr_tr = np.empty(n_bins, dtype=np.float32)
     enr_su = np.empty(n_bins, dtype=np.float32)
@@ -291,13 +199,8 @@ def _weight_echo_for_audibility(
     cfg: EchoAudibilityConfig, echo: np.ndarray, out: np.ndarray,
     sr: int = 16000,
 ) -> None:
-    """Mirrors WeightEchoForAudibility (suppression_gain.cc:88-121).
-
-    For each band (LF: 0-2, MF: 3-6, HF: 7-end), bins with echo below
-    ``threshold = floor_power * audibility_threshold_*`` get scaled by
-    ``max(0, 1 - ((threshold - echo) / (threshold - floor_power))²)``.
-    Bins at or above threshold pass through unchanged.
-    """
+    """Down-weight echo below the audibility threshold per band (LF / MF / HF):
+    ``echo * max(0, 1 - ((thr - echo) / (thr - floor_power))^2)`` where ``thr = floor_power * audibility_threshold``."""
 
     def weigh(threshold: float, begin: int, end: int) -> None:
         if begin >= end:
@@ -320,13 +223,9 @@ def _weight_echo_for_audibility(
 
 
 def _limit_lf_gains(gain: np.ndarray, sr: int = 16000) -> None:
-    """Mirrors LimitLowFrequencyGains (suppression_gain.cc:38-42).
-
-    AEC3 128-pt FFT: bins 0-1 (0-125 Hz) clamped to gain[2] (250 Hz anchor).
-    Our 512-pt FFT: generalize to clamp all bins below 250 Hz to gain at 250 Hz.
-    """
+    """Clamp all bins below 250 Hz to the gain at 250 Hz."""
     n = gain.size
-    clamp_to = hz_to_bin(250, n, sr)  # 8 for 512-pt @ 16kHz, 2 for AEC3 128-pt
+    clamp_to = hz_to_bin(250, n, sr)
     if clamp_to < n:
         anchor = float(gain[clamp_to])
         np.minimum(gain[:clamp_to], anchor, out=gain[:clamp_to])
@@ -338,7 +237,7 @@ def _limit_hf_gains(
     gain: np.ndarray,
     sr: int = 16000,
 ) -> None:
-    """Mirrors LimitHighFrequencyGains (suppression_gain.cc:44-85)."""
+    """Limit gains above the limiting-gain anchor to the anchor-band minimum; optional conservative cap at 2500-3625 Hz."""
     n_bins = gain.size
     lgb = hz_to_bin(cfg.limiting_gain_freq_hz, n_bins, sr)
     biq = max(1, hz_to_bin(cfg.limiting_gain_width_hz, n_bins, sr))
@@ -348,12 +247,7 @@ def _limit_hf_gains(
     if n_bins >= 2:
         gain[-1] = gain[-2]
     if conservative_hf:
-        # AEC3 conservative_hf path. Previous Python port hardcoded bins
-        # 20/29 from AEC3 (fft=128, 2500-3625 Hz) without unit conversion,
-        # silently landing at 625-906 Hz @ fft=512. Express the AEC3
-        # canonical 2500-3625 Hz so the band scales with fft_size.
-        # Note: conservative_hf_suppression defaults False, so the flag-OFF
-        # path is byte-equal regardless.
+        # Conservative cap band 2500-3625 Hz.
         cons_lo = hz_to_bin(2500.0, n_bins, sr)
         cons_hi = hz_to_bin(3625.0, n_bins, sr)
         if n_bins > cons_hi and cons_hi > cons_lo:
@@ -361,11 +255,8 @@ def _limit_hf_gains(
             np.minimum(gain[cons_hi:], hf_gain_bound, out=gain[cons_hi:])
 
 
-# ----------------------------------------- Dominant nearend (ported here)
-
 class _DominantNearendDetector:
-    """AEC3 DominantNearendDetector (single-channel collapse).
-    Mirrors docs/aec3_extracts/src/aec3/dominant_nearend_detector.cc."""
+    """Dominant-near-end detector (single channel)."""
 
     def __init__(
         self,
@@ -376,8 +267,7 @@ class _DominantNearendDetector:
         self._cfg = cfg
         self._sr = int(sr)
         self._hop_size = int(hop_size)
-        # Derive wall-clock hops from cfg.hold_duration_ms at construction;
-        # value is read every update() call so per-frame cost is O(1).
+        # Hold and trigger durations in hops.
         from .. import aec3_scale as _aec3_scale
         self._hold_duration_hops = _aec3_scale.ms_to_hops(
             cfg.hold_duration_ms, self._hop_size, self._sr
@@ -386,16 +276,11 @@ class _DominantNearendDetector:
         self._trigger_counter = 0
         self._hold_counter = 0
         self._nearend_state = False
-        # Per-frame diagnostic snapshot — populated in update(); read by
-        # tracer to attribute DNE blind-spots. No audio path effect.
+        # Per-frame diagnostic snapshot (read-only).
         self._last_update_snap: dict = {}
 
     def _derive_trigger_threshold(self, cfg: DominantNearendConfig) -> int:
-        """AEC3-strict wall-clock alignment is opt-in via
-        ``cfg.use_wallclock_trigger_threshold``. OFF → legacy hop-count
-        path (``cfg.trigger_threshold``). ON → ``ms_to_hops`` of the
-        wall-clock spec, matching AEC3's `trigger_threshold * kBlockSize / sr`.
-        """
+        """Trigger threshold in hops (wall-clock ms if enabled, else the hop count)."""
         if cfg.use_wallclock_trigger_threshold:
             from .. import aec3_scale as _aec3_scale
             return _aec3_scale.ms_to_hops(
@@ -421,33 +306,18 @@ class _DominantNearendDetector:
         comfort_noise: np.ndarray,
         initial_state: bool,
     ) -> None:
-        """AEC3 port — dominant_nearend_detector.cc:32-76.
-
-        Three independent blocks per frame (trigger / early-exit / hold-decrement);
-        do NOT fold them into an if/elif chain. AEC3-parity highlights:
-          - LF energy sum skips bin 0 (DC) — AEC3 `begin()+1` (cc:43).
-          - Trigger gated by `(!initial_state || use_during_initial_phase)`
-            inline; do NOT early-return, hold counter must still decrement.
-          - Exit check has noise floor clause: `echo > exit_thr*ne AND
-            echo > snr_thr*noise` (cc:67-68) — Python prior version omitted
-            the noise clause.
-          - Threshold form is multiplicative (`echo < thr*ne`), not divisive
-            with `+1.0` floor (which biased ENR/SNR at low signal levels).
-        """
+        """Update the near-end state: three independent blocks per frame (trigger, early exit, hold
+        decrement). The LF sums skip DC; the trigger is gated inline on the initial state so the hold
+        counter always decrements; the exit also requires echo above ``snr_threshold`` times noise."""
         c = self._cfg
-        # LF-only sum endpoint from cfg.lf_endpoint_hz (AEC3 canonical 2000 Hz,
-        # bin 16 exclusive at fft=128 — see dominant_nearend_detector.cc:43-44).
+        # LF sum endpoint from lf_endpoint_hz.
         n_bins = nearend_spectrum.size
         lf_end = min(hz_to_bin(c.lf_endpoint_hz, n_bins, self._sr), n_bins)
-        # AEC3 cc:43 — `begin()+1` skips DC (bin 0). Python prior version
-        # included bin 0 → DC contamination biased echo_sum / ne_sum.
         ne_sum = float(np.sum(nearend_spectrum[1:lf_end]))
         echo_sum = float(np.sum(residual_echo[1:lf_end]))
         noise_sum = float(np.sum(comfort_noise[1:lf_end]))
 
-        # Block 1 — Trigger (AEC3 cc:51-64). Multiplicative form, no `+1.0`
-        # division floor. initial_state gates the trigger inline, NOT via
-        # early-return (hold counter must still decrement below).
+        # Block 1: trigger (multiplicative thresholds).
         trigger_initial_gate = (not initial_state or c.use_during_initial_phase)
         trigger_enr_pass = echo_sum < c.enr_threshold * ne_sum
         trigger_snr_pass = ne_sum > c.snr_threshold * noise_sum
@@ -460,20 +330,15 @@ class _DominantNearendDetector:
         else:
             self._trigger_counter = max(0, self._trigger_counter - 1)
 
-        # Block 2 — Early exit at strong echo (AEC3 cc:67-70). Both clauses
-        # required; prior Python version omitted the noise-floor clause.
         early_exit = (echo_sum > c.enr_exit_threshold * ne_sum
                       and echo_sum > c.snr_threshold * noise_sum)
         if early_exit:
             self._hold_counter = 0
 
-        # Block 3 — Unconditional hold decrement + state (AEC3 cc:72-74).
         self._hold_counter = max(0, self._hold_counter - 1)
         self._nearend_state = self._hold_counter > 0
 
-        # Diagnostic snapshot (no audio effect). Ratios use +1.0 floor on
-        # denominator for stable logging even when ne_sum/noise_sum=0; the
-        # actual trigger uses raw multiplicative form (no floor).
+        # Diagnostic snapshot (ratios use a +1.0 denominator floor for logging).
         self._last_update_snap = {
             "ne_sum_lf": ne_sum,
             "echo_sum_lf": echo_sum,
@@ -498,10 +363,8 @@ class _DominantNearendDetector:
         }
 
 
-# -------------------------------------------------------- top-level class
-
 class SuppressionGain:
-    """Single-channel single-band SuppressionGain."""
+    """Single-channel single-band suppression gain."""
 
     def __init__(self, *, n_bins: int = 257, config: Optional[SuppressorConfig] = None,
                  sr: int = 16000, hop_size: int = 160,
@@ -522,43 +385,30 @@ class SuppressionGain:
         self._sr = int(sr)
         self._hop_size = int(hop_size)
         self._config = config or SuppressorConfig()
-        # v3.22 split min-gain floor (default ON). Precompute power-domain
-        # floors from amplitude-dB; see AecConfig.min_gain_split_floor_* .
+        # Split min-gain floor (see AecConfig.min_gain_split_floor_*); power-domain floors from amplitude dB.
         self._split_floor_enabled = bool(split_floor_enabled)
-        # ``_split_floor_far_active`` is the TARGET; ``_live`` is what
-        # _get_min_gain actually applies. They are seeded equal and stay equal
-        # unless set_split_floor_far_active_db asks for a ramp, so a caller that
-        # never touches the setter sees the pre-ramp arithmetic unchanged.
-        # Match C powf exactly so the floor itself cannot differ by one ULP
-        # before either port's ordinary FFT precision differences enter.
+        # ``_split_floor_far_active`` is the target and ``_live`` the applied value; they stay equal
+        # unless set_split_floor_far_active_db requests a ramp. Float32 powf.
         self._split_floor_far_active = _db_to_power_f32(
             split_floor_far_active_db)
         self._split_floor_far_active_live = self._split_floor_far_active
         self._split_floor_ramp_ratio = 1.0
         self._split_floor_far_silent = _db_to_power_f32(
             split_floor_far_silent_db)
-        # DT-gated floor: used in place of far_active when the orchestrator sets
-        # _dt_protect_active (double-talk). Default == near far_active so an
-        # un-set flag is behaviourally neutral.
+        # Floor used in place of far_active while the orchestrator sets _dt_protect_active (double-talk).
         self._split_floor_dt = _db_to_power_f32(split_floor_dt_db)
         self._dt_protect_active = False
         self._split_floor_latch_power = float(split_floor_latch_power)
         self._far_active_latched = False
-        # Stage 3 (A21 plan section 六, P4) per-bin floor blend -- see
-        # AecConfig.per_bin_floor_enabled for the full rationale. Variant i
-        # only: reuses the existing soft_nearend_blend_per_bin sigmoid
-        # params (always set below regardless of that feature's own enabled
-        # flag) as the per-bin near/echo weight for the floor blend.
+        # Per-bin floor blend (see AecConfig.per_bin_floor_enabled): reuses the soft_nearend_blend_per_bin
+        # sigmoid parameters as the per-bin near/echo weight.
         self._per_bin_floor_enabled = bool(per_bin_floor_enabled)
-        # echo_audibility lives on SuppressorConfig so orchestrator can
-        # override use_stationarity_properties.
+        # echo_audibility lives on SuppressorConfig so the orchestrator can override use_stationarity_properties.
         self._echo_audibility = self._config.echo_audibility
         self._last_gain = np.ones(self._n_bins, dtype=np.float32)
         self._last_nearend = np.zeros(self._n_bins, dtype=np.float32)
         self._last_echo = np.zeros(self._n_bins, dtype=np.float32)
-        # Stationary-mask fraction (0.0..1.0); updated by ``get_gain``
-        # from the orchestrator-supplied per-bin mask. Read only via
-        # _ne_state_for_gain_rules; no-op when proxy flag OFF.
+        # Fraction of stationary bins from the orchestrator-supplied mask; used only by the stat-aware proxy.
         self._stat_mask_frac: float = 0.0
         self._low_render = _LowNoiseRenderDetector(
             hop_samples=self._hop_size,
@@ -568,8 +418,7 @@ class SuppressionGain:
             ),
             use_wallclock_ema_alpha=bool(use_wallclock_ema_alpha),
         )
-        # AEC3 `nearend_average_blocks` is in 4 ms blocks; wall-clock rescale
-        # to our hop_size so the moving-average window physically matches.
+        # Near-end average window in hops (config is in 4 ms blocks).
         from .. import aec3_scale as _aec3_scale
         _n_smooth_hops = _aec3_scale.blocks_to_hops(
             self._config.nearend_average_blocks, self._hop_size, self._sr
@@ -577,35 +426,25 @@ class SuppressionGain:
         self._nearend_smoother = _MovingAverageSpectrum(
             n_bins=self._n_bins, n_blocks=_n_smooth_hops
         )
-        # NearendDetector — mirrors AEC3 suppression_gain.cc:373-378.
         self._dominant_nearend = _DominantNearendDetector(
             self._config.dominant_nearend_detection,
             sr=self._sr,
             hop_size=self._hop_size,
         )
         self._initial_state = True
-        # Gain attribution snapshot — populated each frame in _lower_band_gain.
-        # Read by orchestrator trace_hf_chain; no audio path effect.
         self._last_lower_band_snap: dict = {}
-        # Kill-stage diag stashes — set in _gain_to_no_audible_echo each hop.
-        # Initialised to zeros so first-frame snap access is safe before the
-        # first call. No audio effect.
         self._last_g_lin = np.zeros(self._n_bins, dtype=np.float32)
         self._last_g_emr = np.zeros(self._n_bins, dtype=np.float32)
         self._last_fire_mask = np.zeros(self._n_bins, dtype=bool)
         self._last_enr_raw = np.zeros(self._n_bins, dtype=np.float32)
         self._last_emr_raw = np.zeros(self._n_bins, dtype=np.float32)
-        # v3.22 D3: Soft nearend tuning blend.
-        # Replaces binary DNE is_ne switch with sigmoid LF-ENR weight.
-        # ne_weight = sigmoid((enr_threshold - enr_lf) / softness)
-        # enr_tr = ne_weight * nearend_enr_tr + (1-ne_weight) * normal_enr_tr
+        # Soft near-end tuning blend: sigmoid((enr_threshold - enr_lf) / softness) weights the
+        # near-end tuning against the normal tuning instead of a binary switch.
         self._soft_ne_blend_enabled = bool(soft_nearend_blend_enabled)
         self._soft_ne_blend_per_bin = bool(soft_nearend_blend_per_bin)
         self._soft_ne_blend_enr_thr = float(soft_nearend_blend_enr_threshold)
         self._soft_ne_blend_softness = max(float(soft_nearend_blend_softness), 1e-6)
-        # LF endpoint bin for D3 ENR sum (AEC3-canonical 2000 Hz, same as DNE).
         self._dne_lf_end = min(hz_to_bin(2000.0, self._n_bins, self._sr), self._n_bins)
-        # Resolve freq-based config to bin indices once at construction.
         self._last_lf_band = hz_to_bin(self._config.last_lf_freq_hz, self._n_bins, self._sr)
         self._first_hf_band = hz_to_bin(self._config.first_hf_freq_hz, self._n_bins, self._sr)
         self._last_lf_smoothing_band = hz_to_bin(
@@ -619,13 +458,8 @@ class SuppressionGain:
             self._n_bins, self._last_lf_band, self._first_hf_band,
             self._config.normal_tuning,
         )
-        # AEC3 GetMaxGain / GetMinGain LF-smoothing block apply the tuning
-        # ratchet multipliers once per LowerBandGain call (= once per 4 ms
-        # block in AEC3). At our 10 ms hop, applying the raw constant once
-        # per call recovers gain 2.5× slower wall-clock. When the flag is
-        # ON, scale each tuning's inc/dec by per_block_growth_to_per_hop
-        # so a single per-hop application matches the per-block AEC3 rate.
-        # Flag OFF: cached values == raw config values (byte-equal).
+        # The max-gain ratchet factors are applied once per call; with the wall-clock flag they
+        # are converted from per-block to per-hop.
         if use_wallclock_gain_ratchet:
             _hop = self._hop_size
             _sr = self._sr
@@ -643,18 +477,11 @@ class SuppressionGain:
             self._max_dec_lf_nearend = float(self._config.nearend_tuning.max_dec_factor_lf)
             self._max_dec_lf_normal = float(self._config.normal_tuning.max_dec_factor_lf)
 
-    # ── Runtime far-active floor retarget ────────────────────────────────
-    # The far-active split floor is the ONLY field the three shipped presets
-    # differ in, so retargeting it IS a runtime preset change. Target lives in
-    # ``_split_floor_far_active``; ``_live`` walks toward it. A ramp is
-    # geometric in the power domain, which is linear in dB, so no logarithm is
-    # evaluated per hop. Nothing else in the suppressor is disturbed: no
-    # smoothing history, no latch, no dominant-nearend counter.
-    #
-    # Contract (mirrored by the C twin, which returns -1 where this raises):
-    # call between hops only; ramp_ms == 0 applies immediately; a call during
-    # an active ramp restarts from the CURRENT live value; nothing is written
-    # unless every argument validates.
+    # Runtime far-active floor retarget. The far-active split floor is the only field the shipped
+    # presets differ in, so retargeting it is a runtime preset change. The target is
+    # ``_split_floor_far_active`` and ``_live`` walks toward it geometrically (linear in dB).
+    # Contract: call between hops only; ramp_ms == 0 applies immediately; a call during a ramp
+    # restarts from the current live value; nothing is written unless all arguments validate.
     SPLIT_FLOOR_DB_MIN = -300.0
     SPLIT_FLOOR_DB_MAX = 50.0
     SPLIT_FLOOR_RAMP_MS_MAX = 60000.0
@@ -670,8 +497,7 @@ class SuppressionGain:
                                       ramp_ms: float = 0.0) -> None:
         db = float(db)
         ramp_ms = float(ramp_ms)
-        # Validate everything before writing anything: the C twin must be able
-        # to report failure with the instance provably untouched.
+        # Validate everything before writing anything.
         self._check_split_floor_db(db, "split_floor_far_active_db")
         if not np.isfinite(ramp_ms) or not (0.0 <= ramp_ms
                                             <= self.SPLIT_FLOOR_RAMP_MS_MAX):
@@ -690,16 +516,13 @@ class SuppressionGain:
             self._split_floor_far_active_live = target
             self._split_floor_ramp_ratio = 1.0
             return
-        # Keep the retarget walk in float32, matching C's ``float`` state and
-        # ``powf``.  Besides parity, this guarantees that the same hop which
-        # lands in C also crosses (and snaps to) the target in Python.
+        # Float32 walk, so the target is reached on a deterministic hop.
         ratio = float(
             np.float32(target / live)
             ** (np.float32(1.0) / np.float32(hops))
         )
         if ratio == 1.0:
-            # ramp_ms so short (or the step so small) that the per-hop factor
-            # rounds to identity; land now rather than stall forever.
+            # Per-hop factor rounds to identity: land now rather than stall.
             self._split_floor_far_active_live = target
             self._split_floor_ramp_ratio = 1.0
             return
@@ -712,34 +535,19 @@ class SuppressionGain:
             return
         ratio = self._split_floor_ramp_ratio
         value = float(np.float32(live) * np.float32(ratio))
-        # Land exactly on the target rather than leaving a 1-ULP residue that
-        # would keep the ramp nominally active for the rest of the stream.
+        # Land exactly on the target, leaving no residue.
         if ratio == 1.0 or (value >= target if ratio > 1.0 else value <= target):
             value = target
         self._split_floor_far_active_live = value
 
-    # ── Runtime DT-floor retarget ────────────────────────────────────────
-    # Unlike the far-active floor above, the DT-lifted floor has no ramp: it
-    # is a hard per-hop override (see _get_min_gain), not a value the gain
-    # rule reads continuously while converging toward a target, so there is
-    # no "smooth transition" to walk -- a preset switch steps it immediately.
-    # This is a deliberate asymmetry with set_split_floor_far_active_db's
-    # ramp, not an oversight: giving dt a second ratio/live pair would only
-    # matter while BOTH a ramp is active AND dt_protect_active is true for
-    # the same hops, which a caller can avoid by not relying on mid-ramp DT
-    # behavior; see aec_set_preset's mirrored comment in aec.c.
+    # Runtime DT-floor retarget: the DT-lifted floor is a hard per-hop override, so it steps
+    # immediately (no ramp).
     def set_split_floor_dt_db(self, db: float) -> None:
         db = float(db)
         self._check_split_floor_db(db, "split_floor_dt_db")
         self._split_floor_dt = _db_to_power_f32(db)
 
-    # ── Runtime floor-gate retarget ────────────────────────────────────────
-    # Same deliberate asymmetry as set_split_floor_dt_db above: a boolean
-    # gate has no continuum to ramp across, so it steps immediately rather
-    # than walking like set_split_floor_far_active_db does. Mirrors the C
-    # twin's suppression_gain_set_split_floor_enabled(). No validation is
-    # needed -- any truthy/falsy value coerces, matching set_initial_state's
-    # own contract exactly.
+    # Runtime floor-gate retarget: a boolean gate steps immediately; any truthy/falsy value coerces.
     def set_split_floor_enabled(self, enabled: bool) -> None:
         self._split_floor_enabled = bool(enabled)
 
@@ -747,15 +555,11 @@ class SuppressionGain:
         self._initial_state = bool(state)
 
     def is_dominant_nearend(self) -> bool:
-        # Public API to orchestrator: returns RAW detector state. The
-        # stat-aware proxy is INTERNAL to gain-policy decisions and
-        # intentionally does NOT propagate here.
+        # Raw detector state; the stat-aware proxy applies to gain-policy decisions only.
         return self._dominant_nearend.is_nearend_state()
 
     def _ne_state_for_gain_rules(self) -> bool:
-        """Augmented NE-presence used by gain-policy consumer sites.
-        Returns ``is_nearend_state()`` unmodified when the proxy flag is
-        OFF."""
+        """Near-end presence for gain rules: the detector state, or the stat-aware proxy when enabled."""
         ne = self._dominant_nearend.is_nearend_state()
         if not self._config.stat_aware_ne_proxy_enabled:
             return ne
@@ -763,7 +567,6 @@ class SuppressionGain:
             return True
         return self._stat_mask_frac > self._config.stat_aware_ne_proxy_threshold
 
-    # --- API consumed by orchestrator -----------------------------------------
 
     def get_gain(
         self,
@@ -775,18 +578,16 @@ class SuppressionGain:
         comfort_noise_spectrum: np.ndarray,  # CNG power
         render_block: np.ndarray,            # time-domain render (for LowNoiseRender)
         clock_drift: bool,
-        stationary_mask: Optional[np.ndarray] = None,  # E.1: per-bin bool from band_stationary_mask()
+        stationary_mask: Optional[np.ndarray] = None,  # per-bin bool from band_stationary_mask()
     ) -> np.ndarray:
         """Returns low-band suppression GAIN (amplitude domain, sqrt'd; per-bin)."""
-        # Sprint E.1 — capture stationary-mask fraction for the
-        # _ne_state_for_gain_rules() proxy. No-op when flag is OFF.
+        # Stationary-mask fraction for the stat-aware proxy.
         if stationary_mask is not None:
             sm = np.asarray(stationary_mask, dtype=bool)
             self._stat_mask_frac = float(sm.mean()) if sm.size > 0 else 0.0
         else:
             self._stat_mask_frac = 0.0
-        # Dominant nearend update using unbounded-echo spectrum when configured
-        # (AEC3 cc:410-413).
+        # Dominant near-end update (unbounded echo spectrum when configured).
         echo_for_det = (
             residual_echo_spectrum_unbounded
             if self._config.dominant_nearend_detection.use_unbounded_echo_spectrum
@@ -797,16 +598,9 @@ class SuppressionGain:
         )
         low_noise_render = self._low_render.detect(render_block)
         self._advance_split_floor_ramp()
-        # Split min-gain floor: per-recording far-active LATCH (applied in
-        # _get_min_gain; see AecConfig.min_gain_split_floor_*). Latch fires from
-        # the FIRST far-active frame on instantaneous render energy — NOT
-        # aec_state.active_render(), which needs ~800ms to assert and would leak
-        # the strong NE floor through the FS/DT cold-start where echo is highest.
-        # render_block is int16-scaled (×32768): FS far p99 ≥2e7 vs NE far max
-        # ≤~7e4, so latch_power separates with ~10× margin. Once latched it
-        # stays for the recording (reset per AEC instance), so FS/DT use the
-        # gentler floor throughout; only pure-NE (far never active) keeps the
-        # strong floor.
+        # Split min-gain floor: per-recording far-active latch on instantaneous render energy
+        # (not aec_state.active_render(), which needs ~800 ms and would miss the cold start).
+        # render_block is int16-scaled; once latched it stays until reset.
         if self._split_floor_enabled and not self._far_active_latched:
             _rb = np.asarray(render_block, dtype=np.float64)
             if float(np.mean(_rb * _rb)) > self._split_floor_latch_power:
@@ -821,7 +615,6 @@ class SuppressionGain:
         )
         return gain
 
-    # --- internals ------------------------------------------------------------
 
     def _lower_band_gain(
         self,
@@ -833,42 +626,29 @@ class SuppressionGain:
         comfort_noise: np.ndarray,
         clock_drift: bool,
     ) -> np.ndarray:
-        # Step 1: max gain envelope from last_gain.
         max_gain = self._get_max_gain(self._config.floor_first_increase)
-        # Step 2: smoothed nearend.
         nearend = self._nearend_smoother.average(suppressor_input)
-        # Step 3: weighted residual (audibility downweight).
         weighted_residual = np.empty(self._n_bins, dtype=np.float32)
         _weight_echo_for_audibility(self._echo_audibility, residual_echo, weighted_residual, self._sr)
-        # Step 3.5 (Stage 3, A21 plan section 六): per-bin near/echo weight
-        # for the min-gain floor blend, from the SAME inputs (smoothed
-        # nearend + weighted_residual) and the SAME sigmoid params as
-        # _gain_to_no_audible_echo's soft_nearend_blend_per_bin blend below --
-        # computed here, independently of whether that feature is itself
-        # enabled, because the floor and the gain-rule blend are different
-        # consumers of the same per-bin near-dominance signal.
+        # Per-bin near/echo weight for the min-gain floor blend (same inputs and sigmoid as
+        # the soft_nearend_blend_per_bin gain-rule blend, computed independently of whether that is enabled).
         ne_wb_floor = None
         if self._per_bin_floor_enabled:
             _enr_bin_floor = weighted_residual / (nearend + 1.0)
             ne_wb_floor = self._sigmoid_blend_weight(_enr_bin_floor).astype(np.float32)
-        # Step 4: min gain envelope.
         min_gain = self._get_min_gain(
             weighted_residual, self._last_nearend, self._last_echo,
             low_noise_render, aec_state.saturated_echo(), ne_wb_floor,
         )
-        # Step 5: GainToNoAudibleEcho (the heart).
         G_raw = self._gain_to_no_audible_echo(nearend, weighted_residual, comfort_noise)
-        # Step 6: clip into [min, max].
-        # np.clip inverts priority when min_gain > max_gain (saturated echo path).
-        # Use min/max elementwise so min_gain always wins when the ranges conflict.
+        # Clip into [min, max].
+        # Elementwise min/max so min_gain wins when it exceeds max_gain (np.clip would invert the priority).
         G = np.maximum(np.minimum(G_raw, max_gain), min_gain)
-        # Snapshot pre-HF-limiter G + ENR/EMR for paint-black diagnostic.
-        # No audio effect; consumers via _last_lower_band_snap.
+        # Pre-limiter gain and ENR/EMR for the diagnostic snapshot.
         with np.errstate(divide='ignore', invalid='ignore'):
             _enr_diag = np.divide(weighted_residual, nearend + 1.0)
             _emr_diag = np.divide(weighted_residual, comfort_noise + 1.0)
         _G_pre_hf_lim = G.copy()
-        # Step 7: LF + HF limiters.
         _limit_lf_gains(G, self._sr)
         _hf_lim_applied = (
             (not self._ne_state_for_gain_rules())
@@ -882,19 +662,16 @@ class SuppressionGain:
                 G,
                 self._sr,
             )
-        # Stash for next hop.
         self._last_gain[:] = G
         self._last_nearend[:] = nearend
         self._last_echo[:] = weighted_residual
-        # D — gain attribution snap (trace_hf_chain reads; no audio effect).
         def _sb(a, k): return float(a[k]) if a.size > k else 0.0
         def _reason(raw, mn, mx, final):
             if raw < mn: return 'min'
             if raw > mx: return 'max'
             clipped = min(max(raw, mn), mx)
             return 'lim' if abs(final - clipped) > 1e-6 else 'G'
-        # R0.5 per-band reason histogram (diagnostic; no audio effect).
-        # Bands match R0 audit defs: LF=0:7, MF=7:65, HF=65+
+        # Per-band reason histogram (LF=0:7, MF=7:65, HF=65+).
         _r_min = G_raw < min_gain
         _r_max = G_raw > max_gain
         _G_cl  = np.clip(G_raw, min_gain, max_gain)
@@ -902,20 +679,13 @@ class SuppressionGain:
         _r_G   = ~_r_min & ~_r_max & ~_r_lim
         def _bf(m, sl): return float(m[sl].mean()) if m[sl].size > 0 else 0.0
         _LF, _MF, _HF = slice(0, 7), slice(7, 65), slice(65, None)
-        # Kill-stage attribution: which term won inside _gain_to_no_audible_echo,
-        # how often min_gain clip / audibility downweight actually fired, what
-        # the effective audibility threshold was. Stashed values come from
-        # _gain_to_no_audible_echo / _weight_echo_for_audibility (recomputed
-        # from residual_echo vs weighted_residual). No audio effect.
+        # Attribution: winning term inside _gain_to_no_audible_echo, min_gain clip and audibility downweight.
         _g_lin = self._last_g_lin
         _g_emr = self._last_g_emr
         _fire = self._last_fire_mask
         _g_emr_wins = _fire & (_g_emr > _g_lin)
         _min_clip_fired = G_raw < min_gain
-        # Audibility weight ratio: weight = weighted/residual_echo where
-        # residual_echo > 0. Bins with weight < 1 were downweighted by
-        # WeightEchoForAudibility. Use a strict-positive guard to keep
-        # silent bins from skewing the fraction.
+        # Audibility weight = weighted / residual_echo where residual_echo > 0; < 1 means downweighted.
         _ea_cfg = self._echo_audibility
         _audibility_threshold_hf_eff = float(
             _ea_cfg.floor_power * _ea_cfg.audibility_threshold_hf
@@ -927,7 +697,6 @@ class SuppressionGain:
                 1.0,
             )
         _aud_lt1 = (residual_echo > 1e-30) & (_aud_ratio < 0.999)
-        # 10·log10 of the per-bin reduction; clip empty/silent bins.
         with np.errstate(divide='ignore', invalid='ignore'):
             _aud_db_hf = np.where(
                 (residual_echo[_HF] > 1e-30) & (weighted_residual[_HF] > 1e-30),
@@ -945,28 +714,22 @@ class SuppressionGain:
             'gain_reason_100': _reason(_sb(G_raw, 100), _sb(min_gain, 100), _sb(max_gain, 100), _sb(G, 100)),
             'gain_reason_200': _reason(_sb(G_raw, 200), _sb(min_gain, 200), _sb(max_gain, 200), _sb(G, 200)),
             'hf_lim_applied': _hf_lim_applied,
-            # R0.5 per-band fractions
             'reason_G_lf':   _bf(_r_G,   _LF), 'reason_G_mf':   _bf(_r_G,   _MF), 'reason_G_hf':   _bf(_r_G,   _HF),
             'reason_min_lf': _bf(_r_min, _LF), 'reason_min_mf': _bf(_r_min, _MF), 'reason_min_hf': _bf(_r_min, _HF),
             'reason_lim_lf': _bf(_r_lim, _LF), 'reason_lim_mf': _bf(_r_lim, _MF), 'reason_lim_hf': _bf(_r_lim, _HF),
-            # per-band raw R² (before audibility weighting; for regression root-cause)
             'r2_lf_mean': float(np.mean(residual_echo[_LF])),
             'r2_mf_mean': float(np.mean(residual_echo[_MF])),
             'r2_hf_mean': float(np.mean(residual_echo[_HF])),
-            # === HF paint-black diagnostic (no audio effect) ===
-            # Per-band gain distribution AFTER HF cap propagation.
+            # Per-band gain distribution after the HF cap.
             'gain_lf_median': float(np.median(G[_LF])),
             'gain_mf_median': float(np.median(G[_MF])),
             'gain_hf_median': float(np.median(G[_HF])),
             'gain_hf_p5':     float(np.percentile(G[_HF], 5)),
             'gain_hf_min':    float(np.min(G[_HF])),
-            # Pre-HF-cap snapshot — distinguishes (a) HF cap anchor crushing
-            # everything above 2 kHz from (b) underlying R² inflation. Equal
-            # pre+post in HF → not the HF anchor. Big gap → anchor is the cause.
+            # Pre-HF-cap snapshot, to separate the HF anchor from R^2 inflation.
             'gain_hf_median_pre_hf_lim': float(np.median(_G_pre_hf_lim[_HF])),
             'gain_hf_p5_pre_hf_lim':     float(np.percentile(_G_pre_hf_lim[_HF], 5)),
-            # HF anchor location + value. Used to identify which single bin
-            # crushed the rest (lgb = freq → bin at SR/2 / N).
+            # HF anchor bin and its pre-limiter value.
             'hf_anchor_lgb_bin': int(
                 round(
                     self._config.high_frequency_suppression.limiting_gain_freq_hz
@@ -983,45 +746,33 @@ class SuppressionGain:
                     ))
                 )
             ]),
-            # ENR/EMR HF medians (post-audibility-weight, pre-clip).
-            # ENR = R² / (Y² + 1). Large → 'echo dominates' branch of
-            # gain_to_no_audible_echo fires → G drops linearly with ENR.
-            # EMR = R² / (CN + 1). Large → 'echo above masker' → G ≈ emr_tr/emr.
+            # ENR = R^2 / (Y^2 + 1), EMR = R^2 / (CN + 1), post-audibility weight, pre-clip.
             'enr_hf_median': float(np.median(_enr_diag[_HF])),
             'emr_hf_median': float(np.median(_emr_diag[_HF])),
             'enr_tr_hf_median': float(np.median(
                 (self._nearend_enr_tr if self._ne_state_for_gain_rules() else self._normal_enr_tr)[_HF])),
             'emr_tr_hf_median': float(np.median(
                 (self._nearend_emr_tr if self._ne_state_for_gain_rules() else self._normal_emr_tr)[_HF])),
-            # === Kill-stage attribution (HF + MF cross-check) ===
-            # g_lin / g_emr per-bin medians at HF — which term inside
-            # GainToNoAudibleEcho dominates. g_emr_wins_frac tells whether
-            # the EMR-bypass clause (emr_tr/emr) is the killer at HF.
+            # Per-term gain medians and EMR-win fractions.
             'g_lin_hf_median': float(np.median(_g_lin[_HF])),
             'g_emr_hf_median': float(np.median(_g_emr[_HF])),
             'g_lin_mf_median': float(np.median(_g_lin[_MF])),
             'g_emr_mf_median': float(np.median(_g_emr[_MF])),
             'g_emr_wins_frac_hf': float(_g_emr_wins[_HF].mean()) if _HF.start < self._n_bins else 0.0,
             'g_emr_wins_frac_mf': float(_g_emr_wins[_MF].mean()),
-            # Outer gate fire fraction — fraction of HF bins where
-            # (enr > enr_tr AND emr > emr_tr); when 0, GainToNoAudibleEcho
-            # leaves G=1.0 untouched at HF (cap / smoothing must be culprit).
+            # Fraction of HF bins where the outer gate (enr > enr_tr and emr > emr_tr) fires.
             'gate_fire_frac_hf': float(_fire[_HF].mean()) if _HF.start < self._n_bins else 0.0,
-            # min_gain actual values at HF (NOT post-clip; the protection
-            # floor itself) and how often G_raw < min_gain (clip fired).
+            # min_gain at HF and how often it clips G_raw.
             'min_gain_hf_median': float(np.median(min_gain[_HF])),
             'min_gain_hf_p95': float(np.percentile(min_gain[_HF], 95)),
             'min_gain_clipped_frac_hf': float(_min_clip_fired[_HF].mean()),
-            # low_noise_render bool consumed this hop (selects
-            # low_render_limit vs normal_render_limit in _get_min_gain).
+            # low_noise_render selects low_render_limit vs normal_render_limit.
             'low_noise_render_active': bool(low_noise_render),
-            # Audibility downweight effectiveness — how often weight < 1
-            # and the band-mean dB reduction.
+            # Audibility downweight fraction and mean reduction.
             'audibility_weight_lt1_frac_hf': float(_aud_lt1[_HF].mean()),
             'audibility_threshold_eff_hf': _audibility_threshold_hf_eff,
             'weighted_residual_reduction_db_hf_median': float(np.median(_aud_db_hf)),
         }
-        # Step 8: sqrt to amplitude domain.
         return np.sqrt(np.maximum(G, 0.0)).astype(np.float32)
 
     def _get_max_gain(self, floor_first_increase: float) -> np.ndarray:
@@ -1055,8 +806,7 @@ class SuppressionGain:
                 1.0,
             )
         np.minimum(min_gain, 1.0, out=min_gain)
-        # LF smoothing band — make sure low frequencies don't drop too quickly
-        # after strong nearend.
+        # LF smoothing: low frequencies must not drop too fast after strong near-end.
         if not self._initial_state or self._config.lf_smoothing_during_initial_phase:
             is_ne = self._ne_state_for_gain_rules()
             dec = self._max_dec_lf_nearend if is_ne else self._max_dec_lf_normal
@@ -1066,42 +816,20 @@ class SuppressionGain:
                 if last_nearend[k] > last_echo[k] or k <= permanent:
                     min_gain[k] = max(min_gain[k], self._last_gain[k] * dec)
                     min_gain[k] = min(min_gain[k], 1.0)
-        # Split min-gain floor (default ON): cap the deepest suppression to
-        # stop the AEC3 floor (min_echo_power / R²) collapsing to ~0 in DT when
-        # ERLE contamination spikes R². far-active (FS/DT) uses the gentler
-        # floor; pure-NE (far never latched active) uses the stronger floor —
-        # which lifts NE nearend at zero echo cost. See AecConfig and the
-        # far-active latch in get_gain.
+        # Split min-gain floor (default on): bounds the deepest suppression so the AEC3 floor
+        # (min_echo_power / R^2) cannot collapse to ~0 in double-talk. Far-active uses the gentler
+        # floor, pure near-end (far never latched) the stronger one.
         if self._split_floor_enabled:
             if self._far_active_latched:
-                # DT (near recently present) lifts the floor toward near-protection;
-                # FS (far-active, no near) keeps the aggressive far_active floor.
+                # Double-talk lifts the floor toward near-end protection; far-end-only keeps the far-active floor.
                 if self._dt_protect_active:
-                    # max(), not plain _split_floor_dt: set_split_floor_dt_db
-                    # steps instantly while set_split_floor_far_active_db ramps
-                    # (see both setters' docstrings) -- for a RAMPED retarget
-                    # into aggressive, dt lands on its new (deeper) target
-                    # immediately while far_active_live is still mid-walk from
-                    # a shallower preset, so for part of that walk dt would be
-                    # NUMERICALLY DEEPER than the far-active floor currently in
-                    # force, inverting the entire "DT floor protects near-end"
-                    # intent (a DT hop would be suppressed MORE than a
-                    # simultaneous FS hop at that instant). max() keeps the
-                    # floor pinned to whichever is currently shallower (safer)
-                    # -- at any steady state (no ramp in flight, the only case
-                    # every existing golden/test exercises) dt >= far_active
-                    # already holds for all three presets, so this is a no-op
-                    # there and only changes behavior during an actual
-                    # in-flight ramp into a preset whose dt target is deeper
-                    # than the preset being ramped away from.
+                    # max() keeps the floor at the shallower of the two while the far-active floor
+                    # ramps (the DT floor steps instantly), so a DT hop is never suppressed more
+                    # than a far-end-only hop.
                     base_floor = max(self._split_floor_dt,
                                      self._split_floor_far_active_live)
                 elif ne_wb_floor is not None:
-                    # Stage 3 variant i: per-bin blend toward the DT floor by
-                    # how near-dominant THIS bin is, instead of the scalar
-                    # hop-level dt_protect_active switch. Echo-dominant bins
-                    # (ne_wb_floor -> 0) keep today's far_active floor
-                    # unchanged -- never deepened by this blend.
+                    # Per-bin blend toward the DT floor by near-dominance; echo-dominant bins keep the far-active floor.
                     base_floor = (
                         ne_wb_floor * self._split_floor_dt
                         + (1.0 - ne_wb_floor) * self._split_floor_far_active_live
@@ -1115,13 +843,8 @@ class SuppressionGain:
         return min_gain.astype(np.float32)
 
     def _sigmoid_blend_weight(self, enr):
-        """ENR -> near/echo sigmoid blend weight, shared by every near-end
-        soft-blend consumer in this file (the scalar broadband-LF weight and
-        the per-bin weight below, plus the min-gain-floor blend in
-        get_gain()). -> 1 when nearend dominates (low ENR), -> 0 when echo
-        dominates. Accepts a scalar or an ndarray; the caller casts/takes
-        float() as appropriate.
-        """
+        """ENR -> near/echo sigmoid blend weight (1 when near-end dominates, 0 when echo dominates).
+        Accepts a scalar or an array; shared by the soft-blend and floor-blend consumers."""
         _sig_arg = np.clip(
             (enr - self._soft_ne_blend_enr_thr) / self._soft_ne_blend_softness,
             -50.0, 50.0,
@@ -1133,7 +856,6 @@ class SuppressionGain:
     ) -> np.ndarray:
         is_ne = self._ne_state_for_gain_rules()
 
-        # Compute sigmoid LF-ENR weight if needed by D3.
         ne_w = 0.0
         if self._soft_ne_blend_enabled:
             ne_lf = float(np.sum(nearend[1:self._dne_lf_end]))
@@ -1142,10 +864,7 @@ class SuppressionGain:
             ne_w = float(self._sigmoid_blend_weight(enr_lf))
 
         if self._soft_ne_blend_enabled:
-            # D3: blend nearend_tuning ↔ normal_tuning via ne_w.
-            # P5: per-bin ne_w from per-bin ENR (echo[k]/nearend[k]) →
-            # frequency-selective near-end protection. Falls back to the scalar
-            # broadband-LF ne_w when off (byte-equal).
+            # Blend the near-end and normal tunings by ne_w; per-bin ne_w from per-bin ENR when enabled.
             if self._soft_ne_blend_per_bin:
                 _enr_bin = echo / (nearend + 1.0)
                 ne_wb = self._sigmoid_blend_weight(_enr_bin).astype(np.float32)
@@ -1170,9 +889,7 @@ class SuppressionGain:
             g_emr = emr_tr / np.maximum(emr, 1e-30)
             g_eff = np.maximum(g_lin, g_emr)
         g = np.where(fire, g_eff, g)
-        # Kill-stage diag: stash the two competing terms + fire mask + raw
-        # ENR/EMR so _lower_band_gain can attribute which term won per bin.
-        # No audio effect (read-only consumer via _last_lower_band_snap).
+        # Stash the competing terms, fire mask and raw ENR/EMR for the diagnostic snapshot.
         self._last_g_lin = g_lin.astype(np.float32, copy=True)
         self._last_g_emr = g_emr.astype(np.float32, copy=True)
         self._last_fire_mask = fire.copy()

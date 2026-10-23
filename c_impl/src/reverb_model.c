@@ -1,6 +1,5 @@
-/* reverb_model.c — C port of reverb_model.py. All-float32 arithmetic to match
- * the numpy<2 reference (float32 power_spectrum + scalar/float32 scaling →
- * three separate float32 roundings per bin). */
+/* reverb_model.c -- see reverb_model.h. Float32 arithmetic with three separate roundings per bin.
+ * */
 #include "reverb_model.h"
 
 #include <string.h>
@@ -23,7 +22,6 @@ void reverb_model_update_no_freq_shaping(ReverbModel *m,
         return;
     }
     for (k = 0; k < m->n_bins; ++k) {
-        /* numpy: tmp = ps*scaling (f32); reverb += tmp (f32); reverb *= decay (f32) */
         float tmp = power_spectrum[k] * scaling;
         m->reverb[k] = m->reverb[k] + tmp;
         m->reverb[k] = m->reverb[k] * decay;

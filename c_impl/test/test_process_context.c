@@ -1,34 +1,20 @@
-/* test_process_context.c — context-only processing regression test.
+/* test_process_context.c -- context-only processing regression test.
  *
- * aec_process() was split into a shared aec_process_core() (steps 1-17,
- * 19-20: linear filter + post-filter/RES block + power EMAs + convergence
- * detection) and two thin wrappers: aec_process() (core + emit) and
- * aec_process_context() (core only). This test proves three things a
- * byte-equal WAV render alone cannot:
+ * aec_process() and aec_process_context() share aec_process_core() (linear filter + post-filter/RES block + power EMAs +
+ * convergence detection); aec_process() adds the copy into `out`. This test proves three things a byte-equal WAV render
+ * alone cannot:
+ *   1. The two entry points may be interleaved freely on ONE instance: they advance identical state and differ only by the
+ *      final copy into `out`. An interleaved instance is compared bit-for-bit with one driven by aec_process() throughout,
+ *      on every hop where both produced output; a stage that only one entry point advances (e.g. an output limiter) makes
+ *      the two diverge and fails here.
+ *   2. EVERY AecResContext field a caller could read (including linear_hop, far_spec, res_gain, saturation_level) is
+ *      BYTE-IDENTICAL between two separately constructed, identically configured, identically fed instances, one driven by
+ *      aec_process() and one by aec_process_context(), across the three contracted grids x shadow on/off x
+ *      spatial_linear_context on/off (the 4ch wrapper uses spatial_linear_context=1). Every populated field is also
+ *      checked finite.
+ *   3. aec_reset() on a context-only instance restores the state a fresh aec_create() would produce.
  *
- *   1. The two entry points may be interleaved freely on ONE instance: they
- *      advance identical state and differ only by the final copy into `out`.
- *      Verified by comparing an interleaved instance against one driven by
- *      aec_process() throughout, bit-for-bit, on every hop where both
- *      produced output. This also guards against any stage (e.g. an output
- *      limiter) that only one entry point advances: it makes the two
- *      diverge and fails here.
- *   2. EVERY AecResContext field aec_process()'s caller could read --
- *      including linear_hop, far_spec, res_gain, and saturation_level, not
- *      just a subset -- is BYTE-IDENTICAL to
- *      what aec_process_context() produces on two separately-constructed,
- *      identically-configured, identically-fed instances, across the three
- *      officially-contracted grids x shadow on/off x spatial_linear_context
- *      on/off (the exact config the 4ch wrapper uses is
- *      spatial_linear_context=1) -- proving the
- *      context-only entry point loses nothing the context exposes, it only
- *      skips the emit side effect. Every populated field is also
- *      checked finite (no NaN/Inf), not just equal to its sibling.
- *   3. aec_reset() on a context-only instance restores it to the same clean
- *      state a fresh aec_create() would produce.
- *
- * Build (standalone, from c_impl/ — mirrors test_lifecycle.c's documented
- * recipe):
+ * Build (standalone, from c_impl/):
  *   make -C ../../audiolib/common lib
  *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=gnu99 -Iinclude -Iexample \
  *       -I../../audiolib/common/include \
@@ -61,11 +47,10 @@ static void context_only_config(AecConfig* cfg, int sample_rate) {
     cfg->return_res_context = 1;
 }
 
-/* fft_size=0 means "use the preset's default grid for this sample_rate".
- * spatial_linear_context mirrors the exact config the 4ch wrapper uses for
- * every lane (enable_res=0/return_res_context=1/spatial_linear_context=1) --
- * only valid on top of context_only_config's enable_res=0/return_res_
- * context=1 base (aec_validate_config rejects any other combination). */
+/* fft_size=0 means "use the preset's default grid for this sample_rate". spatial_linear_context
+ * mirrors the config the 4ch wrapper uses for every lane (enable_res=0 / return_res_context=1 /
+ * spatial_linear_context=1); it is only valid on top of context_only_config's enable_res=0 /
+ * return_res_context=1 base (aec_validate_config rejects any other combination). */
 static void context_only_config_grid(AecConfig* cfg, int sample_rate, int fft_size,
                                       int spatial_linear_context) {
     context_only_config(cfg, sample_rate);
@@ -96,18 +81,11 @@ static float rng_uniform(float amp) {
 
 /* The two entry points may be MIXED FREELY on one instance.
  *
- * aec_process() and aec_process_context() differ only by the final copy
- * into `out` (there is no output-stage limiter) -- they advance identical
- * state. So an instance whose hops alternate between the
- * two must produce, on the hops where it did call aec_process(), output
- * bit-identical to an instance that called aec_process() every hop.
- *
- * This is stronger than a "context-only never touches limiter state" check:
- * re-introducing ANY stateful stage that only one of
- * the two entry points advances makes the interleaved instance's state
- * diverge from the reference, so this fails. The burst assertion below keeps
- * it from passing vacuously -- it proves the signal actually reaches the
- * regime (output peak above mic peak) an output limiter would have
+ * aec_process() and aec_process_context() differ only by the final copy into `out` (there is no output-stage limiter), so an
+ * instance whose hops alternate between the two must produce, on the hops where it called aec_process(), output
+ * bit-identical to an instance that called aec_process() every hop. Re-introducing any stateful stage that only one of the two
+ * entry points advances would make the interleaved state diverge and fail this. The burst assertion below keeps it from
+ * passing vacuously: the signal actually reaches the regime (output peak above mic peak) an output limiter would have
  * altered. */
 static void test_entry_points_may_be_freely_interleaved(void) {
     AecConfig cfg;
@@ -125,12 +103,10 @@ static void test_entry_points_may_be_freely_interleaved(void) {
     int mismatches = 0, compared = 0, saw_overshoot = 0;
     g_rng_state = 0x2AEC5EEDu;
     for (int i = 0; i < 200; ++i) {
-        /* Quiet baseline, loud burst frames 40-49, quiet tail -- mic/ref
-         * independently drawn (not one derived from the other) so the
-         * adaptive filter has no real echo path to converge onto; the
-         * abrupt quiet->loud transition then forces a transient output
-         * overshoot above the near peak, which is exactly the condition the
-         * condition an output limiter would act on. */
+        /* Quiet baseline, loud burst frames 40-49, quiet tail; mic/ref are drawn independently so
+         * the adaptive filter has no real echo path to converge onto, and the abrupt quiet->loud
+         * transition forces a transient output overshoot above the near peak, the condition an
+         * output limiter would act on. */
         float amp = (i >= 40 && i < 50) ? 0.9f : 0.02f;
         float near_peak = 0.0f;
         for (int s = 0; s < hop; ++s) {
@@ -167,14 +143,10 @@ static void test_entry_points_may_be_freely_interleaved(void) {
     aec_destroy(&mixed);
 }
 
-/* Two separately-constructed, identically-configured, identically-fed
- * instances -- one driven exclusively by aec_process(), one exclusively by
- * aec_process_context() -- must expose byte-identical AecResContext on
- * every hop, across every field a real caller (mono pipeline, 4ch wrapper)
- * actually reads -- including linear_hop/far_spec/res_gain/saturation_level,
- * and spatial_linear_context on/off (the 4ch wrapper's exact config).
- * Proves the context-only path loses no information the context struct
- * itself carries. Every populated field is also checked finite, since a
+/* Two separately constructed, identically configured, identically fed instances, one driven
+ * exclusively by aec_process() and one by aec_process_context(), must expose byte-identical
+ * AecResContext on every hop across every field a real caller (mono pipeline, 4ch wrapper) reads,
+ * with spatial_linear_context on and off. Every populated field is also checked finite, since a
  * byte-equal comparison of two NaN payloads would otherwise pass vacuously. */
 static void test_context_matches_full_process_context(
         int sample_rate, int fft_size, int enable_shadow, int spatial_linear_context) {
@@ -271,15 +243,13 @@ static void test_context_matches_full_process_context(
     aec_destroy(&via_context);
 }
 
-/* AEC_CONTEXT_LINEAR_ONLY skips the residual-echo half of the post block (R²,
- * comfort noise, suppression gain). Nothing it skips feeds the linear
- * filter, so against an instance configured as `spatial` (0 or 1) and fed
- * identically, every linear output must be byte-identical on every
- * hop -- including the AecLinearContext a downstream model reads and the
- * usable-linear verdict -- while res_gain / r2 / comfort_noise read NULL.
- * The input carries a delayed, scaled copy of the far end plus near-end
- * bursts, so the filter converges, the alignment locks and the verdicts
- * change during the run; a skipped step that did feed back would diverge. */
+/* AEC_CONTEXT_LINEAR_ONLY skips the residual-echo half of the post block (R^2, comfort noise,
+ * suppression gain). Nothing it skips feeds the linear filter, so against an instance configured as
+ * `spatial` (0 or 1) and fed identically, every linear output must be byte-identical on every hop,
+ * including the AecLinearContext a downstream model reads and the usable-linear verdict, while
+ * res_gain / r2 / comfort_noise read NULL. The input carries a delayed, scaled copy of the far end
+ * plus near-end bursts, so the filter converges, the alignment locks and the verdicts change during
+ * the run; a skipped step that did feed back would diverge. */
 static void test_linear_context_only_matches_full(
         int sample_rate, int fft_size, int enable_shadow, int spatial_linear_context) {
     AecConfig cfg_full, cfg_lin;
@@ -408,11 +378,9 @@ static void test_context_survives_reset(void) {
 int main(void) {
     test_entry_points_may_be_freely_interleaved();
 
-    /* The three officially-contracted grids (see AEC/docs/development_guide.md /
-     * pipelines/README.md "Parameter Alignment") x shadow on/off x
-     * spatial_linear_context on/off -- the last axis is the exact config
-     * the 4ch wrapper uses for every lane (enable_res=0/return_res_
-     * context=1/spatial_linear_context=1). */
+    /* The three contracted grids (see pipelines/README.md "Parameter Alignment") x shadow on/off x
+     * spatial_linear_context on/off; the last axis is the config the 4ch wrapper uses for every
+     * lane (enable_res=0 / return_res_context=1 / spatial_linear_context=1). */
     static const int grids[][1] = { {0}, {512}, {0} };
     static const int rates[]    = { 16000, 16000, 48000 };
     for (int g = 0; g < 3; ++g) {

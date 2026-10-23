@@ -41,6 +41,140 @@ when verdict requires it.
 
 ---
 
+## [Unreleased] — 2026-10-23 — Seam and validation fixes; sources and docs condensed
+
+### Fixed
+- Reverting a rejected delay re-lock now bumps the delay generation, so `AecLinearContext.generation` and
+  `delay_state` report the change to seam consumers (they stayed at generation 0 / LOCKED). Audio output is unchanged.
+- `live_observer_shift_ms` times the hop size is computed in 64-bit; a very large shift now reads delay 0 instead of
+  overflowing `int`.
+- `aec_realign` with `INT_MIN` samples no longer negates `INT_MIN`.
+- `min_gain_split_floor_enabled` is range-checked like the other flags (values other than 0 or 1 are refused).
+
+### Changed
+- Internal helpers replace repeated blocks (`aec_preset_row`, `aec_state_bind`, `aec_ree_bind`,
+  `aec_epc_gain_change_recovery`, `da_estimator_clear_chain`, `ree_add_reverb`); outputs are bit-identical.
+- Documentation: `delay_est_period_s` defaults to 0.0 (analysis every hop) and is a throttle on matched-filter
+  analysis; the `enable_shadow = 0` saving is 42,880 B at 16 kHz/256; test counts in the README are current.
+  Development-process wording is removed from comments across `c_impl`, `python`, `eval` and `docs`.
+
+
+## [Unreleased] — 2026-10-23 — Source comments condensed
+
+- `aec.c` / `aec.h`: comments reduced to contracts. Design facts that lived only in comments:
+- Delay duty cycle (`delay_est_period_s` > 0) can change which lag the matched filter finds, not only
+  the compute, so the default 0.0 analyses every hop. The duty ERLE-watchdog leak is authored as
+  0.001 dB/hop on the 10 ms grid (0.1 dB/s); as a literal it would be 0.125 dB/s at the 8 ms grid and
+  0.0625 dB/s at the 16 ms grids.
+- FIXED reference ring is exactly `fixed_delay_samples + hop_size` (the read needs size >= d + hop;
+  equality is safe). The MATCHED ring keeps 4096 samples of headroom, which also bounds the
+  `new_delay <= ring - hop` eligibility gate.
+- `ne_recent_sustain` stays at the literal 3 and the simple-mu state machine stays hop-authored;
+  retiming either to wall clock did not hold across the three grids.
+- Bad-relock judgment compares float32 without an epsilon (one ULP exceeds any double slack, checked
+  over all finite non-negative values). Rejected candidates are kept until `aec_reset()` in an 8-slot
+  list that stops recording when full instead of overwriting.
+- External-realign retard exposes echo for up to ceil((|delta| + tap offset) / hop) + 1 hops (worst
+  `n_partitions + 1`); for a 256-sample hop and 1024-sample span: delta -300 at tap 0 gives 2 hops,
+  -768 at tap 100 gives 4, -900 at tap 60 gives 4, with 1.30x the echo while history refills.
+- Live-observer `max_bin` is float32-safe (`bin_hz` is exact on every grid; `ceil()` is stable for
+  `live_observer_max_hz` in [1, 24000]); `err_ema_alpha` and `corrob_margin` stay double because they
+  drive a double-precision per-hop recursion.
+- Streaming FIFO capacity is a power of two (32 hops at every supported rate) so unsigned cursor
+  indexing is continuous across 2^32. The consumer releases a slot only after `aec_process()` returns,
+  which can report one extra drop-new under sustained skew; the design is TSan-clean.
+- Stage timing costs seven clock reads per hop per instance; the five buckets do not sum to the call
+  (power EMAs and convergence run after `res_us`); the 32-bit stamp wraps at about 71.6 minutes.
+- `min_gain_floor_dt_db` = -20 dB is an operating point that recovers residual-echo suppression lost
+  when the near-recent latch false-arms in far-end single talk, at a small double-talk cost.
+- Other C sources (`src/*.c`, `include/*.h` except `aec.c` / `aec.h` / `aec_balanced_config.h`,
+  `example/`): comments reduced to contracts. Design facts that lived only in comments:
+- SC_HYS_STREAK_MIN is a hop count on every grid; retiming it to 100 ms (12 hops at 16 kHz/128)
+  broke a near-end single-talk case (the rescue streak stopped completing and the output stayed ~5
+  dB under the capture); 11 fails too, 10 passes.
+- Counter saturation: raw counter values are observable, so they stop at the integer limit, not at
+  their gate threshold, where a threshold cap would still satisfy the comparison
+  (`hold_counter_time_domain` at INT_MIN, filter-quality counters and `call_counter` at INT_MAX /
+  LONG_MAX, the filter-analyzer consistency counter at LONG_MAX). The fullband-ERLE hold counter
+  also stops at INT_MIN rather than 0 because its `== 0` check is an edge trigger that must fire
+  once per re-arm; flooring at 0 would re-fire it every hop. Counters read only by a threshold
+  comparison (`blocks_since_reset`, `stability_counter`) stop one past the threshold.
+- Stationarity flags walk the history row-major over 128-bin accumulator blocks (STAT_ACC_BLOCK):
+  128 keeps the frame near 1 KiB and is below the smallest shipped bin count so the blocked walk
+  splits on every grid; about 6% slower than a 256-bin accumulator at 129 bins, about 4x faster than
+  the column-major walk.
+- Live observer corroboration compares the observer's low-frequency residual with the main filter's
+  residual on the same hop (EMA pair, margin observer_corrob_margin); comparing against the
+  observer's own past state cannot tell correct extra cancellation from near-end contamination,
+  since both lower its own residual. Evidence is capped at min(|observer.echo_spec - sel_echo|^2,
+  |sel_esw|^2) and limited to observer_max_bin; the EMA recursion and comparison run in double.
+- DA_MAX_FILTER_LAG_FOR(n) = n * intra_shift + filter_size deliberately keeps one filter of headroom
+  over the reachable lag (the same sizing formula as the reference matched filter); n = 5 gives 2433
+  highest-peak and 152 pre-echo histogram bins. The extra tail is behaviour-neutral: bins above the
+  reachable lag are never incremented and ties resolve to the first maximum.
+- The reported delay is always the aggregator's dominant highest-peak candidate (reference design
+  reports the earliest onset); detect_pre_echo has no effect here, so the pre-echo buffers keep
+  their initialised values. Reporting an earliest-onset candidate would attach the dominant
+  histogram's confidence to a delay it does not describe (a 100 ms-early onset once reached a 52 ms
+  PBFDKF with confidence 1.0).
+- Delay chain is float32 end to end (decimator biquads, matched-filter dot products and NLMS update,
+  anchors); sums accumulate directly in float32 (block-wise on NEON).
+- Highest-peak histogram argmax is maintained incrementally: while a tracked candidate c (first
+  index of the maximum M) is valid, a decrement on another bin leaves (c, M) unchanged, and an
+  insert at B only replaces c when it exceeds M (or ties it at a lower index); when the candidate
+  itself is decremented the new value must be compared against the old M, otherwise an untracked tie
+  is missed (for example H=[3,5,5,2,0], candidate 1, evict bin 1 and insert at bin 3 gives argmax
+  2), so that case rescans. A decrement and increment on the same bin are intercepted by the caller
+  as a net-zero update.
+- example/wav_io.h resolves the shared audiolib wav_io.h through explicit relative __has_include
+  paths (sibling checkout, or two levels deeper in an Audio_ALG submodule). #include_next was
+  rejected because for a same-directory include it restarts the search from the top and re-finds the
+  shim; the shim's guard is therefore not WAV_IO_H.
+- Python library (`python/aec.py`, `python/modules/**`): comments and docstrings reduced to contracts;
+  behaviour hash unchanged. Design facts that lived only in comments:
+- Per-block EMA constants in the fullband and subband ERLE estimators fire once per 6-hop accumulation
+  window; the factor 6 cancels, so they are rescaled with a single hop (passing 6 x hop inflated the
+  exponent 6x). The 0.0004 max/min forget is an additive per-block step and is rescaled linearly.
+- `PathChangeRegimeHandler` is the defence for wildly nonstationary echo paths: without it the main
+  filter diverged to anti-correlated output on a p99.2 ERL-decile-std case (ERLE_main -27 dB); its
+  boost_q / pause_main / reverse_copy actions drive W toward 0 (pass-through) instead. `HYS_STREAK_MIN`
+  is 10 hops on every grid (see the C bullet above). The regime classifier thresholds 9.43 / 21.04 dB
+  are the p90 / p99 of ERL-decile std over the 800-case corpus (660 cases with enough far-active
+  deciles; the reference case measured 23.39 dB, rank 655/660); the classifier is analysis-only.
+- `StationarityEstimator`: a constant ~0.009 RMS far-end hum made two near-end single-talk cases lose
+  9-18% of near-end RMS, hence R^2 is zeroed on stationary bands once the filter has converged.
+- `ReverbFrequencyResponse` keeps one-bin windows and the in-place ascending neighbour-max loop: widening
+  the conservative-max and neighbour-max windows to +-125 Hz at fft 512 inflated the HF tail
+  (reverb/direct ratios up to 1e6, "painted black" HF during double-talk) and was reverted.
+- `H_error` constants stay in AEC3's own scale (K * E is scale-invariant; rescaling by 1/PSD_SCALE
+  collapsed learning: FS echo 3.804 -> 2.311, ERLE ~10 -> ~2 dB). The cold-start deadlock breaker
+  (`h_error_refresh_erl_floor`) exists because 67% of far-end single-talk cases never converged
+  (mean ERLE 0.14 dB) when W ~ 0 gave no H_error refresh.
+- Preset floors (amplitude dB, far-active / DT): mild -20/-20, balanced -28/-20, aggressive -38/-30.
+  800-case at balanced: FS echo 3.549, DT echo 4.155, DT deg 2.183, NE deg 4.047. DT floor -20 vs -16
+  (832-file paired): FS echo MOS +0.053/+0.064, ERLE +0.46/+0.53 dB, DT deg -0.027/-0.030. Aggressive's
+  -30 DT floor (47-case dev pool): DT_static echo +0.17/+0.14, deg -0.16/-0.14, near-end 200 ms guard
+  42/48 -> 39/48 (grid A) and 44/48 -> 43/48 (grid B).
+- Other defaults and their measured effect (800-case): round-robin constraint FS echo +0.055/+0.073,
+  DT echo +0.043/+0.055 at -0.031 DT deg; soft near-end blend FS echo +0.042, DT deg -0.040; second-order
+  nonlinear residual FS echo +0.079/+0.106, DT deg -0.027/-0.031 (cap 300x leaves output unchanged and
+  bounds the worst r2_nl 2.76e18 -> 6.52e15); ERLE render PSD scale revives the reverb model (linear-filter
+  quality 0 -> 32%, tail 0 -> 73%, far-offset residual -18 -> -30 dB); windowed ERLE Y2 FS echo +0.08, DT deg
+  -0.05; delay_acquire_protect_converged changed 26 cases (net echo +2.85); warm tap-transfer fires on ~117 of
+  600 FS+DT cases (DT deg +0.089 on that subset).
+- Live-observer injection ceiling `live_observer_inject_dt_energy_max` = 0.5: the corroboration margin cannot
+  separate false-positive injections from legitimate ones (EMA ratio medians 0.82 vs 0.84) and a consecutive
+  streak gate failed; 0.3 cost fid0 grid B ERLE +7.12 -> +5.70 dB, 0.5 costs +7.12 -> +6.91 dB and removes the
+  DT_movement deg loss on the worst case (-0.117 -> +0.0008).
+- Delay chain: the 48 kHz path first runs an anti-alias sidechain (7th-order elliptic, passband 6800 Hz /
+  1 dB, stopband 8000 Hz / 60 dB, decimate by 3), because without it the Python and C estimators locked
+  different delays at 48 kHz. The clock-drift stability window and the lag-aggregator histogram are
+  counted in inner 64-sample blocks (30 s window, `sample_rate / 64` estimates), not in hops.
+- Warm delay realign: keeping `X_buf` on an advance beat clearing it (line removal -16.8 vs -23.9 dB,
+  steady 11.5 vs 12.2); a retard clears it. Soft Path-B realign shifts the IR by the applied delta because
+  without it raw output reached 2.2-2.4x full scale on a real file. A second Path-B shift inside a pending
+  bad-relock judgment overwrites that judgment (resolving early or refusing the shift were rejected).
+
 ## [Unreleased] — 2026-10-23 — Smaller pool, fewer copies in the weight constraint and the delay chunker
 
 - `aec_get_mem_size()` is 1,024 / 2,048 / 4,096 B smaller on the 256 / 512 / 1024 grids (the FFT handle

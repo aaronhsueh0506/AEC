@@ -1,9 +1,7 @@
-"""Generate a binary golden for the C erl_estimator port (WS5 Phase 5.2).
+"""Generate a binary golden for the C erl_estimator port.
 
 Runs the Python ErlEstimator over a deterministic float32 render/capture-PSD
-sequence and writes inputs + full per-frame state to a raw little-endian file
-that a C replay harness (not shipped in this tree)
-replays.
+sequence and writes inputs + full per-frame state to a raw little-endian file.
 
 The sequence is engineered to exercise every branch:
   * startup gate (blocks_since_reset < startup_hops → early return)
@@ -17,10 +15,9 @@ The sequence is engineered to exercise every branch:
   * the fullband path: x2_sum/y2_sum pairwise f32 sums, the threshold gate,
     the downward-nudge, max-clamp, hold decrement + 2× recovery.
 
-Real captured dtypes (single DT case, preset=balanced, hop=160):
-  render_psd / capture_psd float32 (257,); _erl float32; _hold_counters int32;
-  _x2_min = 44015068.0 (py float); _erl_time_domain py float; n_bins=257,
-  startup_hops=200, HOLD_HOPS=400.
+Dtypes (hop=160): render_psd / capture_psd float32 (257,); _erl float32;
+_hold_counters int32; _x2_min = 44015068.0 (py float); _erl_time_domain py
+float; n_bins=257, startup_hops=200, HOLD_HOPS=400.
 
 Layout (LE):
   int32 n_bins, int32 n_frames, int32 startup_hops, int32 hold_hops
@@ -116,7 +113,7 @@ def main():
 
     e = ErlEstimator(startup_phase_length_hops=STARTUP_HOPS, n_bins=N_BINS,
                      hop_size=HOP_SIZE)
-    hold_hops = int(4.0 * 100)  # _HOLD_HOPS
+    hold_hops = int(4.0 * 100)  # ErlEstimator._hold_hops: 4 s at hop=160
 
     with open(out, 'wb') as f:
         np.array([N_BINS, N_FRAMES, STARTUP_HOPS, hold_hops],

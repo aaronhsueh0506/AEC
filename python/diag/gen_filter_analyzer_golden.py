@@ -1,10 +1,10 @@
-"""Generate a binary golden for the C filter_analyzer port (WS5 5.2).
+"""Generate a binary golden for the C filter_analyzer port.
 
 Runs the Python FilterAnalyzer over a deterministic float32 input sequence and
 writes, for each per-hop step, the inputs (filter_taps + render_block) and the
 full observable state AFTER the update (the high-pass-filtered taps, peak_index,
 delay_blocks, gain, consistent flag, consistent-detector internal accumulators),
-to a raw little-endian file replayed by a C harness (not shipped in this tree).
+to a raw little-endian file.
 
 This is a STATEFUL module: the region cursor sweeps the full filter incrementally
 and the ConsistentFilterDetector accumulates floor/secondary peaks across one
@@ -124,12 +124,11 @@ def main():
         blk = make_block(rng, amp=10.0)
         steps.append((taps, blk))
 
-    # Phase E: hold a stable strong peak @300 with a loud active render for
-    # well over CONSISTENT_HOLD_HOPS (150) frames so the consistent counter
-    # crosses the hold threshold and any_filter_consistent() flips True. This
-    # exercises the True branch of the consistency verdict + the post-5 s
-    # convergence gain assignment (blocks_since_reset > 500 is NOT reached here,
-    # but the consistent-gain branch coverage is via cd_counter > 150).
+    # Phase E: hold a stable strong peak @300 with a loud active render for well
+    # over the consistent hold (1.5 s = 150 hops at hop=160) so the consistent
+    # counter crosses the hold threshold and any_filter_consistent() flips True.
+    # blocks_since_reset > 500 is not reached here; the consistent-gain branch is
+    # covered via cd_counter > 150.
     for _ in range(170):
         taps = make_taps(rng, peak_pos=300, peak_amp=2000.0, floor_scale=0.3)
         blk = make_block(rng, amp=4000.0)

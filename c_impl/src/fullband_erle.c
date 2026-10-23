@@ -1,32 +1,22 @@
-/* fullband_erle.c — C port of python/modules/state/fullband_erle.py.
- *
- * PRECISION: float32 (drift versus Python accepted). The per-bin inputs
- * x2/y2/e2 are float32 arrays; the pairwise sum over them stays float32
- * (sk_pairwise_sum_tailfold_b_f32). Every scalar accumulator / ratio / log2 /
- * EMA / max-min / quality op is float32 end-to-end, matching the arrays' precision
- * (the _fast_log2 helper wraps log2f). Built with -ffp-contract=off so each
- * float op rounds separately.
- */
+/* fullband_erle.c -- see fullband_erle.h. Float32 throughout. */
 #include "fullband_erle.h"
 
-#include "aec_scale.h"   /* aec_per_bin_psd_threshold */
+#include "aec_scale.h"
 #include "utility/simd_aec.h"
 
-#include <limits.h>   /* INT_MIN */
+#include <limits.h>
 #include <math.h>
 
-/* _fast_log2(x) = log2f(x) — float32 in, float32 out (single-precision log2
- * to match the rest of the float32 pipeline). */
 static float fast_log2(float x) {
     return log2f(x);
 }
 
-/* ── _ErleInstantaneous ─────────────────────────────────────────────────────── */
+/* Instantaneous ERLE */
 
 static void inst_init(ErleInstantaneous *e, float quality_alpha,
                        float maxmin_forget) {
-    e->clamp_zero = 1;            /* clamp_quality_to_zero default True */
-    e->clamp_one = 1;            /* clamp_quality_to_one  default True */
+    e->clamp_zero = 1;
+    e->clamp_one = 1;
     e->quality_alpha = quality_alpha;
     e->maxmin_forget = maxmin_forget;
     e->has_erle_log2 = 0;
@@ -41,7 +31,7 @@ static void inst_init(ErleInstantaneous *e, float quality_alpha,
 
 static void inst_reset_accumulators(ErleInstantaneous *e) {
     e->has_erle_log2 = 0;
-    e->erle_log2 = 0.0f;         /* mirror _erle_log2 = None (value unused) */
+    e->erle_log2 = 0.0f;
     e->inst_quality_estimate = 0.0f;
     e->num_points = 0;
     e->y2_acum = 0.0f;
@@ -58,11 +48,11 @@ static void inst_reset(ErleInstantaneous *e) {
 static void inst_update_max_min(ErleInstantaneous *e) {
     e->max_erle_log2 -= e->maxmin_forget;
     if (e->erle_log2 > e->max_erle_log2) {
-        e->max_erle_log2 = e->erle_log2;   /* max(_max, _erle) */
+        e->max_erle_log2 = e->erle_log2;
     }
     e->min_erle_log2 += e->maxmin_forget;
     if (e->erle_log2 < e->min_erle_log2) {
-        e->min_erle_log2 = e->erle_log2;   /* min(_min, _erle) */
+        e->min_erle_log2 = e->erle_log2;
     }
 }
 
@@ -80,7 +70,7 @@ static void inst_update_quality_estimate(ErleInstantaneous *e) {
     }
 }
 
-/* ErleInstantaneous::update -> returns whether estimates updated. */
+/* Returns whether the estimates were updated. */
 static int inst_update(ErleInstantaneous *e, float y2_sum, float e2_sum) {
     int update_estimates = 0;
     e->e2_acum += e2_sum;
@@ -103,7 +93,7 @@ static int inst_update(ErleInstantaneous *e, float y2_sum, float e2_sum) {
     return update_estimates;
 }
 
-/* get_quality_estimate() — *valid = 0 mirrors a None return (erle_log2 None). */
+/* *valid = 0 until the first accumulation completes. */
 static float inst_get_quality_estimate(const ErleInstantaneous *e, int *valid) {
     float value;
     if (!e->has_erle_log2) {
@@ -121,7 +111,7 @@ static float inst_get_quality_estimate(const ErleInstantaneous *e, int *valid) {
     return value;
 }
 
-/* ── FullBandErleEstimator ──────────────────────────────────────────────────── */
+/* Fullband estimator */
 
 static void update_quality_estimate(FullBandErleEstimator *s) {
     int valid = 0;
@@ -134,31 +124,18 @@ void fb_erle_init(FullBandErleEstimator *s, int n_freqs,
                         float min_erle, float max_erle_l, int hop_size,
                         int sample_rate) {
     s->n_freqs = n_freqs;
-    /* Reference fullband EMAs (quality 0.07, erle_time_domain 0.05) are
-     * per-4ms-block, and fire once per FBERLE_POINTS_TO_ACCUMULATE(=6)-hop
-     * accumulation window (see fb_erle_update()), not every hop. Both our
-     * accumulation window (6 hops) and the reference update period (6
-     * native 4ms blocks = 24ms) carry the same factor of 6, so it cancels:
-     * pass plain hop_size against aec_per_block_ema_alpha_to_per_hop's
-     * fixed single-native-block (4ms) denominator, NOT
-     * FBERLE_POINTS_TO_ACCUMULATE*hop_size (which would compare 6 real hops
-     * against only 1 native block and inflate the exponent 6x). */
+    /* The EMAs are per 4 ms block and fire once per 6-hop accumulation window. The factor of 6
+     * cancels, so plain hop_size is used against the single-block denominator. */
     s->td_alpha = aec_per_block_ema_alpha_to_per_hop(
         0.05f, hop_size, sample_rate);
     s->quality_alpha = aec_per_block_ema_alpha_to_per_hop(
         0.07f, hop_size, sample_rate);
-    /* FBERLE_MAXMIN_FORGET is the reference's own literal per-event forget *step*
-     * (additive, not a retention alpha) on the same 6-point-gated cadence
-     * as quality_alpha/td_alpha above -- the wall-clock-preserving rescale
-     * is the linear aec_per_block_rate_to_per_hop (same hop_size-cancels-
-     * the-6x reasoning), not the EMA formula. */
+    /* Additive per-event forget step on the same 6-point cadence: linear rescale, not the EMA
+     * form. */
     float maxmin_forget = aec_per_block_rate_to_per_hop(
         FBERLE_MAXMIN_FORGET, hop_size, sample_rate);
-    /* ERLE hold of 100 blocks (~400 ms), rescaled live to the hop
-     * and sample rate. */
+    /* 400 ms ERLE hold, scaled to the live grid. */
     s->blocks_to_hold_erle = aec_ms_to_hops(400.0f, hop_size, sample_rate);
-    /* The helper (aec_scale.h/.c) is float32-typed and out of scope for this
-     * conversion; its result is stored directly here. */
     s->x2_band_energy_threshold =
         aec_per_bin_psd_threshold(FBERLE_X2_BAND_ENERGY_THRESHOLD, hop_size, 160);
     s->min_erle_log2 = fast_log2(min_erle + FBERLE_EPSILON);
@@ -182,7 +159,6 @@ void fb_erle_update(FullBandErleEstimator *s,
                           const float *x2, const float *y2, const float *e2,
                           int converged_filter) {
     if (converged_filter) {
-        /* x2_sum = pairwise f32 sum, consumed directly as float32. */
         float x2_sum = sk_pairwise_sum_tailfold_b_f32(x2, (size_t)s->n_freqs);
         if (x2_sum > s->x2_band_energy_threshold * (float)s->n_freqs) {
             float y2_sum = sk_pairwise_sum_tailfold_b_f32(y2, (size_t)s->n_freqs);
@@ -197,22 +173,8 @@ void fb_erle_update(FullBandErleEstimator *s,
             }
         }
     }
-    /* Floored at INT_MIN to avoid signed overflow -- NOT at 0
-     * (⚠ do not floor this the way erle_estimator.c/erl_estimator.c's
-     * LEVEL-check counters are bounded: the gate below is `== 0`, an
-     * EDGE-triggered one-shot check, not a level check. An unbounded
-     * decrement crosses exactly 0 once per re-arm cycle then keeps
-     * counting down (-1, -2, ...), so `== 0` fires exactly once per cycle.
-     * Flooring at 0 would PIN the value at 0 once reached, making `== 0`
-     * fire on every subsequent hop too -- inst_reset_accumulators() would
-     * re-fire every hop instead of once, discarding any partial
-     * accumulation inst_update() makes on those hops (this field's raw value
-     * must also track the module's Python reference's own unbounded
-     * `_hold_counter_inst_erle`). Flooring at
-     * INT_MIN instead preserves BOTH the one-shot edge-trigger semantics and
-     * bit-exactness for every practically reachable hop count (at 10 ms hops
-     * INT_MIN is ~248 days of continuous uptime away), while removing the UB
-     * at the true overflow boundary. */
+    /* Saturates at INT_MIN, not 0: the `== 0` check below is an edge trigger that must fire once
+     * per re-arm cycle, and flooring at 0 would re-fire it every hop. */
     if (s->hold_counter_inst_erle > INT_MIN) s->hold_counter_inst_erle -= 1;
     if (s->hold_counter_inst_erle == 0) {
         inst_reset_accumulators(&s->inst);

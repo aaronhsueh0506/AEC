@@ -1,14 +1,12 @@
-"""Generate a binary golden for the C stationarity_estimator port (WS5 Phase 5.1).
+"""Generate a binary golden for the C stationarity_estimator port.
 
 Runs the Python StationarityEstimator over a deterministic float32 render-PSD
 sequence (warmup avg-init phase → EMA rising/falling → past initial_phase so the
 mask10 (10×pn < pb) branch fires; the history ring fills + the flag/hangover/
 3-bin-smooth/is_block_stationary chain all evolve) and writes inputs + expected
-outputs to a raw little-endian file that
-a C replay harness (not shipped in this tree)
-replays.
+outputs to a raw little-endian file.
 
-Per-frame order matches the real pipeline (orchestrator.py:1809-1810):
+Per-frame order matches the real pipeline (orchestrator.py):
   update_noise_estimator(psd)  then  update_stationarity_flags(psd)
 
 Real captured dtypes: render_psd float32, average_reverb None, noise EMA float32,

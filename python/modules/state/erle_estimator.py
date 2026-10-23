@@ -1,11 +1,6 @@
-"""ErleEstimator — wraps Fullband + Subband ERLE (single-channel).
+"""ErleEstimator: fullband and subband ERLE (single channel).
 
-Mirrors docs/aec3_extracts/src/aec3/erle_estimator.{cc,h}.
-
-Startup-phase gating: ``startup_phase_length_hops`` is supplied at
-construction time in OUR hop units (caller resolves it via wall-clock
-``ms_to_hops``-style scaling, not a fixed count -- see AecState's
-``_resolve_startup_hops``). AEC3 passes ``2 * kNumBlocksPerSecond`` (~2 s).
+``startup_phase_length_hops`` is in hops of the live grid (about 2 s); updates are skipped until it elapses.
 """
 from typing import Optional
 
@@ -57,11 +52,9 @@ class ErleEstimator:
         y2: np.ndarray,                # capture PSD (per-bin)
         e2: np.ndarray,                # subtractor / filter error PSD (per-bin)
         converged_filter: bool,
-        # Legacy kwargs (signal-dependent ERLE retired); accepted as no-op for
-        # caller-side API compatibility.
+        # Accepted and ignored.
         filter_freq_response: Optional[np.ndarray] = None,
         x2_history: Optional[np.ndarray] = None,
-        # C': pre-computed coherence gate (bool array). None = disabled.
         coh_gate_mask: Optional[np.ndarray] = None,
     ) -> None:
         self._blocks_since_reset += 1

@@ -1,29 +1,17 @@
-/* Permanent kernel and state equivalence gates for delay_aec.c.
- * Committed rather than left as throwaway sweeps because the
- * argmax's tie-order semantics are invisible to every other check in the
- * repo: real audio never produces an exact h^2 tie inside a 16-lane group,
- * so the E2E dumps and the delay golden pass even with last-match-wins
- * semantics -- only this sweep fails. The decimator half proves the
- * register-specialized cascade against the generic walk across carried IIR
- * state, which a per-block re-zeroing comparison would not. The two-lane
- * decimator and 48 kHz resampler kernels are checked against their
+/* Kernel and state equivalence gates for delay_aec.c.
+ * The argmax's tie-order semantics are invisible to every other check in the repo: real audio never produces an exact h^2 tie
+ * inside a 16-lane group, so the E2E dumps and the delay golden pass even with last-match-wins semantics; only this sweep
+ * fails. The decimator half proves the register-specialized cascade against the generic walk across carried IIR state, which
+ * a per-block re-zeroing comparison would not. The two-lane decimator and 48 kHz resampler kernels are checked against their
  * single-channel references the same way.
  *
- * On builds without the NEON body (non-aarch64, or
- * SIMD_KERNELS_FORCE_SCALAR) the argmax half degenerates to comparing the
- * scalar walk against itself, and the two pair sweeps compare the single-call
- * fallback (the only body that build has) against the generic walks; they
- * still run -- and say so -- rather than failing, so one
- * `make test-delay-kernels` invocation is valid everywhere. The
- * coefficient-equality helper (da_decimator_same_coefficients) exists only
- * in the NEON body, so the decimator pair sweep calls it, and checks its
- * verdict per variant, only there; a scalar build has no such helper to
- * check, and its pair function discards the flag.
- * The matched-core sweep checks the shipped core against separate update
- * and dot passes, including first-only, last-only and no-update gates. Its
- * kernels have their own gate (DA_MF_NEON), so it also runs the NEON body on
- * 32-bit ARM with fused FMA; test_delay_matched_neon holds their bit-exact
- * contract.
+ * On builds without the NEON body (non-aarch64, or SIMD_KERNELS_FORCE_SCALAR) the argmax half compares the scalar walk
+ * against itself, and the two pair sweeps compare the single-call fallback (the only body that build has) against the generic
+ * walks; they still run, and say so, so one `make test-delay-kernels` invocation is valid everywhere. The coefficient-equality
+ * helper (da_decimator_same_coefficients) exists only in the NEON body, so the decimator pair sweep checks its verdict per
+ * variant only there. The matched-core sweep checks the shipped core against separate update and dot passes, including
+ * first-only, last-only and no-update gates; its kernels have their own gate (DA_MF_NEON), so it also runs the NEON body on
+ * 32-bit ARM with fused FMA, and test_delay_matched_neon holds their bit-exact contract.
  * Includes the SHIPPED translation unit so the sweeps exercise real source. */
 #include "src/delay_aec.c"
 

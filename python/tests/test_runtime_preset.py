@@ -1,38 +1,18 @@
 """Runtime retarget of the residual-echo strength axis (``AEC.set_preset``).
 
-Why this test exists: mild/balanced differ in exactly one field,
-``min_gain_floor_far_active_db``; aggressive also differs in a second,
-``min_gain_floor_dt_db`` (``AecConfig.from_preset``). Both reach the
-suppressor as a single scalar clamp each, read once per hop. So a preset
-change has never actually needed a rebuild — but until now the only way to get
-one was to construct a new AEC, which throws away the filter, the noise
-estimate and the whole smoothing history. An integrator exposing a strength
-control had no honest option.
+mild/balanced differ in exactly one field, ``min_gain_floor_far_active_db``;
+aggressive also differs in ``min_gain_floor_dt_db`` (``AecConfig.from_preset``).
+Both reach the suppressor as a single scalar clamp each, read once per hop, so a
+preset change needs no rebuild. The floor is a HARD clamp and mild -> aggressive
+is an 18 dB step, so the retarget walks there geometrically in the power domain
+(linear in dB, no logarithm per hop) instead of jumping.
 
-The floor is a HARD clamp with nothing downstream to smooth it, and
-mild -> aggressive is an 18 dB step, so the retarget also has to be able to
-walk there instead of jumping. That walk is geometric in the power domain,
-which is linear in dB, so no logarithm is evaluated per hop.
-
-What is asserted:
-  1. THE DEFAULT PATH IS UNTOUCHED — an instance whose setter is never called
-     produces bit-identical output to one built before the ramp state existed.
-     Covered structurally here by ``test_untouched_instance_matches_target``:
-     the live floor and the target stay equal, which is the condition under
-     which ``_get_min_gain`` reads exactly what it read before.
-  2. ``ramp_ms=0`` LANDS ON THE CONSTRUCTED VALUE — bit-identical to a fresh
-     instance built with that preset. This is the property that makes the
-     setter a true preset change rather than an approximation of one.
-  3. ``ramp_ms>0`` IS MONOTONIC AND LANDS EXACTLY — no overshoot, and no
-     1-ULP residue that would leave the ramp nominally live forever.
-  4. A CALL DURING A RAMP RESTARTS FROM THE CURRENT LIVE VALUE — it does not
-     snap back to the old target first, and does not inherit the old ratio.
-  5. REJECTION IS TOTAL — an out-of-range argument leaves the instance
-     bit-identical, so a caller cannot half-apply a strength change.
-
-``test_mutation_*`` proves the landing assertion can fail: with the exact-
-landing branch removed, the geometric walk leaves a residue and never reports
-equality with the target.
+Asserted: an instance whose setter is never called keeps live floor == target
+(``test_untouched_instance_matches_target``); ``ramp_ms=0`` is bit-identical to
+a fresh instance built with that preset; ``ramp_ms>0`` is monotonic and lands
+exactly (no overshoot, no 1-ULP residue); a call during a ramp restarts from the
+current live value; an out-of-range argument leaves the instance bit-identical.
+``test_mutation_*`` proves the landing assertion can fail.
 """
 
 from __future__ import annotations
@@ -80,8 +60,7 @@ def test_direct_suppressor_dt_floor_matches_aec_default():
 def test_untouched_instance_matches_target():
     sg = _sg()
     assert _live(sg) == _target(sg)
-    # Advancing the ramp on an untouched instance must be a no-op, hop after
-    # hop -- this is what keeps every pre-existing golden valid.
+    # Advancing the ramp on an untouched instance must be a no-op, hop after hop.
     for _ in range(64):
         sg._advance_split_floor_ramp()
         assert _live(sg) == _target(sg)
@@ -249,14 +228,14 @@ def test_set_preset_rejects_unknown_preset():
 
 
 def test_set_preset_allows_no_floor():
-    """NO_FLOOR changes min_gain_split_floor_enabled -- a boolean the ramped
-    scalar setters below it cannot represent on their own, which is why this
-    used to be rejected at runtime. Now that the gate has its own explicit
-    setter (set_split_floor_enabled), stepped immediately rather than
-    inferred from the dB setters, the retarget can land correctly: the gate
-    goes False, and the far-active dB value is whatever NO_FLOOR's own config
-    carries (inert once the gate is off, but still tracked in self.config so
-    a later retarget AWAY from NO_FLOOR has a consistent value to read)."""
+    """NO_FLOOR changes min_gain_split_floor_enabled -- a boolean the ramped scalar
+    setters cannot represent on their own, so the gate has its own explicit setter
+    (set_split_floor_enabled), stepped immediately rather than inferred from the dB
+    setters. The retarget lands with the gate False and the far-active dB value
+    whatever NO_FLOOR's own config carries (inert once the gate is off, but still
+    tracked in self.config so a later retarget AWAY from NO_FLOOR has a consistent
+    value to read).
+    """
     aec = AEC(AecConfig.from_preset(AecPreset.BALANCED))
     no_floor_cfg = AecConfig.from_preset(AecPreset.NO_FLOOR)
     aec.set_preset(AecPreset.NO_FLOOR)
@@ -268,11 +247,9 @@ def test_set_preset_allows_no_floor():
 
 def test_set_preset_allows_retargeting_away_from_no_floor():
     """The symmetric direction: an instance CONSTRUCTED with NO_FLOOR can be
-    retargeted back to a ramped preset, and must land on BOTH that preset's
-    gate (True) AND its two dB fields -- not just one of the two, which is
-    exactly the hazard class the old guard was invented to prevent (a caller
-    that fixes only the boolean, or only the scalar, and silently keeps a mix
-    of the two presets' behavior)."""
+    retargeted back to a ramped preset, and must land on BOTH that preset's gate
+    (True) AND its two dB fields -- never a mix of the two presets' behavior.
+    """
     aec = AEC(AecConfig.from_preset(AecPreset.NO_FLOOR))
     assert aec.config.min_gain_split_floor_enabled is False
     balanced_cfg = AecConfig.from_preset(AecPreset.BALANCED)
@@ -284,10 +261,9 @@ def test_set_preset_allows_retargeting_away_from_no_floor():
 
 
 def test_set_preset_no_floor_round_trip():
-    """BALANCED -> NO_FLOOR -> AGGRESSIVE, each step checked against a fresh
-    instance of the target preset. Proves the fix covers the hazard the
-    retired guard warned about (gate and scalars never disagree), rather than
-    merely removing the guard and hoping."""
+    """BALANCED -> NO_FLOOR -> AGGRESSIVE, each step checked against a fresh instance
+    of the target preset (gate and scalars never disagree).
+    """
     aec = AEC(AecConfig.from_preset(AecPreset.BALANCED))
 
     def _assert_matches(preset):
@@ -304,12 +280,10 @@ def test_set_preset_no_floor_round_trip():
 
 
 def test_set_preset_no_floor_gate_steps_without_ramp():
-    """Mutation-style check that the gate is written through its OWN setter,
-    not inferred: if set_preset forgot to call set_split_floor_enabled, the
-    gate would silently stay at whatever it was before (the exact bug this
-    whole fix exists to avoid -- see the behavior-spec investigation's finding
-    that the 4ch pipeline's hand-rolled set_preset has precisely this gap
-    today). ramp_ms must not affect the gate at all -- it is not a scalar."""
+    """The gate is written through its OWN setter, not inferred: if set_preset forgot
+    to call set_split_floor_enabled, the gate would silently stay at whatever it was
+    before. ramp_ms must not affect the gate at all -- it is not a scalar.
+    """
     aec = AEC(AecConfig.from_preset(AecPreset.BALANCED))
     aec.set_preset(AecPreset.NO_FLOOR, ramp_ms=5000.0)
     assert aec.config.min_gain_split_floor_enabled is False
@@ -395,9 +369,10 @@ def test_ramp_hops_never_returns_zero():
 
 @pytest.mark.parametrize("bad", [99, None, -1, "gentle", object(), 3.5])
 def test_set_preset_rejects_non_presets(bad):
-    """AecConfig.from_preset falls back to balanced for anything unknown --
-    correct for a config factory, wrong for a setter. Without an explicit
-    coercion at the entry point, 99 and None were both silently accepted."""
+    """AecConfig.from_preset falls back to balanced for anything unknown -- correct
+    for a config factory, wrong for a setter, which must coerce at the entry point
+    so that 99 and None are rejected.
+    """
     aec = AEC(AecConfig.from_preset(AecPreset.BALANCED))
     before = aec.config.min_gain_floor_far_active_db
     live_before = _live(aec._aec3_sg)

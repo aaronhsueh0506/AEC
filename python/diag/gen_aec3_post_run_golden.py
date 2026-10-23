@@ -4,19 +4,17 @@ Unlike gen_aec3_post_golden.py (the DRIVER golden, which injects the sub-module
 outputs gain / usable_linear / r2 as inputs), this golden exercises the WHOLE
 ``AEC._aec3_post`` end-to-end: aec3_post_run drives AecState +
 ResidualEchoEstimator + SuppressionGain + StationarityEstimator +
-LinearFilterSelect ITSELF and must reproduce ``out[hop]`` bit-exactly.
+LinearFilterSelect itself and must reproduce ``out[hop]`` bit-exactly.
 
-Approach: hook the REAL balanced pipeline on the doubletalk case, monkeypatch
-``AEC._aec3_post`` to capture, PER HOP, every input the method reads from
-``self`` (the linear-filter spectra, W, X_buf, partition_idx, the shadow
-error_spec / _last_shadow_output_time / _last_s_max_abs, _current_delay /
-_delay_active, _saturation_level, the pending EPV flags PRE-call, the
-filter_taps via get_time_domain_filter, the stationarity read-state) + the args
-(raw_output / near / far) + the returned ``out[hop]``. We capture the WHOLE case
-(~2616 hops at the 512/256 grid this generator drives). The construction
-config of every sub-module is captured live off
-the orchestrator's instances (same extraction the per-module goldens use), so
-the C parity test rebuilds them faithfully.
+Approach: hook the REAL balanced pipeline on the doubletalk case and
+monkeypatch ``AEC._aec3_post`` to capture, per hop, every input the method
+reads from ``self`` (the linear-filter spectra, W, X_buf, partition_idx, the
+shadow error_spec / _last_shadow_output_time / _last_s_max_abs, _current_delay
+/ _delay_active, _saturation_level, the pending EPV flags PRE-call, the
+filter_taps via get_time_domain_filter, the stationarity read-state), the args
+(raw_output / near / far) and the returned ``out[hop]``, over the whole case.
+The construction config of every sub-module is captured live off the
+orchestrator's instances (same extraction the per-module goldens use).
 
 Run: python3 python/diag/gen_aec3_post_run_golden.py /tmp/aec3_post_run_golden.bin
 """
@@ -39,15 +37,9 @@ CASE = os.path.join(WAV, 'doubletalk', '0I0XMl3M0ECO0U1N0cJvpg_doubletalk')
 
 SR = 16000
 FL = 832
-# 16 kHz has two valid product grids (frame=256/hop=128, frame=512/hop=256);
-# the module-level hardcoded HOP=160 this used to carry matched neither (it
-# was the legacy hop=160/sr=16000 grid -- see orchestrator.py's references to
-# it -- before config._GRID_TABLE dropped it). The loop below now reads the
-# resolved hop straight off the live AEC instance instead of a constant,
-# the same pattern gen_residual_echo_estimator_golden.py uses. frame_size=512
-# is passed explicitly below (matching that sibling generator's choice) so
-# the hop used here is 256, not the product default of 128.
-MAX_HOPS = 4200   # whole DT case (~2616 hops at hop=256; was ~4186 at hop=160)
+# The hop is read off the live AEC instance; frame_size=512 is passed explicitly
+# below, so it is 256.
+MAX_HOPS = 4200  # whole DT case
 
 
 def _w_i32(f, *vals):
@@ -216,10 +208,10 @@ def main():
     from modules.residual.residual_echo_estimator import ResidualEchoEstimator
     orig_ree_reset = ResidualEchoEstimator.reset
 
-    # The orchestrator's coarse-rescue path (process loop, BEFORE _aec3_post)
-    # may call ree.reset(). aec3_post_run does not model that (it is upstream);
-    # the C test replays it on the captured rising-edge flag so the REE reverb
-    # state stays in lockstep.
+    # The orchestrator's coarse-rescue path (process loop, before _aec3_post) may
+    # call ree.reset(). aec3_post_run does not model that (it is upstream), so the
+    # rising-edge flag is captured and the consumer replays it to keep the REE
+    # reverb state in lockstep.
     reset_pending = {'v': 0}
 
     def patched_reset(self):
@@ -333,17 +325,16 @@ def main():
             pending_delay=(-1 if self._aec3_pending_delay_change is None
                            else int(self._aec3_pending_delay_change.value)),
             stat_active_hops=int(self._aec3_stationarity_active_hops),
-            # Whether the upstream process loop fired the StationarityEstimator
-            # update this hop (non_zero_render_seen latched). The C replays the
-            # update on the SAME flag so is_block_stationary / band_mask agree.
+            # Whether the upstream process loop fired the StationarityEstimator update this
+            # hop (non_zero_render_seen latched); the consumer replays the update on the
+            # same flag so is_block_stationary / band_mask agree.
             stat_update_fired=int(bool(self._aec3_non_zero_render_seen)),
         )
         ret = orig_post(self, raw_output, near_end, far_end)
-        # _dt_protect_active is set INSIDE _aec3_post (orchestrator 3444) just
-        # before get_gain, from dt_aware_res_floor_enabled & _ne_recent_frames.
-        # aec3_post_run does NOT compute it (the production caller aec.c sets it
-        # on the SG before the call); capture the value this hop actually used
-        # so the C test can replay it onto sg.dt_protect_active.
+        # _dt_protect_active is set inside _aec3_post just before get_gain, from
+        # dt_aware_res_floor_enabled & _ne_recent_frames. aec3_post_run does not compute
+        # it (the production caller aec.c sets it on the SG before the call), so the
+        # value this hop used is captured for the consumer to replay.
         rec['dt_protect_active'] = int(bool(self._aec3_sg._dt_protect_active))
         rec['out'] = np.asarray(ret, np.float32).copy()
         # usable_linear after update (localisation assertion)

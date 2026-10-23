@@ -1,28 +1,15 @@
-/* subband_erle.c — C port of python/modules/state/subband_erle.py.
- *
- * Per-bin ERLE estimator with onset compensation (reference subband ERLE
- * estimator, single capture channel). See subband_erle.h for the parity contract.
- *
- * PRECISION: float32 (drift versus Python accepted). All per-bin ERLE
- * arithmetic is float32 end-to-end (scalars combined with the f32 arrays
- * round once, in float). The lone threshold quantity
- * _x2_band_energy_threshold is float32 too (the result of the float32
- * aec_per_bin_psd_threshold() helper, stored at init); the low-render test
- * `low |= x2(f32) < thr(f32)` is a plain float32 compare.
- * Built with -ffp-contract=off so per-op float roundings are not fused.
- */
+/* subband_erle.c -- see subband_erle.h. Float32 throughout. */
 #include "subband_erle.h"
 #include "utility/simd_aec.h"
 
-#include "aec_scale.h"   /* aec_per_bin_psd_threshold */
+#include "aec_scale.h"
 
 #include <string.h>
 
-/* _set_max_erle_bands: arr[:half] = max_erle_l ; arr[half:] = max_erle_h
- * with half = (n_bins - 1) // 2  (kFftLengthBy2 // 2 analogue). */
+/* Low half of the bins gets max_erle_l, the rest max_erle_h. */
 static void set_max_erle_bands(float *arr, int n_bins,
                                float max_erle_l, float max_erle_h) {
-    int half = (n_bins - 1) / 2;   /* Python floor div on non-negative */
+    int half = (n_bins - 1) / 2;
     int k;
     for (k = 0; k < half; ++k) arr[k] = max_erle_l;
     for (k = half; k < n_bins; ++k) arr[k] = max_erle_h;
@@ -41,28 +28,19 @@ void subband_erle_init(SubbandErle *s, int n_bins,
     s->min_erle = min_erle;
     s->use_onset_detection = use_onset_detection ? 1 : 0;
     s->use_min_erle_during_onsets = use_min_erle_during_onsets ? 1 : 0;
-    /* Subband EMA constants are per-4ms-block. alpha_up/alpha_down fire
-     * once per SE_POINTS_TO_ACCUMULATE(=6)-hop accumulation window (see
-     * subband_erle_update()'s gated path below), NOT every hop.
-     * onset_release_decay DOES fire every hop. Both our accumulation window
-     * (6 hops) and the reference update period (6 native 4ms blocks =
-     * 24ms) carry the same factor of 6, so it cancels: pass plain hop_size
-     * against the shared EMA helper's fixed single-native-block (4ms)
-     * denominator, NOT SE_POINTS_TO_ACCUMULATE*hop_size (which would compare 6
-     * real hops against only 1 native block and inflate the exponent 6x). */
+    /* The EMA constants are per 4 ms block. alpha_up/alpha_down fire once per 6-hop window and
+     * onset_release_decay every hop; the factor of 6 cancels against the reference period, so plain
+     * hop_size is used. */
     s->alpha_up = aec_per_block_ema_alpha_to_per_hop(
         0.05f, hop_size, sample_rate);
     s->alpha_down = aec_per_block_ema_alpha_to_per_hop(
         0.1f, hop_size, sample_rate);
     s->onset_release_decay = 1.0f - aec_per_block_ema_alpha_to_per_hop(
         1.0f - 0.97f, hop_size, sample_rate);
-    /* ERLE hold 100 blocks (~400ms) / onset detection 250 blocks (~1s).
-     * Were frozen #defines (40/100 hops, correct only at hop=160/sr=16000);
-     * rescaled live here. */
+    /* ERLE hold 400 ms, onset detection 1 s, scaled to the live grid. */
     s->blocks_to_hold_erle = aec_ms_to_hops(400.0f, hop_size, sample_rate);
     s->blocks_for_onset_detection = aec_ms_to_hops(1000.0f, hop_size, sample_rate);
-    /* _x2_band_energy_threshold = per_bin_psd_threshold(44015068.0, hop_size)
-     * (ref_hop=160); float32 end-to-end. */
+    /* Threshold scaled to the live hop (reference hop 160). */
     s->x2_band_energy_threshold =
         aec_per_bin_psd_threshold(SE_X2_BAND_ENERGY_THRESHOLD, hop_size, 160);
 
@@ -91,7 +69,7 @@ void subband_erle_reset(SubbandErle *s) {
         s->coming_onset[k] = 1;
         s->hold_counters[k] = 0;
     }
-    /* _reset_accumulated_spectra */
+    /* Reset accumulated spectra. */
     for (k = 0; k < s->n_bins; ++k) {
         s->y2_acc[k] = 0.0f;
         s->e2_acc[k] = 0.0f;
@@ -100,28 +78,23 @@ void subband_erle_reset(SubbandErle *s) {
     s->num_points = 0;
 }
 
-/* _smoothed_update(prev, new_val, low_render, min_v, max_v) -> float (f32).
- *
- * All-float32, single rounding per op:
- *   diff = new_val - prev          -> float32
- *   v    = prev + alpha * diff     -> float32
- *   v    = clip(v, min_v, max_v)   -> float32 */
+/* Smoothed update of prev toward new_val with alpha_up (rising) or alpha_down (falling, 0 when
+ * low render), clamped to [min_v, max_v]. */
 static float smoothed_update(const SubbandErle *s, float prev, float new_val,
                              int low_render, float min_v, float max_v) {
     float alpha = s->alpha_up;
-    float diff = new_val - prev;                   /* f32 subtraction */
+    float diff = new_val - prev;
     float v;
     if (new_val < prev) {
         alpha = low_render ? 0.0f : s->alpha_down;
     }
-    v = prev + alpha * diff;                       /* f32 */
-    /* clip(v, min_v, max_v): clamp low then high. */
+    v = prev + alpha * diff;
     if (v < min_v) v = min_v;
     if (v > max_v) v = max_v;
     return v;
 }
 
-/* _update_accumulated_spectra */
+/* Accumulate y2/e2 and the low-render flag. */
 static void update_accumulated_spectra(SubbandErle *s,
                                        const float *x2, const float *y2,
                                        const float *e2, int converged_filter) {
@@ -140,7 +113,7 @@ static void update_accumulated_spectra(SubbandErle *s,
     s->num_points += 1;
 }
 
-/* _update_bands */
+/* Update the per-bin estimates at the end of each accumulation window. */
 static void update_bands(SubbandErle *s, int converged_filter,
                          const unsigned char *coh_gate_mask) {
     int k;
@@ -148,47 +121,42 @@ static void update_bands(SubbandErle *s, int converged_filter,
     if (!converged_filter) return;
     if (s->num_points != SE_POINTS_TO_ACCUMULATE) return;
 
-    /* Per-bin compute only for interior bins k = 1 .. n-2 (excludes endpoints).
-     * We fold new_erle + is_erle_updated into a per-bin loop; for masked-out
-     * bins new_erle is 0.0 (matches np.where else-branch) and is_erle_updated
-     * is 0, so they never touch state. */
+    /* Interior bins k = 1 .. n-2 only; masked-out bins never touch state. */
     for (k = 1; k <= n - 2; ++k) {
         float new_erle;
         int is_updated;
         float e2a = s->e2_acc[k];
         int low;
-        /* mask = e2_acc > 0.0 ; new = where(mask, y2_acc/max(e2_acc,1e-30), 0) */
         if (e2a > 0.0f) {
-            float denom = e2a > 1e-30f ? e2a : 1e-30f; /* np.maximum(e2_acc,1e-30) */
-            new_erle = s->y2_acc[k] / denom;            /* f32 */
+            float denom = e2a > 1e-30f ? e2a : 1e-30f;
+            new_erle = s->y2_acc[k] / denom;
             is_updated = 1;
         } else {
             new_erle = 0.0f;
             is_updated = 0;
         }
 
-        /* Coherence gate: is_updated &= coh_gate_mask[k]. */
+        /* Coherence gate. */
         if (coh_gate_mask != NULL && is_updated) {
             if (!coh_gate_mask[k]) is_updated = 0;
         }
 
         low = s->low_render_energy[k] ? 1 : 0;
 
-        /* Onset detection transition + hold. */
+        /* Onset detection transition and hold. */
         if (s->use_onset_detection) {
             if (is_updated && !s->low_render_energy[k]) {
                 if (s->coming_onset[k]) {
                     s->coming_onset[k] = 0;
                     if (!s->use_min_erle_during_onsets) {
-                        /* v = during + alpha*(new_erle - during), all float32.
-                         * alpha = 0.3f if new<during else 0.15f. */
+                        /* Smooth erle_during_onsets toward new_erle (0.3 falling, 0.15 rising). */
                         float prev_d = s->erle_during_onsets[k];
                         float alpha = (new_erle < prev_d) ? 0.3f : 0.15f;
-                        float diff = new_erle - prev_d;          /* f32 */
-                        float v = prev_d + alpha * diff;         /* f32 */
+                        float diff = new_erle - prev_d;
+                        float v = prev_d + alpha * diff;
                         float lo = s->min_erle;
                         float hi = s->max_erle[k];
-                        if (v < lo) v = lo;            /* clip */
+                        if (v < lo) v = lo;
                         if (v > hi) v = hi;
                         s->erle_during_onsets[k] = v;
                     }
@@ -197,7 +165,7 @@ static void update_bands(SubbandErle *s, int converged_filter,
             }
         }
 
-        /* Per-bin smoothed ERLE update (only when is_erle_updated). */
+        /* Smoothed ERLE update, only for updated bins. */
         if (is_updated) {
             s->erle[k] = smoothed_update(s, s->erle[k], new_erle, low,
                                          s->min_erle, s->max_erle[k]);
@@ -213,7 +181,7 @@ static void update_bands(SubbandErle *s, int converged_filter,
     }
 }
 
-/* _decrease_erle_per_band_for_low_render_signals */
+/* Release the onset-compensated ERLE for low-render signals. */
 static void decrease_erle_for_low_render(SubbandErle *s) {
     sk_erle_release_f32(s->erle_onset_compensated + 1,
                          s->erle_during_onsets + 1, s->hold_counters + 1,
@@ -232,7 +200,7 @@ void subband_erle_update(SubbandErle *s,
     if (s->use_onset_detection) {
         decrease_erle_for_low_render(s);
     }
-    /* Mirror first / last bin. */
+    /* Mirror first and last bin. */
     s->erle[0] = s->erle[1];
     s->erle[n - 1] = s->erle[n - 2];
     s->erle_onset_compensated[0] = s->erle_onset_compensated[1];

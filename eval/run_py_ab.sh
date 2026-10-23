@@ -6,17 +6,16 @@
 # the Python AEC and cannot observe a C-only change, and aec_wav cannot observe
 # a Python-only one.
 #
-# Baseline and candidate are separate git WORKTREES. The previous version of
-# this harness swapped module sources in and out of the working tree around
-# each render, which makes the tree transiently un-retimed -- indistinguishable
-# from an unfinished implementation to anything else reading it, and impossible
-# to attribute afterwards if the run is interrupted.
+# Baseline and candidate are separate git WORKTREES; no module sources are
+# swapped in the working tree, so an interrupted run leaves the tree intact.
 #
 # NO_PREALIGN=1 is mandatory. The eval driver's DEFAULT is an offline GCC-PHAT
 # pre-align crutch, which invalidates any timing-related verdict.
 #
 # The dataset and the manifest come from THIS checkout, not the worktrees, so
-# both sides see byte-identical input.
+# both sides see byte-identical input. PYBIN selects the interpreter; WORKERS
+# (default 6) the number of parallel renders. OUT_DIR receives out_*/, res_*/,
+# render_*.log, score_*.log and wav_comparison_g<fft>.json.
 #
 # Usage:
 #   eval/run_py_ab.sh BASE_WORKTREE CAND_WORKTREE OUT_DIR ["256 512"]

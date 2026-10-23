@@ -1,40 +1,20 @@
 """Shared signal-grid resolver (``modules.config.resolve_signal_grid``).
 
-Why this test exists: the frame geometry used to be derived in three
-separate blocks of ``AecConfig.__post_init__`` (a default-fft dict, a
-``hop = frame // 2`` line, a ``valid_grids`` dict) with the C port carrying
-its own fourth copy in ``aec_validate_config``/``aec_derive_dims``. Nothing
-forced them to agree, and nothing named 8 kHz as the legacy grid it is.
-There is now ONE table and ONE resolver, and ``__post_init__`` is its only
-caller.
-
-What is asserted:
-  1. RESOLVER CONTENT — frame/hop/n_freqs on all four supported grids (the
-     three product grids plus 8 kHz legacy), hard-coded rather than
-     recomputed from the same ``// 2`` the source uses; ``is_legacy`` is set
-     for 8 kHz and only 8 kHz.
-  2. C PARITY — the table matches ``AEC_GRID_TABLE`` in c_impl/src/aec.c row
-     for row, read out of the C source rather than restated (so an edit to
-     either side that is not mirrored fails here). This is the same
-     lockstep the C ``test_signal_grid_resolver`` enforces internally.
-  3. NO GUESSING (the can-fail core) — an unspecified / zero / negative
-     fft_size RAISES rather than being filled in, and every mismatched pair
-     raises. 16 kHz has two production grids, so a resolver that guessed
-     would silently pick one.
-  4. THE CONVENIENCE DEFAULT IS THE ONLY PLACE A GRID IS CHOSEN —
-     ``default_fft_size()`` (what the ``frame_size = -1`` sentinel expands
-     to) agrees with the first table row per rate, and its output is
-     immediately resolvable.
-  5. THE CORE DEMANDS A RESOLVED CONFIG — ``AEC()`` rejects a config whose
-     grid was poked back into an inconsistent state after construction.
-
-Mutation checks (each breaks one line and must go red here):
-  - let ``resolve_signal_grid`` fill a default for fft_size<=0 instead of
-    raising -> the "no guessing" rows fail;
-  - change one ``_GRID_TABLE`` row's hop or n_freqs -> rows 1 AND 2 fail
-    together, which is the property that makes it a single source of truth;
-  - drop the hop_size cross-check -> "explicit mismatched hop raises" fails;
-  - drop the orchestrator's resolved-config check -> row 5 fails.
+The frame geometry is derived from ONE table by ONE resolver, and
+``__post_init__`` is its only caller; the C port carries its own copy in
+``aec_validate_config``/``aec_derive_dims``, kept in lockstep by the C-parity
+row. Asserted:
+  - frame/hop/n_freqs on all four supported grids (three product grids plus
+    8 kHz), hard-coded rather than recomputed from the source's own ``// 2``;
+    ``is_legacy`` is set for 8 kHz only;
+  - the table matches ``AEC_GRID_TABLE`` in c_impl/src/aec.c row for row, read
+    out of the C source;
+  - an unspecified / zero / negative fft_size RAISES instead of being filled in
+    (16 kHz has two production grids), and every mismatched pair raises;
+  - ``default_fft_size()`` (what the ``frame_size = -1`` sentinel expands to)
+    agrees with the first table row per rate and is immediately resolvable;
+  - ``AEC()`` rejects a config whose grid was poked back into an inconsistent
+    state after construction.
 
 Run:
     python3 -m pytest python/tests/test_signal_grid.py

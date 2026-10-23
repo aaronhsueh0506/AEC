@@ -1,6 +1,4 @@
-/* aec_post.c — C port of the post-filter DRIVER (the orchestrator's post-filter step).
- * See aec_post.h for the stage breakdown + parity rules.
- */
+/* aec_post.c -- post-filter driver; see aec_post.h for the stages. */
 #include "aec_post.h"
 
 #include <assert.h>
@@ -10,7 +8,7 @@
 #include "utility/simd_aec.h"
 #include "aec_scale.h"
 
-#define PSD_SCALE (32768.0 * 32768.0)   /* int16 max^2 (Python _PSD_SCALE) */
+#define PSD_SCALE (32768.0 * 32768.0)   /* int16 max^2 */
 
 void aec_post_config_defaults(AecPostConfig *cfg) {
     memset(cfg, 0, sizeof(*cfg));
@@ -23,7 +21,7 @@ void aec_post_config_defaults(AecPostConfig *cfg) {
     cfg->erle_render_x2_psd_scale = 1;
     cfg->output_capture_when_linear_unusable = 1;
     cfg->enable_cng = 1;
-    cfg->cng_n2_windowed_psd = 0;   /* default OFF (NOT corpus-validated) */
+    cfg->cng_n2_windowed_psd = 0;
     cfg->erle_coh_gate_alpha = 0.05f;
     cfg->erle_coh_gate_threshold = 0.5f;
     cfg->cng_y2_alpha = 0.23156652857908377f;
@@ -34,9 +32,7 @@ void aec_post_config_defaults(AecPostConfig *cfg) {
     cfg->cng_n2_update_onset_hops = 20;
     cfg->cng_n2_initial_duration_hops = 400;
     cfg->noise_floor_int16sq = 68.50682420305405f;
-    /* default == block_size (the 16 kHz row's synth_window_len); the caller
-     * (aec.c) overrides with the per-rate lookup value, same as every other cfg
-     * field below block_size above. */
+    /* Default is block_size; aec.c overrides it with the per-rate value. */
     cfg->synth_window_len = cfg->block_size;
 }
 
@@ -57,12 +53,8 @@ void aec_post_init(AecPost *p, const AecPostConfig *cfg,
     p->trace.aec_converged = 0;
     p->trace.far_active = 0;
     p->trace.gain_mean = 0.0f;
-    /* Convergence-flags y2 threshold (step 4 below): 3.73e-4f = 50^2*64/32768^2
-     * at the reference grid, rescaled to the live hop_size (it is compared
-     * against y2_time summed over the LIVE hop_size) via the helper
-     * suppression_gain.c uses for this identical constant
-     * (aec_block_energy_scale is a pure sample-count ratio -- hop_size only, no
-     * sample_rate). Mirrors orchestrator.py's _y2_threshold. */
+    /* Convergence-flags y2 threshold: 50^2 * 64 / 32768^2 at the reference grid, scaled to the live
+     * hop_size (it is compared against y2_time summed over the hop). */
     p->y2_thr = aec_block_energy_scale(50.0f * 50.0f * 64.0f, cfg->hop_size)
               / (32768.0f * 32768.0f);
     p->fft = fft;
@@ -94,14 +86,9 @@ void aec_post_init(AecPost *p, const AecPostConfig *cfg,
 void aec_post_reset(AecPost *p) {
     int k;
     int nb = p->cfg.n_bins;
-    /* mirrors the orchestrator's post-chain reset (filter-derived path): OLA / CNG / coherence /
-     * avg-reverb cleared. */
+    /* Reset: OLA, CNG, coherence and avg-reverb cleared. */
     memset(p->ola_buf, 0, (size_t)p->cfg.block_size * sizeof(float));
-    /* Trace stash: written by this block, read only by aec_debug_status
-     * (never by the audio path), so restarting it here changes no sample on
-     * either caller -- and it stops a --debug-trace row printed after a reset
-     * from attributing a pre-reset hop's convergence/far-activity/gain to a
-     * block that has not run since. Same values aec_post_init writes. */
+    /* The trace stash is restarted so a trace row after a reset does not show a pre-reset hop. */
     p->trace.aec_converged = 0;
     p->trace.far_active = 0;
     p->trace.gain_mean = 0.0f;
@@ -112,9 +99,9 @@ void aec_post_reset(AecPost *p) {
         p->y2_smoothed[k] = 0.0f;
         p->n2[k] = 1.0e6f;
         p->n2_initial[k] = 0.0f;
-        p->coh_sye_re[k] = 0.0f;     /* _reset_coherence_state: sye=0 */
+        p->coh_sye_re[k] = 0.0f;
         p->coh_sye_im[k] = 0.0f;
-        p->coh_syy[k] = 1.0e-30f;    /* syy=see=1e-30 */
+        p->coh_syy[k] = 1.0e-30f;
         p->coh_see[k] = 1.0e-30f;
     }
     reverb_model_reset(&p->avg_reverb);
@@ -123,31 +110,18 @@ void aec_post_reset(AecPost *p) {
     p->observer_main_err_ema = 0.0;
 }
 
-/* PSD = (mag*mag) in f32, then * _PSD_SCALE in f32 (numpy<2 array*pyfloat rule),
- * .astype(f32) is a no-op. mag is the captured np.abs(c64) f32 value. */
 static void psd_from_abs(const float *mag, int n, float *out) {
-    /* sk_sq_scale_f32(mag, scale, ...) computes out[i]=(mag[i]*mag[i])*scale
-     * -- the textually identical op sequence to this loop's body, and
-     * (float)PSD_SCALE (2^30, exact in f32) folds to the same constant
-     * regardless of call path. Same bit-exact scale-multiply pattern as in
-     * suppression_gain.c (there with scale=1.0f). */
     sk_sq_scale_f32(mag, (float)PSD_SCALE, out, n);
 }
 
-/* ── stage 1-2: PSDs (+ capture_psd_win) ────────────────────────────── */
 void aec_post_compute_psds(AecPost *p, const AecPostAbs *mag) {
     int nb = p->cfg.n_bins;
     psd_from_abs(mag->abs_near, nb, p->near_psd);
     psd_from_abs(mag->abs_far, nb, p->far_psd);
     psd_from_abs(mag->abs_sel_echo, nb, p->echo_psd);
     psd_from_abs(mag->abs_error, nb, p->error_psd);
-    /* Shared producer: capture_psd_win is the windowed capture PSD both
-     * erle_windowed_capture_psd (ERLE Y2/E2 consistency) and
-     * cng_n2_windowed_psd (CNG N2-tracker coordinate fix) read; form it
-     * whenever either flag needs it -- abs_nsw_e1 (the windowed near_spec_win
-     * magnitude) is already computed unconditionally in aec_post_run's
-     * Step 2, in every mode, so this is just the squaring/scale pass, no
-     * extra FFT either flag pays for alone. */
+    /* capture_psd_win is read by both erle_windowed_capture_psd and cng_n2_windowed_psd; form it
+     * when either is set. */
     if (p->cfg.erle_windowed_capture_psd || p->cfg.cng_n2_windowed_psd) {
         psd_from_abs(mag->abs_nsw_e1, nb, p->capture_psd_win);
     }
@@ -162,7 +136,6 @@ void aec_post_avg_reverb_slots(int n_part, int partition_idx, int delay,
     *past_idx = ((curr_p - delay - 1) % n_part + n_part) % n_part;
 }
 
-/* ── stage 3: avg-render-reverb x2_reverb_for_erle ─────────────────────── */
 void aec_post_compute_x2_reverb(AecPost *p, int x2_present,
                                 const float *x2_at_delay, const float *x2_past,
                                 float decay_steady) {
@@ -178,7 +151,6 @@ void aec_post_compute_x2_reverb(AecPost *p, int x2_present,
     }
 }
 
-/* ── stage 4: coherence Γ²(Ŷ,Y) EMA + ERLE coh-gate mask ───────────────── */
 void aec_post_compute_coherence(AecPost *p,
                                 const Complex *echo_spec_for_coh,
                                 const Complex *near_spec,
@@ -186,11 +158,6 @@ void aec_post_compute_coherence(AecPost *p,
     const AecPostConfig *c = &p->cfg;
     int nb = c->n_bins;
     if (!c->erle_coh_gate_enabled) return;
-    /* Was 2 separate per-bin loops (EMA update, then threshold gate); fused
-     * into sk_coherence_ema_gate_f32's single per-bin pass -- the gate loop
-     * only ever reads coh_sye_re/im/syy/see at the SAME index k the EMA loop
-     * just wrote, never a different index, so per-k fusion is order-
-     * preserving (see the kernel's doc comment in simd_kernels.h). */
     sk_coherence_ema_gate_f32(p->coh_sye_re, p->coh_sye_im,
                               p->coh_syy, p->coh_see,
                               echo_spec_for_coh, near_spec,
@@ -199,24 +166,14 @@ void aec_post_compute_coherence(AecPost *p,
                               p->coh_gate_mask, nb);
 }
 
-/* ── stage 5: CNG N2 tracking → comfort_noise ──────────────────────────── */
 void aec_post_compute_comfort_noise(AecPost *p, int saturated_capture) {
     const AecPostConfig *c = &p->cfg;
     int nb = c->n_bins;
-    /* cng_n2_windowed_psd (default OFF, NOT corpus-validated): mirrors
-     * python/modules/orchestrator.py's _cng_input_psd select. The reference
-     * comfort-noise generator reads its Y2 from the same windowed FFT as E2,
-     * not a rectangular one; near_psd here is rectangular, so the tracker's
-     * target runs ~3 dB high vs that reference coordinate. When set, read
-     * the windowed capture PSD already shared with erle_windowed_capture_psd
-     * (capture_psd_win, populated above by aec_post_compute_psds() whenever
-     * either flag is on) instead of near_psd; OFF reproduces the original
-     * near_psd-fed behaviour byte-for-byte. */
+    /* With cng_n2_windowed_psd, track the windowed capture PSD instead of the rectangular near_psd
+     * (which runs about 3 dB high against the windowed reference). */
     const float *cng_in = (c->cng_n2_windowed_psd) ? p->capture_psd_win
                                                     : p->near_psd;
     if (!p->noise_initialized) {
-        /* straight copy -- memcpy is bit-exact by construction (no rounding
-         * involved, so no NEON kernel is needed for this one). */
         memcpy(p->y2_smoothed, cng_in, (size_t)nb * sizeof(float));
         p->noise_initialized = 1;
     }
@@ -228,26 +185,16 @@ void aec_post_compute_comfort_noise(AecPost *p, int saturated_capture) {
         float ia = c->cng_n2_initial_alpha;
         float nfloor = c->noise_floor_int16sq;
         int dur = c->cng_n2_initial_duration_hops;
-        /* delta-form EMA: y2_smoothed += y2a*(cng_in-y2_smoothed) --
-         * sk_ema_delta_f32 mirrors the source's separate sub/mul/add. */
         sk_ema_delta_f32(p->y2_smoothed, cng_in, y2a, nb);
         if (p->n2_counter > c->cng_n2_update_onset_hops) {
-            /* data-dependent track/up select on n2 -- sk_n2_track_f32. */
             sk_n2_track_f32(p->n2, p->y2_smoothed, fresh, retain, g_up, nb);
         }
         if (p->n2_counter < dur) {
             p->n2_counter += 1;
             if (p->n2_counter < dur) {
-                /* data-dependent slow/raw select on n2_initial --
-                 * sk_n2_initial_track_f32. */
                 sk_n2_initial_track_f32(p->n2_initial, p->n2, ia, nb);
             }
         }
-        /* floor clamp: `if (x[k]<nfloor) x[k]=nfloor;` with no upper bound
-         * at all -- sk_clip_f32(x, nfloor, +inf, n) reproduces this exactly:
-         * `x[k] > +inf` is unreachable for any finite x (and false even for
-         * x==+inf), so the clip's high branch degenerates to a no-op and
-         * only the low-bound compare+select fires, verbatim. */
         sk_clip_f32(p->n2, nfloor, (float)INFINITY, nb);
         if (p->n2_counter < dur) {
             sk_clip_f32(p->n2_initial, nfloor, (float)INFINITY, nb);
@@ -260,7 +207,6 @@ void aec_post_compute_comfort_noise(AecPost *p, int saturated_capture) {
     }
 }
 
-/* ── stage 6: select + gain apply + CNG inject + irfft + OLA ──────────── */
 void aec_post_apply_output(AecPost *p,
                            const Complex *error_spec,
                            const Complex *echo_spec_sel,
@@ -274,16 +220,13 @@ void aec_post_apply_output(AecPost *p,
     int hop = c->hop_size;
     int k;
 
-    /* _out_base = error_spec; switch to y_base = error_spec + sel_echo when
-     * (output_capture_when_linear_unusable && !usable && |E|>|Y|). */
+    /* Switch to y_base = error_spec + sel_echo when output_capture_when_linear_unusable, the linear
+     * estimate is unusable and |E| > |Y|. */
     {
         const Complex *out_base = error_spec;
         if (c->output_capture_when_linear_unusable && !usable_linear) {
             float *se2 = p->nf;
             float se, sy;
-            /* |abs|^2 == (abs*abs)*1.0f bit-for-bit (multiplying by 1.0f is
-             * an exact IEEE no-op, incl. sign of ±0.0f), so sk_sq_scale_f32
-             * with scale=1.0f reproduces the source square verbatim. */
             sk_sq_scale_f32(mag->abs_error, 1.0f, se2, nb);
             se = sk_pairwise_sum_f32(se2, (size_t)nb);
             sk_sq_scale_f32(mag->abs_ybase, 1.0f, se2, nb);
@@ -293,32 +236,13 @@ void aec_post_apply_output(AecPost *p,
                 out_base = p->e_out_spec;
             }
         }
-        /* out_base may alias p->e_out_spec (the se>sy branch above just
-         * wrote it there) -- sk_capply_gain_f32 explicitly supports
-         * out == z in-place (full load before store, no cross-iteration
-         * reuse of a not-yet-overwritten element), which is exactly this
-         * case. */
         sk_capply_gain_f32(p->e_out_spec, out_base, gain, nb);
     }
 
     if (c->enable_cng) {
         int n_random = nb - 2;
         uint32_t seed = p->cng_seed;
-        static const float inv_psd_scale = 1.0f / (float)PSD_SCALE;  /* 2^-30, exact */
-        /* v = comfort_noise[k]*inv_psd_scale is pure float32*float32 --
-         * inv_psd_scale is a compile-time-folded float32 constant (2^-30
-         * exact); PSD_SCALE's double literal never touches the per-element
-         * math. Split into: plain scalar multiply into p->nf as scratch
-         * (provably dead here -- whatever nf held before, whether leftover
-         * se2 scratch from the output-select block above or a previous hop's contents,
-         * is never read again: every element is overwritten by this
-         * multiply before anything reads nf back), then the floor clamp via
-         * sk_clip_f32(v, 0, +inf) (the source has no upper bound either --
-         * same +inf-degenerates-to-floor-only trick as the CNG N2 clamps
-         * above), then a single batched sk_fast_sqrt_f32 in place. */
-        /* Only [1, nb-1) is ever read back (the injection loop below reads
-         * bin = k+1 for k in [0, n_random)), so narrow all three ops to that
-         * range -- indices 0 and nb-1 are never consumed. */
+        static const float inv_psd_scale = 1.0f / (float)PSD_SCALE;
         sk_scale_f32(p->nf + 1, p->comfort_noise + 1, inv_psd_scale, n_random);
         sk_clip_f32(p->nf + 1, 0.0f, (float)INFINITY, n_random);
         sk_fast_sqrt_f32(p->nf + 1, p->nf + 1, n_random);
@@ -346,12 +270,8 @@ void aec_post_apply_output(AecPost *p,
 
     fft_inverse(p->fft, p->e_out_spec, p->e_out_full);
 
-    /* synth_window is caller-owned and sized by the selected signal-grid
-     * row. It must match block_size for every supported grid. The win_n
-     * clamp is the release-path guard for a hypothetical NDEBUG
-     * build that strips the assert: it degrades to a partial OLA window
-     * instead of reading past whichever buffer is shorter, rather than an
-     * OOB read. At every validated grid win_n == bs. */
+    /* synth_window_len must equal block_size (asserted); the win_n clamp keeps a build without the
+     * assert from reading past the shorter buffer. */
     assert(c->synth_window_len == bs);
     {
         int win_n = (c->synth_window_len < bs) ? c->synth_window_len : bs;
@@ -363,29 +283,15 @@ void aec_post_apply_output(AecPost *p,
     memset(p->ola_buf + (bs - hop), 0, (size_t)hop * sizeof(float));
 }
 
-/* ─────────────────────────────────────────────────────────────────────────
- * aec_post_run — full orchestration of the orchestrator's post-filter step
- * (orchestrator.py). Drives the sub-modules in the exact Python order.
- * ──────────────────────────────────────────────────────────────────────── */
+/* aec_post_run: full orchestration of the post-filter step, driving the sub-modules in order. */
 
-/* f32 pairwise sum of x[i]²: accumulates in f32 throughout, same
- * pairwise/unrolled-by-8 structure and split order as sk_pairwise_sum_f32;
- * drift vs the numpy reference (float(np.sum(arr.astype(np.float64)
- * ** 2))) is accepted. */
 static float sum_sq_f32_pairwise(const float *a, size_t n) {
     return sk_sum_sq_pairwise_f32(a, n);
 }
 
-/* ── Live observer injection step ──────────────────────────
- * Factored out of aec_post_run's per-hop body (same >20-50 line threshold
- * this file's other aec_post_compute_* steps already follow -- see
- * aec_post_compute_x2_reverb/_coherence/_comfort_noise above, all smaller
- * than this one). Runs between Steps 17 and 18, mirroring orchestrator.py's
- * live-observer block exactly: same insertion point relative to the
- * stationarity R² zeroing just before it and nearend_pwr just after.
- * Needs THIS hop's dominant_ne (Step 13)/usable (Step 14) verdicts plus the
- * run's own in/obj/sc bundles, so -- unlike main/shadow -- it cannot be
- * driven by the caller; aec_post_run calls this in place. */
+/* Live observer injection step. Runs after the stationarity R^2 zeroing and before the comfort-noise
+ * and gain steps, and needs this hop's dominant_ne and usable verdicts, so aec_post_run calls it in
+ * place. */
 static void aec_post_run_observer_step(AecPost *p,
                                        const AecPostRunIn *in,
                                        const AecPostRunObj *obj,
@@ -401,22 +307,12 @@ static void aec_post_run_observer_step(AecPost *p,
     int kmax = p->cfg.observer_max_bin;
     if (kmax > nb) kmax = nb;
     if (kmax < 0) kmax = 0;
-    /* |sel_esw|^2, bounded to [0,kmax): every bin at k>=kmax is
-     * unconditionally discarded before it can reach r2 (the final step
-     * below), so computing it there is dead work -- bit-exact for the
-     * retained range, and the single computation now serves both the
-     * e_main EMA input and the corroborated-branch cap check (no second
-     * pass). */
+    /* |sel_esw|^2 bounded to [0, kmax): bins at or above kmax never reach r2. It feeds both the
+     * e_main EMA input and the corroborated-branch cap. */
     sk_cmag2_np_f32(sc->sel_esw, sc->observer_cap_mag2, kmax);
     sk_cmag2_np_f32(obj->observer_filter->error_spec, sc->observer_diff_mag2, kmax);
     float e_obs = sk_pairwise_sum_f32(sc->observer_diff_mag2, (size_t)kmax);
     float e_main = sk_pairwise_sum_f32(sc->observer_cap_mag2, (size_t)kmax);
-    /* double, matching Python's EMA precision exactly (see
-     * observer_obs_err_ema's doc comment) -- e_obs/e_main themselves stay
-     * float32-precision values (the pairwise sum above already matches
-     * np.sum() on a float32 array bit-for-bit), promoted here only on
-     * entry to the EMA, same as Python's `_e_obs`/`_e_main` (float32-
-     * precision sums cast to Python float). */
     double ea = p->cfg.observer_err_ema_alpha;
     p->observer_obs_err_ema =
         ea * p->observer_obs_err_ema + (1.0 - ea) * (double)e_obs;
@@ -425,24 +321,9 @@ static void aec_post_run_observer_step(AecPost *p,
     int corroborated = (p->observer_obs_err_ema
                          <= p->cfg.observer_corrob_margin * p->observer_main_err_ema);
     if (corroborated && lo_trustworthy) {
-        /* observer.echo_spec - sel_echo: plain complex subtraction (exact)
-         * via sk_csub_f32, equivalent to sk_cadd_f32 with a negated operand
-         * but without ever forming that negation -- this is a one-per-hop
-         * glue computation, not a hot loop, so the kernel call is for
-         * uniformity with the rest of this file, not performance. Bounded
-         * to [0,kmax) -- same dead-work argument as the cap computation
-         * above. sk_cmag2_np_f32 (scaled-hypot) afterward is what matches
-         * numpy's sqrt-then-square np.abs(c64)**2 bit-for-bit; re^2+im^2
-         * directly would not. */
         sk_csub_f32(sc->observer_diff_spec, obj->observer_filter->echo_spec,
                    sc->sel_echo, kmax);
         sk_cmag2_np_f32(sc->observer_diff_spec, sc->observer_diff_mag2, kmax);
-        /* ev = min(diff, cap) * PSD_SCALE, masked zero where stationary,
-         * then raise r2 to at least ev -- the same 3 kernels
-         * (sk_min_f32/sk_mask_zero_f32/sk_raise_to_f32) this file already
-         * uses elsewhere for the structurally identical nearend_pwr min and
-         * the regular R² stationarity-zeroing step, instead of a hand-
-         * rolled scalar loop duplicating all three. */
         sk_min_f32(sc->observer_diff_mag2, sc->observer_diff_mag2,
                   sc->observer_cap_mag2, kmax);
         sk_scale_f32(sc->observer_diff_mag2, sc->observer_diff_mag2,
@@ -470,20 +351,12 @@ int aec_post_run(AecPost *p,
     AecPostAbs mag;
     int saturated_capture = (in->saturation_level > 0.5f);
     int pgc = in->pending_gain_change;
-    int pdc = in->pending_delay_change;   /* -1 == None */
+    int pdc = in->pending_delay_change;
 
-    /* ── Step 1: form the linear output on the post-filter WOLA grid ────────
-     *
-     * PBFDKF's error_spec_windowed is an internal estimator quantity:
-     * FFT(sqrt-Hann * capture) - unwindowed_echo_spec.  It is not the STFT
-     * of the continuous time-domain linear residual and therefore cannot be
-     * paired with the post-filter's sqrt-Hann synthesis window.  Always run
-     * FormLinearFilterOutput so sel_esw is exactly
-     * FFT(sqrt-Hann * [previous formed hop, current formed hop]).
-     *
-     * With a shadow filter this also performs refined/coarse selection.  With
-     * no shadow, passing raw_output as both candidates reduces the selector
-     * to a pure stateful WOLA analysis of the refined linear output. */
+    /* Form the linear output on the post-filter WOLA grid. error_spec_windowed is an internal
+     * estimator quantity and cannot pair with the synthesis window, so FormLinearFilterOutput
+     * always runs; with a shadow filter it also selects refined/coarse, without one it is a
+     * stateful WOLA analysis of the refined output. */
     linear_filter_select(obj->lfs,
                          in->raw_output, in->near_end,
                          (in->shadow_present && in->last_shadow_output_time != NULL)
@@ -491,53 +364,29 @@ int aec_post_run(AecPost *p,
                              : in->raw_output,
                          in->error_spec_windowed, in->echo_spec,
                          in->sqrt_hann, obj->fft,
-                         /* AecState is updated later in this run, so this
-                          * reads the previous hop's verdict by construction.
-                          * See the parameter's contract in the header. */
+                         /* AecState is updated later in this run, so this is the previous hop's
+                          * verdict. */
                          !aec_state_usable_linear_estimate(obj->state),
-                         /* Only where this chain's own over-output guard
-                          * cannot reach. Under enable_res the output-capture step
-                          * below still owns the rule and applies it to the emitted
-                          * audio; running both would let its frequency-domain
-                          * hard switch overwrite the crossfade the selector
-                          * just started, and would change shipped audio for a
-                          * seam only an external post-filter reads. */
+                         /* Only where the post chain's own over-output guard cannot reach; under
+                          * enable_res the output
+                          * capture step still owns the rule. */
                          c->output_capture_when_linear_unusable
                              && in->context_only,
                          sc->sel_esw, sc->sel_echo);
 
-    /* ── Step 2: precompute the np.abs magnitude arrays.
-     *            sel_esw/sel_echo come from Step 1.   */
-    /* near_spec_win = error_spec_windowed + echo_spec (ORIGINAL); y_base =
-     * sel_esw + sel_echo (SELECTED). Fissioned into 2 independent
-     * elementwise complex adds -- disjoint destinations (nsw_e1/ybase are
-     * separate caller-owned scratch buffers), so splitting the single
-     * per-k loop into 2 full-range sk_cadd_f32 calls changes nothing:
-     * sk_cadd_f32 reproduces `out[k].r = a[k].r+b[k].r; out[k].i =
-     * a[k].i+b[k].i` expression-for-expression. */
+    /* near_spec_win = error_spec_windowed + echo_spec (original); y_base = sel_esw + sel_echo
+     * (selected). */
     sk_cadd_f32(sc->nsw_e1, in->error_spec_windowed, in->echo_spec, nb);
     sk_cadd_f32(sc->ybase, sc->sel_esw, sc->sel_echo, nb);
 
-    /* 7 independent np.abs magnitude arrays. Fissioned into 7 per-array
-     * sk_cabs_np_f32 calls -- each out[k] is |z[k]| elementwise with no
-     * loop-carried dependency across k, so splitting the single loop into
-     * 7 full passes over disjoint destinations is order-preserving. */
     sk_cabs_np_f32(in->near_spec, sc->abs_near, nb);
     sk_cabs_np_f32(in->far_spec, sc->abs_far, nb);
     sk_cabs_np_f32(sc->sel_echo, sc->abs_sel_echo, nb);
     sk_cabs_np_f32(sc->sel_esw, sc->abs_error, nb);
     sk_cabs_np_f32(in->echo_spec, sc->abs_echo_coh, nb);
     sk_cabs_np_f32(sc->nsw_e1, sc->abs_nsw_e1, nb);
-    /* |y_base| has exactly one consumer: the output-capture guard inside
-     * aec_post_apply_output(), which context_only never reaches (Step 21
-     * returns the linear residual instead), so the pass is dead in that mode.
-     * ybase ITSELF is still formed above -- it is exported as the linear
-     * context's near_spec. NULL rather than a stale pointer marks the
-     * uncomputed magnitude, so a future reader faults instead of silently
-     * consuming the previous hop's scratch. The sibling abs_nsw_e1 pass is
-     * deliberately NOT conditional: aec_post_compute_psds() consumes it
-     * whenever erle_windowed_capture_psd OR cng_n2_windowed_psd is set, in
-     * every mode. */
+    /* |y_base| is only used by the output-capture guard, which context_only never reaches; NULL
+     * marks it uncomputed. abs_nsw_e1 is always computed (aec_post_compute_psds() needs it). */
     if (!in->context_only)
         sk_cabs_np_f32(sc->ybase, sc->abs_ybase, nb);
     mag.abs_near = sc->abs_near;
@@ -548,13 +397,10 @@ int aec_post_run(AecPost *p,
     mag.abs_nsw_e1 = sc->abs_nsw_e1;
     mag.abs_ybase = in->context_only ? NULL : sc->abs_ybase;
 
-    /* ── Step 3: PSDs + windowed-capture PSD ───────────────────────────────────── */
     aec_post_compute_psds(p, &mag);
 
-    /* render_block_scaled = (far_end * 32768).astype(f32). */
     sk_scale_f32(sc->render_block_scaled, in->far_end, 32768.0f, hop);
 
-    /* ── Step 4: convergence flags ────────────────────────────── */
     {
         float y2_time = sum_sq_f32_pairwise(in->near_end, (size_t)hop);
         float e2_refined = sum_sq_f32_pairwise(in->raw_output, (size_t)hop);
@@ -565,19 +411,11 @@ int aec_post_run(AecPost *p,
 
         refined_conv = (e2_refined < 0.5f * y2_time) && (y2_time > y2_thr);
         if (in->shadow_present) {
-            /* Parseval map: (2·Σ|E[1:-1]|² + |E[0]|² + |E[-1]|²)/fft_size,
-             * cmag2_np per bin, f32 sums. */
+            /* Parseval map: (2 * sum|E[1:-1]|^2 + |E[0]|^2 + |E[-1]|^2) / fft_size. */
             const Complex *es = in->shadow_error_spec;
             float inner = 0.0f;
-            /* (np.abs(c)²) per bin (cmag2_np), NOT er*er+ei*ei. Batched via
-             * sk_cmag2_np_f32 into sc->x2_at_delay as scratch -- provably
-             * dead here: within this call, x2_at_delay is next written by
-             * Step 9 below (aec_post_compute_x2_reverb consumes it
-             * immediately after), and the previous hop's Step 9 already
-             * consumed its former contents the same way before returning;
-             * nothing reads x2_at_delay between that consume and this
-             * point. The manual serial sum below keeps the exact k=1..nb-2
-             * left-to-right accumulation order of the original loop. */
+            /* Per-bin |c|^2 via sk_cmag2_np_f32 into x2_at_delay, which is free here (rewritten
+             * later in this run); summed serially in order. */
             sk_cmag2_np_f32(es + 1, sc->x2_at_delay, nb - 2);
             for (k = 0; k < nb - 2; ++k) inner += sc->x2_at_delay[k];
             {
@@ -589,12 +427,9 @@ int aec_post_run(AecPost *p,
             coarse_conv = (e2_coarse < 0.05f * y2_time) && (y2_time > y2_thr);
         }
         aec_converged = refined_conv || coarse_conv;
-        p->trace.aec_converged = aec_converged;   /* audio-passive trace stash */
+        p->trace.aec_converged = aec_converged;
 
-        /* AecState.update reads the live aec_converged local directly (see
-         * Step 11 below); no separate filter-state snapshot is built. */
         {
-            /* ── Step 6: ext_delay ───────────────────────────── */
             FilterDelayEstimate ext;
             const FilterDelayEstimate *ext_p = NULL;
             if (in->delay_active && in->current_delay >= 0) {
@@ -604,7 +439,6 @@ int aec_post_run(AecPost *p,
                 ext_p = &ext;
             }
 
-            /* ── Step 7: handle_echo_path_change ─────────────── */
             if (pgc || pdc != -1) {
                 int was_delay = (pdc != -1);
                 int gain_change = pgc ? 1 : 0;
@@ -617,11 +451,9 @@ int aec_post_run(AecPost *p,
                 pdc = -1;
             }
 
-            /* ── Step 8: update_capture_saturation (3172) ────────────────── */
             aec_state_update_capture_saturation(obj->state,
                                                 saturated_capture);
 
-            /* ── Step 9: avg-render-reverb ───────────────────── */
             {
                 int x2_present = 0;
                 float decay_steady = 0.0f;
@@ -632,17 +464,8 @@ int aec_post_run(AecPost *p,
                     aec_post_avg_reverb_slots(n_part, in->partition_idx, delay,
                                               &delay_idx, &past_idx);
                 if (in->X_buf != NULL && n_part > 0) {
-                    /* x2 = (np.abs(X)**2).astype(f32) = cmag2_np per bin.
-                     * When the filter hands over its |X_buf|² mirror, both
-                     * rows are already those floats, so aec_post_compute_x2_reverb
-                     * (which only reads x2_at_delay/x2_past, never writes them)
-                     * reads straight out of in->x2_cache -- no copy needed.
-                     * The fallback stays fissioned into 2 independent
-                     * elementwise calls into the scratch pair: disjoint
-                     * destinations (x2_at_delay/x2_past), disjoint
-                     * nb-contiguous sources (Xd/Xp are two different
-                     * partition-slices of X_buf) -- no ordering dependency
-                     * between them. */
+                    /* x2 = |X|^2 per bin. With the filter's x2_cache mirror both rows are read in
+                     * place; otherwise they are computed from X_buf into the scratch pair. */
                     if (in->x2_cache != NULL) {
                         x2d = in->x2_cache + (size_t)delay_idx * nb;
                         x2p = in->x2_cache + (size_t)past_idx * nb;
@@ -654,26 +477,19 @@ int aec_post_run(AecPost *p,
                     }
                     x2_present = 1;
                 }
-                /* decay_steady = ree._reverb_decay(False): per-block power
-                 * multiplier 0.83^(hop_seconds/0.004), resolved once at
-                 * ree_init and never mutated afterward. */
                 decay_steady = obj->ree->reverb_decay_per_hop;
                 aec_post_compute_x2_reverb(p, x2_present, x2d, x2p, decay_steady);
             }
 
-            /* ── Step 10: coherence Γ²(Ŷ,Y) ──────────────────── */
             if (in->erle_coh_gate_enabled) {
                 aec_post_compute_coherence(p, in->echo_spec, in->near_spec,
                                            &mag);
             }
 
-            /* ── Step 11: aec_state.update ───────────────────── */
             {
-                /* far_pwr = mean(far_end²), f32 pairwise-sum / n; a plain f32 compare
-                 * against numpy's float(np.mean(...)), drift accepted. */
                 float far_pwr = sum_sq_f32_pairwise(in->far_end, (size_t)hop) / (float)hop;
                 int active_render = (far_pwr > in->active_render_threshold);
-                p->trace.far_active = active_render;   /* audio-passive trace stash */
+                p->trace.far_active = active_render;
                 int x2r_present_state =
                     (in->X_buf != NULL && n_part > 0);
                 aec_state_update(obj->state,
@@ -683,7 +499,7 @@ int aec_post_run(AecPost *p,
                                  p->echo_psd,
                                  active_render,
                                  in->s_ref_max, in->s_coa_max,
-                                 /*echo_path_gain (unused; analyzer drives)*/ 1.0,
+                                  1.0,
                                  sc->render_block_scaled, hop,
                                  in->filter_taps_full, in->filter_taps_full_len,
                                  x2r_present_state ? p->x2_reverb_for_erle : NULL,
@@ -691,31 +507,24 @@ int aec_post_run(AecPost *p,
                                  in->erle_coh_gate_enabled ? p->coh_gate_mask : NULL);
             }
 
-            /* ── Step 12: transition_triggered → set_initial_state(0) (3327) */
             if (aec_state_transition_triggered(obj->state))
                 suppression_gain_set_initial_state(obj->sg, 0);
 
-            /* Linear-only context: Steps 13-20 produce R², comfort noise and
-             * G_res (and advance the REE / CNG / suppression-gain state that
-             * only they read). Nothing after this point writes AecState, the
-             * stationarity estimator, the avg-render reverb or the pending
-             * echo-path flags, so the linear filter and the formed output
-             * are unaffected. Step 21's context_only return follows. */
+            /* Linear-only context: the remaining stages only produce R^2, comfort noise and G_res
+             * and advance the state that only they read, so stop here; the linear filter and
+             * formed output are unaffected. */
             if (in->linear_context_only) {
                 assert(in->context_only);
                 memcpy(out, in->raw_output, (size_t)hop * sizeof(float));
                 goto post_done;
             }
 
-            /* ── Step 13: converged_enough + dominant_ne ─────── */
             {
                 int converged_enough = (in->stationarity_active_hops
                                         >= in->stationarity_converge_hops);
                 int dominant_ne =
                     suppression_gain_is_dominant_nearend(obj->sg);
 
-                /* ── Step 14: ree update_reverb_models ───────── */
-                /* attach_reverb_decay_estimator: no-op (use_adaptive_decay=False). */
                 {
                     int delay_blocks =
                         aec_state_min_direct_path_filter_delay(obj->state);
@@ -726,39 +535,16 @@ int aec_post_run(AecPost *p,
                     int usable =
                         aec_state_usable_linear_estimate(obj->state);
 
-                    /* ── DT-gated min-gain floor lift (read at Step 20) ──
-                     * The energy-based near-recent latch is the product
-                     * policy. Keep the decision beside the gain consumer and
-                     * export the exact result through AecResContext so fused
-                     * consumers do not derive a second rule. */
+                    /* DT-gated min-gain floor lift (read when the gain is computed below). The
+                     * energy-based near-recent latch decides it; the result is exported via
+                     * AecResContext so fused consumers do not derive a second rule. */
                     obj->sg->dt_protect_active =
                         (in->dt_floor_enabled && in->nearend_recent) ? 1 : 0;
 
-                    /* _w_mag2 = |filter.W|² (cmag2_np), an n_part × nb
-                     * row-major block. in->W_all and sc->w_mag2 are single
-                     * contiguous flat blocks with row stride exactly nb at
-                     * every call site (aec.c dynamic malloc+memcpy /
-                     * static-arena carve of W_all and w_mag2), and REE's
-                     * frequency-response n_freqs is the same n_bins, so
-                     * row r is [r*nb, (r+1)*nb).
-                     *
-                     * Its one consumer -- ree_update_reverb_models ->
-                     * reverb_freq_resp_update -- reads exactly two rows,
-                     * the direct-path row delay_blocks and the tail row
-                     * n_part-1, and touches nothing at all when it takes an
-                     * early return. The conditions below are that consumer's
-                     * three early-return guards, evaluated here from the same
-                     * values passed into the call, so the rows materialized
-                     * are always exactly the rows about to be read;
-                     * delay_blocks moves hop to hop, so it must be read once
-                     * and used for both the guard and the row index.
-                     * cmag2_np_elem is per-index (not a reduction), so a row
-                     * slice produces bit-identical results to the same
-                     * elements inside a whole-block pass. Rows outside the
-                     * two are never read and are deliberately left stale; W
-                     * is rewritten every hop, so no result may be carried
-                     * across hops -- the only valid saving is computing
-                     * fewer rows. */
+                    /* |W|^2 (cmag2_np) as an n_part x nb block, but only the two rows the reverb
+                     * update reads (the direct-path row delay_blocks and the tail row n_part - 1)
+                     * are materialized, under the same guards as that consumer. Other rows are left
+                     * stale and not carried across hops. */
                     if (!in->stationary_block && fq_valid &&
                         delay_blocks >= 0 && delay_blocks < n_part) {
                         int tail_row = n_part - 1;
@@ -772,16 +558,13 @@ int aec_post_run(AecPost *p,
                     }
                     ree_update_reverb_models(obj->ree, sc->w_mag2, n_part,
                                              delay_blocks, filter_q,
-                                             /*fq_is_none=*/!fq_valid,
+                                             !fq_valid,
                                              in->stationary_block);
 
-                    /* ── Step 15: ree.estimate ───────────────── */
                     {
                         int saturated = aec_state_saturated_echo(obj->state);
                         int transparent =
                             aec_state_transparent_mode_active(obj->state);
-                        /* onset = erle_onset_comp_in_dominant or not dominant_ne.
-                         * erle_onset_comp_in_dominant is False in balanced. */
                         int onset_comp = obj->ree->erle_onset_comp_in_dominant;
                         int onset = onset_comp || !dominant_ne;
                         const float *erle =
@@ -793,10 +576,10 @@ int aec_post_run(AecPost *p,
                                      dominant_ne, usable, saturated, transparent,
                                      erle, erle_unb,
                                      delay_blocks, n_part,
-                                     /*force_nonlinear=*/0,
+                                     0,
                                      sc->r2, sc->r2_unb);
 
-                        /* ── Step 17: stationarity R² zeroing ──── */
+                        /* Stationarity R^2 zeroing */
                         {
                             int use_stat = in->use_stationarity_properties;
                             int need = use_stat && converged_enough;
@@ -811,29 +594,17 @@ int aec_post_run(AecPost *p,
                                 for (k = 0; k < nb; ++k)
                                     if (stat_mask[k]) { any = 1; break; }
                                 if (any) {
-                                    /* r2/r2_unb are disjoint destinations
-                                     * sharing the same mask + index range --
-                                     * no ordering dependency between the two
-                                     * calls, so each converts independently
-                                     * to sk_mask_zero_f32 (verbatim
-                                     * `if (mask[k]) x[k]=0.0f;`). */
                                     sk_mask_zero_f32(sc->r2, stat_mask, nb);
                                     sk_mask_zero_f32(sc->r2_unb, stat_mask, nb);
                                 }
                             }
 
-                            /* ── Live observer, between Steps
-                             * 17 and 18. See aec_post_run_observer_step's
-                             * own doc comment above for the full rationale
-                             * and why it cannot be driven by the caller. */
+                            /* Live observer, after the stationarity R^2 zeroing. */
                             aec_post_run_observer_step(p, in, obj, sc, nb,
                                                        dominant_ne, usable,
                                                        stat_mask);
 
-                            /* ── Step 18: nearend_pwr ──────────── */
                             if (usable) {
-                                /* np.minimum compares in float -- exact shape
-                                 * of sk_min_f32: (a<b)?a:b. */
                                 sk_min_f32(sc->nearend_pwr, p->error_psd,
                                           p->near_psd, nb);
                             } else {
@@ -841,26 +612,16 @@ int aec_post_run(AecPost *p,
                                       (size_t)nb * sizeof(float));
                             }
 
-                            /* ── Step 19: comfort_noise ────────── */
                             aec_post_compute_comfort_noise(p,
                                                            saturated_capture);
 
-                            /* ── Step 20: suppression_gain.get_gain (3574) ─── */
                             {
                                 const float *gain;
-                                int sat_echo = saturated;  /* aec_state.saturated_echo() */
+                                int sat_echo = saturated;
                                 if (in->spatial_linear_context) {
-                                    /* G_res is provably unused downstream in
-                                     * this mode (context_only is required, so
-                                     * apply_output below never reads it
-                                     * either) -- but the DominantNearend
-                                     * hold-state must keep advancing: it is
-                                     * read via suppression_gain_is_dominant_
-                                     * nearend() at Step 13 of the NEXT hop,
-                                     * feeding the ERLE onset flag ->
-                                     * ree_estimate() -> r2, which a downstream
-                                     * fused-context consumer (e.g. the 4ch
-                                     * wrapper's fuse_contexts()) does use. */
+                                    /* G_res is unused in this mode (context_only is required), but
+                                     * the DominantNearend hold state must keep advancing: the next
+                                     * hop's ERLE onset flag and r2 depend on it. */
                                     suppression_gain_update_dominant_nearend(
                                         obj->sg, sc->nearend_pwr, sc->r2,
                                         sc->r2_unb, p->comfort_noise);
@@ -869,18 +630,8 @@ int aec_post_run(AecPost *p,
                                     gain = suppression_gain_get_gain(
                                         obj->sg, sc->nearend_pwr, sc->r2, sc->r2_unb,
                                         p->comfort_noise, sc->render_block_scaled,
-                                        /*clock_drift=*/0, sat_echo);
+                                        0, sat_echo);
 
-                                    /* audio-passive trace stash: mean per-bin
-                                     * gain. Its only reader is aec.c's
-                                     * --debug-trace row, which needs
-                                     * cfg.enable_res AND the aec_process()
-                                     * path; in->context_only is exactly the
-                                     * complement of that (set from
-                                     * !enable_res && return_res_context), so
-                                     * in ctx-only the sum feeds nothing.
-                                     * trace.gain_mean keeps the value
-                                     * aec_post_reset seeded. */
                                     if (!in->context_only) {
                                         float gsum = 0.0f;
                                         for (k = 0; k < nb; ++k) gsum += gain[k];
@@ -888,20 +639,16 @@ int aec_post_run(AecPost *p,
                                     }
                                 }
 
-                                /* ── Step 21: apply_output ──────── */
                                 /* spatial_linear_context implies context_only
-                                 * (aec_validate_config() enforces this), so
-                                 * the NULL `gain` above is never dereferenced
-                                 * by aec_post_apply_output(). */
+                                 * (aec_validate_config()), so the NULL gain is never
+                                 * dereferenced by aec_post_apply_output(). */
                                 assert(!in->spatial_linear_context ||
                                        in->context_only);
                                 if (in->context_only) {
-                                    /* The external joint NR/RES consumes E(f),
-                                     * gain, R² and comfort_noise, then performs
-                                     * its own CNG/IFFT/OLA. Preserve the run()
-                                     * output contract by returning the linear
-                                     * residual, without advancing the otherwise
-                                     * private AEC synthesis OLA/CNG phase. */
+                                    /* context_only: the external joint stage consumes E(f), gain,
+                                     * R^2 and comfort_noise and does its own CNG/IFFT/OLA, so
+                                     * return the linear residual and leave the private OLA/CNG
+                                     * phase alone. */
                                     memcpy(out, in->raw_output,
                                            (size_t)hop * sizeof(float));
                                 } else {

@@ -1,4 +1,4 @@
-"""Generate a binary golden for the C residual_echo_estimator port (WS5).
+"""Generate a binary golden for the C residual_echo_estimator port.
 
 Hooks the REAL balanced pipeline (orchestrator) by monkeypatching
 ResidualEchoEstimator.update_reverb_models + .estimate, capturing every input
@@ -8,12 +8,11 @@ AEC-Challenge cases (one DT / FS / NE) so all gain/R² branches are exercised:
   - farend_singletalk : echo-dominant, linear path R² = S²/ERLE
   - nearend_singletalk: near-dominant, nonlinear X²·g² + nl_r2 path
 
-Writes raw little-endian binary; a C replay harness (not shipped in this tree)
-replays the full estimator (update_reverb_models → estimate) and asserts every
-output bit-exact, INCLUDING the _last_r2_direct_component /
-_last_r2_reverb_component decomposition (so a reverb-tail bug can't hide behind
-a direct-path match) and the bound ReverbFrequencyResponse tail_response /
-average_decay.
+Writes raw little-endian binary holding every input and the expected outputs of
+the full estimator (update_reverb_models → estimate), INCLUDING the
+_last_r2_direct_component / _last_r2_reverb_component decomposition (so a
+reverb-tail bug can't hide behind a direct-path match) and the bound
+ReverbFrequencyResponse tail_response / average_decay.
 
 Per-frame record layout (all LE):
   int32 reset_before   ; 1 = ResidualEchoEstimator.reset() fired before this hop
@@ -49,7 +48,7 @@ Header (LE):
   per case: int32 n_frames, int32 max_partitions, then the per-frame records.
 
 Config constants (written ONCE in a preamble, captured from the live estimator
-on the first frame): see CFG_FIELDS below.
+on the first frame): see the config preamble in main().
 
 Run: python3 python/diag/gen_residual_echo_estimator_golden.py /tmp/ree_golden.bin
 """
@@ -105,9 +104,9 @@ def run_case(stem, frames):
     # pending holds the update_reverb_models record until the matching estimate.
     pending = {}
     cfg_holder = {}
-    # AEC3-strict mid-stream reset (coarse-rescue rising edge, orchestrator
-    # ~line 1921). Clears noise floor + counter + reverb_model + freq_resp
-    # (NOT the render deques). Recorded per-frame so the C test replays it.
+    # Mid-stream reset (coarse-rescue rising edge). Clears noise floor + counter +
+    # reverb_model + freq_resp (NOT the render deques). Recorded per frame so the C
+    # side replays it.
     reset_state = {'pending': 0}
 
     def patched_reset(self):
@@ -230,10 +229,9 @@ def run_case(stem, frames):
     ResidualEchoEstimator.estimate = patched_est
     ResidualEchoEstimator.reset = patched_reset
     try:
-        # frame_size=512 is explicit (not the current product default of 256
-        # at 16 kHz) so the real-pipeline cases stay at N_BINS=257 bins,
-        # matching this module's hardcoded N_BINS and the synthetic_saturated
-        # case below -- the file format assumes one n_bins for every case.
+        # frame_size=512 is explicit (the product default at 16 kHz is 256) so the real
+        # cases stay at N_BINS=257, the one n_bins the file format assumes for every
+        # case.
         cfg = AecConfig.from_preset(
             'balanced', sample_rate=16000, frame_size=512, filter_length=832,
             mode=AecMode.PBFDKF, enable_shadow=True,
@@ -377,7 +375,7 @@ def main():
           f"saturated_linear={n_sl} saturated_nonlinear={n_snl}")
 
     with open(out, 'wb') as f:
-        # ── config preamble (the C test feeds these into ree_init) ──
+        # config preamble (fed into ree_init by a C-side replay)
         f.write(struct.pack('<i', N_BINS))
         f.write(struct.pack('<i', cfg['hop_size']))
         f.write(struct.pack('<d', cfg['min_noise_floor_power']))

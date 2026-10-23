@@ -1,34 +1,17 @@
-/* test_shared_fft_handle.c — shared-FFT-handle regression test.
+/* test_shared_fft_handle.c -- shared-FFT-handle regression test.
  *
- * aec_create()/aec_init() share exactly ONE FftHandle across the
- * sub-modules (main_filter.base.fft, shadow_filter.fft, post_fft), all at
- * the identical fft_size: aec_carve() constructs it once and hands the same
- * pointer to pbfdkf_init_static()/pbfdaf_init_static() via their required
- * `shared_fft` parameter; pbfdaf_free()'s static-path branch does not
- * destroy it (ownership stays with post_fft, torn down once by
- * aec_destroy()). This test proves:
+ * aec_create()/aec_init() share exactly ONE FftHandle across the sub-modules (main_filter.base.fft, shadow_filter.fft,
+ * post_fft), all at the same fft_size: aec_carve() constructs it once and hands the same pointer to
+ * pbfdkf_init_static()/pbfdaf_init_static() via their required `shared_fft` parameter; pbfdaf_free()'s static-path branch
+ * does not destroy it (ownership stays with post_fft, torn down once by aec_destroy()). This test proves:
+ *   1. All three FftHandle pointers on a live instance are the exact SAME address, not merely equal-sized objects, across
+ *      the 3 contracted grids x shadow on/off. Per-sub-module private handles would fail it immediately.
+ *   2. The shared identity survives aec_reset() (reset clears state, never re-carves the pool/arena).
+ *   3. Both aec_create() (heap arena) and aec_init() (caller pool) share the handle.
+ *   4. Audio is identical with and without sharing, so only the pointer identity can pin the ownership invariant; the
+ *      byte-equal aec_wav render gate covers the audio side.
  *
- *   1. All three FftHandle pointers on a live instance are the exact SAME
- *      address, not merely equal-sized/equivalent objects -- across all 3
- *      officially-contracted grids x shadow on/off. A revert to
- *      per-sub-module private handles would make this fail immediately
- *      (main_filter.base.fft/shadow_filter.fft would point at distinct
- *      heap/pool regions from post_fft).
- *   2. The shared identity survives aec_reset() (reset never re-carves the
- *      pool/arena, only clears state -- the handle pointers must be
- *      untouched).
- *   3. Both aec_create() (heap arena) and aec_init() (caller pool) share the
- *      same handle-identity property -- the sharing is not an accident of
- *      one construction path only.
- *   4. Sharing produces byte-identical AecResContext to a hypothetical
- *      per-sub-module-owned world: proven indirectly via the existing
- *      byte-equal aec_wav render gate (see CHANGELOG.md), not re-derived
- *      here -- this file's job is to pin the OWNERSHIP invariant a render
- *      diff cannot see (two builds with/without sharing produce identical
- *      audio either way; only the pointer identity differs).
- *
- * Build (standalone, from c_impl/ — mirrors test_process_context.c's
- * documented recipe):
+ * Build (standalone, from c_impl/):
  *   make -C ../../audiolib/common BACKEND=ne10 lib
  *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=gnu99 -Iinclude -Iexample \
  *       -I../../audiolib/common/include \
@@ -68,9 +51,8 @@ static void check_shared_identity(const Aec* a, int enable_shadow, const char* l
     }
 }
 
-/* aec_create() (heap arena) path, across all 3 officially-contracted grids
- * (see AEC/docs/development_guide.md / pipelines/README.md "Parameter Alignment") x shadow
- * on/off. */
+/* aec_create() (heap arena) path, across the 3 contracted grids (see pipelines/README.md "Parameter
+ * Alignment") x shadow on/off. */
 static void test_shared_identity_heap(int sample_rate, int fft_size, int enable_shadow) {
     AecConfig cfg;
     aec_config_from_preset(&cfg, AEC_PRESET_BALANCED, sample_rate);

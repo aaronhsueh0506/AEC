@@ -1,12 +1,4 @@
-/* saturation_detector.c — C port of
- * python/modules/state/saturation_detector.py.
- *
- * The else-branch reduction (max over |render_block|) runs in float32 to match
- * `np.abs(render_block).max()` on a float32 array; the resulting f32 scalar and
- * the margin/gain multiplies + the final compare are all float32 (drift versus
- * Python accepted). The usable-branch comparisons are f32 vs f32.
- * Built with -ffp-contract=off so nothing fuses.
- */
+/* saturation_detector.c -- see saturation_detector.h. All comparisons are float32. */
 #include "saturation_detector.h"
 #include "utility/simd_aec.h"
 
@@ -26,14 +18,11 @@ void saturation_detector_update(SaturationDetector *d,
         return;
     }
     if (usable_linear_estimate) {
-        /* refined_max_abs > THR or coarse_max_abs > THR  (all f32). */
         d->saturated_echo =
             (subtractor_s_refined_max_abs > SATDET_SATURATION_THRESHOLD ||
              subtractor_s_coarse_max_abs  > SATDET_SATURATION_THRESHOLD) ? 1 : 0;
     } else {
-        /* max_sample = np.abs(render_block).max() if size>0 else 0.0 */
         float max_sample = sk_max_abs_f32(render_block, render_block_len);
-        /* peak = max_sample * echo_path_gain * _RENDER_MARGIN  (all f32). */
         {
             float peak = max_sample * echo_path_gain * SATDET_RENDER_MARGIN;
             d->saturated_echo = (peak > SATDET_INT16_SATURATION) ? 1 : 0;

@@ -1,14 +1,7 @@
-/* aec_wav.c — WAV processing CLI on top of aec.
- *
- * Notes:
- *   - balanced reverb 0.85/1.6 is set in aec_config_from_preset.
- *   - CNG is OFF by default; --cng enables it.
- *   - --preset takes the AecPreset value 0/1/2/3 or the name
- *     mild/balanced/aggressive/no_floor.
- *   - The hop size is derived from sample_rate by aec (no fixed [160]).
- *
- * Plus --debug-level for log infra.
- */
+/* aec_wav.c -- WAV processing CLI on top of aec.
+ *  - --preset takes 0/1/2/3 or mild/balanced/aggressive/no_floor.
+ *  - The hop size comes from the library's signal grid (fft_size / 2).
+ *  - --debug-level / --debug sets the debug level and periodic status print. */
 #include "aec.h"
 #include "aec_debug.h"
 #include "wav_io.h"
@@ -61,14 +54,9 @@ static const char* delay_mode_name(AecDelayMode m) {
     }
 }
 
-/* Config rejection is reported identically wherever it happens: the two
- * entry points that can reject (aec_get_mem_breakdown() under
- * --print-mem-size, aec_create() on the render path) run the SAME
- * aec_validate_config(), so a caller who hits one must not be told less
- * than a caller who hits the other. Prints every delay field as it was
- * actually resolved plus the full legality table, so the user can see which
- * of their flags is the illegal one without re-running under the other
- * entry point. */
+/* Config rejection is reported the same way wherever it happens (aec_get_mem_breakdown() under
+ * --print-mem-size, aec_create() otherwise): prints every delay field as resolved plus the legality
+ * table. */
 static void print_config_rejected(const char* who, int sr,
                                   const AecConfig* cfg) {
     fprintf(stderr,
@@ -102,17 +90,11 @@ int main(int argc, char* argv[]) {
     int debug_level = 0;
     const char* debug_log = NULL;
     const char* debug_trace = NULL;
-    int debug_status = 0;   /* --debug: periodic aec_debug_status() print */
+    int debug_status = 0;
     int fft_size = 0;
-    /* Delay-mode overrides. A separate "was it given" flag rather than a
-     * sentinel value for the same reason as --fft-size==0 above: overloading
-     * a magic value as "not given" would make an explicit, legal user value
-     * indistinguishable from "unset". Each is handed to aec_create()
-     * UNVALIDATED on purpose -- aec_validate_config() is the single range
-     * and mode/field-compatibility authority, so
-     * an illegal value or combination fails the run there rather than being
-     * silently clamped or ignored into a different configuration than the
-     * one asked for. */
+    /* Delay-mode overrides use a separate "given" flag, and are handed to aec_create() unvalidated
+     * so aec_validate_config() is the single authority; illegal values fail the run instead of
+     * being clamped. */
     AecDelayMode delay_mode = AEC_DELAY_MATCHED;  int have_delay_mode = 0;
     int delay_num_filters = 0;                    int have_delay_num_filters = 0;
     int fixed_delay_samples = 0;                  int have_fixed_delay = 0;
@@ -170,10 +152,7 @@ int main(int argc, char* argv[]) {
         fprintf(stderr, "ERROR: cannot open input wavs\n"); return 3;
     }
 
-    /* Reject an unsupported sample rate (or a mic/ref rate mismatch)
-     * before ever constructing an AecConfig — aec_create would reject the
-     * same rate via aec_validate_config, but failing here gives a
-     * clear, WAV-specific message instead of a bare aec_create() failure. */
+    /* Reject an unsupported sample rate (or a mic/ref rate mismatch) with a WAV-specific message. */
     if (!aec_is_valid_sample_rate(mr->info.sample_rate)) {
         fprintf(stderr,
             "ERROR: unsupported mic sample rate %d Hz (AEC whitelist: 8000/16000/48000 Hz)\n",
@@ -199,15 +178,8 @@ int main(int argc, char* argv[]) {
 
     AecConfig cfg;
     aec_config_from_preset(&cfg, preset, sr);
-    /* Grid resolution happens HERE, in the CLI, before the library is
-     * called: a user who did not pass --fft-size gets this rate's product
-     * default (already filled by aec_config_from_preset via
-     * aec_default_fft_size), and the value handed to aec_create() is always
-     * a concrete nonzero fft_size. The core deliberately refuses
-     * fft_size == 0 -- 16 kHz has two production grids and the library must
-     * not guess which one a caller meant. Rejecting the unresolved pair
-     * here (rather than letting aec_create() fail with the same message
-     * further down) also catches a bad --fft-size before any allocation. */
+    /* Grid resolution happens here: the fft_size handed to aec_create() is always concrete (the
+     * rate's default unless --fft-size is given), since the core refuses fft_size == 0. */
     if (fft_size > 0) cfg.fft_size = fft_size;
     if (!aec_resolve_signal_grid(sr, cfg.fft_size, NULL)) {
         fprintf(stderr,
@@ -227,15 +199,10 @@ int main(int argc, char* argv[]) {
     if (have_fixed_delay)        cfg.fixed_delay_samples = fixed_delay_samples;
     if (have_delay_est_period)   cfg.delay_est_period_s = delay_est_period_s;
 
-    /* --print-mem-size: answer the static-pool question and exit, before
-     * any debug/log setup or Aec construction — no audio is touched.
-     * aec_get_mem_breakdown() runs the same
-     * aec_validate_config() every other entry point does, so an illegal
-     * mode/field combination fails HERE with the library's own validation
-     * outcome (fail-fast), not a silently-different config. */
+    /* --print-mem-size: report the static-pool size and exit before any audio is touched. */
     if (print_mem_size) {
         AecSignalGrid grid;
-        aec_resolve_signal_grid(sr, cfg.fft_size, &grid);   /* already proven valid above */
+        aec_resolve_signal_grid(sr, cfg.fft_size, &grid);
         AecMemBreakdown mb;
         if (!aec_get_mem_breakdown(&cfg, &mb)) {
             print_config_rejected("aec_get_mem_breakdown", sr, &cfg);
@@ -274,8 +241,7 @@ int main(int argc, char* argv[]) {
     int hop = aec_hop_size(&aec);
     aec_debug_set_frame(0, hop, sr);
 
-    /* Default to float32 output for parity-friendly comparison; override
-     * via AEC_OUT_FLOAT=0 if 16-bit PCM needed (the key wav_io.h reads). */
+    /* Default to float32 output; AEC_OUT_FLOAT=0 selects 16-bit PCM. */
     if (!getenv("AEC_OUT_FLOAT")) setenv("AEC_OUT_FLOAT", "1", 1);
     WavWriter* ww = wav_open_write(out_path, sr, 1);
     if (!ww) { fprintf(stderr, "ERROR: cannot write output\n"); return 3; }
@@ -284,7 +250,7 @@ int main(int argc, char* argv[]) {
     float* ref = (float*)malloc((size_t)hop * sizeof(float));
     float* out = (float*)malloc((size_t)hop * sizeof(float));
 
-    /* --debug cadence: approximately once per second on every signal grid. */
+    /* --debug cadence: about once per second. */
     int frames_per_sec = hop > 0 ? sr / hop : 0;
     if (frames_per_sec <= 0) frames_per_sec = 1;
 
@@ -320,20 +286,12 @@ int main(int argc, char* argv[]) {
             delay_mode_name(cfg.delay_mode), cfg.delay_num_filters,
             cfg.fixed_delay_samples);
 
-    /* Duty-cycle engagement census for this run (see the duty_hops_* doc in
-     * aec.h). Printed unconditionally: it is
-     * one line, and the whole point is that the "~90% of the matched-filter
-     * cost" design figure stops being an assumption and becomes a number a
-     * bench can read off every run. */
+    /* Duty-cycle engagement census for this run (see the duty_hops_* fields in aec.h). */
     {
         AecDebugStatus st;
         aec_debug_status(&aec, &st);
         if (st.duty_hops_total == 0) {
-            /* No matched filter was ever constructed this run (any mode
-             * other than MATCHED, or the legacy enable_delay_est=0 mirror
-             * of it) -- there was no matched-filter cost to decimate, so
-             * reporting a "% saved" here would claim a saving for a machine
-             * that never ran at all. */
+            /* No matched filter is constructed in this mode, so no saving is reported. */
             fprintf(stderr, "duty: matched_filter_ran=0/0 hops "
                             "(n/a -- no matched-filter estimator in delay_mode=%s)\n",
                     delay_mode_name(cfg.delay_mode));

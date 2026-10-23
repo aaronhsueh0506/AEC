@@ -5,16 +5,11 @@ DoubleTalkAnalyzer over a deterministic stimulus and writes inputs + expected
 per-frame state to a raw little-endian file that
 ``c_impl/test/modules/parity_detectors.c`` replays.
 
-The harness existed with no generator and no Makefile target, so nothing ever
-ran it. That is how ``SHADOW_FRAME_GATE`` drifted: commit 6cd995e (2026-06-12)
-changed the Python gate 50 -> 20 and never mirrored it to C, and no gate
-noticed for eight weeks.
-
 The stimulus is engineered to exercise every branch, in particular the ones a
 naive random signal would miss:
   * far silence -> ``_active_prev`` False, ``_is_stationary`` False
   * the FIRST audible far hop -> variance is undefined from one observation, so
-    stationarity must NOT be declared (the branch C got wrong until 2026-08-06)
+    stationarity must NOT be declared
   * a long constant-amplitude far stretch -> CV^2 collapses -> stationary True
   * an amplitude-modulated stretch -> CV^2 rises -> stationary False
   * far returning to silence -> the latch drops, then re-arms
@@ -23,12 +18,12 @@ naive random signal would miss:
     reset it (this is what makes CONV_FRAMES an evidence count, not a duration)
   * a qualifying-but-failing hop -> counter resets to 0
   * post-convergence divergence EMA rise and its else-branch decay
-  * ``shadow_frame_count`` swept slowly across [0, 60) so it passes through the
-    whole [20, 50) window where a Python gate of 20 and a C gate of 50 disagree.
-    Any future divergence in that constant fails this golden on those frames.
+  * ``shadow_frame_count`` swept slowly across [0, 60) so every value around the
+    SHADOW_FRAME_GATE boundary is visited; any divergence in that constant
+    between Python and C fails this golden on those frames.
 
 The header carries ``sample_rate`` as well as ``hop``: every wall-clock constant
-in detectors.py/.c is now retimed from (hop, sample_rate), and hop alone cannot
+in detectors.py/.c is retimed from (hop, sample_rate), and hop alone cannot
 disambiguate the grids -- hop=128 is both 8 kHz (16.000 ms) and 16 kHz
 (8.000 ms), which retime to different coefficients.
 
@@ -120,19 +115,18 @@ def build_stimulus(hop, n_frames, rng):
         else:
             near_pwr_eff = near_pwr
 
-        # erl_est must be LARGE (small erl_ceiling) and mic_pwr comparable to
-        # far_pwr, or update_energy_dt's `inst` pins to 0 for the whole run and
-        # both DTE branches just multiply zero -- which silently leaves
-        # DTE_RISE_*/DTE_DECAY_* untested. A mutation test caught exactly that.
-        # mic_pwr swings so `inst` crosses dt_from_energy in both directions,
-        # exercising the rise branch and the decay branch.
+        # erl_est must be LARGE (small erl_ceiling) and mic_pwr comparable to far_pwr,
+        # or update_energy_dt's `inst` pins to 0 for the whole run and both DTE branches
+        # just multiply zero, leaving DTE_RISE_*/DTE_DECAY_* untested. mic_pwr swings so
+        # `inst` crosses dt_from_energy in both directions, exercising the rise branch
+        # and the decay branch.
         erl_est = 0.8
         mic_pwr = 0.20 + 0.80 * ((fi % 10) / 9.0)
         main_err = 1.0e-3 * (1.0 + 0.5 * ((fi % 11) / 10.0))
         shadow_err = 1.0e-3 * (0.4 + 0.9 * ((fi % 13) / 12.0))
         far_excited = int(far_active and (fi % 9) != 0)
-        # Sweep slowly through [0, 60) so every value in the [20, 50) window
-        # where a 20-gate and a 50-gate disagree is visited on several frames.
+        # Sweep slowly through [0, 60) so every value around SHADOW_FRAME_GATE is
+        # visited on several frames.
         shadow_count = min(60, fi // 4)
 
         yield (far, near_pwr_eff, raw_err_pwr, mic_pwr, erl_est,

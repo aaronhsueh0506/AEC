@@ -1,114 +1,23 @@
-/* test_rate_structural.c — per-rate unity/impulse/COLA structural checks.
- * Wired to the `make test-rate-structural` target.
+/* test_rate_structural.c -- per-rate structural checks, run by `make test-rate-structural` on each whitelisted
+ * grid (8000/256, 16000/256, 16000/512, 48000/1024):
+ *   (a)  COLA: the rate's synthesis window (AecBalancedRateDims::synth_window, via aecb_rate_cfg()) satisfies
+ *        w[i]^2 + w[i+hop_size]^2 == 1 within 1e-6.
+ *   (b)  impulse through the linear path (enable_res = 0, enable_cng = 0): finite output from hop 0 and residual
+ *        energy well below mic energy after convergence. (b2): the same excitation through the full post chain
+ *        (enable_res = 1), which reads the per-grid aecb_rate_cfg() tuning row.
+ *   (c)  aec_get_mem_size grows 8k < 16k < 48k and is identical across the four presets at a fixed rate. (c2):
+ *        aec_init (static pool) is byte-equal to aec_create (heap) on every grid.
+ *   (d)  retiming of the top-level constants authored as hop counts / per-hop EMAs on the 10 ms / 16 kHz grid
+ *        (shadow_err_alpha, warmup_frames, epc_hangover, ne_recent_hold, filter_misadjustment_{stable,hangover}_frames,
+ *        EPV_FAST_TC/EPV_SLOW_TC): each covers about the same wall-clock duration on every grid.
+ *   (d2) the same for the adaptation-path constants (Aec::alpha_pow, alpha_erl_tracking/converged, PBFDKF::alpha_r,
+ *        Saturation::alpha_attack/release) and the duty-cycle ERLE watchdog leak (0.1 dB/s); (d2b): that leak is exact
+ *        at its authoring grid. (d3)-(d7) are described at their sections.
+ *   (e)  external RES/NR seam: ctx.error_spec reconstructs the previous ctx.formed_hop through the sqrt-Hann WOLA and
+ *        near_spec == error_spec + echo_spec, with shadow selection on and off. (e2): spatial_linear_context leaves
+ *        every context field except res_gain identical to a baseline. (e3): suppression_gain_update_dominant_nearend()
+ *        tracks get_gain()'s DominantNearend state hop by hop.
  *
- * The following checks run at each of the four whitelisted grids
- * (8000/256, 16000/256, 16000/512, 48000/1024):
- *
- *   (a) COLA: the rate's own synthesis window (AecBalancedRateDims::
- *       synth_window, looked up via aecb_rate_cfg()) satisfies the
- *       sqrt-Hann 50%-overlap perfect-reconstruction identity --
- *       w[i]^2 + w[i+hop_size]^2 == 1 for i in [0, hop_size) -- within 1e-6.
- *       This is the actual OLA correctness property the synthesis stage
- *       depends on; carve time asserts synth_window_len == block_size, this
- *       test asserts the WINDOW SHAPE itself reconstructs.
- *
- *   (b) impulse-through-linear-path: build an Aec at each rate with
- *       cfg.enable_res = 0 (linear-only output, same knob aec_wav.c's
- *       --no-res flips) and cfg.enable_cng = 0 (deterministic, no dither),
- *       drive it with a periodic impulse train on far + a delayed, scaled
- *       copy on mic (a trivial single-tap synthetic echo path), and assert:
- *         - every output sample is finite (no NaN/Inf) from hop 0 onward;
- *         - after enough hops to converge, the residual energy has dropped
- *           well below the mic energy (a generous ratio threshold -- this
- *           is structural sanity that the linear path actually adapts and
- *           cancels at every rate, not a quality bar).
- *
- *   (b2) impulse-through-full-post-chain: identical excitation, cfg.enable_res
- *       = 1 -- the actual production path. (b) alone never touches the
- *       post-filter chain (SuppressionGain/ResidualEchoEstimator/CNG), which reads
- *       a per-(sample_rate, fft_size) tuning row from aecb_rate_cfg().
- *
- *   (c) aec_get_mem_size monotonicity/consistency: pool size must increase
- *       8k < 16k < 48k (bigger FFT/filter/n_partitions at higher rates), and
- *       must be identical across all four presets at a fixed rate (mild/
- *       balanced/aggressive/no_floor differ only in a few float/int fields,
- *       not a size-affecting one).
- *
- *   (c2) aec_init (static pool) byte-equal to aec_create (heap), full
- *       post-chain, every grid -- looping all four grids explicitly so a
- *       default flip can't silently leave the non-default grid's static path
- *       unchecked.
- *
- *   (d) top-level (non-reference) constant retiming: proves
- *       shadow_err_alpha / warmup_frames / epc_hangover / ne_recent_hold /
- *       filter_misadjustment_{stable,hangover}_frames and EpcDetector's
- *       EPV_FAST_TC/EPV_SLOW_TC cover approximately the SAME wall-clock
- *       duration at every grid -- these are project-native (non-reference)
- *       constants authored as literal hop counts / per-hop EMA constants at
- *       the hop=160/sample_rate=16000 (10 ms) grid. Builds via
- *       aec_config_from_preset() THEN overrides cfg.fft_size (mirrors
- *       aec_wav.c's --fft-size flag) before aec_create() -- the post-defaults
- *       grid-override path that makes retiming live in aec_carve() rather
- *       than aec_config_defaults() (see aec.c's
- *       aec_legacy10ms_hops()/aec_legacy10ms_alpha() doc comment).
- *
- *   (d2) adaptation-constant retiming: the same property for the five
- *       constants that live in the ADAPTATION path rather than in AecConfig --
- *       Aec::alpha_pow (per-SAMPLE), alpha_erl_tracking/alpha_erl_converged,
- *       PBFDKF::alpha_r, and Saturation::alpha_attack/alpha_release. They are
- *       assigned in aec_carve()/pbfdkf_init_static()/saturation_init(), not read out
- *       of the config struct. This is the C mirror of
- *       python/tests/test_detector_timing_effective_values.py, so the C/Python
- *       agreement is a REGRESSION GATE. Includes both halves of the negative
- *       space: the 16 ms-authored saturation pair must NOT move on a 16 ms
- *       grid, and the 10 ms/per-sample constants MUST move where the grids
- *       differ -- including alpha_r, whose anchor is 10 ms, so a 16 ms grid is
- *       one of the places it has to move.
- *       (d2) also covers the one ADDITIVE per-hop rate in the same family,
- *       the duty-cycle ERLE watchdog leak (0.1 dB/s, asserted through the
- *       60 s span it takes to leak the watchdog's 6 dB threshold) --
- *       and unlike every retention above it has no identity grid among the
- *       four, so a reverted literal fails on all four rows.
- *
- *   (d2b) that additive rate is EXACT at its authoring grid: the retimed
- *       expression returns the authored 0.001 dB/hop bit-for-bit at
- *       hop=160/sample_rate=16000, which is what makes the retime leave the
- *       10 ms grid's behaviour untouched. That grid is a 320-sample frame and
- *       therefore unconstructible, so the value is read through an
- *       AEC_TESTING hook. The drift check tying that hook's answer to the
- *       field aec_carve() actually stored lives in (d2), where the
- *       constructed instance already exists.
- *
- *   (e) external RES/NR seam WOLA identity: with internal RES disabled and
- *       return_res_context enabled, reconstruct ctx.error_spec with the
- *       matching sqrt-Hann synthesis/OLA and verify it produces the previous
- *       ctx.formed_hop. Runs with shadow selection both enabled and disabled,
- *       and also verifies near_spec == error_spec + echo_spec. This catches a
- *       wrong context pointer to PBFDKF's non-reconstructing estimator
- *       error_spec_windowed even though the synthesis window itself passes
- *       the standalone COLA check in (a).
- *
- *   (e2) spatial_linear_context: an Aec configured to skip computing its own
- *       (otherwise-unused) per-lane suppression gain must still expose an
- *       identical R²/comfort_noise/near_spec/echo_spec/error_spec/formed_hop
- *       to a baseline instance fed the same inputs -- only res_gain differs
- *       (NULL instead of the computed array). Runs with shadow selection
- *       both enabled and disabled.
- *
- *   (e3) suppression_gain_update_dominant_nearend() vs get_gain(): drives two
- *       SuppressionGain instances (via two Aec's a3_sg) through a
- *       deliberately-constructed enter/hold/early-exit cycle of the
- *       DominantNearend state machine and asserts dne_trigger_counter/
- *       dne_hold_counter/dne_nearend_state match every hop. This is the
- *       actual "removing the state-updating prefix must fail" mutation
- *       proof for the spatial_linear_context design in (e2) -- deterministic
- *       by construction rather than dependent on an incidental signal
- *       reaching these states. Dropping get_gain()'s call to
- *       suppression_gain_update_dominant_nearend() fails at all 4 grids
- *       (unlike (e2)'s dependence on whether a specific synthetic signal
- *       happens to reach these states).
- *
-
  * Build (standalone; from c_impl/):
  *   make -C ../../audiolib/common lib
  *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=gnu99 -DAEC_TESTING -Iinclude -Iexample \
@@ -176,10 +85,8 @@ static void test_cola(void) {
     }
 }
 
-/* FilterAnalyzer's 64/128-sample peak-exclusion window is 4/8 ms
- * at 16 kHz. It indexes impulse-response samples, so the 48-kHz product
- * grid needs 192/384 rather than the 16 kHz literals 64/128. Legacy 8 kHz remains
- * frozen at its established values and is not retuned by this test. */
+/* FilterAnalyzer's peak-exclusion window is 64/128 samples (4/8 ms at 16 kHz) and indexes impulse-response samples, so
+ * the 48 kHz product grid needs 192/384. The 8 kHz grid is not retuned by this test. */
 static void test_filter_analyzer_rate_scaled_exclusion_window(void) {
     static const int expected_low[] = { 64, 64, 64, 192 };
     static const int expected_high[] = { 128, 128, 128, 384 };
@@ -228,19 +135,10 @@ static float lcg_uniform(void) {
 /* ── (b) impulse-through-linear-path (and, parametrized, through the full
  * post-filter chain) ────────────────────────────────────────────────────── */
 static void run_impulse_test(int enable_res, const char *label) {
-    /* A perfectly PERIODIC impulse train is an adversarial input for the online
-     * delay estimator: an exactly-periodic comb is ambiguous under any matched
-     * filter (every period-multiple offset correlates equally well), and this
-     * can let the estimator drift onto a spurious, non-alias, WRONG lag partway
-     * through a long run at 16k/48k (e.g. delay jumping from a converging 1472
-     * to a stuck 6336 around hop 900, killing cancellation for the remainder).
-     * It is not a rate-specific bug but a generic property of feeding any
-     * exactly-periodic signal to a correlation-based delay estimator. An i.i.d.
-     * sparse random impulse train (mean spacing PULSE_MEAN_PERIOD, LCG-driven
-     * position AND amplitude) keeps the "impulse train" character (mostly-zero
-     * signal, discrete non-zero impulses) while removing the exact periodicity
-     * that makes the true delay ambiguous -- and is the more standard choice for
-     * system-identification excitation for exactly this reason. */
+    /* A periodic impulse train is adversarial for the online delay estimator: an exactly periodic comb is ambiguous under
+     * any matched filter, so the estimator can lock onto a spurious lag part-way through a long run at 16k/48k. An i.i.d.
+     * sparse random impulse train (probability PULSE_PROB per sample, LCG-driven position and amplitude) keeps the impulse
+     * character without the periodicity. */
     const float PULSE_PROB = 1.0f / 37.0f;   /* mean spacing ~37 samples */
     const int ECHO_DELAY = 41;               /* samples */
     const float ECHO_SCALE = 0.5f;
@@ -326,11 +224,9 @@ static void test_impulse_linear_path(void) {
     run_impulse_test(0, "linear-only");   /* aec_wav.c's --no-res knob */
 }
 
-/* Same excitation, full post-filter chain (RES) enabled -- the actual
- * production path (BALANCED ships with enable_res=1). test_impulse_linear_path
- * above only ever exercised the linear PBFDKF filter; the 16000/256
- * grid has its own aecb_rate_cfg() tuning row (CNG/REE/SG parameters) that
- * only this test runs end-to-end. */
+/* Same excitation through the full post-filter chain (RES), the production path (BALANCED ships with enable_res=1).
+ * The 16000/256 grid has its own aecb_rate_cfg() tuning row (CNG/REE/SG parameters) that only this test runs end to
+ * end. */
 static void test_impulse_res_enabled(void) {
     run_impulse_test(1, "RES-enabled");
 }
@@ -450,36 +346,16 @@ static void test_res_context_wola_identity(void) {
     }
 }
 
-/* ── (e2) spatial_linear_context: skipping the unused per-lane G_res leaves
- * every OTHER context field byte-identical, every grid, shadow on/off ────
- * A multi-channel wrapper (e.g. pipelines/4ch_aec_bf_nr_res/4aec_nr_res.c) sets
- * this to stop computing a per-lane suppression gain that only a downstream
- * fused/beamformed stage ever reads, while the DominantNearend hold-state
- * (suppression_gain_update_dominant_nearend(), still called every hop) keeps
- * advancing so the NEXT hop's ERLE onset decision, and therefore r2, are
- * unaffected. comfort_noise is a separate, independent Step 19 computation
- * (one of DominantNearend's own inputs, not something it affects) and is
- * checked here for completeness, not because it depends on this mechanism.
- * Proves that "keep the state-updating prefix, skip everything else" is a
- * true no-op on every field except res_gain itself, end to end through a
- * real Aec instance.
- *
- * The DominantNearend state machine itself (enter/hold/early-exit) is
- * mutation-tested in isolation, at every grid, in
- * test_suppression_gain_dne_prefix_matches_get_gain() below -- see that
- * test for the actual "removing the prefix must fail" proof; this test's
- * job is bit-exactness of the mode as a whole, not of that one mechanism. */
+/* ── (e2) spatial_linear_context: skipping the unused per-lane G_res leaves every OTHER context field
+ * byte-identical, every grid, shadow on/off ────
+ * A multi-channel wrapper (e.g. pipelines/4ch_aec_bf_nr_res/4aec_nr_res.c) sets this to stop computing a per-lane
+ * suppression gain that only a downstream fused stage reads, while suppression_gain_update_dominant_nearend() still
+ * runs every hop, so the next hop's ERLE onset decision, and therefore r2, are unaffected. The DominantNearend state
+ * machine itself is tested in test_suppression_gain_dne_prefix_matches_get_gain(). */
 static void test_spatial_linear_context_matches_baseline(void) {
-    /* 200, not 80: at the default 16k/256 grid, DominantNearend does not
-     * reach its ACTIVE hold state within 80 hops on this synthetic signal --
-     * a run that never activates DNE would not actually exercise the one
-     * state transition (dne_nearend_state, fed forward into the next hop's
-     * ERLE onset decision) this test exists to protect. 200 hops was
-     * verified (by hand, across every grid x shadow combination below) to
-     * reach dne_nearend_state==1 at least once; saw_dominant_nearend below
-     * asserts that, so a future signal-generation change that regresses
-     * back to "never activates" fails loudly instead of silently testing
-     * less than it claims to. */
+    /* 200, not 80: at the default 16k/256 grid DominantNearend does not reach its ACTIVE hold state within 80 hops on this
+     * synthetic signal. saw_dominant_nearend below asserts that dne_nearend_state == 1 is reached at least once, so a run
+     * that never activates it fails instead of testing less than it claims. */
     const int N_HOPS = 200;
 
     for (int shadow = 0; shadow <= 1; ++shadow) {
@@ -530,21 +406,10 @@ static void test_spatial_linear_context_matches_baseline(void) {
             out_spatial = (float*)malloc((size_t)hop * sizeof(float));
             if (!far || !mic || !out_base || !out_spatial) valid = 0;
 
-            /* Bursty far-end (loud/near-silent, ~300 ms per half-cycle) rather
-             * than stationary noise: a constant-level signal never creates a
-             * genuine render-level transition, which is what feeds
-             * SubbandErle's coming_onset/hold_counter machinery -- with a
-             * flat signal, erle_onset_compensated tracks erle exactly, so
-             * onset never has anything to select between and a broken
-             * dominant_ne feed goes undetected. Authored in wall-clock ms and
-             * retimed per grid (this codebase's own convention for
-             * warmup_frames/epc_hangover/etc., aec.c's aec_carve()) rather
-             * than a fixed hop count: a fixed 20-hop period was verified (by
-             * hand) to only trigger the divergence at half the grids here --
-             * 8000/256 and 16000/512 both have a 16 ms hop and caught it,
-             * 16000/256 (8 ms hop) and 48000/1024 (10.67 ms hop) did not,
-             * because 20 hops covers a different wall-clock burst length at
-             * each rate. */
+            /* Bursty far-end (loud/near-silent, about 300 ms per half-cycle) rather than stationary noise: a constant level
+             * never creates the render-level transition that feeds SubbandErle's coming_onset/hold_counter machinery, so
+             * a broken dominant_ne feed would go undetected. The period is authored in wall-clock ms and retimed per grid,
+             * because a fixed hop count covers a different burst length at each rate. */
             const int burst_hops_local =
                 ((300 * sr) / (1000 * hop)) > 0 ? (300 * sr) / (1000 * hop) : 1;
             g_lcg_state = 0x53504331u + (unsigned)(17 * r + shadow);
@@ -573,21 +438,16 @@ static void test_spatial_linear_context_matches_baseline(void) {
                     valid = 0;
                     break;
                 }
-                /* Accumulate across ALL hops, not just the last one -- the
-                 * pointer doesn't actually move hop to hop, but asserting
-                 * that every hop stayed non-NULL is the honest claim, not an
-                 * incidental one-hop snapshot. */
+                /* Accumulate over all hops, not just the last: the pointer does not move, but asserting that every hop stayed
+                 * non-NULL is the honest claim. */
                 if (ctx_base.res_gain == NULL) base_res_gain_ever_null = 1;
                 if (ctx_spatial.res_gain != NULL) spatial_res_gain_seen_null = 0;
 
                 if (suppression_gain_is_dominant_nearend(&base.a3_sg))
                     saw_dominant_nearend = 1;
 
-                /* Genuine byte-identical checks (memcmp over the raw arrays),
-                 * not a numeric-equality proxy -- fabsf(a-b) > 0 would also
-                 * silently pass a NaN divergence (fabsf(NaN) compares false
-                 * against any threshold), so finiteness is checked
-                 * separately below rather than folded into the diff. */
+                /* Byte-identical checks (memcmp over the raw arrays), not a numeric-equality proxy: fabsf(a-b) > 0 is false
+                 * for NaN and would pass a NaN divergence. Finiteness is checked separately below. */
                 for (int k = 0; k < n_freqs && all_finite; ++k) {
                     if (!isfinite(ctx_base.r2[k]) || !isfinite(ctx_spatial.r2[k]) ||
                         !isfinite(ctx_base.comfort_noise[k]) ||
@@ -668,25 +528,14 @@ static void test_spatial_linear_context_matches_baseline(void) {
     }
 }
 
-/* ── (e3) suppression_gain_update_dominant_nearend() reproduces get_gain()'s
- * DominantNearend trajectory exactly, through a deliberately-driven
- * enter -> hold -> early-exit cycle, at every grid ─────────────────────────
- * Deterministic contract test: two Aec instances at the same grid, one
- * driven through the full suppression_gain_get_gain(), the other through
- * only the standalone prefix. Both are fed identical, hand-crafted
- * nearend/echo/comfort_noise spectra designed (from the DominantNearend
- * trigger formula in suppression_gain.c: trigger_active = enr_pass &&
- * snr_pass, where enr_pass = echo_sum < dne_enr_threshold*ne_sum and
- * snr_pass = ne_sum > dne_snr_threshold*noise_sum; early_exit =
- * echo_sum > dne_enr_exit_threshold*ne_sum && echo_sum >
- * dne_snr_threshold*noise_sum) to force ENTER for dne_trigger_threshold_hops
- * hops, then hold under NEUTRAL input (neither condition satisfied) partway
- * into dne_hold_duration_hops, then force an EARLY EXIT. dne_trigger_counter/
- * dne_hold_counter/dne_nearend_state are compared every hop -- unlike
- * test_spatial_linear_context_matches_baseline() above (which depends on a
- * signal incidentally reaching these states), this one drives the exact
- * state machine transitions by construction, so it needs no by-hand
- * verification of coverage and mutation-catches at every grid. */
+/* ── (e3) suppression_gain_update_dominant_nearend() reproduces get_gain()'s DominantNearend trajectory exactly,
+ * through a driven enter -> hold -> early-exit cycle, at every grid ──
+ * Two Aec instances at the same grid, one driven through suppression_gain_get_gain(), the other through the standalone
+ * prefix only. Both get identical hand-crafted nearend/echo/comfort_noise spectra that force ENTER for
+ * dne_trigger_threshold_hops hops (trigger_active = enr_pass && snr_pass), then hold under NEUTRAL input (neither
+ * condition satisfied) partway into dne_hold_duration_hops, then force an EARLY EXIT (echo_sum >
+ * dne_enr_exit_threshold*ne_sum && echo_sum > dne_snr_threshold*noise_sum). dne_trigger_counter/dne_hold_counter/
+ * dne_nearend_state are compared every hop, so the state machine is driven by construction. */
 static void test_suppression_gain_dne_prefix_matches_get_gain(void) {
     for (int r = 0; r < N_GRIDS; ++r) {
         int sr = GRIDS[r].sample_rate;
@@ -850,9 +699,7 @@ static void test_static_pool_matches_heap(void) {
         CHECK(!mismatch, what);
 
         aec_destroy(&aec_heap);
-        aec_destroy(aec_static);   /* B2 contract: required even for a pool instance
-                                    * -- see test_static_aec.c's own regression guard,
-                                    * some fields own resources outside the pool. */
+        aec_destroy(aec_static);   /* frees nothing for a pool instance */
         free(pool); free(far); free(mic); free(out_heap); free(out_static);
     }
 }
@@ -951,7 +798,7 @@ static void test_top_level_constant_retiming(void) {
         /* Time-constant form (EMA "RETENTION" convention -- see
          * aec_growth_rehop's doc comment) for the three alpha-shaped
          * constants: TC = -hop_seconds / ln(retention). Continuous (no
-         * integer rounding), so this should track the legacy target far
+         * integer rounding), so this should track the target far
          * tighter than the hop-count fields above. */
         double tc_shadow = -(hop_ms / 1000.0) / log((double)aec.cfg.shadow_err_alpha) * 1000.0;
         check_close("shadow_err_alpha (TC)", sr, fft, tc_shadow, 44.82, ALPHA_TOL);
@@ -982,30 +829,16 @@ static void test_top_level_constant_retiming(void) {
 }
 
 /* ── (d2) adaptation-constant retiming ──────────────────────────────────
- * The C mirror of python/tests/test_detector_timing_effective_values.py.
- *
- * (d) above covers the constants that live in AecConfig/EpcDetector. This
- * covers the five that live in the ADAPTATION path -- Aec's own EMAs, the
- * PBFDAF/PBFDKF filter EMAs and the saturation detector's attack/release --
- * which are set in aec_carve()/pbfdkf_init_static()/saturation_init() rather than
- * read out of the config struct.
- *
- * This asserts the value each instance ACTUALLY ENDS UP WITH at every grid,
- * not that a retiming call appears in the source. Only an effective-value
- * assertion separates "retimed" from "not retimed": two of the seven values
- * are legitimately IDENTICAL to their authored literal on two of the four
- * grids.
- *
- * The reference grids are NOT uniform -- retiming a 16 ms constant off the
- * 10 ms reference is wrong by exactly 1.6x, which is inside no sane tolerance
- * but is invisible if you only ever sample the 16 ms grids:
+ * The C mirror of python/tests/test_detector_timing_effective_values.py. (d) covers the constants in AecConfig and
+ * EpcDetector; this covers the ones set in aec_carve()/pbfdkf_init_static()/saturation_init(). It asserts the value each
+ * instance ends up with at every grid: only an effective-value assertion separates "retimed" from "not retimed", since
+ * some values equal their authored literal on some grids. The reference grids differ, and retiming a 16 ms constant
+ * off the 10 ms reference is wrong by exactly 1.6x:
  *   alpha_pow                  per-SAMPLE, authored at sr=16000
  *   alpha_erl_{tracking,conv}  per-hop, 10 ms
  *   alpha_r     (PBFDKF)       per-hop, 10 ms
  *   saturation attack/release  per-hop, 16 ms   (frame 512/hop 256)
- *
- * Targets are the wall-clock TC each retention covers on its OWN reference
- * grid, so a correct retiming reproduces the same number at every rate. */
+ * Targets are the wall-clock TC each retention covers on its own reference grid. */
 static void check_moved(const char *label, int sr, int fft,
                         double actual, double authored) {
     char what[192];
@@ -1088,29 +921,15 @@ static void test_adaptation_constant_retiming(void) {
         CHECK(aec.sat_ref.alpha_attack == aec.sat_mic.alpha_attack &&
               aec.sat_ref.alpha_release == aec.sat_mic.alpha_release, what);
 
-        /* Duty-cycle ERLE watchdog leak, per-hop, 10 ms reference. The third
-         * convention in this file: an ADDITIVE amount subtracted once per hop,
-         * so its wall-clock meaning is a RATE (dB per second) and it scales
-         * linearly, not by the power law the retentions above use. Asserted
-         * through the span that rate implies, so the target is the same
-         * number at every grid.
-         *
-         * Note what is NOT here: an identity row. Every shipped grid is a
-         * 16.000 / 8.000 / 16.000 / 10.667 ms hop, so none of them is the
-         * 10 ms grid this constant was calibrated on -- the authored 0.001f
-         * literal is wrong on all four, and reverting the retime fails this
-         * assertion on all four rows rather than on a convenient subset. The
-         * reference point itself is unconstructible (hop=160 is a 320-sample
-         * frame, which AEC_GRID_TABLE does not admit) and is pinned separately,
-         * bit-for-bit, in (d2b) below -- which is also why the last check here
-         * ties this instance's field to that same helper. */
+        /* Duty-cycle ERLE watchdog leak, per-hop, 10 ms reference. An ADDITIVE per-hop amount, so its wall-clock meaning is a
+         * RATE (dB/s) and it scales linearly, not by the power law of the retentions above. Asserted through the span that
+         * rate implies. No shipped grid has a 10 ms hop, so the authored 0.001f literal is wrong on all four and a reverted
+         * retime fails on all four rows. The reference point itself (hop=160, a 320-sample frame that AEC_GRID_TABLE does
+         * not admit) is pinned bit-for-bit in (d2b); the last check here ties this instance's field to that helper. */
         {
-            /* Expressed as the span the anchor itself is stated in -- how long
-             * the peak takes to leak the watchdog's whole 6 dB collapse
-             * threshold -- so it goes through check_close like every other
-             * wall-clock row here, prints in the same units, and reads against
-             * the same 60 s figure the inventory records. Dividing out to
-             * dB/s would have needed a private comparison printing "ms". */
+            /* Expressed as the span the anchor is stated in (how long the peak takes to leak the watchdog's whole 6 dB collapse
+             * threshold), so it goes through check_close like every other wall-clock row and reads against the 60 s figure
+             * the inventory records. */
             double leak_db_per_s = (double)aec.duty_erle_leak_db / hop_s;
             check_close("duty_erle watchdog 6 dB collapse span", sr, fft,
                         6.0 / leak_db_per_s * 1000.0, 60000.0, ALPHA_TOL);
@@ -1164,21 +983,11 @@ static void test_adaptation_constant_retiming(void) {
 }
 
 /* ── (d2b) the additive-rate retime is EXACT at its authoring grid ───────
- * (d2) proves the four shipped grids carry 0.1 dB/s. It cannot prove the one
- * property that decides whether this retime is a behaviour change or a
- * rewrite: that at hop=160/sample_rate=16000, the grid the 0.001 dB/hop leak
- * was calibrated on, the retimed expression still yields that literal
- * BIT-FOR-BIT. A tolerance would not do -- one ulp of drift there is a
- * different stream on a grid whose behaviour is supposed to be untouched --
- * and that grid is unconstructible (320-sample frame; AEC_GRID_TABLE admits
- * 256/512/1024 only), so the value cannot be read out of an Aec at all.
- * Hence the AEC_TESTING hook.
- *
- * Exactness here is structural rather than lucky: 160/16000 and the helper's
- * own reference are the same division, so the ratio is exactly 1.0f and the
- * multiply is an identity. The equality is therefore asserted with ==, and
- * the third check below shows it is a property of the REFERENCE GRID and not
- * of the value 0.001f in particular. */
+ * (d2) proves the shipped grids carry 0.1 dB/s. This proves that at hop=160/sample_rate=16000, where the 0.001 dB/hop leak
+ * was calibrated, the retimed expression still yields that literal bit-for-bit: one ulp of drift would be a different
+ * stream on a grid whose behaviour must stay untouched. That grid is unconstructible (320-sample frame), so the value is
+ * read through an AEC_TESTING hook. The ratio 160/16000 over the helper's own reference is exactly 1.0f, so equality is
+ * asserted with ==; the third check shows it holds for the reference grid, not for the value 0.001f in particular. */
 static void test_additive_rate_reference_exactness(void) {
     char what[192];
 
@@ -1209,44 +1018,21 @@ static void test_additive_rate_reference_exactness(void) {
           "non-positive grid");
 }
 
-/* ── (d3) F2.4 mu-holdoff re-arm regression ─────────────────────────────
- * The holdoff counter must arm only on a FRESH double-talk onset. Ongoing DT
- * must let it run down, or marginal-DT oscillation re-arms it every hop and
- * the adaptation step size never releases.
- *
- * Collapsing
- *     if (!cfg.mu_holdoff_no_reset || holdoff == 0)
- * to an unconditional arm would otherwise go unnoticed: the counter is
- * internal state, and a mu freeze under marginal DT does not move a bucket
- * average enough to break a benchmark.
- *
- * The observable signature is exact and stimulus-independent: with the guard,
- * the counter only ever goes 0 -> armed, or n -> n-1. Without it, a hop inside
- * an active window jumps it back UP (e.g. ... 18, 20, 19 ...). So the
- * assertion is "an increase is legal only from zero" -- no threshold, no
- * tolerance, and it cannot be satisfied by a stimulus that simply fails to
- * reach the branch, because coverage is asserted separately below. */
+/* ── (d3) mu-holdoff re-arm ─────────────────────────────────────────────
+ * The holdoff counter must arm only on a FRESH double-talk onset. Ongoing DT must let it run down, or marginal-DT
+ * oscillation re-arms it every hop and the adaptation step size never releases. Collapsing the
+ * `if (a->simple_mu_holdoff == 0)` guard to an unconditional arm is invisible elsewhere: the counter is internal state.
+ * With the guard the counter only goes 0 -> armed, or n -> n-1; without it a hop inside an active window jumps it back UP
+ * (... 18, 20, 19 ...). So the assertion is "an increase is legal only from zero", with coverage asserted separately
+ * below so a stimulus that never reaches the branch cannot pass. */
 /* ── (d4) retimed constants must reach the AUDIO PATH, not just the struct ──
- * Check (d2) asserts the VALUE each instance ends up with. That is necessary
- * and was not sufficient: a retimed retention can be computed into a field,
- * asserted on, and then read by nothing -- which is exactly what happened to
- * PBFDAF::alpha_power, whose far-power EMA was maintained on every hop of
- * both filters and consumed by no one. That EMA and its retention are gone;
- * this check now measures the retention that DOES reach audio.
- *
- * Aec::alpha_pow is the per-SAMPLE power EMA behind near_power /
- * raw_error_power, and those two drive convergence detection, the
- * instantaneous-ERLE ring and the windowed-ERLE guard. It is recovered from
- * the filter's own state with no access to the coefficient itself:
- *
- *   applying `P = a*P + (1-a)*c²` once per sample over one hop of a CONSTANT
- *   near level c gives  P_new = a^hop * P_old + (1 - a^hop) * c²
- *   =>  a = ((P_new - c²) / (P_old - c²)) ^ (1/hop)
- *
- * Two near levels make that well conditioned: settle at the first, then run a
- * single hop at the second, so the denominator is the gap between them rather
- * than a converged residual. The mic HPF is off, so near_hop is the constant
- * the caller passed, sample for sample. */
+ * (d2) asserts the value each instance ends up with, which does not show that anything reads it. Aec::alpha_pow is the
+ * per-SAMPLE power EMA behind near_power / raw_error_power, which drive convergence detection, the instantaneous-ERLE
+ * ring and the windowed-ERLE guard. It is recovered from the filter's own state, without access to the coefficient:
+ *   one hop of `P = a*P + (1-a)*c^2` on a CONSTANT near level c gives  P_new = a^hop * P_old + (1 - a^hop) * c^2
+ *   =>  a = ((P_new - c^2) / (P_old - c^2)) ^ (1/hop)
+ * Two near levels keep this well conditioned: settle at the first, then run a single hop at the second. The mic HPF is
+ * off, so near_hop is the constant the caller passed, sample for sample. */
 static void test_retimed_constants_reach_the_audio_path(void) {
     const double TOL = 2e-3;    /* fp32 EMA recovery over one hop */
     const float  C_SETTLE = 0.5f;
@@ -1408,38 +1194,14 @@ static void test_render_activity_first_observation(void) {
 }
 
 /* ── (d5) alpha_r is a live constant of the DIRECT PBFDKF API ───────────────
- *
- * alpha_r cannot be pinned the way alpha_pow is pinned by (d4), because it
- * does not reach audio through `Aec` at all:
- *
- *   Aec + shadow ON (default)  error_psd is never read. The orchestrator
- *                              publishes e2_coarse_per_bin every hop, and the
- *                              live per-bin branch of the H_error refresh
- *                              reads error_spec directly.
- *   Aec + shadow OFF           the scalar fallback DOES run and DOES read the
- *                              smoothed error_psd -- but e2_coarse_for_refresh
- *                              is likewise assigned only inside
- *                              `if (a->has_shadow)` (aec.c), so it stays 0.0f
- *                              and `use_conv = (e2_ref_sum <= e2_coa_sum)` is
- *                              constant-false whatever the coefficient is
- *                              (--no-shadow runs are byte-identical).
- *   direct pbfdkf_process()    the caller supplies its own
- *                              e2_coarse_for_refresh, both sides of the
- *                              comparison vary, and alpha_r selects the
- *                              leakage branch and the adaptation that follows.
- *
- * So no wrapper-level A/B can observe this constant, and a zero delta from one
- * is not evidence that it is inert. This check drives PBFDKF directly, which is
- * a supported entry point (pbfdkf.h), and pins two things:
- *
- *   (1) the coefficient the EMA actually APPLIED, recovered from two runs that
- *       differ only in error_psd's starting value -- not the stored field
- *       alone, which would pass while the loop ran on a hardcoded literal;
- *   (2) that the recovered coefficient selects the leakage branch, so the
- *       constant has a downstream effect and not merely a value.
- *
- * Mutations that must fail: reverting the use site to `0.95f`; reverting the
- * reference hop to 256 (the 16 ms grid); deleting the EMA. */
+ * alpha_r cannot be pinned through `Aec` the way alpha_pow is in (d4). With the shadow on (default) error_psd is never
+ * read: the orchestrator publishes e2_coarse_per_bin and the per-bin H_error refresh reads error_spec directly. With the
+ * shadow off the scalar fallback reads error_psd, but e2_coarse_for_refresh stays 0.0f, so
+ * `use_conv = (e2_ref_sum <= e2_coa_sum)` is constant-false whatever the coefficient is. A direct pbfdkf_process() call
+ * (a supported entry point, pbfdkf.h) supplies its own e2_coarse_for_refresh, so alpha_r selects the leakage branch.
+ * This check pins (1) the coefficient the EMA actually APPLIED, recovered from two runs that differ only in error_psd's
+ * starting value (not the stored field alone), and (2) that it selects the leakage branch.
+ * Mutations that must fail: reverting the use site to `0.95f`; reverting the reference hop to 256; deleting the EMA. */
 typedef struct {
     double psd_sum;         /* sum(error_psd) after the measured hop */
     float  div_frac;        /* last_leakage_div_frac after the measured hop */
@@ -1636,10 +1398,9 @@ static void test_alpha_r_reaches_the_direct_pbfdkf_path(void) {
 
 /* ── (d6) simple-mu frozen exception: four constants, one mechanism ──
  *
- * The F2.4 holdoff and its three alphas are hop-authored. Retiming the four
- * values as a group failed the two-grid blind A/B gate, so production keeps
- * 20 and 0.3/0.99/0.95 together. The test recovers what each branch actually
- * applies and separately checks the arm site; no stored copy can pass it. */
+ * The mu holdoff and its three alphas are hop-authored and deliberately not retimed: production keeps 20 and
+ * 0.3/0.99/0.95 together. The test recovers what each branch actually applies and separately checks the arm site; no
+ * stored copy can pass it. */
 static void mu_step(Aec* a, float far_scale, float err_scale, unsigned *seed) {
     int hop = aec_hop_size(a);
     float far[2048], out[2048];

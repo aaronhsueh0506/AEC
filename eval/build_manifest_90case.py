@@ -4,25 +4,19 @@
 Selects a balanced, deterministic subset of wav/aec_challenge_blind/:
   - farend_singletalk : 30 cases (all 5 static + 25 movement, sorted)
   - doubletalk        : 30 cases (all 4 static + 26 movement, sorted)
-  - nearend_singletalk: 30 cases (all static -- this corpus has no
-                        near-end-singletalk movement variant at all,
-                        upstream or in our download)
+  - nearend_singletalk: 30 cases (all static; this corpus has no near-end
+                        singletalk movement variant)
 
-Static counts are scarce (5 far-end, 4 doubletalk) so every static case
-available is included; movement cases fill the remainder up to 30 each,
-taken in sorted-stem order for determinism.
+Static cases are scarce, so every one is included; movement cases fill the
+remainder up to 30 in sorted-stem order.
 
-Re-run this script any time the corpus under wav/aec_challenge_blind/
-changes and you want to regenerate the manifest -- it will reselect
-deterministically from whatever is on disk. The manifest actually
-checked in (eval/manifest_90case.json) is the frozen snapshot used for
-the 2026-08-03 metric-overhaul run; don't regenerate casually, since
-regenerating changes which cases baseline/candidate compare against.
+The checked-in eval/manifest_90case.json is the frozen set that baseline and
+candidate runs compare on; regenerating it changes which cases are compared.
 
 Usage:
-    python3 eval/build_manifest_90case.py \
-        --dataset-dir wav/aec_challenge_blind \
-        --out eval/manifest_90case.json \
+    python3 eval/build_manifest_90case.py \\
+        --dataset-dir wav/aec_challenge_blind \\
+        --out eval/manifest_90case.json \\
         --stems-out eval/manifest_90case_stems.txt
 """
 import argparse

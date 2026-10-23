@@ -1,22 +1,6 @@
-/* saturation.c — 1:1 port of python/aec.py SaturationDetector.
- *
- * Python SaturationDetector.detect():
- *     n = len(signal)
- *     if n == 0: return saturation_level
- *     abs_sig    = np.abs(signal)
- *     clip_count = np.sum(abs_sig > threshold)
- *     consec_count = 0
- *     high_mask = abs_sig > threshold * 0.8
- *     for i in range(1, n):
- *         if high_mask[i] and high_mask[i-1] and abs(s[i]-s[i-1]) < 1e-6:
- *             consec_count += 1
- *     raw_sat = min((clip + 2*consec)/n, 1.0)
- *     alpha = attack if raw_sat > saturation_level else release
- *     saturation_level = alpha*saturation_level + (1-alpha)*raw_sat
- *
- * Note: np.sum over a bool array is integer; in C we use long sum.
- * abs(...) runs float32-by-design; C uses fabsf.
- */
+/* saturation.c -- clipping detector.
+ * Counts samples above the threshold plus 2x the runs of near-threshold flat samples,
+ * then smooths the clipped fraction with an asymmetric EMA. */
 #include "saturation.h"
 #include "aec_scale.h"
 #include "utility/simd_aec.h"
@@ -27,9 +11,7 @@ void saturation_init(Saturation* s, float threshold,
                      int hop_size, int sample_rate) {
     s->threshold        = threshold;
     s->saturation_level = 0.0f;
-    /* Asymmetric per-hop EMA. Reference grid is hop=256/16000 (16 ms),
-     * NOT 10 ms: authored against frame 512/hop 256.
-     * Mirrors preprocessing.py SaturationDetector. */
+    /* Attack/release EMAs authored for hop=256 @ 16 kHz (16 ms). */
     s->alpha_attack  = aec_growth_rehop(0.3f,  256, 16000,
                                         hop_size, sample_rate);
     s->alpha_release = aec_growth_rehop(0.98f, 256, 16000,
@@ -62,12 +44,7 @@ float saturation_detect(Saturation* s, const float* signal, size_t n) {
 
 void saturation_soft_clip(const float* signal, float* out, size_t n,
                              float knee) {
-    /* Python:
-     *     out = signal.copy()
-     *     mask = abs(signal) >= knee
-     *     for masked: out = sign * (knee + tanh(excess/scale)*scale)
-     *     scale = max(1.0 - knee, 1e-6)
-     */
+    /* Soft knee: |x| >= knee is compressed with tanh over scale = max(1 - knee, 1e-6). */
     float scale = 1.0f - knee;
     if (scale < 1e-6f) scale = 1e-6f;
     for (size_t i = 0; i < n; ++i) {

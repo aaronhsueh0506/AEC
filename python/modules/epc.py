@@ -1,16 +1,4 @@
-"""Echo-Path-Change family.
-
-Extracted from ``aec.py`` during refactor R.7:
-
-* ``classify_epc_event`` — utility mapping EpcEvent → AecEvent
-* ``EchoPathChangeDetector`` — coherence-drop EPC detector
-* ``PathChangeRegimeHandler`` — post-EPC adaptation regime selector
-  (formerly ShadowCopyController, renamed in P52 Phase A)
-
-Consumes value-type dataclasses from ``modules.dataclasses``.
-
-Self-contained: numpy + modules.dataclasses.
-"""
+"""Echo-path-change family: ``classify_epc_event``, ``EchoPathChangeDetector`` and ``PathChangeRegimeHandler``."""
 import numpy as np
 
 from . import aec3_scale as _aec3_scale
@@ -18,12 +6,7 @@ from .dataclasses import AecEvent, AecEventType, EpcEvent, RegimeHandlerDecision
 
 
 def classify_epc_event(epc_event: 'EpcEvent') -> AecEvent:
-    """Phase F.1 classifier — map our 3-source EpcEvent to AEC3 AecEvent.
-
-    Pure function, no state. Returns empty AecEvent (no-op) when the
-    EpcEvent didn't fire. Callers should pass every EpcEvent regardless
-    of `fired`, so the classification result follows trigger ordering.
-    """
+    """Map an ``EpcEvent`` to an ``AecEvent``; pure, returns an empty event when not fired."""
     if not epc_event.fired:
         return AecEvent()
     if epc_event.source == 'delay':
@@ -36,39 +19,12 @@ def classify_epc_event(epc_event: 'EpcEvent') -> AecEvent:
 class EchoPathChangeDetector:
     """Unified state for the three echo-path-change trigger sources.
 
-    Triggers (caller invokes individually so call-site ordering matches v2.8.1):
-        force_delay()        → delay-realignment trigger (caller-driven)
-        update_epv(...)      → fast/slow far-power EMA divergence (±6 dB)
-        update_shadow_rise(...)  → both filters' errors rising in tandem (post-converged)
-
-    Caller applies side effects (Q-boost, P-override, ERL cap, render-forced,
-    mark_diverged) by inspecting EpcEvent.source.
-
-    Hangover countdown is unified into a single counter; tick_hangover() is
-    called once per frame inside the same `(shadow_filter and filter_converged)`
-    gate the original code used, **and only when shadow_rise did not fire this
-    frame** — preserving the original `if/elif/else` semantics bit-exactly.
-
-    State (private):
-        _active            currently in EPC (firing or hangover)
-        _hangover          remaining hangover frames
-        _epv_gain_fast     fast far-power EMA (TC ≈ 50 frames @ legacy grid)
-        _epv_gain_slow     slow far-power EMA (TC ≈ 1000 frames @ legacy grid)
-        _prev_total_err    last frame's main_err+shadow_err sum (for shadow_rise)
-
-    EPV_FAST_TC/EPV_SLOW_TC are per-hop RETENTION-convention EMA constants
-    (``fast <- EPV_FAST_TC*fast + (1-EPV_FAST_TC)*new`` -- the constant
-    multiplies the OLD state directly) authored at the legacy
-    hop=160/sample_rate=16000 (10 ms) grid (TC ~50/~1000 frames = ~500 ms/
-    ~10 s wall-clock) with zero rate conversion -- project-native, not
-    AEC3-sourced. hop_size/sample_rate were previously not parameters at
-    all (__init__ only took ``config``); retimed per-instance in __init__
-    below via ``aec3_scale.growth_rehop`` (a direct power law -- the
-    RETENTION convention here is the OPPOSITE of
-    ``per_block_ema_alpha_to_per_hop``'s AEC3 new-sample-weight form)
-    (2026-08 gap-fix) into ``self._epv_fast_tc``/``self._epv_slow_tc``,
-    which update_epv() reads instead of the class constants. Must match
-    epc_shadow.c's epc_init() (C side).
+    Triggers, invoked individually by the caller: ``force_delay()`` (delay realignment),
+    ``update_epv(...)`` (fast/slow far-power EMA ratio outside [0.25, 4]) and
+    ``update_shadow_rise(...)`` (both filter errors rising together after convergence).
+    The caller applies the side effects from ``EpcEvent.source``; ``tick_hangover()`` runs once
+    per frame inside the shadow/converged gate, only when shadow_rise did not fire.
+    ``EPV_FAST_TC`` / ``EPV_SLOW_TC`` are per-hop retention constants authored at the 10 ms grid.
     """
     EPV_FAST_TC = 0.98
     EPV_SLOW_TC = 0.999
@@ -98,14 +54,14 @@ class EchoPathChangeDetector:
         self._prev_total_err = 0.0
 
     def force_delay(self) -> EpcEvent:
-        """Trigger 1: delay-shift re-alignment (caller already validated consistency)."""
+        """Delay-shift re-alignment (caller has validated consistency)."""
         self._active = True
         self._hangover = self.config.epc_hangover
         return EpcEvent(fired=True, source='delay')
 
     def update_epv(self, *, far_pwr_global: float, filter_converged: bool,
                    main_paused: bool) -> EpcEvent:
-        """Trigger 2: EPV gain-ratio. Updates fast/slow EMAs, fires on outliers."""
+        """Far-power EPV gain ratio: update the fast/slow EMAs and fire on outliers."""
         if far_pwr_global <= 1e-6:
             return EpcEvent()
         if self._epv_gain_fast < 1e-12:
@@ -126,7 +82,7 @@ class EchoPathChangeDetector:
 
     def update_shadow_rise(self, *, main_err_smooth: float, shadow_err_smooth: float,
                            is_stationary: bool) -> EpcEvent:
-        """Trigger 3: shadow-based error rise. Always updates _prev_total_err."""
+        """Shadow-based error rise; always updates ``_prev_total_err``."""
         total_err = main_err_smooth + shadow_err_smooth
         if total_err > 1e-10:
             delta_ratio = abs(main_err_smooth - shadow_err_smooth) / total_err
@@ -135,7 +91,7 @@ class EchoPathChangeDetector:
         errors_rising = (total_err > self._prev_total_err * self.config.epc_total_rise
                          and self._prev_total_err > 1e-10)
         is_echo_change = errors_rising and delta_ratio < self.config.epc_delta_threshold
-        # White-noise guard: stationary far + error rise = DT, not echo path change
+        # Stationary far-end plus an error rise is double-talk, not a path change.
         if is_echo_change and is_stationary:
             is_echo_change = False
         self._prev_total_err = total_err
@@ -146,11 +102,7 @@ class EchoPathChangeDetector:
         return EpcEvent()
 
     def tick_hangover(self) -> None:
-        """Count down hangover and clear active when expired.
-
-        Caller MUST gate this on the original (shadow_filter and filter_converged)
-        guard, AND only call it when shadow_rise did not fire this frame.
-        """
+        """Count down the hangover and clear ``active`` when expired."""
         if self._hangover > 0:
             self._hangover -= 1
             self._active = True
@@ -168,58 +120,26 @@ class EchoPathChangeDetector:
 
 
 class PathChangeRegimeHandler:
-    """Catastrophe defence for cohort echo-path-nonstationarity outliers.
+    """Shadow-copy gate state machine: protects against wildly nonstationary echo paths.
 
-    Post-A.0 post-mortem reframe (2026-05-11, see docs/p52_a0_postmortem.md):
-    this handler is **correct by design**, not a legacy artifact. P52 v1.1
-    Task A.0 attempted to retire it on the premise that "shadow is just an
-    information source." Empirically that premise is invalid on at least one
-    cohort case (qNvSMyUSXUyrDGpOw7s6qg_farend_singletalk, p99.2 on
-    ERL_decile_std): with the handler retired, the main filter diverges into
-    anti-correlated output (W L2 grows large but wrong → ERLE_main −27 dB).
-    The handler's boost_q / pause_main / reverse_copy actions force main W →
-    0 on wildly-nonstationary echo paths, degrading the AEC to pass-through
-    rather than catastrophe.
-
-    The Yang-2017 / Jung-2011 R-reset-only mechanism does NOT cover this
-    failure mode (their fast-recovery assumes a stable post-change path; the
-    cohort tail has none — only W → 0 protects).
-
-    Owns shadow-copy gate state machine. Per-frame inputs are read-only
-    measurements; outputs are explicit RegimeHandlerDecision flags. Caller
-    (AEC.process) applies the decisions: gate main_mu, apply filter Q-boost,
-    perform shadow.copy_weights_from(main). The handler never mutates filter
-    state itself.
-
-    State (private):
-        _copy_err_baseline : EMA of best(main, shadow) error during stable FS
-        _copy_counter      : consecutive frames shadow < main * threshold
-        _streak            : legacy mirror of _copy_counter (Python state is
-                             retained for checkpoint/debug compatibility)
-        _main_paused       : main filter weight update currently frozen
-        _pause_resume      : countdown to un-pause
+    Where the echo path has no stable post-change state, the boost_q / pause_main /
+    reverse_copy actions drive the main filter toward zero (pass-through) instead of letting
+    it diverge. Inputs are read-only measurements; outputs are ``RegimeHandlerDecision``
+    flags that the caller applies (it never mutates filter state itself).
     """
 
     BASELINE_INIT = 1e-6
-    # HYS_STREAK_MIN stays a hop COUNT on every grid. Retiming it to 100 ms
-    # (12 hops at the shipped 16 kHz/128 grid) was measured on the 90-case
-    # blind subset: one near-end single-talk clip with a loud, echo-free
-    # reference lost 0.79 deg MOS (output held 5 dB below the capture for
-    # 26 s) because the rescue streak no longer completed; 11 hops fails the
-    # same way and 10 restores the capture. The gate is a consecutive-hop
-    # count whose validated value is 10, not a duration.
+    # Consecutive-hop count, not a duration; not retimed.
     HYS_STREAK_MIN = 10
-    # Authored on the legacy 10 ms grid; live instances use the
-    # wall-clock-preserving retention built in __init__.
+    # Authored on the 10 ms grid; live instances use a wall-clock-preserving retention.
     COPY_ERR_BASELINE_RETENTION = 0.995
-    AEC3_STREAK_FRAMES = 5  # gate_mode='streak_only' uses pure 5-block AEC3 rule
+    AEC3_STREAK_FRAMES = 5  # gate_mode='streak_only': consecutive-block rule
     SHADOW_COPY_WARMUP_MS = 500.0
 
-    # Gate-mode choices for Phase C1 ablation. S0=energy is the v2.8.1 baseline.
-    GATE_ENERGY = 'energy'                # S0: dt_from_energy < 0.3
-    GATE_COHERENCE = 'coherence'          # S1: dt_from_coherence < 0.4
-    GATE_COH_DELAY = 'coherence_delay'    # S2: S1 AND delay_reliable
-    GATE_STREAK = 'streak_only'           # S3: AEC3 5-block, no DT gate
+    GATE_ENERGY = 'energy'  # dt_from_energy < 0.3
+    GATE_COHERENCE = 'coherence'  # dt_from_coherence < 0.4
+    GATE_COH_DELAY = 'coherence_delay'  # coherence gate and delay_reliable
+    GATE_STREAK = 'streak_only'  # 5-block streak, no DT gate
 
     def __init__(self, config: 'AecConfig', gate_mode: str = 'energy'):
         self.config = config
@@ -265,8 +185,7 @@ class PathChangeRegimeHandler:
 
     def _dt_safe(self, dt_from_energy: float, dt_from_coherence: float,
                  delay_reliable: bool) -> bool:
-        """Resolve the per-mode DT-safety gate. Returns True when copy is allowed
-        from a DT-perspective (NOT from far-active / saturation / EPC perspective)."""
+        """True when copy is allowed from the double-talk perspective (per gate mode)."""
         m = self.gate_mode
         if m == self.GATE_ENERGY:
             return dt_from_energy < 0.3
@@ -275,8 +194,8 @@ class PathChangeRegimeHandler:
         if m == self.GATE_COH_DELAY:
             return dt_from_coherence < 0.4 and delay_reliable
         if m == self.GATE_STREAK:
-            return True   # AEC3 mode: skip DT gate, rely on streak alone
-        return dt_from_energy < 0.3  # fallback: legacy
+            return True
+        return dt_from_energy < 0.3  # fallback: energy gate
 
     def update(self, *, shadow_frame_count: int, far_pwr: float,
                main_err_smooth: float, shadow_err_smooth: float,
@@ -289,9 +208,7 @@ class PathChangeRegimeHandler:
             return decision
 
         threshold = self.config.shadow_copy_threshold
-        # EPC/regime far_active gate uses the legacy active_render threshold
-        # (1e-4); routing the AecState 5.96e-4 here was the C6 NOSHIP probe
-        # (use_aec3_active_render_threshold_shadow_epc) — retired.
+        # Far-active threshold for the shadow/EPC gate.
         _far_thr = 1e-4
         far_active = far_pwr > _far_thr
 
@@ -306,15 +223,12 @@ class PathChangeRegimeHandler:
 
         error_is_normal = main_err_smooth < self._copy_err_baseline * 4.0 + 1e-10
         not_saturating = saturation_level < 0.3
-        # DT guard: shadow may chase near-end speech during DT, making shadow_err
-        # artificially low. Gate selectable for Phase C1 ablation.
+        # DT guard: during double-talk the shadow can chase near-end speech and look artificially good.
         dt_safe = self._dt_safe(dt_from_energy, dt_from_coherence, delay_reliable)
         copy_allowed = (far_active and error_is_normal
                         and not epc_active and not_saturating and dt_safe)
 
-        # S3 streak-only mode: AEC3 5-block consecutive shadow-better rule, no
-        # hysteresis pair. Skip the legacy two-counter logic and go directly
-        # to a simple streak.
+        # Streak-only mode: consecutive shadow-better frames, no hysteresis pair.
         if self.gate_mode == self.GATE_STREAK:
             if copy_allowed and shadow_err_smooth < main_err_smooth * threshold:
                 self._streak += 1
@@ -337,7 +251,7 @@ class PathChangeRegimeHandler:
             decision.pause_main = self._main_paused
             return decision
 
-        # Legacy / coherence gates: original two-counter + streak logic.
+        # Energy / coherence gates: two-counter plus streak logic.
         if copy_allowed:
             if shadow_err_smooth < main_err_smooth * threshold:
                 self._copy_counter += 1

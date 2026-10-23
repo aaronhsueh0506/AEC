@@ -1,11 +1,9 @@
-"""Generate a binary golden for the C reverb_frequency_response port (WS5 Phase 5.1).
+"""Generate a binary golden for the C reverb_frequency_response port.
 
 Drives the Python ReverbFrequencyResponse over a deterministic float32 input
 sequence (float32 (n_partitions, n_freqs) frequency_response, int
 filter_delay_blocks, float linear_filter_quality, bool stationary) and writes
-inputs + expected tail_response + average_decay to a raw little-endian file that
-a C replay harness (not shipped in this tree)
-replays.
+inputs + expected tail_response + average_decay to a raw little-endian file.
 
 Input dtypes captured from a real balanced/DT case
 (0I0XMl3M0ECO0U1N0cJvpg_doubletalk): frequency_response is float32 with shape

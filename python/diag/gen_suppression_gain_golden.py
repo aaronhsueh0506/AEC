@@ -1,12 +1,12 @@
-"""Generate a binary golden for the C suppression_gain port (WS5).
+"""Generate a binary golden for the C suppression_gain port.
 
 Hooks the REAL AEC pipeline (orchestrator `_aec3_post`) by monkeypatching
 `SuppressionGain.get_gain` and captures, per hop, EVERY input (with real
 dtypes / None-ness) plus the output gain[257]. We run THREE real cases —
-one each from doubletalk / farend_singletalk / nearend_singletalk — so the
-C parity test exercises the echo-dominant FS, near-dominant NE, and mixed
-DT gain/R² branches (a branch left uncovered by a single case would be
-silently un-tested).
+one each from doubletalk / farend_singletalk / nearend_singletalk — so a replay
+exercises the echo-dominant FS, near-dominant NE, and mixed DT
+gain/R² branches (a branch left uncovered by a single case would be silently
+un-tested).
 
 Captured real dtypes (balanced, 16 kHz, hop=160, filter_length=832):
   nearend / R² / R²_unbounded / comfort_noise : float32 (257,)
@@ -93,11 +93,10 @@ def _f32(x):
 def capture_config(self):
     """Read the FULL derived config off the live SuppressionGain instance.
 
-    The orchestrator overrides several fields on the SuppressorConfig before
-    constructing the SuppressionGain (fft-density-scaled audibility floors,
-    use_wallclock_trigger_threshold=True, etc.), so reconstructing the config
-    from defaults is WRONG. Read the live instance instead — this is the same
-    object the production pipeline uses.
+    The orchestrator overrides several SuppressorConfig fields before constructing
+    the SuppressionGain (fft-density-scaled audibility floors,
+    use_wallclock_trigger_threshold=True, ...), so rebuilding the config from
+    defaults would be wrong.
     """
     from modules.freq_utils import hz_to_bin
     N, sr = self._n_bins, self._sr
@@ -131,10 +130,9 @@ def capture_config(self):
         nearend_smoother_n=int(self._nearend_smoother._n),
         aud_lf_end_bin=int(min(hz_to_bin(ea.lf_band_end_hz, N, sr), N)),
         aud_mf_end_bin=int(min(hz_to_bin(ea.mf_band_end_hz, N, sr), N)),
-        # LF-gain clamp anchor bin: _limit_lf_gains hardcodes hz_to_bin(250).
-        # Production C sets scfg.lf_clamp_bin = AECB_SG_LF_CLAMP_BIN (=8); the
-        # parity test must replay the same value (was an un-set cfg field ->
-        # garbage clamped a wide LF range and corrupted the gain).
+        # LF-gain clamp anchor bin: _limit_lf_gains hardcodes hz_to_bin(250). Production
+        # C sets scfg.lf_clamp_bin = AECB_SG_LF_CLAMP_BIN; the replay must use the same
+        # value.
         lf_clamp_bin=int(hz_to_bin(250.0, N, sr)),
         floor_power=float(ea.floor_power),
         aud_thr_lf=float(ea.audibility_threshold_lf),
@@ -179,14 +177,12 @@ def run_case(repo, mic_path, ref_path, frames, cfg_out):
                 render_block, clock_drift, stationary_mask=None):
         if not cfg_out:
             cfg_out.update(capture_config(self))
-        # The orchestrator RECREATES the SuppressionGain instance on a
-        # mid-stream reset (delay-acquire / filter-recovery -> _reset_aec3_post),
-        # which clears the smoother / split-floor latch / DNE counters /
-        # last_gain. Detect that by instance identity so the C replay can
-        # re-init its state on the same frame. We also capture initial_state
-        # (used by the LF-smoothing gate + DNE trigger gate) at call time
-        # (BEFORE the call mutates nothing — get_gain reads but doesn't change
-        # initial_state; it is set externally by the orchestrator).
+        # The orchestrator RECREATES the SuppressionGain instance on a mid-stream reset
+        # (delay-acquire / filter-recovery -> _reset_aec3_post), which clears the
+        # smoother / split-floor latch / DNE counters / last_gain. Detect that by
+        # instance identity so the C replay can re-init its state on the same frame.
+        # initial_state (used by the LF-smoothing gate + DNE trigger gate) is captured at
+        # call time; get_gain only reads it, the orchestrator sets it externally.
         is_reset = (prev_id[0] is not None and id(self) != prev_id[0])
         prev_id[0] = id(self)
         cur_initial_state = bool(self._initial_state)

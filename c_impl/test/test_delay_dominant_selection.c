@@ -1,27 +1,17 @@
-/* test_delay_dominant_selection.c — the product delay is the DOMINANT
- * matched-filter peak, not the pre-echo one.
+/* test_delay_dominant_selection.c -- the product delay is the DOMINANT matched-filter peak, not the pre-echo one.
  *
- * The reference design runs its delay estimator inside a RenderDelayController and wants the
- * earliest echo-path onset, so upstream substitutes the pre-echo candidate for
- * the reported delay while still qualifying it with the dominant peak's
- * histogram. This port's product path is different: the reported sample delay
- * aligns a short PBFDKF directly, so an onset further ahead of the dominant
- * echo than that filter spans puts the echo it must cancel outside the filter
- * -- while confidence still reads 1.0, because confidence describes the
- * dominant histogram and not the substituted delay.
+ * A reference delay estimator that wants the earliest echo-path onset can report the pre-echo candidate. Here the reported
+ * sample delay aligns a short PBFDKF directly, so an onset further ahead of the dominant echo than that filter spans puts the
+ * echo it must cancel outside the filter, while confidence still reads 1.0 (it describes the dominant histogram, not a
+ * substituted delay). The onset estimate therefore has no consumer: the accumulated-error search that produced it is not
+ * computed and the pre-echo histogram is never fed; test_pre_echo_path_is_inert() pins that.
  *
- * The onset estimate has no consumer here, so the accumulated-error search
- * that produced it is not computed and the pre-echo histogram is never fed;
- * test_pre_echo_path_is_inert() pins that.
+ * The signal is dual-path on purpose: a weak early reflection plus a stronger dominant one, separated by more than the PBFDKF
+ * span. "The dominant one was reported" only means something if this estimator could have reported the early one, so every
+ * test below first feeds the early reflection ALONE, at the same gain, and asserts it is locked onto (see
+ * check_early_path_is_detectable()).
  *
- * The signal is dual-path on purpose: a weak early reflection plus a stronger
- * dominant one, separated by more than the PBFDKF span. "The dominant one was
- * reported" only means something if this estimator could have reported the
- * early one, so every test below first feeds the early reflection ALONE, at
- * the same gain, and asserts it is locked onto -- see
- * check_early_path_is_detectable().
- *
- * Build (standalone, from c_impl/ -- same recipe as test_delay_reset.c):
+ * Build (standalone, from c_impl/):
  *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=gnu99 -Iinclude \
  *       -I../../audiolib/common/include \
  *       -I../../audiolib/common \
@@ -51,10 +41,8 @@ static float rng_next(void) {
     return (float)((int)((g_rng >> 9) & 0x7FFFu) - 16384) / 16384.0f;
 }
 
-/* Separation is 1600 samples at 16 kHz = 100 ms, far wider than the 832-sample
- * (52 ms) PBFDKF the reported delay aligns. Taken from the a6941aef far-end
- * single-talk fixture, whose dominant echo sits ~6210 samples out and whose
- * earlier onset lands at 4608. */
+/* Separation is 1600 samples at 16 kHz = 100 ms, far wider than the 832-sample (52 ms) PBFDKF the
+ * reported delay aligns. */
 #define DOMINANT_16K 6208
 #define EARLY_16K    4608
 #define EARLY_GAIN   0.30f
@@ -165,12 +153,10 @@ static void test_reported_delay_is_the_dominant_peak(int sample_rate, int hop) {
     free(pool);
 }
 
-/* The other half of the contract: the onset estimate is not merely
- * unreported, it is not computed. After a long dual-path run -- one that
- * would have driven every pre-echo update a per-tap-prefix path makes -- the buffers it
- * fed and the histogram it fed into must still hold their initialised values.
- * This is what a patch that quietly re-introduced the per-tap-prefix error
- * would trip over. */
+/* The other half of the contract: the onset estimate is not merely unreported, it is not computed.
+ * After a long dual-path run, which would have driven every pre-echo update a per-tap-prefix path
+ * makes, the buffers it fed and the histogram it fed into must still hold their initialised values.
+ * A change that re-introduced the per-tap-prefix error would trip over this. */
 static void test_pre_echo_path_is_inert(void) {
     DelayAec d;
     const char *why = NULL;

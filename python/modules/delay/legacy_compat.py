@@ -1,28 +1,10 @@
-"""Compatibility shim: exposes legacy DelayEstimator API on top of the
-AEC3-aligned EchoPathDelayEstimator.
+"""Delay estimator adapter exposing the orchestrator's ``DelayEstimator`` interface
+(``confidence``, ``is_solid``, ``estimated_delay``, ``accumulate``, ``reset``,
+``_n_updates``, ``_period_samples``, ``_alpha``) on top of ``EchoPathDelayEstimator``.
 
-Drop-in replacement for ``legacy_delay.DelayEstimator`` at orchestrator.py:374.
-The orchestrator has ~30 call sites referencing ``self.delay_est`` via the
-legacy API (``.confidence``, ``.is_solid``, ``.estimated_delay``,
-``.accumulate``, ``.reset``, ``._n_updates``, plus mutable ``._period_samples``
-and ``._alpha``). Rather than rewrite every site, this shim adapts the AEC3
-estimator to that surface.
-
-Design notes:
-  * We bypass ``RenderDelayController`` because it quantises the delay to
-    AEC3 4 ms blocks (or our 10 ms hops via the port), losing the sub-hop
-    sample precision the orchestrator's ring buffer needs (the filter taps
-    align to raw-sample resolution, not hop boundaries). Calling
-    ``EchoPathDelayEstimator.estimate_delay()`` directly returns the raw
-    16 kHz-sample delay (post ``_DOWN_SAMPLING_FACTOR=4`` multiplication
-    inside the estimator).
-  * Confidence mapping: None→0.0, COARSE→0.5, REFINED→1.0 — matches the
-    orchestrator's ≥0.3 / ≥0.5 / is_solid gates.
-  * The legacy EPC fast-cadence path writes ``._period_samples`` and
-    ``._alpha``; AEC3 matched filter is always-on per 4 ms inner block,
-    so these are accepted as no-op compat attributes.
-  * ``latest_variability`` synthesises ``EchoPathVariability`` from the
-    delay change for future migrations that want the AEC3-native event.
+The delay is the raw-sample value from ``estimate_delay()``, not quantised to
+hops. Confidence: no estimate 0.0, COARSE 0.5, REFINED 1.0.
+``_period_samples`` and ``_alpha`` are accepted and ignored.
 """
 from typing import Optional
 
@@ -36,19 +18,12 @@ class LegacyDelayShim:
     def __init__(self, sample_rate: int, hop_size: int, **legacy_kwargs) -> None:
         self._sample_rate = int(sample_rate)
         self._hop_size = int(hop_size)
-        # Legacy kwargs accepted for call-site compat; ignored by the AEC3
-        # estimator (which carries its own internal smoothing + cadence).
-        # ``num_filters`` is the ONE exception -- it is a real AEC3 geometry
-        # parameter (matched-filter bank size), so it is forwarded rather
-        # than swallowed. Default 5 keeps every existing caller that does not
-        # pass it byte-identical to before this pass-through existed.
+        # Extra kwargs are accepted and ignored; ``num_filters`` (matched-filter bank size) is forwarded.
         self._legacy_kwargs = legacy_kwargs
 
         num_filters = int(legacy_kwargs.get('num_filters', 5))
         if not 1 <= num_filters <= 5:
-            # Mirror AecConfig.__post_init__ / C delay_aec3 fail-fast: a
-            # direct caller of this shim must not be able to build a bank
-            # size the orchestrated/C paths would reject.
+            # Same bank-size limit as AecConfig and the C path.
             raise ValueError(
                 f"num_filters must be in [1, 5], got {num_filters}"
             )
@@ -56,12 +31,12 @@ class LegacyDelayShim:
             sample_rate=self._sample_rate,
             num_filters=num_filters,
         )
-        self._latest_estimate: Optional[DelayEstimate] = None  # raw 16 kHz samples
+        self._latest_estimate: Optional[DelayEstimate] = None  # raw (input-rate) samples
         self._estimate_count = 0
         self._latest_variability: Optional[EchoPathVariability] = None
         self._pending_flush = False
 
-        # Legacy EPC fast-cadence writes these. No-op compat attributes.
+        # No-op attributes kept for caller compatibility.
         self._period_samples = 0
         self._alpha = 0.6
 
@@ -74,22 +49,16 @@ class LegacyDelayShim:
         self._pending_flush = True
 
     def accumulate(self, near: np.ndarray, far: np.ndarray) -> bool:
-        """Process one hop. Returns True iff a NEW delay value was emitted
-        this hop (mirrors legacy ``DelayEstimator.accumulate`` return)."""
+        """Process one hop; True iff a new delay value was emitted."""
         estimate = self._estimator.estimate_delay(far, near)
         prev_delay = self._latest_estimate.delay if self._latest_estimate else -1
         emitted_new = False
         if estimate is not None:
             self._latest_estimate = estimate
-            # _estimate_count counts hops where ANY estimate is available,
-            # matching the legacy `_n_updates` semantic (`>= 3` gate at
-            # orchestrator.py:1644). Legacy incremented per segment-update;
-            # AEC3 matched filter updates every inner block (>=2 per hop),
-            # so a per-hop increment is the equivalent guard.
+            # Counts hops where any estimate is available (consumers gate on >= 3).
             self._estimate_count += 1
             if estimate.delay != prev_delay:
                 emitted_new = True
-        # Synthesise EchoPathVariability for downstream consumers.
         if self._pending_flush:
             delay_change = DelayAdjustment.BUFFER_FLUSH
             self._pending_flush = False

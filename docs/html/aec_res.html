@@ -137,18 +137,7 @@ t              各 lane 線性 AEC 完成
 <h2>7. 延遲與 warm-up</h2>
 <p>無演算法延遲(同 hop 內回傳)。實例以 <code>initial_state = 1</code> 起始:初始階段是否啟用 DominantNearend 觸發與低頻平滑,由設定中的 <code>dne_use_during_initial_phase</code>／<code>lf_smoothing_during_initial_phase</code> 決定;第一次 <code>all_converged</code> 為真的 hop 離開初始狀態,之後不會回去,直到 <code>aec_res_reset()</code>。設定來自 <code>AecConfig</code> 的共同建構函式,其中這兩個旗標固定為 1,所以經由本介面,初始狀態對增益沒有影響;離開初始狀態的判斷與狀態仍保留,供旗標被關閉的設定使用。</p>
 
-<h2>8. 多 lane pipeline 原本向 AEC 內部取用的符號</h2>
-<p>4ch pipeline(<code>Audio_ALG/pipelines/4ch_aec_bf_nr_res/4aec_nr_res.c</code>)目前自己 include 內部 header 重做這一級。對應如下;「已提供」表示 <code>aec_res.h</code> 能取代,pipeline 端改接線是另一項工作。</p>
-<div class="tblwrap"><table>
-<tr><th>pipeline 現在用的</th><th>用途</th><th>取代者</th></tr>
-<tr><td><code>lanes[0]-&gt;a3_sg.cfg／.tun</code></td><td>取得抑制器設定</td><td><code>aec_res_init(mem, bytes, &amp;aec_cfg)</code></td></tr>
-<tr><td><code>SuppressionGain／Config／Tuning</code>、<code>suppression_gain_init</code></td><td>建立與 reset 抑制器</td><td><code>aec_res_init</code>／<code>aec_res_reset</code></td></tr>
-<tr><td><code>suppression_gain_set_initial_state</code>、<code>.initial_state</code>、<code>.dt_protect_active</code>、<code>suppression_gain_get_gain</code></td><td><code>post_res_gain</code></td><td><code>aec_res_process</code>(閾值 0.2／0.5 固定於內部)</td></tr>
-<tr><td><code>suppression_gain_set_split_floor_far_active_db</code>、<code>.cfg.split_floor_far_active</code></td><td>preset 改強度(ramp)</td><td><code>aec_res_set_preset</code></td></tr>
-<tr><td><code>.split_floor_far_active_live</code>、<code>post_sg_cfg.split_floor_far_active</code></td><td>診斷:現行／目標地板</td><td><code>aec_res_split_floor</code></td></tr>
-<tr><td><code>AECB_SQRT2_SIN_LUT</code>(<code>aec_balanced_config.h</code>)</td><td>舒適噪音填補</td><td><code>aec_cng_fill</code></td></tr>
-<tr><td><code>delay_aec_*</code>(<code>delay_aec.h</code>)</td><td>共用延遲估計器</td><td><b>仍是內部符號</b>,不在 RES 級範圍內,本介面不提供</td></tr>
-</table></div>
+<h2>8. 與 Aec 內部舒適噪音的差異</h2>
 <div class="note"><code>aec_cng_fill</code> 與 <code>Aec</code> 自己的舒適噪音(<code>aec_post.c</code>)<b>同配方、不同算式</b>:同一個亂數遞推與查表,但本函式用 libm 的 <code>sqrtf</code>／除法,與兩條 pipeline 的迴圈逐位元相同;<code>Aec</code> 內部則是批次化的 <code>inv_psd_scale</code>＋<code>sk_fast_sqrt_f32</code>。兩者不要混用在要求位元一致的比對中。</div>
 
 <h2>9. 相關檔案與測試</h2>

@@ -1,87 +1,44 @@
-/* filter_delay.h — C port of python/modules/state/filter_delay.py
- * (AecState::FilterDelay; the reference filter-delay logic with a
- * hop-rescaled threshold).
- *
- * Caches the external (RenderDelayController) delay plus the per-channel
- * direct-path filter delays reported by the filter analyzer, in OUR hop units.
- *
- * This module is PURELY INTEGER (no floating point at all): all quantities are
- * block/hop counts and array indices. There are no numpy-dtype parity concerns
- * here — the only correctness surface is exact branch selection and the
- * integer floor-division `delay_headroom_samples // HOP_SAMPLES`.
- *
- * Behaviour (verbatim from the Python):
- *   ctor:  delay_headroom_blocks = delay_headroom_samples // HOP_SAMPLES
- *          filter_delays_blocks[c] = delay_headroom_blocks (all channels)
- *          min_filter_delay        = delay_headroom_blocks
- *          external_delay          = <unreported>
- *   update(analyzer, external, blocks_with_proper_filter_adaptation):
- *     if external is reported:            external_delay = external   (cached)
- *     unconverged = blocks_with_proper_filter_adaptation
- *                   < filter_adaptation_threshold_hops (200 at 16 kHz/160)
- *     if unconverged AND external_delay reported:
- *         filter_delays_blocks[*] = delay_headroom_blocks
- *     elif analyzer provided:
- *         require len(analyzer) == num_channels  (else error)
- *         filter_delays_blocks    = analyzer
- *     (else: untouched)
- *     min_filter_delay = min(filter_delays_blocks)
- *
- * The cached external_delay PERSISTS across update calls — it is only replaced
- * when a *reported* external delay is supplied; a subsequent unreported
- * external still drives the unconverged-reset branch because the cache stays
- * set. Verified against the Python on the real balanced/DT pipeline.
- */
+/* Caches the external (render-delay-controller) delay and the per-channel direct-path filter
+ * delays from the filter analyzer, in hop units (integer only). A reported external delay persists
+ * across calls. While unconverged (adaptation counter below filter_adaptation_threshold_hops) with
+ * an external delay cached, all channels reset to delay_headroom_blocks; otherwise the analyzer
+ * delays are copied when given. min_filter_delay is the minimum over channels.
+ * Python reference: modules/state/filter_delay.py. */
 #ifndef FILTER_DELAY_H
 #define FILTER_DELAY_H
 
-/* delay_headroom_blocks and filter_adaptation_threshold_hops are computed
- * live in filter_delay_init() from hop_size/sample_rate (a hop=160/sr=16000
- * grid gives a hop of 160 samples and an adaptation threshold of 200 hops)
- * -- see the struct fields. */
-
-/* DelayEstimate POD (python modules/delay/delay_types.DelayEstimate).
- * `quality` is DelayQuality (0=COARSE, 1=REFINED); `delay` is in samples.
- * `reported` replaces Python's Optional[...] None sentinel (0 == None). */
+/* DelayEstimate POD. `quality` is DelayQuality (0=COARSE, 1=REFINED); `delay` is in samples;
+ * `reported` == 0 means no estimate. */
 typedef struct {
-    int reported;  /* 0 == None (unreported), 1 == a DelayEstimate is present */
-    int quality;   /* DelayQuality enum value (0=COARSE, 1=REFINED)           */
-    int delay;     /* delay in samples                                        */
+    int reported;
+    int quality;
+    int delay;
 } FilterDelayEstimate;
 
 typedef struct {
-    int delay_headroom_blocks;   /* delay_headroom_samples / hop_size, live   */
-    int num_channels;            /* len(filter_delays_blocks)                 */
-    int *filter_delays_blocks;   /* caller-owned storage; length num_channels */
-    int min_filter_delay;        /* min(filter_delays_blocks)                 */
-    FilterDelayEstimate external_delay;  /* cached external delay (.reported)  */
-    int filter_adaptation_threshold_hops; /* derived from the live grid; 200 hops at 16 kHz/160 */
+    int delay_headroom_blocks;
+    int num_channels;
+    int *filter_delays_blocks;   /* caller-owned; length num_channels */
+    int min_filter_delay;
+    FilterDelayEstimate external_delay;
+    int filter_adaptation_threshold_hops;
 } FilterDelay;
 
-/* delays_storage must point to num_capture_channels ints; ownership stays with
- * the caller. hop_size/sample_rate drive the live delay_headroom_blocks and
- * filter_adaptation_threshold_hops computation. Mirrors FilterDelay.__init__. */
+/* delays_storage points to num_capture_channels ints, owned by the caller.
+ * hop_size/sample_rate set delay_headroom_blocks and filter_adaptation_threshold_hops. */
 void filter_delay_init(FilterDelay *fd, int *delays_storage,
                        int delay_headroom_samples, int num_capture_channels,
                        int hop_size, int sample_rate);
 
-/* update (aec_state.cc:355-388 line port).
- *   analyzer            : per-channel direct-path delays, length analyzer_len.
- *                         Pass analyzer == NULL to signal Python's None
- *                         (leave the cached estimate untouched in the else
- *                         branch). analyzer_len is ignored when analyzer==NULL.
- *   external            : external delay; pass external->reported == 0 (or
- *                         external == NULL) to signal None.
- *   blocks_with_proper_filter_adaptation : adaptation counter (hops).
- * Returns 0 on success, -1 on the analyzer length mismatch (Python raises
- * ValueError("analyzer delays length mismatch")). On the -1 path the state is
- * left unmodified up to the point of the check (matching Python, where the
- * raise aborts before the assignment and before min recompute). */
+/* analyzer: per-channel direct-path delays of length analyzer_len, or NULL to keep the
+ * current delays (analyzer_len is then ignored).
+ * external: external delay; NULL or external->reported == 0 means none.
+ * blocks_with_proper_filter_adaptation: adaptation counter in hops.
+ * Returns 0, or -1 on an analyzer length mismatch (state unmodified). */
 int filter_delay_update(FilterDelay *fd, const int *analyzer, int analyzer_len,
                         const FilterDelayEstimate *external,
                         int blocks_with_proper_filter_adaptation);
 
-/* Accessors (mirror the Python methods). */
 int filter_delay_min_direct_path(const FilterDelay *fd);
 
-#endif /* FILTER_DELAY_H */
+#endif

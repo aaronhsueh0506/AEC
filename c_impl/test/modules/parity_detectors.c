@@ -64,34 +64,22 @@ int main(int argc, char* argv[]) {
                                        mic_pwr, erl_est);
 
         /* Tolerances:
-         *  Every float-valued field is compared in a float32 ULP band.
-         *  detectors.c is float32 by design (see the note at the top of that
-         *  file), so the
-         *  divergence/dt_from_shadow/shadow_advantage fields cannot be
-         *  compared with exact equality -- they are fp32 in C and fp64 in
-         *  Python. The band is tight enough to stay a real gate:
-         *  the SHADOW_FRAME_GATE 50-vs-20 divergence this test exists to
-         *  catch shows up as 0.0 vs ~0.059, ~7 orders of magnitude outside it.
-         *  Booleans and counters remain exact.
-         *  far_pwr: Python np.mean uses pairwise fp32 sum; we use 8-block
-         *  pairwise, so the exact algorithm differs by <= 2 fp32-ULP.
-         *  dt_from_energy compounds far_pwr drift. */
+         *  Every float-valued field is compared in a float32 ULP band. detectors.c is float32 by design, so the
+         *  divergence/dt_from_shadow/shadow_advantage fields (fp32 in C, fp64 in Python) cannot be compared with exact equality.
+         *  The band is tight enough to stay a real gate: a wrong shadow frame gate shows up as 0.0 vs ~0.059, about 7 orders of
+         *  magnitude outside it. Booleans and counters remain exact.
+         *  far_pwr: Python np.mean uses a pairwise fp32 sum; C uses 8-block pairwise, so the exact algorithm differs by <= 2
+         *  fp32 ULP. dt_from_energy compounds far_pwr drift. */
         const double F32_ULP = 1.2e-7;
         #define DRIFT(c, py, ulps) \
             (fabs((double)(c) - (double)(py)) > \
              (ulps) * F32_ULP * (fabs((double)(py)) + 1e-30))
-        /* EMA-ACCUMULATED fields use a RELATIVE band, not a ULP count.
-         * Since the retiming landed, the EMA coefficient itself differs
-         * between the ports -- C's aec_growth_rehop is float32 powf, Python's
-         * growth_rehop is float64 -- so the two sides run slightly different
-         * recursions. The gap therefore GROWS with the length of a decay run
-         * (~N * 1 coefficient-ULP over N steps), which a fixed ULP count
-         * cannot express: 16 ULP held for 240 frames and failed on a 20-frame
-         * silence tail at 16.3. Measured worst case over all four grids is
-         * ~2e-6 relative; 1e-4 is 50x that and still four orders below any
-         * real defect (a wrong constant shows up at 20%+ -- see the mutation
-         * cases in the file header). The instantaneous fields keep their tight
-         * ULP bands: they carry no accumulated state. */
+        /* EMA-ACCUMULATED fields use a RELATIVE band, not a ULP count. The EMA coefficient itself differs between the ports
+         * (C's aec_growth_rehop is float32 powf, Python's growth_rehop is float64), so the two sides run slightly different
+         * recursions and the gap GROWS with the length of a decay run (~N * 1 coefficient-ULP over N steps), which a fixed ULP
+         * count cannot express. The measured worst case over all four grids is ~2e-6 relative; 1e-4 is 50x that and still four
+         * orders below any real defect (a wrong constant shows up at 20%+). The instantaneous fields keep tight ULP bands:
+         * they carry no accumulated state. */
         #define REL_DRIFT(c, py, rel) \
             (fabs((double)(c) - (double)(py)) > \
              (rel) * (fabs((double)(py)) + 1e-12))

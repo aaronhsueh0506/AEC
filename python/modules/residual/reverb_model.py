@@ -1,17 +1,7 @@
-"""ReverbModel — port of AEC3 reverb_model.cc.
+"""ReverbModel: per-bin exponential accumulator ``reverb[k] = (reverb[k] + power[k] * scaling) * decay``.
 
-Mirrors docs/aec3_extracts/src/aec3/reverb_model.{cc,h}. Tiny exponential
-IIR accumulator over a per-bin power spectrum:
-
-    reverb[k] = (reverb[k] + power_spectrum[k] * scaling) * decay
-
-Two update flavours match AEC3 source:
-  * ``update_no_freq_shaping`` — scalar ``scaling`` (used in nonlinear
-    mode, where scaling = echo_path_gain).
-  * ``update`` — per-bin ``scaling`` (linear mode, scaling = filter
-    frequency response squared).
-
-The accumulator is shared across modes; only the update rule differs.
+``update_no_freq_shaping`` takes a scalar scaling (nonlinear mode, echo-path gain);
+``update`` takes a per-bin scaling (linear mode, filter frequency response squared).
 """
 from __future__ import annotations
 
@@ -33,7 +23,7 @@ class ReverbModel:
     def update_no_freq_shaping(
         self, power_spectrum: np.ndarray, scaling: float, decay: float
     ) -> None:
-        """Mirrors UpdateReverbNoFreqShaping (cc:28-39)."""
+        """Scalar-scaling update; no-op when ``decay <= 0``."""
         if decay <= 0.0:
             return
         np.add(self._reverb, power_spectrum * float(scaling), out=self._reverb)
@@ -45,7 +35,7 @@ class ReverbModel:
         scaling: np.ndarray,
         decay: float,
     ) -> None:
-        """Mirrors UpdateReverb (cc:41-52). Per-bin scaling."""
+        """Per-bin-scaling update; no-op when ``decay <= 0``."""
         if decay <= 0.0:
             return
         np.add(self._reverb, power_spectrum * scaling, out=self._reverb)

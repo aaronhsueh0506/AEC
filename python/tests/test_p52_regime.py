@@ -1,10 +1,8 @@
-"""P52 A.0R.4 — unit tests for PathChangeRegimeHandler + AcousticRegimeClassifier.
+"""Unit tests for PathChangeRegimeHandler + AcousticRegimeClassifier.
 
-Tests each handler action (boost_q / reverse_copy / main_paused) with a
-synthetic input that triggers it; verifies the state transition.
-
-Tests the regime classifier against synthetic regimes matching the
-post-mortem distribution.
+Each handler action (boost_q / reverse_copy / main_paused) is triggered with a
+synthetic input and the state transition verified. The regime classifier is
+tested against synthetic regimes.
 
 Run:
     python -m pytest python/tests/test_p52_regime.py
@@ -194,7 +192,7 @@ class HandlerActionTests(unittest.TestCase):
                          dt_from_energy=0.0)
             self.assertFalse(d.boost_q)
             self.assertFalse(d.reverse_copy)
-            # When far inactive in legacy/coherence branch, counters reset and
+            # When far is inactive in the energy/coherence gate modes, counters reset and
             # _main_paused goes False.
         self.assertFalse(h.main_paused)
 
@@ -295,19 +293,13 @@ class RegimeClassifierTests(unittest.TestCase):
         self.assertLess(r.deciles_used, clf.MIN_DECILES_WITH_FAR)
 
 
-# --- B1: PBFDKF.reset() P-override cleanup (v3.14 housekeeping) -----------
+# --- PBFDKF.reset() P-override cleanup -----------
 
 class PBFDKFResetTests(unittest.TestCase):
-    """B1 fix verification: reset() must unconditionally clear dynamic
-    P-override attrs regardless of countdown state (B1, LOW-MED severity).
-
-    The _p_max_override / _p_max_override_frames / _p_floor_beta /
-    _p_floor_beta_frames attrs are dynamically injected as instance attributes
-    when an EPC or regime event arms the P-override.  The countdown logic
-    decrements _frames and deletes it (plus resets base attr to default) when
-    the countdown expires.  reset() must clear all four attrs unconditionally
-    so that a reset mid-countdown leaves no stale state that a subsequent
-    process() would inherit.
+    """reset() must unconditionally clear the dynamic P-override attrs
+    (_p_max_override, _p_max_override_frames, _p_floor_beta, _p_floor_beta_frames)
+    that an EPC or regime event injects while arming the P-override, so a reset
+    mid-countdown leaves no stale state for a subsequent process() to inherit.
     """
 
     def _make_filter(self):
@@ -326,9 +318,9 @@ class PBFDKFResetTests(unittest.TestCase):
             self.assertFalse(hasattr(filt, attr), f'{attr} present after reset on fresh filter')
 
     def test_reset_during_active_p_override_clears_all_four_attrs(self):
-        """B1 core: reset() called mid-countdown removes all 4 dynamic attrs."""
+        """reset() called mid-countdown removes all 4 dynamic attrs."""
         filt = self._make_filter()
-        # Arm a P-override exactly as the EPC trigger does (see aec.py lines 5633-5635)
+        # Arm a P-override exactly as the EPC trigger does
         filt._p_max_override = 1.0
         filt._p_max_override_frames = 30
         filt._p_floor_beta = 1.0

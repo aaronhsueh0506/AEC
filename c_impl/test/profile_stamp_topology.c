@@ -1,16 +1,11 @@
-/* profile_stamp_topology.c — audit-profile's value-level half.
+/* profile_stamp_topology.c -- audit-profile's value-level half.
  *
- * The rest of audit-profile proves the PROFILE knob reaches the compile and
- * that a release build links no clock. That says nothing about WHERE the
- * stamps sit, and a stage window whose opening stamp is missing reports 0 --
- * indistinguishable from a stage that genuinely cost under a microsecond.
- * steering_us is the field most exposed to that: it exists precisely because
- * the window between the main filter and the post block had no stamps at all
- * and read as free.
+ * The rest of audit-profile proves the PROFILE knob reaches the compile and that a release build links no clock. That says
+ * nothing about WHERE the stamps sit, and a stage window whose opening stamp is missing reports 0, indistinguishable from a
+ * stage that genuinely cost under a microsecond.
  *
- * Built against a library whose stamp advances by one per read (see
- * profile_timer_count.h), so each window's value is the number of stamps it
- * spans. One hop through aec_process() then produces an exact tuple:
+ * Built against a library whose stamp advances by one per read (see profile_timer_count.h), so each window's value is the
+ * number of stamps it spans. One hop through aec_process() then produces an exact tuple:
  *
  *   read 0  entry, opens frontend
  *   read 1  opens the delay bracket        delay_us    = 2 - 1     = 1
@@ -20,8 +15,7 @@
  *   read 5  closes steering, opens res     steering_us = 5 - 4     = 1
  *   read 6  closes res                     res_us      = 6 - 5     = 1
  *
- * Seven reads, five windows, no window empty -- which is the contract
- * AecStageTiming's doc comment states.
+ * Seven reads, five windows, no window empty: the contract AecStageTiming's doc comment states.
  */
 #include "aec.h"
 #include <stdio.h>

@@ -1,23 +1,11 @@
-"""AecDebugLogger — per-second console diagnostic dump (--diag flag).
-
-Extracted from ``aec.py`` during refactor R.10. Read-only consumer of
-AEC state; no algorithmic effect.
-
-Self-contained: numpy + AEC type-hint forward reference.
-"""
+"""AecDebugLogger: periodic console dump of AEC internal state (read-only)."""
 import numpy as np
 
 
 class AecDebugLogger:
-    """Periodically logs AEC internal state to console.
+    """Logs AEC internal state to the console every ``log_interval_s`` seconds.
 
-    Usage::
-
-        aec = AEC(config)
-        logger = AecDebugLogger(aec, log_interval_s=1.0)
-        # inside processing loop:
-        output = aec.process(mic, ref)
-        logger.update()
+    Call ``update()`` once per processed frame.
     """
 
     _HEADER = (

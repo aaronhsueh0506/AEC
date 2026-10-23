@@ -1,4 +1,4 @@
-"""Generate a binary golden for the C initial_state port (WS5 Phase 5.2).
+"""Generate a binary golden for the C initial_state port.
 
 Drives the Python InitialState through a deterministic active_render /
 saturated_capture sequence across THREE configs and snapshots the full state
