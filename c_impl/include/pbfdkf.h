@@ -186,7 +186,7 @@ typedef struct PBFDKF {
 
     long   partition_sum_x2_startup_hops;
 
-    /* Per-hop |error_spec|^2 [n_freqs], computed once in pbfdkf_process and shared. */
+    /* Per-hop |error_spec|^2 [n_freqs], computed once in pbfdkf_process_with_far_cmag2 and shared. */
     float* e2_ref_scratch;
 
     /* More per-hop scratch, n_freqs each. */
@@ -209,16 +209,9 @@ void pbfdkf_reset_taps(PBFDKF* p);
 /* pbfdaf_reset_carried_state plus the orchestrator-fed refresh inputs and the per-bin H_error. */
 void pbfdkf_reset_carried_state(PBFDKF* p);
 
-/* mu_scale: NULL for a scalar broadcast, else per-bin float[n_freqs] (after the narrow-band mask).
- * */
-void pbfdkf_process(PBFDKF* p,
-                       const float* near_end, const float* far_end,
-                       const float* mu_scale,
-                       float        mu_scale_scalar,
-                       float*       output);
-
-/* As pbfdaf_process_with_far_cmag2. Returns 1 when e2_ref_scratch holds this hop's |error_spec|^2,
- * 0 on the far-silent path. */
+/* As pbfdaf_process_with_far_cmag2. mu_scale: NULL for a scalar broadcast, else per-bin float[n_freqs]
+ * (after the narrow-band mask). Returns 1 when e2_ref_scratch holds this hop's |error_spec|^2, 0 on
+ * the far-silent path. */
 int pbfdkf_process_with_far_cmag2(PBFDKF* p,
                        const float* near_end, const float* far_end,
                        const float* mu_scale, float mu_scale_scalar,

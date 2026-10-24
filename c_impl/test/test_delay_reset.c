@@ -85,7 +85,7 @@ static int feed_delayed_noise(DelayAec *d, unsigned int seed, int n_hops,
     for (i = delay_samples; i < total; ++i) near[i] = far[i - delay_samples];
     for (i = 0; i < n_hops; ++i) {
         int cur;
-        delay_aec_accumulate(d, near + (size_t)i * hop, far + (size_t)i * hop, hop);
+        delay_aec_accumulate_ex(d, near + (size_t)i * hop, far + (size_t)i * hop, hop, 1);
         cur = delay_aec_estimated_delay(d);
         if (cur >= 0) last = cur;
     }
@@ -205,7 +205,7 @@ static int split_run(DelayAec *d, void *pool, size_t pool_bytes, const float *ne
     while (pos < total) {
         int n = mode == 0 ? 1 : mode == 1 ? SPLIT_HOP : ragged[i++ % (int)(sizeof ragged / sizeof ragged[0])];
         if (n > total - pos) n = total - pos;
-        delay_aec_accumulate(d, near + pos, far + pos, n);
+        delay_aec_accumulate_ex(d, near + pos, far + pos, n, 1);
         pos += n;
     }
     memcpy(snap, d, sizeof *snap);
@@ -265,7 +265,7 @@ static void test_edge_chunker_overlapping_input(void) {
         if (!pool) return;
         rng_seed(100u + (unsigned)k);
         for (j = 0; j < DA_BLOCK_SIZE; ++j) { seed_in[j] = rng_next(); outside[j] = rng_next(); }
-        if (cases[k].pre) delay_aec_accumulate(&d, seed_in, seed_in, cases[k].pre);
+        if (cases[k].pre) delay_aec_accumulate_ex(&d, seed_in, seed_in, cases[k].pre, 1);
         pc = d.est.pending_count;
         memcpy(rp, d.est.render_pending, sizeof rp);
         memcpy(cp, d.est.capture_pending, sizeof cp);
@@ -280,7 +280,7 @@ static void test_edge_chunker_overlapping_input(void) {
                 : cases[k].in_render == 2 ? cp + cases[k].off_r : outside;
             cin = cases[k].in_capture == 1 ? cp + cases[k].off_c
                 : cases[k].in_capture == 2 ? rp + cases[k].off_c : outside;
-            /* delay_aec_accumulate(d, near, far): far is the render input. */
+            /* delay_aec_accumulate_ex(d, near, far, ...): far is the render input. */
             delay_aec_accumulate_ex(&d, real_c, real_r, cases[k].n, 1);
         }
         model_append(rp, cp, pc, rin, cin, cases[k].n);

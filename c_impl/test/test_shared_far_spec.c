@@ -1,24 +1,24 @@
 /* test_shared_far_spec.c -- far-end-FFT sharing regression test.
  *
- * aec_process_context_shared_far() lets one instance borrow another's already-computed far-end spectrum instead of running its
- * own FFT, for multi-instance callers (e.g. a 4-lane wrapper) whose instances see the identical far-end signal every hop.
- * This test proves:
+ * aec_process_context_shared_far_from() lets one instance borrow another's already-computed far-end spectrum (and its squared
+ * magnitudes) instead of running its own FFT, for multi-instance callers (e.g. a 4-lane wrapper) whose instances see the
+ * identical far-end signal every hop. This test proves:
  *   1. Borrowing produces BYTE-IDENTICAL AecResContext output to computing independently: two separately constructed,
  *      identically configured instances fed the identical mic/ref sequence, one via aec_process_context() (own far FFT), the
- *      other via aec_process_context_shared_far() fed the first's ctx.far_spec each hop, across shadow on/off (the borrow
- *      insertion point differs: shadow.precomputed_far_spec when a shadow is present, main.precomputed_far_spec otherwise)
- *      and the three contracted grids.
- *   2. The shared spectrum is genuinely CONSUMED: a deliberately wrong (garbage) shared_far_spec gives a DIFFERENT result
- *      than the correct one. Without this negative control, (1) could pass if the function quietly computed its own spectrum.
- *   3. aec_reset() on an instance with an unconsumed precomputed_far_spec pending leaves no stale pointer behind (the
- *      pbfdaf_reset() defensive clear).
+ *      other via aec_process_context_shared_far_from() borrowing the first instance's spectrum each hop, across shadow on/off
+ *      (the borrow insertion point differs: shadow.precomputed_far_spec when a shadow is present, main.precomputed_far_spec
+ *      otherwise) and the three contracted grids.
+ *   2. The shared spectrum is genuinely CONSUMED: borrowing from an owner that processed a DIFFERENT reference gives a
+ *      DIFFERENT result than computing locally. Without this negative control, (1) could pass if the function quietly
+ *      computed its own spectrum.
+ *   3. aec_reset() on an instance that borrowed leaves no stale pointer behind (the pbfdaf_reset() defensive clear): the
+ *      owner is destroyed after the reset and the instance keeps processing.
  *   4. aec_far_fft_real_compute_count() reflects "did this instance run its own far FFT this hop": it increments once per
- *      hop on an aec_process_context() instance and stays flat on an aec_process_context_shared_far()-only instance. A
+ *      hop on an aec_process_context() instance and stays flat on an aec_process_context_shared_far_from()-only instance. A
  *      multi-lane caller (4aec_nr_res.c) uses it to prove its total per-hop far-FFT count dropped after lanes 1-3 share
  *      lane 0's spectrum.
- *   5. The hop and call counters (frame_count, shadow_frame_count, render_call_count, capture_call_count) saturate at
- *      LONG_MAX, and a shadow hop count past INT_MAX still reads as past the shadow warm-up gate where the detectors narrow
- *      it to int.
+ *   5. The hop counters (frame_count, shadow_frame_count) saturate at LONG_MAX, and a shadow hop count past INT_MAX still
+ *      reads as past the shadow warm-up gate where the detectors narrow it to int.
  *
  * Build (standalone, from c_impl/):
  *   make -C ../../audiolib/common BACKEND=ne10 lib
@@ -99,10 +99,8 @@ static void test_borrow_matches_compute(int sample_rate, int fft_size, int enabl
         }
 
         aec_process_context(&source, mic_a, ref);
-        AecResContext src_ctx;
-        aec_get_res_context(&source, &src_ctx);
 
-        aec_process_context_shared_far(&borrower, mic_b, ref, src_ctx.far_spec);
+        aec_process_context_shared_far_from(&borrower, mic_b, ref, &source);
     }
 
     /* Now verify: a FRESH pair, borrower this time computing its own
@@ -127,9 +125,7 @@ static void test_borrow_matches_compute(int sample_rate, int fft_size, int enabl
         }
 
         aec_process_context(&source2, mic_a, ref);
-        AecResContext src_ctx2;
-        aec_get_res_context(&source2, &src_ctx2);
-        aec_process_context_shared_far(&borrower2, mic_b, ref, src_ctx2.far_spec);
+        aec_process_context_shared_far_from(&borrower2, mic_b, ref, &source2);
 
         aec_process_context(&borrower_reference, mic_b, ref);
 
@@ -157,42 +153,38 @@ static void test_borrow_matches_compute(int sample_rate, int fft_size, int enabl
     aec_destroy(&borrower_reference);
 }
 
-/* Negative control: a deliberately WRONG shared spectrum must change the
- * result. Without this, test_borrow_matches_compute() could pass
- * vacuously if aec_process_context_shared_far() silently ignored its
- * shared_far_spec argument and just computed its own spectrum regardless. */
+/* Negative control: borrowing the spectrum of an owner that processed a DIFFERENT
+ * reference must change the result. Without this, test_borrow_matches_compute()
+ * could pass vacuously if aec_process_context_shared_far_from() silently ignored
+ * the owner and just computed its own spectrum regardless. */
 static void test_wrong_shared_spec_changes_result(void) {
     AecConfig cfg;
     context_only_config(&cfg, 16000, 0, 1);
 
-    Aec correct, wrong;
+    Aec correct, wrong, other_owner;
     CHECK(aec_create(&correct, &cfg) == 0, "negative-control: aec_create(correct)");
     CHECK(aec_create(&wrong, &cfg) == 0, "negative-control: aec_create(wrong)");
+    CHECK(aec_create(&other_owner, &cfg) == 0, "negative-control: aec_create(other_owner)");
 
     int hop = aec_hop_size(&correct);
-    if (hop <= 0 || hop > 4096) { aec_destroy(&correct); aec_destroy(&wrong); return; }
-    AecResContext dims_ctx;
-    aec_get_res_context(&correct, &dims_ctx);
-    int K = dims_ctx.n_freqs;
+    if (hop <= 0 || hop > 4096) {
+        aec_destroy(&correct); aec_destroy(&wrong); aec_destroy(&other_owner);
+        return;
+    }
 
-    Complex* garbage_spec = (Complex*)malloc((size_t)K * sizeof(Complex));
-    CHECK(garbage_spec != NULL, "negative-control: malloc garbage spectrum");
-
-    float mic[4096], ref[4096];
+    float mic[4096], ref[4096], other_ref[4096];
     g_rng_state = 0xBAD5EC00u;
     int saw_divergence = 0;
     for (int i = 0; i < 60; ++i) {
         for (int s = 0; s < hop; ++s) {
             ref[s] = rng_uniform(0.3f);
+            other_ref[s] = rng_uniform(0.3f);
             mic[s] = rng_uniform(0.3f) + 0.4f * ref[s];
-        }
-        for (int k = 0; k < K; ++k) {
-            garbage_spec[k].r = rng_uniform(50.0f);
-            garbage_spec[k].i = rng_uniform(50.0f);
         }
 
         aec_process_context(&correct, mic, ref);
-        aec_process_context_shared_far(&wrong, mic, ref, garbage_spec);
+        aec_process_context(&other_owner, mic, other_ref);
+        aec_process_context_shared_far_from(&wrong, mic, ref, &other_owner);
 
         AecResContext cctx, wctx;
         aec_get_res_context(&correct, &cctx);
@@ -204,19 +196,20 @@ static void test_wrong_shared_spec_changes_result(void) {
     }
 
     CHECK(saw_divergence,
-          "negative-control: a deliberately wrong shared_far_spec actually changes the output "
-          "(proves the argument is genuinely consumed, not silently ignored)");
+          "negative-control: borrowing a different reference's spectrum actually changes the output "
+          "(proves the owner is genuinely consumed, not silently ignored)");
 
-    free(garbage_spec);
     aec_destroy(&correct);
     aec_destroy(&wrong);
+    aec_destroy(&other_owner);
 }
 
 /* aec_reset() must not leave a stale precomputed_far_spec pointer behind, even right after a
  * shared-far call (pbfdaf_reset() defensive clear). The pointer field is not observable from here
- * (the sub-structs are opaque), so this proves the observable consequence: post-reset the instance
- * behaves exactly like a fresh instance computing its own spectrum, never reusing a stale borrowed
- * pointer (garbage output, or a crash under ASan/valgrind on the freed memory). */
+ * (the sub-structs are opaque), so this proves the observable consequence: the owner whose
+ * spectrum was borrowed is destroyed after the reset, and the instance keeps processing without
+ * reusing a stale borrowed pointer (garbage output, or a crash under ASan/valgrind on the freed
+ * memory). */
 static void test_reset_after_shared_far_is_clean(void) {
     AecConfig cfg;
     context_only_config(&cfg, 16000, 0, 1);
@@ -233,21 +226,14 @@ static void test_reset_after_shared_far_is_clean(void) {
     for (int s = 0; s < hop; ++s) { ref[s] = rng_uniform(0.3f); mic[s] = rng_uniform(0.3f); }
 
     aec_process_context(&source, mic, ref);
-    AecResContext src_ctx;
-    aec_get_res_context(&source, &src_ctx);
+    aec_process_context_shared_far_from(&a, mic, ref, &source);
 
-    /* Heap-allocated spectrum, freed immediately after the call that
-     * consumes it -- if reset() (or anything else) kept a stale reference
-     * to it, a subsequent dereference would be a use-after-free (would
+    /* The owner's pool is freed right after the reset -- if reset() (or anything else) kept a
+     * stale reference to its spectrum, a subsequent dereference would be a use-after-free (would
      * show up under ASan even if it happens not to crash here). */
-    int K = src_ctx.n_freqs;
-    Complex* heap_spec = (Complex*)malloc((size_t)K * sizeof(Complex));
-    memcpy(heap_spec, src_ctx.far_spec, (size_t)K * sizeof(Complex));
-    aec_process_context_shared_far(&a, mic, ref, heap_spec);
-    free(heap_spec);
-
     aec_reset(&a);
     CHECK(1, "reset-after-shared-far: aec_reset() right after a shared-far call does not crash");
+    aec_destroy(&source);
 
     for (int i = 0; i < 10; ++i) {
         for (int s = 0; s < hop; ++s) { ref[s] = rng_uniform(0.3f); mic[s] = rng_uniform(0.3f); }
@@ -256,15 +242,14 @@ static void test_reset_after_shared_far_is_clean(void) {
     CHECK(1, "reset-after-shared-far: instance keeps processing normally post-reset "
              "(no crash/UB from a stale borrowed pointer)");
 
-    aec_destroy(&source);
     aec_destroy(&a);
 }
 
 /* aec_far_fft_real_compute_count(): the counter a multi-lane caller uses
  * to prove its total per-hop far-FFT count dropped. Proves both halves:
  * a plain aec_process_context() instance increments by exactly 1 every
- * hop, and an aec_process_context_shared_far()-only instance (given a
- * valid spectrum every hop) never increments at all. */
+ * hop, and an aec_process_context_shared_far_from()-only instance (given a
+ * valid owner every hop) never increments at all. */
 static void test_far_fft_counter_reflects_actual_computation(void) {
     AecConfig cfg;
     context_only_config(&cfg, 16000, 0, 1);
@@ -291,9 +276,7 @@ static void test_far_fft_counter_reflects_actual_computation(void) {
             mic_b[s] = rng_uniform(0.3f) + 0.2f * ref[s];
         }
         aec_process_context(&computing, mic_a, ref);
-        AecResContext ctx;
-        aec_get_res_context(&computing, &ctx);
-        aec_process_context_shared_far(&borrowing, mic_b, ref, ctx.far_spec);
+        aec_process_context_shared_far_from(&borrowing, mic_b, ref, &computing);
     }
 
     char label[128];
@@ -302,7 +285,7 @@ static void test_far_fft_counter_reflects_actual_computation(void) {
              n_hops, n_hops);
     CHECK(aec_far_fft_real_compute_count(&computing) == n_hops, label);
     snprintf(label, sizeof(label),
-             "counter test: aec_process_context_shared_far()-only instance stays at 0 after %d hops",
+             "counter test: aec_process_context_shared_far_from()-only instance stays at 0 after %d hops",
              n_hops);
     CHECK(aec_far_fft_real_compute_count(&borrowing) == 0, label);
 
@@ -349,7 +332,7 @@ static void test_far_fft_counter_saturation(void) {
     aec_destroy(&a);
 }
 
-/* Hop and call counters hold at LONG_MAX instead of overflowing signed long (32 bits on
+/* Hop counters hold at LONG_MAX instead of overflowing signed long (32 bits on
  * ILP32). Seeding one hop below the limit and running past it proves the clamp on the
  * real increment sites; each field must also return to zero on reset. */
 static void test_hop_counter_saturation(void) {
@@ -365,19 +348,11 @@ static void test_hop_counter_saturation(void) {
 
     a.frame_count = LONG_MAX - 1;
     a.shadow_frame_count = LONG_MAX - 1;
-    a.render_call_count = LONG_MAX - 1;
-    a.capture_call_count = LONG_MAX - 1;
-    for (int i = 0; i < 3; ++i) {
-        aec_analyze_render(&a, ref);
-        aec_process_capture(&a, mic, out);
-    }
+    for (int i = 0; i < 3; ++i) aec_process(&a, mic, ref, out);
     CHECK(a.frame_count == LONG_MAX, "frame_count stops at LONG_MAX");
     CHECK(a.shadow_frame_count == LONG_MAX, "shadow_frame_count stops at LONG_MAX");
-    CHECK(a.render_call_count == LONG_MAX, "render_call_count stops at LONG_MAX");
-    CHECK(a.capture_call_count == LONG_MAX, "capture_call_count stops at LONG_MAX");
     aec_reset(&a);
-    CHECK(a.frame_count == 0 && a.shadow_frame_count == 0 && a.render_call_count == 0 &&
-          a.capture_call_count == 0, "saturated hop counters reset to zero");
+    CHECK(a.frame_count == 0 && a.shadow_frame_count == 0, "saturated hop counters reset to zero");
     aec_destroy(&a);
 }
 

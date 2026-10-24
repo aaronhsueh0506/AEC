@@ -66,7 +66,7 @@ static int feed_paths(DelayAec *d, unsigned int seed, int n_hops, int hop,
     }
     for (i = 0; i < n_hops; ++i) {
         int cur;
-        delay_aec_accumulate(d, near + (size_t)i * hop, far + (size_t)i * hop, hop);
+        delay_aec_accumulate_ex(d, near + (size_t)i * hop, far + (size_t)i * hop, hop, 1);
         cur = delay_aec_estimated_delay(d);
         if (cur >= 0) last = cur;
     }

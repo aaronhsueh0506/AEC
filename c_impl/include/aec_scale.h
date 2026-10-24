@@ -11,7 +11,6 @@
 #define AEC_PSD_SCALE        (32768.0 * 32768.0)
 #define AEC_PSD_SCALE_INV    (1.0 / AEC_PSD_SCALE)
 #define AEC_BLOCK_SAMPLES_16K 64                    /* samples per block @ 16 kHz */
-#define AEC_BLOCK_MS          4.0
 
 /* Conversion functions */
 int    aec_blocks_to_hops(int blocks, int hop_samples, int sample_rate);
@@ -39,36 +38,10 @@ double aec_db_to_linear(double db);
 #define AEC_H_ERROR_FLOOR_FLOAT  1.0e-3
 #define AEC_H_ERROR_CEIL_FLOAT   2.0
 
-/* Refined-filter leakage rates per hop (per-block rate x 2.5), steady and transient profiles. */
-#define AEC_LEAKAGE_CONVERGED_PER_HOP            (5.0e-5 * 2.5)
-#define AEC_LEAKAGE_DIVERGED_PER_HOP             (5.0e-2 * 2.5)
-#define AEC_LEAKAGE_CONVERGED_TRANSIENT_PER_HOP  (5.0e-3 * 2.5)
-#define AEC_LEAKAGE_DIVERGED_TRANSIENT_PER_HOP   (5.0e-1 * 2.5)
-
 /* 1000 blocks at the reference grid */
 #define AEC_POOR_EXC_COUNTER_INITIAL_HOPS  400
 
-/* Unitless */
-#define AEC_MAX_ERLE_LF  4.0
-#define AEC_MAX_ERLE_HF  1.5
-#define AEC_MIN_ERLE     1.0
-
-#define AEC_STATIONARITY_THR_RATIO       10.0
-#define AEC_STATIONARITY_BLOCK_FRACTION  0.75
-#define AEC_STATIONARITY_ALPHA           0.004
-#define AEC_STATIONARITY_ALPHA_INIT      0.04
-
-/* Matched-filter amplitude limits (/32768, amplitude not PSD) */
-#define AEC_MATCHED_FILTER_EXCITATION_LIMIT_FLOAT (150.0 / 32768.0)
-#define AEC_MATCHED_FILTER_SATURATION_LIMIT_FLOAT (32000.0 / 32768.0)
-
-/* PSD-scale render and floor constants */
-#define AEC_NORMAL_RENDER_LIMIT_FLOAT (64.0  * AEC_PSD_SCALE_INV)
-#define AEC_LOW_RENDER_LIMIT_FLOAT    (256.0 * AEC_PSD_SCALE_INV)
-#define AEC_FLOOR_POWER_FLOAT         (128.0 * AEC_PSD_SCALE_INV)
+/* PSD-scale floor constant */
 #define AEC_FILTER_NOISE_GATE_POWER_FLOAT (20075344.0 * AEC_PSD_SCALE_INV)
-#define AEC_STATIONARITY_MIN_NOISE_POWER_FLOAT (10.0 * AEC_PSD_SCALE_INV)
-/* int16^2 scale, used verbatim */
-#define AEC_RESIDUAL_NOISE_GATE_POWER 27509.42
 
 #endif

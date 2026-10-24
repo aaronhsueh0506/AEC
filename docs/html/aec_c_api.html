@@ -67,7 +67,7 @@ pre code{background:none;padding:0}
 <tr><td>延遲</td><td>8 ms/hop,<b>較低</b></td><td>16 ms/hop</td></tr>
 <tr><td>頻率解析度</td><td>129 bins</td><td>257 bins,<b>較高</b>——長混響與 tonal echo 分得更開</td></tr>
 <tr><td>每秒運算次數</td><td>加倍 → CPU 較高</td><td>減半 → CPU 較低</td></tr>
-<tr><td>記憶體(balanced/MATCHED n=5)</td><td>397,744 B</td><td>525,440 B</td></tr>
+<tr><td>記憶體(balanced/MATCHED n=5)</td><td>364,416 B</td><td>491,600 B</td></tr>
 <tr><td>partition 數</td><td><code>filter_length 832 / 128</code> → 7</td><td><code>832 / 256</code> → 4</td></tr>
 </table></div>
 <p class="small">所有以「10 ms 為單位」撰寫的時間常數,都會在 <code>aec_carve()</code> 依實際 hop 自動 retime,換 grid 不需要手動換算 tuning。</p>
@@ -134,10 +134,10 @@ aec_destroy(&amp;aec);                        /* 會 free 內部 arena */</pre>
 <h3>四個 grid 的 pool 實測(balanced、MATCHED n=5)</h3>
 <div class="tblwrap"><table>
 <tr><th>sr / fft</th><th><code>aec_get_mem_size()</code></th><th>其中 estimator</th><th>其中 ring</th></tr>
-<tr><td>16000 / 256</td><td>397,744</td><td>33,936</td><td>131,072</td></tr>
-<tr><td>16000 / 512</td><td>525,440</td><td>33,936</td><td>131,072</td></tr>
-<tr><td>48000 / 1024</td><td>1,224,176</td><td>35,312</td><td>393,216</td></tr>
-<tr><td>8000 / 256(legacy)</td><td>284,352</td><td>33,936</td><td>65,536</td></tr>
+<tr><td>16000 / 256</td><td>364,416</td><td>33,936</td><td>131,072</td></tr>
+<tr><td>16000 / 512</td><td>491,600</td><td>33,936</td><td>131,072</td></tr>
+<tr><td>48000 / 1024</td><td>1,156,544</td><td>35,312</td><td>393,216</td></tr>
+<tr><td>8000 / 256(legacy)</td><td>267,408</td><td>33,936</td><td>65,536</td></tr>
 </table></div>
 <p class="small">此表為 <code>aec_get_mem_size()</code>／<code>aec_get_mem_breakdown()</code> 的實測輸出(<code>sizeof(AecConfig)</code> = 224)。<b>這些絕對值會隨 <code>Aec</code>／<code>AecConfig</code> 結構大小整批移動</b>——必須重新查 <code>aec_get_mem_size()</code>,不可沿用記下的常數。相對地,每 filter 的 5,728 B delta 不隨結構改變。</p>
 
@@ -147,22 +147,10 @@ aec_destroy(&amp;aec);                        /* 會 free 內部 arena */</pre>
 <tr><th>入口</th><th>什麼時候用</th><th>輸出</th></tr>
 <tr><td><code>aec_process(a, mic, ref, out)</code></td><td><b>預設</b>:lockstep,要拿時域輸出</td><td><code>out</code>,依 §7 三種模式</td></tr>
 <tr><td><code>aec_process_context(a, mic, ref)</code></td><td><b>接 NN 後級</b>:只讀 context,永不取時域音訊。比上者恰好省一次 O(hop) memcpy</td><td>—</td></tr>
-<tr><td><code>aec_process_context_shared_far(a, mic, ref, far_spec)</code></td><td>多 lane <b>每 hop 看到完全相同的 far</b>:一條 lane 自算 FFT,其餘借用</td><td>—</td></tr>
-<tr><td><code>aec_process_context_shared_far_from(a, mic, ref, far_owner)</code></td><td>同上,但同 hop 的遠端頻譜及其 magnitude² 取自另一個 <code>Aec</code></td><td>—</td></tr>
-<tr><td><code>aec_analyze_render(a, ref)</code> + <code>aec_process_capture(a, mic, out)</code></td><td>render 與 capture <b>分執行緒</b>(SPSC)</td><td><code>out</code></td></tr>
+<tr><td><code>aec_process_context_shared_far_from(a, mic, ref, far_owner)</code></td><td>多 lane <b>每 hop 看到完全相同的 far</b>:一條 lane 自算 FFT,其餘借用它同 hop 的遠端頻譜及其 magnitude²(<code>Aec</code> owner)</td><td>—</td></tr>
 </table></div>
 <div class="note"><b>Aliasing 很寬鬆</b>:<code>aec_process_core()</code> 在最開頭就把 <code>mic</code>／<code>ref</code> memcpy 進內部 buffer,之後<b>再也不讀</b>;<code>out</code> 直到最後一行才寫。所以 <code>out</code> 可以 alias <code>mic</code> 或 <code>ref</code>,<code>mic</code> 與 <code>ref</code> 也可以互相 alias。</div>
-<div class="note"><b>五個處理入口推進完全相同的 state</b>(都經 <code>aec_process_core</code>),差別只在要不要把結果複製出來 → <b>可在同一 instance 上任意交錯,不需要中間 reset</b>。單執行緒下先 <code>aec_analyze_render(ref)</code> 再 <code>aec_process_capture(mic,out)</code>,輸出與 <code>aec_process(mic,ref,out)</code> <b>逐位元相同</b>。</div>
-
-<h3>Streaming 的回傳值 <code>AecBufferingEvent</code></h3>
-<div class="tblwrap"><table>
-<tr><th>值</th><th>意義</th></tr>
-<tr><td><code>AEC_BUF_NONE</code></td><td>正常</td></tr>
-<tr><td><code>AEC_BUF_RENDER_UNDERRUN</code></td><td>capture 跑在前面,FIFO 空 → 該 hop 用<b>靜音 ref</b> 處理</td></tr>
-<tr><td><code>AEC_BUF_RENDER_OVERRUN</code></td><td>render 堆積超過 FIFO:<code>aec_analyze_render</code> 丟新的;<code>aec_process_capture</code> 跳過陳舊 backlog</td></tr>
-<tr><td class="dead"><code>AEC_BUF_API_SKEW</code></td><td class="dead"><b>保留,目前不會被回傳</b>——library 內沒有任何寫入點</td></tr>
-</table></div>
-<p class="small">Threading:<b>SPSC only</b>。恰一條 thread 呼 <code>aec_analyze_render</code>、恰一條呼 <code>aec_process_capture</code>,不需外部鎖。<b>不涵蓋</b>:第二條 producer/consumer、與 render/capture 併發呼叫 <code>aec_reset()</code>/<code>aec_destroy()</code>、把 offline <code>aec_process()</code> 與 streaming pair 混用。</p>
+<div class="note"><b>三個處理入口推進完全相同的 state</b>(都經 <code>aec_process_core</code>),差別只在要不要把結果複製出來 → <b>可在同一 instance 上任意交錯,不需要中間 reset</b>。</div>
 
 <h2>6. 搭配 NN model:不需要 DSP 後級時怎麼用</h2>
 <p>線性 AEC 常常只當前級,殘留回音抑制交給 NN(Align-ULCNet 等)。此時<b>不要</b>照預設整條跑完再丟掉後半段——那是白算的。正確做法:</p>
@@ -188,7 +176,7 @@ aec_get_linear_context(aec, &amp;lin);      /* 時域 seam:線性殘差 + 已對
 <tr><td><code>return_res_context = 1</code></td><td><b>關鍵</b>。若也設 0,post block <b>整段不跑</b>,<code>error_spec</code>／<code>res_gain</code>／<code>r2</code>／<code>comfort_noise</code>／<code>formed_hop</code> <b>全部是 NULL</b></td></tr>
 <tr><td><code>spatial_linear_context = 1</code></td><td>只有多 lane fused post-stage 才用(4ch)。本 lane 的 <code>G_res</code> 完全不算(<code>res_gain</code> 回 NULL),但 DominantNearend hold-state 仍每 hop 更新。<b>強制</b>要求 <code>enable_res==0 &amp;&amp; return_res_context==1</code></td></tr>
 </table></div>
-<div class="warn"><b>borrowed pointer 的效期只到下一次 process。</b><code>AecResContext</code>／<code>AecLinearContext</code> 的每個指標都 alias 內部 per-hop buffer,<b>五個 process 入口任一個</b>都會覆寫它們。要跨 hop 保存必須自己複製走。</div>
+<div class="warn"><b>borrowed pointer 的效期只到下一次 process。</b><code>AecResContext</code>／<code>AecLinearContext</code> 的每個指標都 alias 內部 per-hop buffer,<b>三個 process 入口任一個</b>都會覆寫它們。要跨 hop 保存必須自己複製走。</div>
 <div class="note"><b>接 NR 時 <code>r2</code> 要先換尺度</b>:<code>AecResContext.r2</code> 與 <code>comfort_noise</code> 是 <b>int16² scale</b>,要除以 <code>32768²</code> 才是 audio power。<code>res_gain</code> 則是 amplitude <code>[0,1]</code>。<br><b>用 <code>generation</code> 做快取失效</b>:<code>AecLinearContext.generation</code> 每次 ring offset 改變就 +1(飽和不 wrap)。只比較 <code>delay_samples</code> 會漏掉 A→B→A 的暫態。</div>
 <p class="small">完整的 NN seam 規格(三個 swap point、wiring contract)見 <code>AEC/docs/nn_integration_interface.md</code>。</p>
 
@@ -211,8 +199,8 @@ aec_get_linear_context(aec, &amp;lin);      /* 時域 seam:線性殘差 + 已對
 <tr><td><code>aec_apply_external_realign(a, delta)</code></td><td><b>僅 EXTERNAL_ALIGNED</b>。<code>delta = 新對齊 − 舊對齊</code>。條件符合時<b>平移已學到的 IR</b>,否則做 filter-only reset(保留 synthesis OLA,輸出連續無垂直線)</td><td><code>1</code>=warm transfer／<code>0</code>=filter reset 或 <code>delta==0</code>／<code>-1</code>=NULL 或 mode 不對</td></tr>
 <tr><td><code>aec_reset(a)</code></td><td>回到「全新 instance」狀態。會重啟 WOLA → spectrogram 上會有垂直線。若只是外部對齊改變,<b>請用上一個函式而不是這個</b></td><td><code>void</code>,<b>⚠ 無 NULL 檢查</b></td></tr>
 </table></div>
-<div class="warn"><code>aec_set_preset()</code> 對非法 preset 是<b>拒絕</b>(回 −1),與 <code>aec_config_from_preset()</code> 靜默退回 balanced 的行為<b>相反</b>。<code>ramp_ms</code> 範圍 <code>[0, 60000]</code>,<code>ramp_ms==0</code> <b>不是</b>錯誤。ramp 進行中再呼叫 → 從當前 live 值重新起走。<br>全部必須<b>在 hop 之間</b>呼叫、與 <code>process()</code> 序列化;<b>非 thread-safe</b>。<code>aec_reset()</code> 另外要求 render/capture thread 已靜止。</div>
-<div class="note">若 lane 是用 <code>spatial_linear_context=1</code> 建立的(4ch),<code>aec_set_preset()</code> <b>依構造為 inert</b>——該 lane 根本不跑 suppressor 的 gain path。4ch 要改強度請對整合者自己持有的共用 post 級抑制器——<a href="aec_res.html"><code>AecRes</code></a>——呼叫 <code>aec_res_set_preset()</code>。</div>
+<div class="warn"><code>aec_set_preset()</code> 對非法 preset 是<b>拒絕</b>(回 −1),與 <code>aec_config_from_preset()</code> 靜默退回 balanced 的行為<b>相反</b>。<code>ramp_ms</code> 範圍 <code>[0, 60000]</code>,<code>ramp_ms==0</code> <b>不是</b>錯誤。ramp 進行中再呼叫 → 從當前 live 值重新起走。<br>全部必須<b>在 hop 之間</b>呼叫、與 <code>process()</code> 序列化;<b>非 thread-safe</b>。</div>
+<div class="note">若 lane 是用 <code>spatial_linear_context=1</code> 建立的(4ch),<code>aec_set_preset()</code> <b>依構造為 inert</b>——該 lane 根本不跑 suppressor 的 gain path。4ch 要改強度請對共用的 post 級抑制器——<a href="aec_res.html"><code>AecRes</code></a>(4ch 單元以 <code>audio_pipeline_4ch_res(p)</code> 提供;直接驅動核心的呼叫端自備)——呼叫 <code>aec_res_set_preset()</code>。</div>
 
 <h2>10. 狀態查詢與診斷</h2>
 <div class="tblwrap"><table>
@@ -225,9 +213,8 @@ aec_get_linear_context(aec, &amp;lin);      /* 時域 seam:線性殘差 + 已對
 <tr><td><code>aec_get_mem_breakdown()</code></td><td><b>會重跑 validate,不要放 hot path</b></td><td>有</td><td>—</td></tr>
 <tr><td><code>aec_hop_size()</code></td><td>免費</td><td class="dead">⚠ 無</td><td>—</td></tr>
 <tr><td><code>aec_far_fft_real_compute_count()</code></td><td>免費</td><td class="dead">⚠ 無</td><td>—</td></tr>
-<tr><td><code>aec_last_buffering_event()</code></td><td>免費</td><td class="dead">⚠ 無</td><td>—</td></tr>
 </table></div>
-<div class="warn"><b>NULL 檢查是不對稱的</b>,不要一律假設 NULL-safe。上表標 ⚠ 的三個、以及 <code>aec_reset()</code> 與四個 <code>aec_process*</code> 入口,傳 NULL 會直接解參考。</div>
+<div class="warn"><b>NULL 檢查是不對稱的</b>,不要一律假設 NULL-safe。上表標 ⚠ 的兩個、以及 <code>aec_reset()</code>、<code>aec_process()</code> 與 <code>aec_process_context()</code>,傳 NULL 會直接解參考。</div>
 
 <h3><code>AecDebugStatus</code> — 板端監看的主力</h3>
 <div class="tblwrap"><table>

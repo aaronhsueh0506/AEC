@@ -14,8 +14,6 @@
 #define STAT_BLOCK_FRACTION        0.75f  /* more than 75% of bands stationary -> block stationary */
 #define STAT_ALPHA                 0.004f
 #define STAT_ALPHA_INIT            0.04f
-#define STAT_AVG_INIT_HOPS_DEFAULT       8
-#define STAT_INITIAL_PHASE_HOPS_DEFAULT  200
 
 typedef struct {
     int    n_freqs;

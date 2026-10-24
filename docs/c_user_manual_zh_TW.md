@@ -12,12 +12,12 @@
 ```
 
 只要自己用 `aec_process()` 取得時域輸出，就只需要 `aec.h`。另有一個 header 屬於
-**對外公開、範圍較窄的介面**，在自己組合頻域後處理鏈時需要（單聲道整鏈，以及多通道線性 AEC + BF
-之後接 `AecRes`，都是這種用法）：
+**對外公開、範圍較窄的介面**，在自己組合頻域後處理鏈時需要（單聲道整鏈；以及直接驅動多通道核心、
+在 beamformer 之後自備 `AecRes` 的呼叫端——Audio_ALG 的 4ch 單元已內含一個，見 §8.5）：
 
 | Header | 何時需要 |
 |---|---|
-| `aec_res.h` | `aec_cng_fill()` 舒適噪音填補（單聲道、多通道兩種串接都用）；以及對 beamformer 之後的融合頻譜算 RES 增益的 `AecRes`（§8.6、§8.7） |
+| `aec_res.h` | `aec_cng_fill()` 舒適噪音填補（單聲道、多通道兩種串接都用）；以及對 beamformer 之後的融合頻譜算 RES 增益的 `AecRes`（§8.5、§8.6） |
 
 `suppression_gain.h` 與 `aec_balanced_config.h` 是內部 header。Audio_ALG 的範例與多通道單元
 只 include `aec.h` 與 `aec_res.h`，不直接 include 這兩個。
@@ -99,7 +99,7 @@
 | **沒有非線性回音模型** | 只有線性 filter + 殘留回音抑制。喇叭嚴重失真、破音造成的非線性回音無法建模。 |
 | **取樣率限 8/16/48 kHz** | 其他取樣率請在外部先重新取樣。 |
 | **mic/ref 必須同一時鐘** | 兩路取樣率要相同且同步。長時間的 clock drift 會讓延遲估計與 filter 收斂失效，函式庫不負責補償。 |
-| **不是 thread-safe** | 單一實例不可被多執行緒同時呼叫（例外見 §8 的 streaming API）。 |
+| **不是 thread-safe** | 單一實例不可被多執行緒同時呼叫；處理進入點之間、`aec_reset()` 與 `aec_destroy()` 都要由呼叫端序列化。 |
 
 ---
 
@@ -341,10 +341,10 @@ filter bank、降取樣 render ring 與兩個 lag histogram 都是依 init 設�
 
 | 格點 | n=1 | n=2 | n=3 | n=4 | n=5（預設） |
 |---|---:|---:|---:|---:|---:|
-| 8 kHz / 256（legacy） | 261,440 B | 267,168 B | 272,896 B | 278,624 B | 284,352 B |
-| 16 kHz / 256 | 374,832 B | 380,560 B | 386,288 B | 392,016 B | 397,744 B |
-| 16 kHz / 512 | 502,528 B | 508,256 B | 513,984 B | 519,712 B | 525,440 B |
-| 48 kHz / 1024 | 1,201,264 B | 1,206,992 B | 1,212,720 B | 1,218,448 B | 1,224,176 B |
+| 8 kHz / 256（legacy） | 244,496 B | 250,224 B | 255,952 B | 261,680 B | 267,408 B |
+| 16 kHz / 256 | 341,504 B | 347,232 B | 352,960 B | 358,688 B | 364,416 B |
+| 16 kHz / 512 | 468,688 B | 474,416 B | 480,144 B | 485,872 B | 491,600 B |
+| 48 kHz / 1024 | 1,133,632 B | 1,139,360 B | 1,145,088 B | 1,150,816 B | 1,156,544 B |
 
 > **這些絕對值會隨 `Aec` / `AecConfig` 的結構大小整批移動（`sizeof(AecConfig)`
 > 目前是 224 B），而所有 delta 不變**（每個 filter 5,728 B、`FIXED` 的 byte/ms
@@ -364,13 +364,13 @@ histogram 1,536 B ＋ pre-echo histogram 96 B。所以 `n=1` 相對預設 `n=5` 
 
 | `delay_mode` | 記憶池 | 相對 `MATCHED n=5` |
 |---|---:|---:|
-| `MATCHED` n=5（預設） | 397,744 B | — |
-| `MATCHED` n=1 | 374,832 B | −22,912 B |
-| `FIXED`，`fixed_delay_samples = 0` | 233,248 B | −164,496 B |
-| `FIXED`，`fixed_delay_samples = 400`（25 ms） | 234,848 B | −162,896 B |
-| `FIXED`，`fixed_delay_samples = 1600`（100 ms） | 239,648 B | −158,096 B |
-| `FIXED`，`fixed_delay_samples = 8000`（500 ms） | 265,248 B | −132,496 B |
-| `EXTERNAL_ALIGNED` | 232,736 B | −165,008 B |
+| `MATCHED` n=5（預設） | 364,416 B | — |
+| `MATCHED` n=1 | 341,504 B | −22,912 B |
+| `FIXED`，`fixed_delay_samples = 0` | 199,920 B | −164,496 B |
+| `FIXED`，`fixed_delay_samples = 400`（25 ms） | 201,520 B | −162,896 B |
+| `FIXED`，`fixed_delay_samples = 1600`（100 ms） | 206,320 B | −158,096 B |
+| `FIXED`，`fixed_delay_samples = 8000`（500 ms） | 231,920 B | −132,496 B |
+| `EXTERNAL_ALIGNED` | 199,408 B | −165,008 B |
 
 #### 環形緩衝大小公式
 
@@ -406,20 +406,20 @@ histogram 1,536 B ＋ pre-echo histogram 96 B。所以 `n=1` 相對預設 `n=5` 
 
 | 格點 | fixed=0 | 25 ms | 100 ms | 500 ms |
 |---|---:|---:|---:|---:|
-| 16 kHz / 256 | 233,248 B | 234,848 B | 239,648 B | 265,248 B |
-| 16 kHz / 512 | 361,456 B | 363,056 B | 367,856 B | 393,456 B |
-| 48 kHz / 1024 | 797,696 B | 802,496 B | 816,896 B | 893,696 B |
+| 16 kHz / 256 | 199,920 B | 201,520 B | 206,320 B | 231,920 B |
+| 16 kHz / 512 | 327,616 B | 329,216 B | 334,016 B | 359,616 B |
+| 48 kHz / 1024 | 730,064 B | 734,864 B | 749,264 B | 826,064 B |
 
 > **注意**：`fixed_delay_samples` 很大時 `FIXED` 也可能比 `MATCHED n=5` 更
-> 耗記憶體（48 kHz/1024、2500 ms 為 1,277,696 B，高於 `MATCHED n=5` 的
-> 1,224,176 B）——環形緩衝終究要放得下那個延遲。要用大 fixed delay 又要省
+> 耗記憶體（48 kHz/1024、2500 ms 為 1,210,064 B，高於 `MATCHED n=5` 的
+> 1,156,544 B）——環形緩衝終究要放得下那個延遲。要用大 fixed delay 又要省
 > 記憶體，正確作法是讓呼叫端自己補償掉大延遲後改用 `EXTERNAL_ALIGNED`。
 
-另外一個明顯的開關（16 kHz/256，相對 397,744 B）：
+另外一個明顯的開關（16 kHz/256，相對 364,416 B）：
 
 | 設定 | 記憶池 | 差異 |
 |---|---:|---:|
-| `enable_shadow = 0` | 354,864 B | −42,880 B |
+| `enable_shadow = 0` | 321,536 B | −42,880 B |
 
 `enable_res` 與 `enable_cng` **不影響**記憶池大小（相關緩衝區一律配置）。
 
@@ -459,11 +459,7 @@ aec_reset(&aec);    /* 或 aec_reset(aec) */
 | `aec_reset` | — | 不會失敗 | **會 crash**（無 NULL 檢查） |
 | `aec_process` | 回傳 `void` | **無法回報失敗** | **會 crash**（無 NULL 檢查） |
 | `aec_process_context` | 回傳 `void` | 同上 | **會 crash** |
-| `aec_process_context_shared_far` | 回傳 `void` | 同上 | **會 crash** |
 | `aec_process_context_shared_far_from` | 回傳 `void` | 無法回報失敗；無效 owner 退回本地計算 | 直接返回（安全） |
-| `aec_analyze_render` | 回傳 `AecBufferingEvent` | 以事件值回報緩衝狀況，非錯誤碼 | **會 crash** |
-| `aec_process_capture` | 回傳 `AecBufferingEvent` | 同上 | **會 crash** |
-| `aec_last_buffering_event` | 回傳 `AecBufferingEvent` | — | **會 crash** |
 | `aec_hop_size` | 回傳 hop sample 數 | — | **會 crash** |
 | `aec_far_fft_real_compute_count` | 回傳累計次數 | — | **會 crash** |
 | `aec_get_res_context` | 回傳 `void`，填入結構 | — | **靜默 no-op**（你的結構完全不被寫入） |
@@ -619,7 +615,7 @@ void aec_get_last_timing(const Aec* a, AecStageTiming* out);
   render activity、`mu_scale`、mic-clip、RSA 更新，以及 shadow filter。
   **不含** `delay_us`，兩者不會重複計算。
 - `linear_us`：主自適應濾波器；若本實例自己算 far-end FFT（而不是透過
-  `aec_process_context_shared_far()` 借用），FFT 也算在這裡。
+  `aec_process_context_shared_far_from()` 借用），FFT 也算在這裡。
 - `steering_us`：主濾波器與 post 區塊之間的全部工作——stationarity refresh、
   `e2_coarse`/ERL publish 與 coarse rescue、double-talk analyzer、EPV、
   `shadow_rise`、misadjustment estimator。它們都不直接動樣本，只決定下一個
@@ -819,8 +815,9 @@ balanced**；這是 setter，有呼叫端可以回報，所以**直接拒絕**�
 （目標存在 config、進度存在 state，這是刻意分開的）。
 
 **底層 primitive**。真正做事的是抑制器自己的入口。四麥克風產品共用的那個 post 級
-抑制器是整合者自己初始化、持有的一個 `AecRes`（沒有任何 `Aec` 擁有它）；對它的入口是
-`aec_res_set_preset()`（§8.6），語意與 `aec_set_preset()` 相同。`AecRes` 內部包的
+抑制器是一個 `AecRes`（沒有任何 `Aec` 擁有它；Audio_ALG 的 4ch 單元內含一個，以
+`audio_pipeline_4ch_res(p)` 取得，直接驅動 4ch 核心的呼叫端則自己初始化）；對它的入口是
+`aec_res_set_preset()`（§8.5），語意與 `aec_set_preset()` 相同。`AecRes` 內部包的
 是 `SuppressionGain`，其底層函式為（內部 header，整合端不需要直接呼叫）：
 
 ```c
@@ -850,8 +847,9 @@ preset 查表函式有三個：`aec_preset_floor_db()`、`aec_preset_dt_floor_db
 **四麥克風產品請勿對 lane 呼叫**。四條 lane 都以 `spatial_linear_context` 建立，
 根本不會走到 `suppression_gain_get_gain()`，所以對 lane 呼叫 `aec_set_preset()`
 **依建構方式即為無效操作**——塑形輸出的 gain 來自該產品自己那一個共用的 post 級
-抑制器。請對整合者自己持有的那個 `AecRes` 呼叫 `aec_res_set_preset()`（§8.6），
-它針對的就是那個共用的 post 級抑制器。
+抑制器。請對那個 `AecRes` 呼叫 `aec_res_set_preset()`（§8.5）——4ch 單元是
+`aec_res_set_preset(audio_pipeline_4ch_res(p), preset, ramp_ms)`——它針對的就是那個共用的
+post 級抑制器。
 
 **A/B 量測時該預期什麼**（先讀這段再下結論）：far-active 地板只在
 **far-active 且非 double-talk** 的 hop 上生效。double-talk 期間套用的是 DT 地板
@@ -921,10 +919,10 @@ while (app_read_hop(mic, ref, hop)) {
 > 保護負責，輸出逐位元不變；兩個保護同時作用會讓後者的頻域硬切覆蓋掉前者剛啟動的
 > 交叉淡入。四麥克風線性 AEC + BF 單元的四條 lane 全部落在這個模式。
 
-> **五個處理進入點可以自由混用。**
+> **三個處理進入點可以自由混用。**
 >
-> `aec_process()`、`aec_process_capture()`、`aec_process_context()`、
-> `aec_process_context_shared_far()`、`aec_process_context_shared_far_from()`
+> `aec_process()`、`aec_process_context()`、
+> `aec_process_context_shared_far_from()`
 > 推進完全相同的狀態，輸出複製與遠端分析共用的成本不同。
 > 同一個實例上可以任意交錯呼叫，中間不需要
 > `aec_reset()`。
@@ -938,28 +936,16 @@ while (app_read_hop(mic, ref, hop)) {
 
 ```c
 aec_process_context(&lane[0], mic[0], ref);      /* lane 0 自己算 */
-AecResContext ctx0;
-aec_get_res_context(&lane[0], &ctx0);
-
 for (int ch = 1; ch < n_lanes; ++ch)
-    aec_process_context_shared_far(&lane[ch], mic[ch], ref, ctx0.far_spec);
+    aec_process_context_shared_far_from(&lane[ch], mic[ch], ref, &lane[0]);
 ```
 
 契約：
 
-- `shared_far_spec` 必須正好是**同一個 hop**、由**同一段參考時域訊號**算出來的頻譜。
-- 即使提供了 `shared_far_spec`，`ref` 參數**仍然必須傳**（參考訊號的非 FFT 用途還在）。
-- 傳 `NULL` 就退回 `aec_process_context()` 的行為（自己算）。
+- `far_owner` 必須先完成同一個 hop，且處理的是**同一段參考時域訊號**；借用的是它的遠端頻譜及其 AEC magnitude²。
+- 即使借用了遠端頻譜，`ref` 參數**仍然必須傳**（參考訊號的非 FFT 用途還在）。
 - `aec_far_fft_real_compute_count()` 是唯讀計數器，可用來驗證共用真的生效
   （純共用的實例會一直維持 0）。
-
-若 producer 是另一個 `Aec`，可同時共用同 hop 的遠端頻譜及其 AEC magnitude²：
-
-```c
-aec_process_context(&lane[0], mic[0], ref);
-for (int ch = 1; ch < n_lanes; ++ch)
-    aec_process_context_shared_far_from(&lane[ch], mic[ch], ref, &lane[0]);
-```
 
 `far_owner` 必須先完成同一 hop，且各 lane 的 far-buffer overlap history 必須一致；
 只有本 hop 的 `ref` 相同還不夠。若同一 hop 有 lane 採 warm realign、其他採 soft reset，
@@ -967,8 +953,7 @@ for (int ch = 1; ch < n_lanes; ++ch)
 各 lane 仍保留自己的 spectrum、magnitude history 與 `x2_cache`，不保留 owner pointer；
 previous-hop RSA 不會提前讀到 producer 的 current-hop history。
 `NULL`、自身或 grid 不相容的 owner 會退回本地計算；其他 stale-owner／歷史錯配由呼叫者負責。
-`aec_process_context_shared_far()` 只提供頻譜。
-兩個 API 都保留既有浮點運算；AEC magnitude² 必須來自同一個 AEC kernel，不能任意以其他 power 計算取代。
+AEC magnitude² 必須來自同一個 AEC kernel，不能任意以其他 power 計算取代。
 
 ### 8.3 `AecResContext` 欄位
 
@@ -990,47 +975,10 @@ previous-hop RSA 不會提前讀到 producer 的 current-hop history。
 
 > ⚠️ 所有 pointer 欄位都直接指向實例內部的 per-hop 緩衝區，**不是複本**。
 > 不可修改、不可 free，而且必須在**下一次對同一實例的任何處理呼叫之前**讀完或複製走。
-> 五個進入點（`aec_process`、`aec_process_context`、`aec_process_context_shared_far`、
-> `aec_process_context_shared_far_from`、`aec_process_capture`）都會就地覆寫這些緩衝區。
+> 三個進入點（`aec_process`、`aec_process_context`、
+> `aec_process_context_shared_far_from`）都會就地覆寫這些緩衝區。
 
-### 8.4 分離的 render／capture 進入點
-
-播放與錄音不是由同一個 callback 交付時使用：
-
-```c
-AecBufferingEvent e1 = aec_analyze_render(&aec, ref);        /* 放入一個 render hop */
-AecBufferingEvent e2 = aec_process_capture(&aec, mic, out);  /* 消耗並處理一個 mic hop */
-```
-
-兩者一樣是一次剛好一個 hop。單執行緒下先 `aec_analyze_render(ref)` 緊接
-`aec_process_capture(mic, out)`，輸出與 `aec_process(mic, ref, out)` **逐位元相同**
-（`make test-stream-sim` 逐格點驗證，且不產生任何事件）。
-
-回傳的事件（也可用 `aec_last_buffering_event()` 讀最近一次）：
-
-| 事件 | 意義 |
-|---|---|
-| `AEC_BUF_NONE` | 正常 |
-| `AEC_BUF_RENDER_UNDERRUN` | capture 時緩衝區沒有 render 資料，本次以靜音參考訊號處理 |
-| `AEC_BUF_RENDER_OVERRUN` | render 端超出緩衝容量，資料被丟棄 |
-| `AEC_BUF_API_SKEW` | 保留值，目前不會被回傳 |
-
-內部 FIFO 的實際容量（依格點而定）：8 kHz 512 ms、16 kHz/256 512 ms、
-16 kHz/512 512 ms、48 kHz 341 ms。這是用來吸收兩端**呼叫排程抖動**的，
-**不是**聲學延遲緩衝，也**不能**用來補償 clock drift。持續出現 underrun／overrun
-代表上游排程有問題，請修排程而不是加大 FIFO。
-
-**執行緒契約**：只支援 single-producer / single-consumer——恰好一個執行緒呼叫
-`aec_analyze_render()`，恰好另一個（可以不同）執行緒呼叫 `aec_process_capture()`。
-在這個形狀下兩者可以完全並行、不需要外部鎖。除此之外的任何形狀都**不在保護範圍**，
-需要呼叫端自行序列化，包括：同一側有第二個執行緒；兩端還在呼叫時就
-`aec_reset()` / `aec_destroy()`；以及在 streaming 進行中對同一實例並行呼叫
-`aec_process()`。
-
-注意上面這條限制是**執行緒**層面的，與 §8.1 的進入點選擇無關 —— 五個處理進入點
-本身可以自由混用。
-
-### 8.5 Duty-cycle engagement census
+### 8.4 Duty-cycle engagement census
 
 `AecDebugStatus`（`aec_debug_status()`）含兩個計數器：
 
@@ -1057,11 +1005,14 @@ engagement（`duty_hops_run / duty_hops_total`）。
 - 永久回歸測試：`make test-duty-census`（`test/test_duty_census.c`）。
 
 
-### 8.6 獨立的 RES 級（`aec_res.h`）
+### 8.5 獨立的 RES 級（`aec_res.h`）
 
 多條線性 AEC lane 先融合、再對融合後的頻譜算**一次**殘留回音抑制時使用（四麥克風
-線性 AEC + BF 之後的 post-beam RES）。`AecRes` 由整合者自己初始化、持有與重設，不屬於任何
-`Aec` 或 Audio_ALG 的單元。它把 `Aec` 內部那個抑制器獨立出來，設定來自 lane 自己用的
+線性 AEC + BF 之後的 post-beam RES）。`AecRes` 不屬於任何 `Aec`：Audio_ALG 的 4ch 單元
+（`AudioPipeline4Ch`）內含一個（`enable_res`、`res_preset`；`audio_pipeline_4ch_fuse()` 用它算出
+`g_res_ctx`，`audio_pipeline_4ch_res(p)` 取得實例來設強度或重設），直接驅動 4ch 核心的呼叫端則
+自己 `aec_res_init()`、持有與重設。單聲道不用它，RES 就在 `Aec` 裡（`ctx.res_gain`，見 §8.7）。
+它把 `Aec` 內部那個抑制器獨立出來，設定來自 lane 自己用的
 同一個建構函式，所以同一個 `AecConfig` 建出的 `AecRes` 與 lane 內的抑制器設定逐位元相同。
 
 ```c
@@ -1095,14 +1046,14 @@ aec_cng_fill(&rng, spec, fused_comfort, g_res, g_nr, 0.31622777f, aec_res_n_bins
 `aec_res_process` 做的前處理：近端功率 `|near|²`（`all_converged` 時取 `min(|error|², |near|²)`）乘 32768²；
 參考乘 32768；`all_converged` 讓抑制器離開初始狀態；`max_dt > 0.2` 啟用 double-talk 地板；
 `max_saturation > 0.5` 視為飽和回音。`r2` 同時當作 bounded 與 unbounded 殘留估計。
-`aec_cng_fill` 的算式與 Audio_ALG 範例碼（`pipelines/samples/se_sample_chain.h`）的迴圈逐位元相同，**不同於** `Aec` 內部的批次化填補
+`aec_cng_fill` 就是 Audio_ALG 範例（例如 `pipelines/mono_aec_nr_res/main.c` 的 `mono_form()`）每個 hop 呼叫的那個函式，**不同於** `Aec` 內部的批次化填補
 （`inv_psd_scale`＋`sk_fast_sqrt_f32`），兩者的輸出不可互相比對。
 
 測試：`make test-aec-res`（設定與 lane 逐位元相等、API 契約、render ×32768 縮放、離開初始狀態、
 飽和後復原限制）、`make test-zero-heap`、`make audit-no-stdio`。
 完整頁面見 [`docs/html/aec_res.html`](html/aec_res.html)。
 
-### 8.7 線性對齊 context（`aec_get_linear_context`）
+### 8.6 線性對齊 context（`aec_get_linear_context`）
 
 給需要「與線性 filter 讀到的**同一段**對齊後參考訊號」的後級（頻域 NN 後濾波、
 多 lane 的 RES）使用的唯讀檢視：
@@ -1131,14 +1082,16 @@ aec_get_linear_context(&aec, &lin);   /* 在該 hop 的處理呼叫之後、下�
 消除回音（上一個 hop 的 windowed ERLE 超過 2.5 dB，或近期 inst-ERLE 峰值超過
 `delay_acquire_inst_erle_db`），回 `0` 只代表沒有證據，不代表 filter 壞掉。
 
-### 8.8 單聲道整鏈：AEC → NR → RES 增益融合 → 合成
+### 8.7 單聲道整鏈：AEC → NR → RES 增益融合 → 合成
 
 單聲道沒有單一的包裝函式：`Aec`、`AnrDenoiser`、合成用的 `AcIstft` 由整合者各自初始化，
-只有串接順序是整合者的責任。Audio_ALG 的 `pipelines/mono_aec_nr_res/main.c`（增益序列在
-`pipelines/samples/se_sample_chain.h`）就是用上面的公開介面接起來的範例。
+只有串接順序是整合者的責任。Audio_ALG 的 `pipelines/mono_aec_nr_res/main.c`（每 hop 的增益序列
+是該檔的 `mono_form()`）就是用上面的公開介面接起來的範例；每個範例 `main` 自己初始化它用到的函式庫並寫出這段序列。
 AEC 以 `enable_res = 0`、`return_res_context = 1` 建立（`spatial_linear_context` 維持 preset
 的 `0`，所以 `res_gain`、`r2`、`comfort_noise` 都有值），AEC 自己**不**把抑制套到時域，
-抑制增益留給整合者與 NR 的增益合併後一次套用；RES 增益維持 `Aec` 自己算的 `ctx.res_gain`。
+抑制增益留給整合者與 NR 的增益合併後一次套用；單聲道的 RES 就在 `Aec` 裡面：增益是
+`Aec` 自己算的 `ctx.res_gain`（經 Audio_ALG 的 `se_frame_from_aec()` 成為 `SeSpecFrame` 的
+`g_res_ctx`），整合者不需要另外 `aec_res_init()` 一個 `AecRes`。
 每個 hop 的呼叫順序：
 
 ```
@@ -1169,7 +1122,8 @@ mic, ref (hop 個 float)
   （`SE_CNG_RNG_SEED`）；`aec_reset()` 之外，整合者的 reset 還要同時清 NR 狀態、合成 OLA 與暫存增益，並把 `rng` 設回種子。
 - **`aec_set_preset()` 對這條鏈有效**：單聲道鏈的 `G_res` 來自 `Aec` 自己的
   post 區塊，所以強度旋鈕直接用 `aec_set_preset()`（§7.1）；四麥克風線性 AEC + BF 之後的
-  `G_res` 來自整合者自己初始化的 `AecRes`，才需要 `aec_res_set_preset()`（§8.6）。
+  `G_res` 來自 4ch 單元內的 `AecRes`（`aec_res_set_preset(audio_pipeline_4ch_res(p), …)`）或
+  直接驅動核心的呼叫端自備的 `AecRes`，才需要 `aec_res_set_preset()`（§8.5）。
 - 下游若另有噪音抑制或 CNG，不要在 `aec_cng_fill` 之外再疊一層（§6.2）。
 
 測試：單聲道鏈的行為由 `Audio_ALG` 的 `pipelines/mono_aec_nr_res` 測試涵蓋；本函式庫端的
@@ -1243,7 +1197,6 @@ mic, ref (hop 個 float)
 | 批次處理第二個檔案結果異常 | 沿用了前一個檔案的狀態 | 每個獨立串流前呼叫 `aec_reset()` |
 | 輸出有突波／發散 | 削波、`ref` 送錯、延遲劇烈變化 | 維持 `enable_saturation`、`enable_shadow` 開啟；檢查輸入是否已削波 |
 | 噪音底聽起來不自然、會抽動 | CNG 疊了兩層 | 下游若已有噪音處理，設 `enable_cng = 0` |
-| streaming API 持續 underrun／overrun | 兩端排程或 producer 太慢 | 修排程。不要把 FIFO 當成 clock drift 的補償手段。 |
 | 建立實例一直失敗 | 設定被驗證拒絕 | 對照 §6 的允許範圍；特別注意 `sample_rate`/`fft_size` 必須成對合法，以及 `spatial_linear_context` 的組合限制 |
 | `SIMD=0` 與 `SIMD=1` 的輸出不同 | NEON kernel 與純量 kernel 的加總順序、融合乘加不同 | 這是預期行為。同一組建置旗標下 heap 與記憶池路徑才保證逐位元相同。 |
 
@@ -1300,7 +1253,7 @@ BIN="$(make -s -C c_impl print-bin-dir)"
 （§6.7）後印一行到 **stdout**（其餘旗標一律印到 stderr）：
 
 ```text
-mem: sr=16000 fft=256 hop=128 mode=matched n=5 fixed_delay_samples=-1 total_bytes=397744 estimator_bytes=33936 ring_bytes=131072
+mem: sr=16000 fft=256 hop=128 mode=matched n=5 fixed_delay_samples=-1 total_bytes=364416 estimator_bytes=33936 ring_bytes=131072
 ```
 
 欄位依序：resolved 後的 `sample_rate`／`fft_size`／`hop_size`、`delay_mode`、
@@ -1319,7 +1272,7 @@ byte 數、`delay_aec_get_mem_size()` 回傳的 estimator byte 數（非 `matche
 
 正常處理完（非 `--print-mem-size`）結尾，`aec_wav` 會在既有的 `Processed ...`
 摘要行之後多印一行 matched-filter duty-cycle **實測**（非估計）engagement
-（`delay_estimator_productization_plan_zh_TW.md` 的選型量測要用；見 §8.5）：
+（`delay_estimator_productization_plan_zh_TW.md` 的選型量測要用；見 §8.4）：
 
 ```text
 duty: matched_filter_ran=379/1250 hops (30.32% engagement, 69.68% saved)
@@ -1332,7 +1285,7 @@ duty: matched_filter_ran=379/1250 hops (30.32% engagement, 69.68% saved)
 duty: matched_filter_ran=0/0 hops (n/a -- no matched-filter estimator in delay_mode=fixed)
 ```
 
-診斷用途，不影響音訊路徑（見 §8.5）。
+診斷用途，不影響音訊路徑（見 §8.4）。
 
 輸入 / 輸出：
 

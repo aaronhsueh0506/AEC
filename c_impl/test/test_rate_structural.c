@@ -1197,7 +1197,7 @@ static void test_render_activity_first_observation(void) {
  * alpha_r cannot be pinned through `Aec` the way alpha_pow is in (d4). With the shadow on (default) error_psd is never
  * read: the orchestrator publishes e2_coarse_per_bin and the per-bin H_error refresh reads error_spec directly. With the
  * shadow off the scalar fallback reads error_psd, but e2_coarse_for_refresh stays 0.0f, so
- * `use_conv = (e2_ref_sum <= e2_coa_sum)` is constant-false whatever the coefficient is. A direct pbfdkf_process() call
+ * `use_conv = (e2_ref_sum <= e2_coa_sum)` is constant-false whatever the coefficient is. A direct pbfdkf_process_with_far_cmag2() call
  * (a supported entry point, pbfdkf.h) supplies its own e2_coarse_for_refresh, so alpha_r selects the leakage branch.
  * This check pins (1) the coefficient the EMA actually APPLIED, recovered from two runs that differ only in error_psd's
  * starting value (not the stored field alone), and (2) that it selects the leakage branch.
@@ -1245,7 +1245,7 @@ static DirectProbe pbfdkf_direct_probe(int fft, int hop, int sr, unsigned seed,
         mic[i] = 0.10f * (2.0f * lcg_uniform() - 1.0f);
     }
     for (int h = 0; h < WARM; ++h)
-        pbfdkf_process(&p, mic, far, NULL, 1.0f, res);
+        (void)pbfdkf_process_with_far_cmag2(&p, mic, far, NULL, 1.0f, res, NULL);
 
     /* Open every gate that would divert the hop to refresh-only, so the
      * measured hop takes the full update path (EMA, then refresh). These are
@@ -1271,7 +1271,7 @@ static DirectProbe pbfdkf_direct_probe(int fft, int hop, int sr, unsigned seed,
         p.erl_per_bin[k] = 0.5f;
     }
 
-    pbfdkf_process(&p, mic, far, NULL, 1.0f, res);
+    (void)pbfdkf_process_with_far_cmag2(&p, mic, far, NULL, 1.0f, res, NULL);
 
     double psd = 0.0, he = 0.0;
     for (int k = 0; k < K; ++k) {

@@ -37,19 +37,19 @@
 <!-- stats:begin -->
 | key | 數值 | 說明 |
 |---|---|---|
-| `c_src_total` | 417 | `src/*.c` 的 C 函式總數（唯一 (檔, 函式名)） |
-| `c_src_mirror` | 233 | 關係為 mirror |
-| `c_src_partial` | 102 | 關係為 partial |
-| `c_src_c_only` | 82 | 關係為 C-only（含 3 個 `aec_testing_*` 測試鉤子） |
+| `c_src_total` | 409 | `src/*.c` 的 C 函式總數（唯一 (檔, 函式名)） |
+| `c_src_mirror` | 232 | 關係為 mirror |
+| `c_src_partial` | 101 | 關係為 partial |
+| `c_src_c_only` | 76 | 關係為 C-only（含 3 個 `aec_testing_*` 測試鉤子） |
 | `c_src_unknown` | 0 | 關係為 未能判斷 |
 | `c_hdr_total` | 6 | header 內 static inline 函式總數（規則 2；共用 SIMD 核心不列入） |
 | `c_hdr_c_only` | 5 | 其中 C-only |
 | `c_hdr_mapped` | 1 | 其中 mirror 或 partial |
-| `c_total` | 423 | C 函式合計（src 加 header） |
-| `c_mapped` | 336 | 已對應（mirror 加 partial）合計 |
-| `c_c_only` | 87 | C-only 合計 |
+| `c_total` | 415 | C 函式合計（src 加 header） |
+| `c_mapped` | 334 | 已對應（mirror 加 partial）合計 |
+| `c_c_only` | 81 | C-only 合計 |
 | `c_unknown` | 0 | 未能判斷 合計 |
-| `inferred` | 26 | 關係說明以「推定：」開頭的列（已含在上列 mirror／partial 內） |
+| `inferred` | 25 | 關係說明以「推定：」開頭的列（已含在上列 mirror／partial 內） |
 | `py_total` | 570 | Python 符號總數（規則 4） |
 | `py_mapped` | 322 | 被 §1／§2 至少一列引用的 Python 符號 |
 | `py_only_struct` | 60 | §3 Python-only：C 以資料結構、列舉或常數承載 |
@@ -60,7 +60,7 @@
 
 ### 0.5 未能判斷
 
-沒有留空的函式或符號：每個 C 函式都能由名稱一一對應或讀程式碼比對判定。判定的依據強度不同，其中 26 列標為「推定」（關係說明以「推定：」開頭），是這份表最該被複核的部分；其餘列要嘛有 C 或 Python 註解明載，要嘛函式名與方法名一一對應。
+沒有留空的函式或符號：每個 C 函式都能由名稱一一對應或讀程式碼比對判定。判定的依據強度不同，其中 25 列標為「推定」（關係說明以「推定：」開頭），是這份表最該被複核的部分；其餘列要嘛有 C 或 Python 註解明載，要嘛函式名與方法名一一對應。
 
 ### 0.6 如何維護
 
@@ -117,7 +117,6 @@
 | `src/aec.c:aec_testing_update_simple_mu_ratio` | — | C-only（測試專用鉤子，只在 `AEC_TESTING` 建置存在） | — | `ctest:test_rate_structural.c` |
 | `src/aec.c:aec_testing_reset_filter_latches` | — | C-only（測試專用鉤子，只在 `AEC_TESTING` 建置存在） | — | `ctest:test_rate_structural.c` |
 | `src/aec.c:aec_testing_legacy10ms_rate` | — | C-only（測試專用鉤子，只在 `AEC_TESTING` 建置存在） | — | `ctest:test_rate_structural.c` |
-| `src/aec.c:next_pow2` | — | C-only（記憶體配置輔助） | — | — |
 | `src/aec.c:aec_fill_filter_taps` | — | C-only（FilterAnalyzer 的 tap provider 回呼；Python 直接傳 `get_time_domain_filter()` 結果） | — | — |
 | `src/aec.c:aec_state_bind` | — | C-only（把 AecState 設定與初始化集中在一處，供 `aec_carve_state` 與 `aec_post_chain_reset` 共用） | — | `ctest:test_memory_layout.c`<br>`pytest:test_aec_reset.py` |
 | `src/aec.c:aec_ree_bind` | — | C-only（把殘餘回音估計器的設定與初始化集中在一處，供 `aec_carve_residual` 與 `aec_post_chain_reset` 共用） | — | `ctest:test_memory_layout.c`<br>`pytest:test_aec_reset.py` |
@@ -132,7 +131,7 @@
 | `src/aec.c:aec_resolve_valid_config` | — | C-only（驗證加解析的組合入口） | — | — |
 | `src/aec.c:aec_acquire_delay` | `modules/orchestrator.py:AEC._acquire_delay` | partial（逐 hop 子步驟；保留原始先後順序與 scratch 生命週期） | — | `ctest:test_process_context.c` |
 | `src/aec.c:aec_align_reference` | `modules/orchestrator.py:AEC._align_reference` | partial（逐 hop 子步驟；保留原始先後順序與 scratch 生命週期） | — | `ctest:test_process_context.c` |
-| `src/aec.c:aec_carve_delay_fifo` | `modules/orchestrator.py:AEC._init_delay` | partial（建構步驟；C 綁定既有 pool 切片） | — | `ctest:test_memory_layout.c` |
+| `src/aec.c:aec_carve_delay_ring` | `modules/orchestrator.py:AEC._init_delay` | partial（建構步驟；C 綁定既有 pool 切片） | — | `ctest:test_memory_layout.c` |
 | `src/aec.c:aec_carve_detectors` | `modules/orchestrator.py:AEC._init_path_tracking`<br>`modules/orchestrator.py:AEC._init_preprocessing` | partial（建構步驟；C 綁定既有 pool 切片） | — | `ctest:test_memory_layout.c` |
 | `src/aec.c:aec_carve_filters` | `modules/orchestrator.py:AEC._init_linear_filter`<br>`modules/orchestrator.py:AEC._init_shadow_filter`<br>`modules/orchestrator.py:AEC._init_observer` | partial（建構步驟；C 綁定既有 pool 切片） | — | `ctest:test_memory_layout.c` |
 | `src/aec.c:aec_carve_hop_scratch` | `modules/orchestrator.py:AEC.__init__` | partial（建構步驟；C 綁定既有 pool 切片） | — | `ctest:test_memory_layout.c` |
@@ -183,11 +182,7 @@
 | `src/aec.c:aec_process_core` | `modules/orchestrator.py:AEC.process`<br>`modules/orchestrator.py:AEC._maybe_mark_diverged`<br>`modules/orchestrator.py:AEC._dt_from_energy`<br>`modules/orchestrator.py:AEC._dt_from_shadow`<br>`modules/orchestrator.py:AEC.get_erle_instant`<br>`modules/orchestrator.py:AEC._accept_delay_shift`<br>`modules/orchestrator.py:AEC._acquire_delay`<br>`modules/orchestrator.py:AEC._align_reference`<br>`modules/orchestrator.py:AEC._judge_delay_shift`<br>`modules/orchestrator.py:AEC._prepare_capture`<br>`modules/orchestrator.py:AEC._prepare_linear_gates`<br>`modules/orchestrator.py:AEC._process_frequency`<br>`modules/orchestrator.py:AEC._process_linear`<br>`modules/orchestrator.py:AEC._process_residual`<br>`modules/orchestrator.py:AEC._track_delay_shift`<br>`modules/orchestrator.py:AEC._track_erle_convergence`<br>`modules/orchestrator.py:AEC._track_linear_error`<br>`modules/orchestrator.py:AEC._update_delay_estimate`<br>`modules/orchestrator.py:AEC._update_path_changes`<br>`modules/orchestrator.py:AEC._update_render_gates`<br>`modules/orchestrator.py:AEC._update_render_stationarity`<br>`modules/orchestrator.py:AEC._update_residual_mu`<br>`modules/orchestrator.py:AEC._update_shadow`<br>`modules/orchestrator.py:AEC._update_shadow_leakage` | partial（逐 hop 主迴圈；C 無 return_formed_output／res_audit／診斷，且含 res-context 接縫） | T-02；T-05；T-17；D-10 | `e2e:parity_aec_e2e`<br>`ctest:test_process_context.c` |
 | `src/aec.c:aec_process` | `modules/orchestrator.py:AEC.process` | partial（離線包裝：core 加上輸出複製） | S-19；T-02 | `e2e:parity_aec_e2e` |
 | `src/aec.c:aec_process_context` | `modules/orchestrator.py:AEC.process` | partial（只跑 core 的 context-only 入口，等同 Python 的 `return_res_context` 路徑） | T-05 | `ctest:test_process_context.c` |
-| `src/aec.c:aec_process_context_shared_far` | — | C-only（遠端頻譜共用入口，供多 lane 使用） | D-12 | `ctest:test_shared_far_spec.c` |
-| `src/aec.c:aec_process_context_shared_far_from` | — | C-only（同 hop 的遠端頻譜與精確 magnitude² 成對共用；各 lane 保留自身歷史） | D-12 | `ctest:test_spectral_reuse.c` |
-| `src/aec.c:aec_analyze_render` | — | C-only（串流 render-hop FIFO） | D-12 | `ctest:stream_sim.c`<br>`ctest:test_fifo_spsc.c` |
-| `src/aec.c:aec_process_capture` | — | C-only（串流 capture 入口） | D-12 | `ctest:stream_sim.c`<br>`ctest:test_fifo_spsc.c` |
-| `src/aec.c:aec_last_buffering_event` | — | C-only（串流緩衝事件回報） | D-12 | — |
+| `src/aec.c:aec_process_context_shared_far_from` | — | C-only（同 hop 的遠端頻譜與精確 magnitude² 成對共用；各 lane 保留自身歷史） | D-12 | `ctest:test_shared_far_spec.c`<br>`ctest:test_spectral_reuse.c` |
 | `src/aec.c:aec_get_res_context` | `modules/orchestrator.py:AEC._build_res_context#AecResContext`<br>`modules/orchestrator.py:AEC._post_stash_context` | partial（Python 在 process 內建構 AecResContext，欄位集合兩邊不同） | D-05 | `ctest:test_process_context.c` |
 | `src/aec.c:aec_delay_confidence` | — | C-only（跨 delay 模式的統一信心值；MATCHED 值來自 `delay_aec_confidence`） | D-12 | `ctest:test_duty_census.c` |
 | `src/aec.c:aec_debug_status` | — | C-only（AecDebugStatus 唯讀狀態查詢） | D-12 | `ctest:test_duty_census.c` |
@@ -335,8 +330,7 @@
 | `src/pbfdkf.c:pbfdkf_scale_filter` | `modules/filters.py:PBFDKF.scale_filter` | mirror | T-03 | — |
 | `src/pbfdkf.c:pbfdkf_h_error_refresh` | `modules/filters.py:PBFDKF._h_error_refresh` | mirror | T-03 | — |
 | `src/pbfdkf.c:pbfdkf_update_weights` | `modules/filters.py:PBFDKF._update_weights_aec3`<br>`modules/filters.py:PBFDKF._update_weights` | mirror（Python 的 `_update_weights` 是閘門加包裝） | T-03 | — |
-| `src/pbfdkf.c:pbfdkf_process` | `modules/filters.py:PBFDAF.process`<br>`modules/filters.py:PBFDAF.complete_update` | partial（PBFDKF 沒有自己的 `process`，繼承 PBFDAF；C 把 Kalman 路徑獨立成函式） | T-03 | — |
-| `src/pbfdkf.c:pbfdkf_process_with_far_cmag2` | — | C-only（PBFDKF 精確遠端 magnitude² 快取入口；回傳本 hop 的 error magnitude² cache 是否有效；流程同 process） | T-03 | `ctest:test_spectral_reuse.c` |
+| `src/pbfdkf.c:pbfdkf_process_with_far_cmag2` | `modules/filters.py:PBFDAF.process`<br>`modules/filters.py:PBFDAF.complete_update` | partial（PBFDKF 沒有自己的 `process`，繼承 PBFDAF；C 把 Kalman 路徑獨立成函式，並多一個精確遠端 magnitude² 快取入口，回傳本 hop 的 error magnitude² cache 是否有效） | T-03 | `ctest:test_spectral_reuse.c` |
 
 ### 1.9 `delay_aec.c`　delay_aec.c（延遲估計鏈：降頻器、matched filter、lag 聚合、時脈漂移）
 
@@ -401,7 +395,6 @@
 | `src/delay_aec.c:delay_aec_get_mem_size` | — | C-only（靜態記憶體池尺寸查詢） | — | `ctest:test_delay_num_filters.c` |
 | `src/delay_aec.c:delay_aec_init` | `modules/delay/legacy_compat.py:LegacyDelayShim.__init__` | partial（C 另做記憶體池綁定與尺寸驗證） | — | `ctest:test_delay_num_filters.c` |
 | `src/delay_aec.c:delay_aec_reset` | `modules/delay/legacy_compat.py:LegacyDelayShim.reset` | mirror | — | `ctest:test_delay_reset.c`<br>`pytest:test_delay_reset.py` |
-| `src/delay_aec.c:delay_aec_accumulate` | `modules/delay/legacy_compat.py:LegacyDelayShim.accumulate` | mirror | D-03 | `ctest:test_delay_reset.c`<br>`ctest:test_delay_dominant_selection.c` |
 | `src/delay_aec.c:delay_aec_accumulate_ex` | `modules/delay/legacy_compat.py:LegacyDelayShim.accumulate` | partial（C 加 duty-cycle 節流：run_matched_filter=0 時不分析，Python 永遠分析） | D-03 | `ctest:test_duty_census.c`<br>`ctest:test_counter_saturation.c` |
 | `src/delay_aec.c:delay_aec_estimated_delay` | `modules/delay/legacy_compat.py:LegacyDelayShim.estimated_delay` | mirror | D-03 | `ctest:test_delay_reset.c` |
 | `src/delay_aec.c:delay_aec_confidence` | `modules/delay/legacy_compat.py:LegacyDelayShim.confidence` | mirror（0.0／0.5／1.0 階梯） | D-03 | `ctest:test_delay_dominant_selection.c` |
@@ -669,7 +662,7 @@
 
 ### 1.28 `epc_shadow.c`　epc_shadow.c（回音路徑變化偵測與影子濾波器複製控制）
 
-依據：C 的 `epc_shadow.c` 對應 `modules/epc.py` 的 `EchoPathChangeDetector` 與 `PathChangeRegimeHandler`（影子複製控制）。`shadow_copy_init` 是 160／16000 舊格點的前多速率入口，產品只用 `shadow_copy_init_for_grid`。
+依據：C 的 `epc_shadow.c` 對應 `modules/epc.py` 的 `EchoPathChangeDetector` 與 `PathChangeRegimeHandler`（影子複製控制）。格點相關的建構入口只有 `shadow_copy_init_for_grid`。
 
 | C 檔:函式 | Python 檔:符號 | 關係 | 已知落差 | 對拍工具／測試 |
 |---|---|---|---| --- |
@@ -680,7 +673,6 @@
 | `src/epc_shadow.c:epc_update_shadow_rise` | `modules/epc.py:EchoPathChangeDetector.update_shadow_rise` | mirror | T-03 | — |
 | `src/epc_shadow.c:epc_tick_hangover` | `modules/epc.py:EchoPathChangeDetector.tick_hangover` | mirror | T-03 | `ctest:test_counter_saturation.c` |
 | `src/epc_shadow.c:shadow_copy_init_for_grid` | `modules/epc.py:PathChangeRegimeHandler.__init__` | mirror | T-03 | `ctest:test_counter_saturation.c` |
-| `src/epc_shadow.c:shadow_copy_init` | `modules/epc.py:PathChangeRegimeHandler.__init__` | partial（推定：固定 160／16000 舊格點的前多速率入口） | T-03 | `ctest:test_counter_saturation.c` |
 | `src/epc_shadow.c:shadow_copy_reset` | `modules/epc.py:PathChangeRegimeHandler.reset` | mirror | T-03 | `ctest:test_counter_saturation.c` |
 | `src/epc_shadow.c:dt_safe` | `modules/epc.py:PathChangeRegimeHandler._dt_safe` | mirror | T-03 | — |
 | `src/epc_shadow.c:shadow_copy_update` | `modules/epc.py:PathChangeRegimeHandler.update` | mirror | T-03 | `ctest:test_counter_saturation.c` |
@@ -882,7 +874,7 @@ PBF/Kalman H-error refresh、subband ERLE accumulation/release、render peak cou
 | D-09 | `ms_to_hops` 的 double 版與 C 在整半格案例差 1 hop（`ms_to_hops_f32` 與 C 一致） |
 | D-10 | `poor_excitation_counter`：C 有飽和上限、Python 無上限，re-arm 初值也不同（唯一消費者是 `counter < n_partitions` 閘，決策不變） |
 | D-11 | C 的 `AecConfig.n_partitions` 可覆寫，Python 為唯讀 property |
-| D-12 | C-only API（串流 FIFO、`aec_process_context_shared_far`／`aec_process_context_shared_far_from`、`spatial_linear_context`、靜態記憶體、debug status）；Python-only：`get_res_audit`、`dump_p53_trace`、`get_diagnostics` |
+| D-12 | C-only API（`aec_process_context_shared_far_from`、`spatial_linear_context`、靜態記憶體、debug status）；Python-only：`get_res_audit`、`dump_p53_trace`、`get_diagnostics` |
 | D-13 | CLI／API 兩側獨有項（C `aec_wav` 與 Python `aec.py` 的旗標不同） |
 | D-15 | live observer lane 尚未鏡射 soft-realign warm IR-shift、RSA narrowband mu mask、bad-relock tap 快照還原；兩邊一致的缺口，不是移植落差 |
 | S-02 | live observer 注入守衛 `live_observer_inject_dt_energy_max`（Python 預設 0.5）C 沒有；開 observer 時實測會改輸出 |

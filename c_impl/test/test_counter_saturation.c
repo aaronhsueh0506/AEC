@@ -440,7 +440,8 @@ static void section_epc_shadow(void) {
                                   256, 16000);
         shadow_copy_init_for_grid(&g48, SC_GATE_ENERGY, 0.65f, 3, 5,
                                   512, 48000);
-        shadow_copy_init(&legacy, SC_GATE_ENERGY, 0.65f, 3, 5);
+        shadow_copy_init_for_grid(&legacy, SC_GATE_ENERGY, 0.65f, 3, 5,
+                                  160, 16000);
         CHECK(g8.shadow_copy_hysteresis == 10 &&
               g128.shadow_copy_hysteresis == 10 &&
               g256.shadow_copy_hysteresis == 10 &&

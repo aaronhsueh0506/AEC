@@ -198,8 +198,8 @@ CFLAGS    += $(FP_POLICY)
 COMMON_FWD = BACKEND=$(BACKEND) SIMD=$(SIMD) WERROR=$(WERROR) CC='$(CC)' CXX='$(CXX)' EXTRA_CFLAGS='$(EXTRA_CFLAGS)' NO_STDIO=$(NO_STDIO) TOOLCHAIN_CHECK=$(TOOLCHAIN_CHECK)
 
 ifeq ($(COMMON_LIB),)
-.PHONY: all bench test test-full test-counter-saturation test-rate-structural test-config-validation test-process-context test-avg-reverb-slots test-linear-context test-stream-sim test-res-nearend-gate test-runtime-preset test-delay-num-filters test-duty-census test-external-realign test-cli-delay-flags test-shared-far-spec test-spectral-reuse test-heap-alignment test-shared-fft-handle test-static-aec test-memory-layout test-reset-parity test-zero-heap test-aec-res test-detectors-parity test-detectors-parity-all test-parity-e2e pyc-parity-driver
-all bench test test-full test-counter-saturation test-rate-structural test-config-validation test-process-context test-avg-reverb-slots test-linear-context test-stream-sim test-res-nearend-gate test-runtime-preset test-delay-num-filters test-duty-census test-external-realign test-cli-delay-flags test-shared-far-spec test-spectral-reuse test-heap-alignment test-shared-fft-handle test-static-aec test-memory-layout test-reset-parity test-zero-heap test-aec-res test-detectors-parity test-detectors-parity-all test-parity-e2e pyc-parity-driver:
+.PHONY: all bench test test-full test-counter-saturation test-rate-structural test-config-validation test-process-context test-avg-reverb-slots test-linear-context test-res-nearend-gate test-runtime-preset test-delay-num-filters test-duty-census test-external-realign test-cli-delay-flags test-shared-far-spec test-spectral-reuse test-heap-alignment test-shared-fft-handle test-static-aec test-memory-layout test-reset-parity test-zero-heap test-aec-res test-detectors-parity test-detectors-parity-all test-parity-e2e pyc-parity-driver
+all bench test test-full test-counter-saturation test-rate-structural test-config-validation test-process-context test-avg-reverb-slots test-linear-context test-res-nearend-gate test-runtime-preset test-delay-num-filters test-duty-census test-external-realign test-cli-delay-flags test-shared-far-spec test-spectral-reuse test-heap-alignment test-shared-fft-handle test-static-aec test-memory-layout test-reset-parity test-zero-heap test-aec-res test-detectors-parity test-detectors-parity-all test-parity-e2e pyc-parity-driver:
 	+@ac="$$($(MAKE) -s --no-print-directory -C $(COMMON_DIR) $(COMMON_FWD) print-lib-path)"; \
 	 test -n "$$ac" || { echo "FATAL: could not resolve audiolib archive path (COMMON_DIR=$(COMMON_DIR) -- is audiolib present as a sibling of this repo?)" >&2; exit 1; }; \
 	 $(MAKE) --no-print-directory $@ COMMON_LIB="$$ac"
@@ -260,12 +260,6 @@ TEST_CS_TARGET = $(BIN_DIR)/test_counter_saturation
 TEST_LC_SRCS   = $(TEST_DIR)/test_linear_context.c
 TEST_LC_OBJS   = $(patsubst $(TEST_DIR)/%.c,$(OBJ_DIR)/%.o,$(TEST_LC_SRCS))
 TEST_LC_TARGET = $(BIN_DIR)/test_linear_context
-
-# Streaming API (aec_analyze_render / aec_process_capture, test/stream_sim.c): FIFO capacity rule, lockstep equality with
-# aec_process(), overrun, underrun and consumer catch-up on every supported grid. Needs the full Aec type.
-TEST_SS_SRCS   = $(TEST_DIR)/stream_sim.c
-TEST_SS_OBJS   = $(patsubst $(TEST_DIR)/%.c,$(OBJ_DIR)/%.o,$(TEST_SS_SRCS))
-TEST_SS_TARGET = $(BIN_DIR)/stream_sim
 
 # RES double-talk floor: the energy-based near-recent latch, its exported per-hop decision and the stationarity policy
 # (test/test_res_nearend_gate.c). Needs the full Aec type.
@@ -328,7 +322,7 @@ TEST_ARS_SRCS   = $(TEST_DIR)/test_avg_reverb_slots.c
 TEST_ARS_OBJS   = $(patsubst $(TEST_DIR)/%.c,$(OBJ_DIR)/%.o,$(TEST_ARS_SRCS))
 TEST_ARS_TARGET = $(BIN_DIR)/test_avg_reverb_slots
 
-# aec_process_context_shared_far(): a borrowed far-end spectrum gives a byte-identical AecResContext, is genuinely consumed,
+# aec_process_context_shared_far_from(): a borrowed far-end spectrum gives a byte-identical AecResContext, is genuinely consumed,
 # aec_reset() clears a pending borrow, and the real-FFT-compute counter reflects borrow vs compute.
 TEST_SFS_SRCS   = $(TEST_DIR)/test_shared_far_spec.c
 TEST_SFS_OBJS   = $(patsubst $(TEST_DIR)/%.c,$(OBJ_DIR)/%.o,$(TEST_SFS_SRCS))
@@ -605,7 +599,7 @@ $(TEST_NT_TARGET): $(TEST_NT_OBJ) $(OBJ_DIR)/aec_scale.o | _cfg_guard
 # $(TARGET)/$(BENCH_TARGET) relink only then.
 # =============================================================================
 ifneq ($(COMMON_LIB),)
-.PHONY: all bench FORCE test test-full test-counter-saturation test-rate-structural _run-rate-structural test-config-validation test-process-context test-avg-reverb-slots test-linear-context test-stream-sim test-res-nearend-gate test-runtime-preset test-delay-num-filters test-duty-census test-external-realign test-cli-delay-flags test-shared-far-spec test-spectral-reuse test-heap-alignment test-shared-fft-handle test-static-aec test-memory-layout test-reset-parity test-zero-heap test-aec-res test-detectors-parity test-detectors-parity-all test-parity-e2e pyc-parity-driver
+.PHONY: all bench FORCE test test-full test-counter-saturation test-rate-structural _run-rate-structural test-config-validation test-process-context test-avg-reverb-slots test-linear-context test-res-nearend-gate test-runtime-preset test-delay-num-filters test-duty-census test-external-realign test-cli-delay-flags test-shared-far-spec test-spectral-reuse test-heap-alignment test-shared-fft-handle test-static-aec test-memory-layout test-reset-parity test-zero-heap test-aec-res test-detectors-parity test-detectors-parity-all test-parity-e2e pyc-parity-driver
 all: $(TARGET)
 bench: $(BENCH_TARGET)
 
@@ -640,10 +634,6 @@ test-aec-res: $(TEST_AR_TARGET)
 # Builds AND runs, same convention as test-counter-saturation above.
 test-linear-context: $(TEST_LC_TARGET)
 	"$(abspath $(TEST_LC_TARGET))"
-
-# Builds AND runs, same convention as test-counter-saturation above.
-test-stream-sim: $(TEST_SS_TARGET)
-	"$(abspath $(TEST_SS_TARGET))"
 
 # Python<->C parity: checker + driver link rules, and the end-to-end gate recipe.
 $(TEST_PE_TARGET): $(OBJS) $(TEST_PE_OBJS) $(COMMON_LIB) | _cfg_guard
@@ -750,7 +740,7 @@ TEST_SIMD_DEP   = selftest test-process-context test-linear-context test-aec-res
                   test-delay-num-filters test-duty-census test-external-realign test-reset-parity test-delay-reset \
                   test-delay-dominant-selection test-delay-kernels test-delay-matched-neon test-neon-twins \
                   test-rate-structural test-counter-saturation
-TEST_SIMD_INDEP = test-heap-alignment test-memory-layout test-config-validation test-avg-reverb-slots test-stream-sim \
+TEST_SIMD_INDEP = test-heap-alignment test-memory-layout test-config-validation test-avg-reverb-slots \
                   test-shared-far-spec test-spectral-reuse test-shared-fft-handle test-static-aec test-zero-heap \
                   test-header-fresh test-detectors-parity-all test-cli-delay-flags
 TEST_BUILD_GATES = test-no-testing-symbols audit-no-stdio
@@ -825,10 +815,6 @@ $(TEST_AR_TARGET): $(filter-out $(OBJ_DIR)/aec_res.o,$(OBJS)) $(TEST_AR_OBJS) $(
 $(TEST_LC_TARGET): $(OBJS) $(TEST_LC_OBJS) $(COMMON_LIB) | _cfg_guard
 	$(LINK) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 	@echo "test_linear_context [$(BACKEND)] -> $@"
-
-$(TEST_SS_TARGET): $(OBJS) $(TEST_SS_OBJS) $(COMMON_LIB) | _cfg_guard
-	$(LINK) $(CFLAGS) -o $@ $^ $(LDFLAGS)
-	@echo "stream_sim [$(BACKEND)] -> $@"
 
 $(TEST_RNG_TARGET): $(OBJS) $(TEST_RNG_OBJS) $(COMMON_LIB) | _cfg_guard
 	$(LINK) $(CFLAGS) -o $@ $^ $(LDFLAGS)
@@ -1319,8 +1305,6 @@ help:
 	@echo "                  48 kHz anti-alias pair (the only gate that sees the pair kernel; scalar vs itself with SIMD=0)"
 	@echo "  test-delay-matched-neon  Bit-exact matched-filter kernels (dot, NLMS update, fused update + next dot, core)"
 	@echo "                  vs a portable model of the AArch64 NEON dataflow; scalar kernels vs the scalar model otherwise"
-	@echo "  test-stream-sim  Streaming API: FIFO capacity rule, lockstep == aec_process, exact-count overrun,"
-	@echo "                  underrun recovery, consumer catch-up (all grids)"
 	@echo "  test-aec-res    Standalone RES stage (aec_res.h): lane-equal config, API contract, render scale, initial phase"
 	@echo "  test-header-fresh  Regenerate include/aec_balanced_config.h and diff it against the checked-in copy"
 	@echo "  test-detectors-parity  Gate detectors.c against the Python reference (regenerates the golden)"

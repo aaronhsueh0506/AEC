@@ -58,9 +58,7 @@ typedef enum {
     (((DA_MAX_FILTER_LAG_FOR(n) + 1) * DA_DOWN_SAMPLING_FACTOR) >> 6)
 #define DA_THRESH_INITIAL       5
 #define DA_THRESH_CONVERGED     20
-#define DA_CONSISTENT_EST_THR   125
 #define DA_PRE_ECHO_UPDATES_TO_REPORT 50
-#define DA_ACCUMULATED_ERROR_SUBSAMPLE_RATE 4
 #define DA_BLOCK_SIZE_LOG2      6
 
 /* Biquad cascade, at most 4 sections. */
@@ -203,11 +201,8 @@ int delay_aec_init(DelayAec *d, void *mem, size_t bytes,
 void delay_aec_reset(DelayAec *d);
 
 /* Per-hop drive: near (HPF mic) and far (raw reference) are float[hop] at the caller's rate.
- * Returns 1 iff a new delay value was emitted this hop. */
-int  delay_aec_accumulate(DelayAec *d, const float *near, const float *far, int hop);
-
-/* As delay_aec_accumulate; with run_matched_filter = 0 the hop is fed (decimators and ring) but
- * not analysed, so latest_* is unchanged. */
+ * Returns 1 iff a new delay value was emitted this hop. With run_matched_filter = 0 the hop is fed
+ * (decimators and ring) but not analysed, so latest_* is unchanged. */
 int  delay_aec_accumulate_ex(DelayAec *d, const float *near, const float *far,
                              int hop, int run_matched_filter);
 

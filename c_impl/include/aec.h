@@ -1,6 +1,6 @@
 /* Public C API for the single-channel PBFDKF AEC: heap or caller-pool
- * construction, lockstep and streaming (split render/capture) processing, and
- * the external RES / linear-context getters. */
+ * construction, lockstep processing, and the external RES /
+ * linear-context getters. */
 #ifndef AEC_AEC_H
 #define AEC_AEC_H
 
@@ -192,14 +192,6 @@ int aec_is_valid_sample_rate(int sample_rate);
  * the rate is unsupported. */
 int aec_default_fft_size(int sample_rate);
 
-/* Streaming render/capture buffering events. */
-typedef enum AecBufferingEvent {
-    AEC_BUF_NONE = 0,
-    AEC_BUF_RENDER_UNDERRUN,   /* capture ran ahead: no buffered render */
-    AEC_BUF_RENDER_OVERRUN,    /* render piled up past the FIFO: new hop dropped */
-    AEC_BUF_API_SKEW           /* render/capture call alternation anomaly (diagnostic) */
-} AecBufferingEvent;
-
 /* Instance state: fields are internal, not part of the API; use the functions
  * below. */
 typedef struct Aec {
@@ -332,24 +324,9 @@ typedef struct Aec {
     float* scr_e2ref_arr;
     float* scr_erl_arr;
 
-    /* Streaming FIFO (aec_analyze_render / aec_process_capture; aec_process()
-     * bypasses it). SPSC ring: fifo_write is owned by the render thread,
-     * fifo_read by the capture thread, both release-stored after the slot is
-     * written / consumed and indexed modulo fifo_cap_hops (a power of two). A
-     * stale read can only over-estimate occupancy (spurious drop-new).
-     * aec_reset / aec_destroy need both threads quiesced. */
-    float* render_fifo;
-    int    fifo_cap_hops;
-    int    fifo_count;
-    int    fifo_read, fifo_write;
-    long   render_call_count, capture_call_count;
-    int    last_buffering_event;
-
     int is_static;
 
     void*  heap_arena;
-
-    float* fifo_zero_ref;
 
     struct AecStageTiming {
         uint32_t delay_us;
@@ -436,18 +413,10 @@ Aec*   aec_init(void* mem, size_t mem_size, const AecConfig* cfg);
 void aec_process(Aec* a, const float* mic, const float* ref, float* out);
 
 /* As aec_process() but writes no output; for callers that only read
- * aec_get_res_context(). aec_process, aec_process_context,
- * aec_process_capture and aec_process_context_shared_far advance identical
- * state and may be interleaved freely on one instance. */
+ * aec_get_res_context(). aec_process, aec_process_context and
+ * aec_process_context_shared_far_from advance identical state and may be
+ * interleaved freely on one instance. */
 void aec_process_context(Aec* a, const float* mic, const float* ref);
-
-/* As aec_process_context(), but shared_far_spec (n_freqs entries, or NULL for
- * a local FFT) is borrowed instead of computing this instance's far-end FFT.
- * It must equal what the computing instance's aec_get_res_context() returns
- * this hop for the same ref samples; ref is still required. */
-void aec_process_context_shared_far(
-        Aec* a, const float* mic, const float* ref,
-        const Complex* shared_far_spec);
 
 /* Shares the far spectrum and its squared magnitudes from far_owner, which
  * must have completed this same hop. Both instances must consume identical
@@ -466,21 +435,6 @@ long aec_far_fft_real_compute_count(const Aec* a);
  * cfg.delay_acquire_inst_erle_db. 0 means no evidence, not a fault (also 0
  * before the ERLE machinery has run). */
 int aec_linear_is_cancelling(const Aec* a);
-
-/* Streaming API for asynchronous render/capture: aec_analyze_render() buffers
- * a render hop, aec_process_capture() consumes it and produces output; both
- * return the buffering event. SPSC: one thread may call aec_analyze_render()
- * and one (possibly different) thread aec_process_capture() per instance,
- * concurrently and without locks; anything else, including aec_reset() /
- * aec_destroy() while either thread may call in, needs caller serialization.
- * Called in turn from one thread they equal aec_process(). Underrun (empty
- * FIFO): a silent render hop is used and AEC_BUF_RENDER_UNDERRUN returned.
- * Overrun (FIFO full): the new render hop is dropped, or capture skips to the
- * freshest hop; AEC_BUF_RENDER_OVERRUN returned. */
-AecBufferingEvent aec_analyze_render(Aec* a, const float* ref);
-AecBufferingEvent aec_process_capture(Aec* a, const float* mic, float* out);
-/* Last buffering event from the most recent aec_process_capture(). */
-AecBufferingEvent aec_last_buffering_event(const Aec* a);
 
 /* Samples per process call (fft_size / 2). */
 int  aec_hop_size(const Aec* a);

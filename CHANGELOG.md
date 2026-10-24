@@ -41,6 +41,40 @@ when verdict requires it.
 
 ---
 
+## [Unreleased] — 2026-10-24 — Unused C functions removed; streaming FIFO API and its pool storage dropped
+
+### Removed
+- The streaming render/capture API: `aec_analyze_render()`, `aec_process_capture()`, `aec_last_buffering_event()`, the
+  `AecBufferingEvent` type with `AEC_BUF_NONE`, `AEC_BUF_RENDER_UNDERRUN`, `AEC_BUF_RENDER_OVERRUN` and
+  `AEC_BUF_API_SKEW`, and the nine `Aec` fields behind it (render FIFO, its zero reference, capacity, read/write
+  indices, call counters, last event) with `AEC_STREAM_FIFO_MS`. No sample, example or pipeline used it; `aec_process()`
+  and `aec_process_context()` are the lockstep entry points. The static `next_pow2()` that sized the FIFO went with it.
+- `aec_process_context_shared_far()`. `aec_process_context_shared_far_from()` is its superset (it also borrows the
+  squared magnitudes) and is what the 4-lane unit calls.
+- Forwarding wrappers with no caller outside tests: `delay_aec_accumulate()` (use `delay_aec_accumulate_ex(..., 1)`),
+  `shadow_copy_init()` (use `shadow_copy_init_for_grid()`) and `pbfdkf_process()` (use
+  `pbfdkf_process_with_far_cmag2()`).
+- Macros with no reader: `AEC_BLOCK_MS`, `AEC_LEAKAGE_*_PER_HOP`, `AEC_MAX_ERLE_LF/HF`, `AEC_MIN_ERLE`,
+  `AEC_STATIONARITY_*`, `AEC_MATCHED_FILTER_*_LIMIT_FLOAT`, `AEC_NORMAL_RENDER_LIMIT_FLOAT`,
+  `AEC_LOW_RENDER_LIMIT_FLOAT`, `AEC_FLOOR_POWER_FLOAT`, `AEC_RESIDUAL_NOISE_GATE_POWER` (`aec_scale.h`),
+  `DA_CONSISTENT_EST_THR`, `DA_ACCUMULATED_ERROR_SUBSAMPLE_RATE` (`delay_aec.h`) and `STAT_AVG_INIT_HOPS_DEFAULT`,
+  `STAT_INITIAL_PHASE_HOPS_DEFAULT` (`stationarity_estimator.h`).
+- `test/stream_sim.c`, `test/test_fifo_spsc.c` and the `test-stream-sim` target. `test_shared_far_spec.c` now drives
+  `aec_process_context_shared_far_from()`; its negative control borrows from an owner that processed a different
+  reference, and the hop-counter saturation check keeps `frame_count` and `shadow_frame_count`.
+
+### Changed
+- Pool size: every `Aec` is smaller by the FIFO storage and the shrunken struct (`aec_get_mem_size()`, balanced,
+  default delay mode, SIMD 1): 8 kHz/256 284,352 -> 267,408 B; 16 kHz/256 397,744 -> 364,416 B; 16 kHz/512
+  525,440 -> 491,600 B; 48 kHz/1024 1,224,176 -> 1,156,544 B. The difference is the same for every preset and delay
+  mode. Audio output is bit-identical (SIMD 1 and SIMD 0: `aec_wav` on 21 clips over 16 kHz/256, 16 kHz/512 and 48 kHz/1024, all four presets at 16 kHz/256).
+- `docs/c_user_manual_zh_TW.md`: section 8.4 (separate render/capture entry points) is gone and 8.5-8.8 became 8.4-8.7;
+  the pool tables, `aec.html`, `aec_c_api.html`, `STATIC_MEMORY.md`, `c_impl/README.md` and
+  `docs/c_python_function_map.md` follow (the map's counts are 409 C functions, 232 mirror, 101 partial, 76 C-only;
+  `pbfdkf_process_with_far_cmag2` now carries the `PBFDAF.process` / `complete_update` mapping).
+- Public API removals are a breaking change under the versioning rule above; `__version__` in `python/aec.py` is
+  unchanged because that file is part of the behaviour-hashed Python reference.
+
 ## [Unreleased] — 2026-10-24 — Test tiers: lean default, `make test`, `make test-full`
 
 ### Changed

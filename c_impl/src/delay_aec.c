@@ -1207,13 +1207,9 @@ void delay_aec_reset(DelayAec *d) {
     d->estimate_count = 0;
 }
 
-int delay_aec_accumulate(DelayAec *d, const float *near, const float *far, int hop) {
-    return delay_aec_accumulate_ex(d, near, far, hop, 1);
-}
-
-/* Duty-cycle variant (driven by aec.c's duty-cycle state machine). run_matched_filter = 1 equals
- * delay_aec_accumulate. With 0 the hop is decimated and pushed into the ring (buffers stay gapless)
- * but no matched-filter or aggregator work runs, so latest_* is unchanged. */
+/* Driven by aec.c's duty-cycle state machine. With run_matched_filter = 0 the hop is decimated and
+ * pushed into the ring (buffers stay gapless) but no matched-filter or aggregator work runs, so
+ * latest_* is unchanged. */
 int delay_aec_accumulate_ex(DelayAec *d, const float *near, const float *far,
                             int hop, int run_matched_filter) {
     DelayQuality q = DELAY_QUALITY_COARSE;

@@ -6,7 +6,7 @@ doubletalk case, capturing per hop EVERYTHING the C needs to replay the
 per-bin H_error Kalman update + leakage refresh in lockstep:
 
   External per-hop inputs (set by the orchestrator BEFORE process runs; the C
-  sets these on its filter before calling pbfdkf_process):
+  sets these on its filter before calling pbfdkf_process_with_far_cmag2):
     * near[hop], far[hop]                     (the delay-aligned hop blocks)
     * mu_scale_arr[n_bins]  (post-RSA-mask)   — the array _update_weights_aec3
         actually consumes. Capturing it post-mask means the C never models the
@@ -27,7 +27,7 @@ per-bin H_error Kalman update + leakage refresh in lockstep:
     * error_psd[n_bins], R[n_bins] (float32)   (NON-FFT → bit-exact)
     * partition_idx, call_counter, initial_state_active, init_render_hops
 
-Replaying per hop (set the external inputs, call pbfdkf_process) must match the
+Replaying per hop (set the external inputs, call pbfdkf_process_with_far_cmag2) must match the
 non-FFT state bit-exact and the FFT-derived arrays within rtol<1e-4 (atol 1e-6).
 Covers startup (gated), convergence, far-inactive, block-stationary, and
 full-update paths over the whole DT case.

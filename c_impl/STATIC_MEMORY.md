@@ -86,8 +86,8 @@ prints these):
 
 | FFT / hop | Pool size |
 |---:|---:|
-| 256 / 128 | 397,744 B |
-| 512 / 256 | 525,440 B |
+| 256 / 128 | 364,416 B |
+| 512 / 256 | 491,600 B |
 
 These figures depend on the struct sizes of `Aec`/`AecConfig`; re-run
 `aec_get_mem_size()` (or `make test-delay-num-filters`) rather than carrying
@@ -104,7 +104,7 @@ grid: changing either means re-querying `aec_get_mem_size` and re-initialising.
 
 ## Ownership model
 
-The top-level pool contains the `Aec` object, delay/FIFO storage, FFT plans,
+The top-level pool contains the `Aec` object, delay and reference-ring storage, FFT plans,
 main and shadow filter state, AEC3 post-filter state and processing scratch.
 All placement follows the same 16-byte alignment rules used by
 `aec_get_mem_size`.
@@ -138,5 +138,5 @@ Heap-vs-pool equality is checked by `make test-static-aec`.
 static-pool lifecycle.
 
 For firmware builds without hosted I/O, use `NO_STDIO=1` and run
-`make audit-no-stdio`. For the complete public lifecycle and streaming API,
+`make audit-no-stdio`. For the complete public lifecycle API,
 see [the C user manual](../docs/c_user_manual_zh_TW.md).

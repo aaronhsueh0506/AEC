@@ -635,8 +635,8 @@ static void pbfdkf_h_error_refresh(PBFDKF* p, const float *e2_ref_bins) {
     }
 
     if (p->e2_coarse_per_bin_valid) {
-        /* Per-bin path; e2_ref_bins[k] = |error_spec[k]|^2 is computed once by pbfdkf_process and
-         * shared. */
+        /* Per-bin path; e2_ref_bins[k] = |error_spec[k]|^2 is computed once by pbfdkf_process_with_far_cmag2
+         * and shared. */
         int n_div = sk_h_error_refresh_f32(
             p->H_error_per_bin, e2_ref_bins, p->e2_coarse_per_bin,
             p->erl_per_bin, lc_eff, ld_eff, p->h_error_refresh_erl_floor,
@@ -786,12 +786,4 @@ int pbfdkf_process_with_far_cmag2(PBFDKF* p,
 
     b->partition_idx = (b->partition_idx + 1) % N;
     return error_cmag2_valid;
-}
-
-void pbfdkf_process(PBFDKF* p,
-                       const float* near_end, const float* far_end,
-                       const float* mu_scale_arr, float mu_scale_scalar,
-                       float* output) {
-    (void)pbfdkf_process_with_far_cmag2(p, near_end, far_end, mu_scale_arr,
-                                     mu_scale_scalar, output, NULL);
 }

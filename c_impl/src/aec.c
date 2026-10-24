@@ -15,9 +15,6 @@
 /* DelayAdjustment value stored in pending_delay_change. */
 #define AEC_DA_NEW_DETECTED  2
 
-/* Streaming FIFO budget (ms), converted to whole hops at create time. */
-#define AEC_STREAM_FIFO_MS 320
-
 /* ───────────────────────── config ──────────────────────────────────────── */
 
 /* Fields authored on the 16 kHz / 10 ms reference grid are converted to the
@@ -604,15 +601,6 @@ float aec_testing_legacy10ms_rate(float legacy_per_hop, int hop,
 
 /* ───────────────────────── construction ────────────────────────────────── */
 
-static int next_pow2(int x) {
-    if (x <= 1) return 1;
-    if (x > (1 << 20)) x = (1 << 20);
-    unsigned int n = 1u;
-    unsigned int ux = (unsigned int)x;
-    while (n < ux) n <<= 1u;
-    return (int)n;
-}
-
 
 /* FilterAnalyzer tap materializer: inverse-transforms only the partitions
  * covering tap span [first, last] into a->filter_taps_full. */
@@ -720,18 +708,18 @@ static void aec_post_chain_reset(Aec* a) {
 
 static void aec_derive_dims(const AecConfig* cfg,
                             int* o_hop, int* o_blk, int* o_fft, int* o_K,
-                            int* o_nparts, int* o_buf_samp, int* o_fifo_cap);
+                            int* o_nparts, int* o_buf_samp);
 static int aec_carve(Aec* a, uint8_t* ptr, const AecConfig* cfg,
                       int hop, int blk, int fft, int K, int np,
-                      int buf_samp, int fcap, int is_static);
+                      int buf_samp, int is_static);
 
 int aec_create(Aec* a, const AecConfig* cfg_in) {
     if (!a || !cfg_in || !aec_validate_config(cfg_in)) return -1;
     AecConfig cfg_resolved = aec_resolved_config(cfg_in);
     const AecConfig* cfg = &cfg_resolved;
 
-    int hop, blk, fft, K, np, buf_samp, fcap;
-    aec_derive_dims(cfg, &hop, &blk, &fft, &K, &np, &buf_samp, &fcap);
+    int hop, blk, fft, K, np, buf_samp;
+    aec_derive_dims(cfg, &hop, &blk, &fft, &K, &np, &buf_samp);
 
     /* One arena (aec_get_mem_size() minus the Aec struct), carved like
      * aec_init(). */
@@ -745,7 +733,7 @@ int aec_create(Aec* a, const AecConfig* cfg_in) {
     uint8_t* arena = (uint8_t*)arena_mem;
 
     memset(a, 0, sizeof(*a));
-    if (aec_carve(a, arena, cfg, hop, blk, fft, K, np, buf_samp, fcap,
+    if (aec_carve(a, arena, cfg, hop, blk, fft, K, np, buf_samp,
                   /*is_static=*/0) != 0) {
         /* aec_carve() failed (FFT allocation); it already released the FFT handle. */
         free(arena);
@@ -785,15 +773,15 @@ static int aec_ref_ring_samples(const AecConfig* cfg, int hop) {
 
 /* ── dimension helper (shared by aec_create() and aec_init()) ─────────────── */
 
-/* Frame dimensions: geometry from the shared resolver, partitions / ring /
- * FIFO capacity from cfg; zero-filled on an unresolvable grid. */
+/* Frame dimensions: geometry from the shared resolver, partitions / ring
+ * length from cfg; zero-filled on an unresolvable grid. */
 static void aec_derive_dims(const AecConfig* cfg,
                             int* o_hop, int* o_blk, int* o_fft, int* o_K,
-                            int* o_nparts, int* o_buf_samp, int* o_fifo_cap) {
+                            int* o_nparts, int* o_buf_samp) {
     AecSignalGrid g;
     if (!aec_resolve_signal_grid(cfg->sample_rate, cfg->fft_size, &g)) {
         *o_hop = 0; *o_blk = 0; *o_fft = 0; *o_K = 0;
-        *o_nparts = 0; *o_buf_samp = 0; *o_fifo_cap = 0;
+        *o_nparts = 0; *o_buf_samp = 0;
         return;
     }
     int fft = g.fft_size;
@@ -804,12 +792,6 @@ static void aec_derive_dims(const AecConfig* cfg,
     if (n <= 0) { n = (cfg->filter_length + hop - 1) / hop; if (n < 1) n = 1; }
     *o_nparts = n;
     *o_buf_samp = aec_ref_ring_samples(cfg, hop);
-    int cap = (AEC_STREAM_FIFO_MS * cfg->sample_rate / 1000 + hop - 1) / hop;
-    if (cap < 2) cap = 2;
-    /* FIFO capacity is a power of two so unsigned sequence indexing stays
-     * continuous across the 2^32 wrap. */
-    cap = next_pow2(cap);
-    *o_fifo_cap = cap;
 }
 
 size_t aec_get_mem_size(const AecConfig* cfg_in) {
@@ -817,8 +799,8 @@ size_t aec_get_mem_size(const AecConfig* cfg_in) {
     if (!aec_validate_config(cfg_in)) return 0;
     AecConfig cfg_resolved = aec_resolved_config(cfg_in);
     const AecConfig* cfg = &cfg_resolved;
-    int hop, blk, fft, K, np, buf, fcap;
-    aec_derive_dims(cfg, &hop, &blk, &fft, &K, &np, &buf, &fcap);
+    int hop, blk, fft, K, np, buf;
+    aec_derive_dims(cfg, &hop, &blk, &fft, &K, &np, &buf);
 
     const int ncc  = AECB_ST_NUM_CAPTURE_CHANNELS;
     const int rh   = (AECB_REE_USE_AEC_ECHO_GEN_WINDOW ? 1 : 0) + 2;
@@ -843,8 +825,6 @@ size_t aec_get_mem_size(const AecConfig* cfg_in) {
     if (cfg->delay_mode != AEC_DELAY_EXTERNAL_ALIGNED && buf <= 0) return 0;
     if (buf > 0)
         t = ck_field_size(t, (size_t)buf, sizeof(float));
-    t = ck_field_size(t, ck_mul_size((size_t)fcap, (size_t)hop), sizeof(float));   /* render_fifo */
-    t = ck_field_size(t, (size_t)hop, sizeof(float));  /* fifo_zero_ref (underrun reference) */
     t = ck_field_size(t, (size_t)(K - 2 > 0 ? K - 2 : 1), sizeof(int64_t));
     t = ck_add_size(t, fft_get_mem_size(fft));
     {
@@ -938,8 +918,8 @@ int aec_get_mem_breakdown(const AecConfig* cfg_in, AecMemBreakdown* out) {
     AecConfig cfg_resolved = aec_resolved_config(cfg_in);
     const AecConfig* cfg = &cfg_resolved;
 
-    int hop, blk, fft, K, np, buf, fcap;
-    aec_derive_dims(cfg, &hop, &blk, &fft, &K, &np, &buf, &fcap);
+    int hop, blk, fft, K, np, buf;
+    aec_derive_dims(cfg, &hop, &blk, &fft, &K, &np, &buf);
 
     size_t est = 0;
     if (cfg->delay_mode == AEC_DELAY_MATCHED) {
@@ -1082,8 +1062,8 @@ static void aec_init_config_state(Aec* a, const AecConfig* cfg, int hop, int blk
     }
 }
 
-static uint8_t* aec_carve_delay_fifo(Aec* a, uint8_t* ptr, const AecConfig* cfg,
-                                 int hop, int K, int buf_samp, int fcap) {
+static uint8_t* aec_carve_delay_ring(Aec* a, uint8_t* ptr, const AecConfig* cfg,
+                                 int hop, int K, int buf_samp) {
     /* Delay ring (cfg is delay-resolved): MATCHED estimator + ring; FIXED
      * ring only; EXTERNAL_ALIGNED neither. buf_samp is the capacity
      * aec_get_mem_size() budgeted. */
@@ -1108,15 +1088,6 @@ static uint8_t* aec_carve_delay_fifo(Aec* a, uint8_t* ptr, const AecConfig* cfg,
         a->current_delay = 0;
     }
     a->duty_last_delay = -1;
-    /* Streaming FIFO: plain init, before the instance is published to any thread. */
-    a->fifo_cap_hops = fcap;
-    a->render_fifo = (float*)ptr; ptr += ALIGN16((size_t)fcap * hop * sizeof(float));
-    memset(a->render_fifo, 0, (size_t)fcap * hop * sizeof(float));
-    a->fifo_zero_ref = (float*)ptr; ptr += ALIGN16((size_t)hop * sizeof(float));
-    memset(a->fifo_zero_ref, 0, (size_t)hop * sizeof(float));
-    a->fifo_count = 0; a->fifo_read = 0; a->fifo_write = 0;
-    a->render_call_count = 0; a->capture_call_count = 0;
-    a->last_buffering_event = AEC_BUF_NONE;
 
     a->rsa_counters = (int64_t*)ptr;
     size_t rsa_sz = ALIGN16((size_t)(K - 2 > 0 ? K - 2 : 1) * sizeof(int64_t));
@@ -1494,7 +1465,7 @@ static void aec_init_scalar_state(Aec* a, const AecConfig* cfg, const AecBalance
 
 static int aec_carve(Aec* a, uint8_t* ptr, const AecConfig* cfg,
                       int hop, int blk, int fft, int K, int np,
-                      int buf_samp, int fcap, int is_static) {
+                      int buf_samp, int is_static) {
     /* Per-rate row (a hit is guaranteed by aec_validate_config). */
     const AecBalancedRateDims* rd = aecb_rate_cfg(
         cfg->sample_rate, cfg->fft_size);
@@ -1504,7 +1475,7 @@ static int aec_carve(Aec* a, uint8_t* ptr, const AecConfig* cfg,
     if (aec_build_sg_config(cfg, &scfg, &stun) != 0) return -1;
 
     aec_init_config_state(a, cfg, hop, blk, fft, K, np);
-    ptr = aec_carve_delay_fifo(a, ptr, cfg, hop, K, buf_samp, fcap);
+    ptr = aec_carve_delay_ring(a, ptr, cfg, hop, K, buf_samp);
     if (!ptr) return -1;
     ptr = aec_carve_filters(a, ptr, cfg, hop, blk, fft, K, np);
     if (!ptr) return -1;
@@ -1533,13 +1504,13 @@ Aec* aec_init(void* mem, size_t mem_size, const AecConfig* cfg_in) {
         if (need == 0 || mem_size < need) return NULL;
     }
 
-    int hop, blk, fft, K, np, buf_samp, fcap;
-    aec_derive_dims(cfg, &hop, &blk, &fft, &K, &np, &buf_samp, &fcap);
+    int hop, blk, fft, K, np, buf_samp;
+    aec_derive_dims(cfg, &hop, &blk, &fft, &K, &np, &buf_samp);
 
     Aec* a = (Aec*)mem;
     memset(a, 0, sizeof(Aec));
     uint8_t* ptr = (uint8_t*)mem + ALIGN16(sizeof(Aec));
-    if (aec_carve(a, ptr, cfg, hop, blk, fft, K, np, buf_samp, fcap,
+    if (aec_carve(a, ptr, cfg, hop, blk, fft, K, np, buf_samp,
                   /*is_static=*/1) != 0) {
         /* Nested FFT or hpf_init() failure; aec_carve() already released any
          * FFT handle. */
@@ -1661,14 +1632,6 @@ void aec_reset(Aec* a) {
     a->duty_active = 0; a->duty_stable_hops = 0; a->duty_pos = 0;
     a->duty_last_delay = -1; a->duty_erle_peak = 0.0f;
     a->duty_hops_total = 0; a->duty_hops_run = 0;
-    if (a->render_fifo)
-        memset(a->render_fifo, 0,
-               (size_t)a->fifo_cap_hops * a->hop_size * sizeof(float));
-    if (a->fifo_zero_ref)
-        memset(a->fifo_zero_ref, 0, (size_t)a->hop_size * sizeof(float));
-    a->fifo_count = 0; a->fifo_read = 0; a->fifo_write = 0;
-    a->render_call_count = 0; a->capture_call_count = 0;
-    a->last_buffering_event = AEC_BUF_NONE;
     pbfdkf_reset(&a->main_filter);
     if (a->has_shadow) pbfdaf_reset(&a->shadow_filter);
     if (a->has_observer) { pbfdaf_reset(&a->observer_filter); a->observer_far_hop_valid = 0; }
@@ -2805,16 +2768,6 @@ void aec_process_context(Aec* a, const float* mic_in, const float* ref_in) {
     aec_process_core(a, mic_in, ref_in, NULL, NULL);
 }
 
-/* Far-end-FFT-sharing entry point: shared_far_spec (n_freqs) replaces this
- * instance's far-end FFT; it must equal the computing instance's
- * aec_get_res_context() far_spec for the same ref_in, else the result is
- * silently wrong. */
-void aec_process_context_shared_far(
-        Aec* a, const float* mic_in, const float* ref_in,
-        const Complex* shared_far_spec) {
-    aec_process_core(a, mic_in, ref_in, shared_far_spec, NULL);
-}
-
 void aec_process_context_shared_far_from(
         Aec* a, const float* mic_in, const float* ref_in, const Aec* far_owner) {
     if (!a) return;
@@ -2826,72 +2779,6 @@ void aec_process_context_shared_far_from(
     }
     aec_process_core(a, mic_in, ref_in, far_owner->main_filter.base.far_spec,
                      far_owner->main_filter.base.far_cmag2_hold);
-}
-
-/* Streaming API: render-hop FIFO around aec_process(); in lockstep it is
- * pass-through and equals aec_process(). SPSC ring with drop-new and consumer
- * catch-up: fifo_write is written only by the render thread, fifo_read only
- * by the capture thread, via acquire/release `__atomic_*_n`. Overrun drops
- * the incoming hop; a full ring makes the consumer skip to the freshest hop;
- * both report AEC_BUF_RENDER_OVERRUN. */
-AecBufferingEvent aec_analyze_render(Aec* a, const float* ref) {
-    const int hop = a->hop_size;
-    const unsigned cap = (unsigned)a->fifo_cap_hops;
-    aec_counter_bump(&a->render_call_count);
-
-    /* fifo_write: own field (plain load); fifo_read: acquire, to see the
-     * consumer's claim. */
-    unsigned w = *(unsigned*)&a->fifo_write;
-    unsigned r = __atomic_load_n((unsigned*)&a->fifo_read, __ATOMIC_ACQUIRE);
-    if (w - r >= cap)
-        return AEC_BUF_RENDER_OVERRUN;
-
-    memcpy(a->render_fifo + (size_t)(w % cap) * (size_t)hop, ref, (size_t)hop * sizeof(float));
-    /* Publish after the memcpy (release pairs with the consumer's acquire). */
-    __atomic_store_n((unsigned*)&a->fifo_write, w + 1u, __ATOMIC_RELEASE);
-    return AEC_BUF_NONE;
-}
-
-AecBufferingEvent aec_process_capture(Aec* a, const float* mic, float* out) {
-    const int hop = a->hop_size;
-    const unsigned cap = (unsigned)a->fifo_cap_hops;
-    aec_counter_bump(&a->capture_call_count);
-    AecBufferingEvent ev;
-    const float* ref;
-    int claimed;
-
-    /* fifo_read: own field (plain load); fifo_write: acquire, to see the
-     * payload. */
-    unsigned r = *(unsigned*)&a->fifo_read;
-    unsigned w = __atomic_load_n((unsigned*)&a->fifo_write, __ATOMIC_ACQUIRE);
-
-    if (w == r) {
-        ref = a->fifo_zero_ref;
-        ev = AEC_BUF_RENDER_UNDERRUN;
-        claimed = 0;
-    } else if (w - r == cap) {
-        r = w - 1u;
-        ref = a->render_fifo + (size_t)(r % cap) * (size_t)hop;
-        ev = AEC_BUF_RENDER_OVERRUN;
-        claimed = 1;
-    } else {
-        ref = a->render_fifo + (size_t)(r % cap) * (size_t)hop;
-        claimed = 1;
-        ev = AEC_BUF_NONE;
-    }
-
-    aec_process(a, mic, ref, out);
-    /* Publish the read cursor after aec_process() returns (it copies `ref`
-     * out first). */
-    if (claimed)
-        __atomic_store_n((unsigned*)&a->fifo_read, r + 1u, __ATOMIC_RELEASE);
-    /* Relaxed atomic store so a polling third thread cannot read a torn value. */
-    __atomic_store_n(&a->last_buffering_event, (int)ev, __ATOMIC_RELAXED);
-    return ev;
-}
-
-AecBufferingEvent aec_last_buffering_event(const Aec* a) {
-    return (AecBufferingEvent)__atomic_load_n(&a->last_buffering_event, __ATOMIC_RELAXED);
 }
 
 void aec_get_res_context(const Aec* a, AecResContext* ctx) {

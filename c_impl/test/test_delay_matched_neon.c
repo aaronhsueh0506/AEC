@@ -410,7 +410,7 @@ static int run_estimator(int sample_rate, int hop, int n_hops, int delay) {
     for (int i = 0; i < n_hops; ++i) {
         int cur, nu;
         float conf;
-        delay_aec_accumulate(&d, near + (size_t)i * hop, far + (size_t)i * hop, hop);
+        delay_aec_accumulate_ex(&d, near + (size_t)i * hop, far + (size_t)i * hop, hop, 1);
         cur = delay_aec_estimated_delay(&d);
         conf = delay_aec_confidence(&d);
         nu = delay_aec_n_updates(&d);

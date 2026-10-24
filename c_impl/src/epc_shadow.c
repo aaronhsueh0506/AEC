@@ -134,13 +134,6 @@ void shadow_copy_init_for_grid(ShadowCopy* s, ShadowCopyGateMode mode,
     s->epc_hangover           = epc_hangover;
 }
 
-/* Fixed-grid entry point (160 @ 16 kHz); the product AEC uses shadow_copy_init_for_grid(). */
-void shadow_copy_init(ShadowCopy* s, ShadowCopyGateMode mode,
-                      float threshold, int hysteresis, int epc_hangover) {
-    shadow_copy_init_for_grid(s, mode, threshold, hysteresis, epc_hangover,
-                              160, 16000);
-}
-
 void shadow_copy_reset(ShadowCopy* s) {
     s->copy_err_baseline = SC_BASELINE_INIT;
     s->copy_counter = 0;

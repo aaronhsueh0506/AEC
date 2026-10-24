@@ -40,6 +40,7 @@ pre code{background:none;padding:0}
 
 <h2>1. 概要</h2>
 <p><code>Aec</code> 內部的 post chain 會算出一組逐 bin 的殘留回音抑制增益 G<sub>res</sub>(f)。多 lane 的整合(例如 4ch:四條線性 AEC → beamform／融合 → 一個共用的 RES)需要的是「對<b>融合後</b>的頻譜算一次 G<sub>res</sub>」,而不是每條 lane 各算一次。<code>aec_res.h</code> 把同一個抑制器獨立出來,並附上與它搭配的舒適噪音填補 <code>aec_cng_fill()</code>。</p>
+<p>誰持有 RES:單聲道的 RES 就在 <code>Aec</code> 裡面(增益是 <code>ctx.res_gain</code>,強度用 <code>aec_set_preset()</code>,Audio_ALG 以 <code>se_frame_from_aec()</code> 取得 frame),不需要另建 <code>AecRes</code>。Audio_ALG 的 4ch 單元(<code>AudioPipeline4Ch</code>)內含一個後波束 <code>AecRes</code>(<code>enable_res</code>、<code>res_preset</code>;<code>audio_pipeline_4ch_fuse()</code> 用它算出 <code>g_res_ctx</code>;強度用 <code>aec_res_set_preset(audio_pipeline_4ch_res(p), …)</code>)。<code>AecRes</code> 作為獨立物件仍是公開 API,供直接驅動 4ch 核心的呼叫端自行 <code>aec_res_init()</code>。</p>
 <ul>
 <li>設定來自與 lane 相同的建構函式(<code>aec_build_sg_config</code>),所以由同一個 <code>AecConfig</code> 建出的 <code>AecRes</code> 與 lane 內的抑制器設定逐位元相同。</li>
 <li>Static memory:呼叫端給一塊 16-byte 對齊的記憶體;process／reset／set_preset 不配置記憶體、不用 stdio、無全域狀態。</li>
@@ -138,7 +139,7 @@ t              各 lane 線性 AEC 完成
 <p>無演算法延遲(同 hop 內回傳)。實例以 <code>initial_state = 1</code> 起始:初始階段是否啟用 DominantNearend 觸發與低頻平滑,由設定中的 <code>dne_use_during_initial_phase</code>／<code>lf_smoothing_during_initial_phase</code> 決定;第一次 <code>all_converged</code> 為真的 hop 離開初始狀態,之後不會回去,直到 <code>aec_res_reset()</code>。設定來自 <code>AecConfig</code> 的共同建構函式,其中這兩個旗標固定為 1,所以經由本介面,初始狀態對增益沒有影響;離開初始狀態的判斷與狀態仍保留,供旗標被關閉的設定使用。</p>
 
 <h2>8. 與 Aec 內部舒適噪音的差異</h2>
-<div class="note"><code>aec_cng_fill</code> 與 <code>Aec</code> 自己的舒適噪音(<code>aec_post.c</code>)<b>同配方、不同算式</b>:同一個亂數遞推與查表,但本函式用 libm 的 <code>sqrtf</code>／除法,與 Audio_ALG 範例碼(<code>pipelines/samples/se_sample_chain.h</code>)的迴圈逐位元相同;<code>Aec</code> 內部則是批次化的 <code>inv_psd_scale</code>＋<code>sk_fast_sqrt_f32</code>。兩者不要混用在要求位元一致的比對中。</div>
+<div class="note"><code>aec_cng_fill</code> 與 <code>Aec</code> 自己的舒適噪音(<code>aec_post.c</code>)<b>同配方、不同算式</b>:同一個亂數遞推與查表,但本函式用 libm 的 <code>sqrtf</code>／除法,就是 Audio_ALG 範例(例如 <code>pipelines/mono_aec_nr_res/main.c</code> 的 <code>mono_form()</code>)每個 hop 呼叫的那個函式;<code>Aec</code> 內部則是批次化的 <code>inv_psd_scale</code>＋<code>sk_fast_sqrt_f32</code>。兩者不要混用在要求位元一致的比對中。</div>
 
 <h2>9. 相關檔案與測試</h2>
 <ul class="small">
@@ -146,7 +147,7 @@ t              各 lane 線性 AEC 完成
 <li><code>AEC/c_impl/include/aec_config_build.h</code> — 庫內部:<code>aec_build_sg_config</code>／<code>aec_resolve_valid_config</code>(非對外 API)</li>
 <li><code>AEC/c_impl/test/test_aec_res.c</code> — <code>make test-aec-res</code>(含 render 的 ×32768 縮放、離開初始狀態、飽和後復原限制的判別案例)</li>
 <li><code>AEC/c_impl/test/test_zero_heap_aec.c</code>（含 AecRes 週期）、<code>test/no_stdio_main.c</code>（<code>make audit-no-stdio</code>）</li>
-<li><code>AEC/docs/c_user_manual_zh_TW.md</code> §8.6</li>
+<li><code>AEC/docs/c_user_manual_zh_TW.md</code> §8.5</li>
 </ul>
 </body>
 </html>

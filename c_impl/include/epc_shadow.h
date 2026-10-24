@@ -78,8 +78,6 @@ typedef struct ShadowCopy {
     int    epc_hangover;
 } ShadowCopy;
 
-void shadow_copy_init(ShadowCopy* s, ShadowCopyGateMode mode,
-                      float threshold, int hysteresis, int epc_hangover);
 void shadow_copy_init_for_grid(ShadowCopy* s, ShadowCopyGateMode mode,
                                float threshold, int hysteresis,
                                int epc_hangover, int hop_size,

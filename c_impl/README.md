@@ -118,22 +118,6 @@ second), `--debug-trace <path>` (opt-in per-frame CSV of post-filter internals �
 … one row per hop; one NULL test per hop when off). `aec_wav --help` lists all
 options.
 
-## Streaming API
-
-`aec_process(mic, ref, out)` is the lockstep 1-hop-in/1-hop-out call. For async
-pipelines where render and capture arrive on separate calls/threads, a
-decoupled pair runs over a render FIFO of at least 320 ms (its hop capacity is
-rounded up to a power of two):
-
-```c
-aec_analyze_render(&a, ref);          /* buffer one render hop */
-aec_process_capture(&a, mic, out);    /* consume + process one mic hop */
-```
-
-Lockstep (`analyze_render` then `process_capture`) is **byte-identical** to
-`aec_process`; underrun/overrun return `AEC_BUF_RENDER_UNDERRUN`/`_OVERRUN`. See
-[使用手冊 §8.4](../docs/c_user_manual_zh_TW.md) and `test/stream_sim.c`.
-
 ## Precision & regression anchors
 
 Production C is float32 end-to-end (delay chain, orchestrator scalars,
@@ -173,8 +157,8 @@ caller-pool path (`aec_get_mem_size`/`aec_init`), and differs from numpy's fp64
   input.
 - Not in either tier, still runnable on their own: `test-detectors-parity`
   (single grid; `test-detectors-parity-all` is a superset), `test/docs_smoke.sh`,
-  `test/test_fifo_spsc.c`, `test/test_lifecycle.c` and `test/test_wav_io_shim.c`
-  (the last three have no Makefile target; their build lines are in the files).
+  `test/test_lifecycle.c` and `test/test_wav_io_shim.c` (these two have no
+  Makefile target; their build lines are in the files).
 
 **Regression gates:**
 
