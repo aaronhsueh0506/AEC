@@ -1,6 +1,8 @@
 # AEC — Acoustic Echo Cancellation
 
 > **C 使用與整合**：[AEC C User Manual（繁體中文）](docs/c_user_manual_zh_TW.md)
+> · HTML 頁面：[呼叫使用](docs/html/aec_usage.html) · [流程時序圖](docs/html/aec_sequence.html) ·
+> [外部參數](docs/html/aec_params.html) · [內部參數](docs/html/aec_params_internal.html)
 
 Single-channel AEC (1 mic + 1 ref) supporting PBFDKF (frequency-domain Kalman),
 multi-ERLE, shadow filter, and post-filter residual echo suppression.
@@ -128,8 +130,9 @@ lookups.
 
 Two things to know before measuring a preset change: lanes built with
 `spatial_linear_context` never reach the suppressor's gain path, so retargeting
-them is inert by construction (the 4-channel core has its own setter for its
-shared post stage); and the far-active floor only binds on far-active,
+them is inert by construction (a 4-channel product retargets the shared
+`AecRes` that the application itself created after the Audio_ALG 4ch unit:
+`aec_res_set_preset(res, preset, ramp_ms)`); and the far-active floor only binds on far-active,
 non-double-talk hops while the same gain also sets the comfort-noise level, so a
 whole-recording average moves less than the dB step suggests. Full contract and
 A/B guidance → [docs/c_user_manual_zh_TW.md §7.1](docs/c_user_manual_zh_TW.md).
@@ -265,7 +268,7 @@ gain so a downstream stage runs entirely in the frequency domain:
 | `echo_spec`, `near_spec` | Matching windowed echo and capture spectra; `near_spec = error_spec + echo_spec` |
 | `far_spec` | X(f) — PBFDKF render spectrum (shared reference/diagnostic coordinate) |
 | `res_gain`, `comfort_noise` | the AEC3 SuppressionGain + CNG this frame |
-| `erle_factor`, `dt_indicator`, `divergence`, `over_sub`, `erl_estimate` | per-frame telemetry |
+| `erle_factor`, `dt_indicator`, `divergence`, `over_sub`, `erl_estimate` | per-frame telemetry (`over_sub` is a Python-only field, equal to `erle_factor`; the C `AecResContext` has no `over_sub`) |
 | `res_floor_protect` | this frame's near-recent-latch DT floor decision; a fused consumer ORs the contributing lanes' flags for its own suppressor |
 | `usable_linear` | this frame's usable-linear-estimate verdict; `False` means `r2` is the conservative nonlinear estimate (far-end power times a default echo-path gain), not one derived from the linear echo estimate — see `docs/aec_methods.md` §3.4 |
 
@@ -356,11 +359,12 @@ BIN="$(make -s print-bin-dir)"
 "$BIN"/aec_wav mic.wav ref.wav out.wav --preset 2       # 0 mild | 1 balanced | 2 aggressive | 3 no_floor (names also accepted)
 "$BIN"/aec_wav mic.wav ref.wav out.wav --no-cng         # disable CNG (default on)
 "$BIN"/aec_wav mic.wav ref.wav out.wav --no-res         # skip residual filter
-"$BIN"/aec_wav mic.wav ref.wav out.wav --debug-level 2  # per-frame log
+"$BIN"/aec_wav mic.wav ref.wav out.wav --debug-trace trace.csv  # per-hop CSV trace
 ```
 
 C usage / API / integration details
-→ [docs/c_user_manual_zh_TW.md](docs/c_user_manual_zh_TW.md).
+→ [docs/c_user_manual_zh_TW.md](docs/c_user_manual_zh_TW.md); call order, sequence diagrams and the
+external-vs-internal parameter tables are on the HTML pages under [docs/html/](docs/html/aec_usage.html).
 
 ---
 
@@ -464,8 +468,9 @@ AEC/
 │   ├── timing_constant_inventory.md     # generated hop-authored constant inventory
 │   ├── delay_estimator_design_zh_TW.md  # delay estimator design
 │   ├── delay_estimator_productization_plan_zh_TW.md
-│   ├── html/                            # HTML pages (API, parameters, flow)
-│   └── archive/                         # archived documents
+│   ├── linear_filter_evolution.svg      # linear-filter figure
+│   ├── timing_constant_inventory.json   # source of timing_constant_inventory.md
+│   └── html/                            # HTML pages (usage, sequence diagrams, parameters, API, RES stage)
 ├── model/                           # AECMOS ONNX model and wrapper
 ├── eval/                            # fixed benchmark manifest, A/B tooling
 └── wav/                             # local/downloaded test audio (mostly ignored)

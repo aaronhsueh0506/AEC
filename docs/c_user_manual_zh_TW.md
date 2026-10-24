@@ -4,6 +4,10 @@
 >
 > 本手冊是給**函式庫使用者**看的整合說明：什麼時候呼叫哪個函式、參數怎麼設。
 > 演算法內部設計請看 [`aec_methods.md`](aec_methods.md)。
+>
+> HTML 版（含可編譯範例與時序圖）：[呼叫使用](html/aec_usage.html)、
+> [流程時序圖](html/aec_sequence.html)、[外部參數與公開函式](html/aec_params.html)、
+> [內部參數](html/aec_params_internal.html)。
 
 ## 你需要 include 的 header
 
@@ -13,7 +17,7 @@
 
 只要自己用 `aec_process()` 取得時域輸出，就只需要 `aec.h`。另有一個 header 屬於
 **對外公開、範圍較窄的介面**，在自己組合頻域後處理鏈時需要（單聲道整鏈；以及直接驅動多通道核心、
-在 beamformer 之後自備 `AecRes` 的呼叫端——Audio_ALG 的 4ch 單元已內含一個，見 §8.5）：
+在 beamformer 之後自備 `AecRes` 的呼叫端——Audio_ALG 的 4ch 單元不含 RES，由應用在單元之後自己建立，見 §8.5）：
 
 | Header | 何時需要 |
 |---|---|
@@ -440,8 +444,8 @@ aec_reset(&aec);    /* 或 aec_reset(aec) */
 
 ### 什麼不能改
 
-`sample_rate`、`fft_size`、`filter_length`、`n_partitions` 決定記憶體佈局，
-**建立後不可更改**。要換設定必須 destroy 後重新 create（記憶池路徑則是重新 `aec_init`）。
+`sample_rate`、`fft_size`、`filter_length`、`n_partitions`、`delay_mode`、
+`delay_num_filters`、`fixed_delay_samples` 決定記憶體佈局，**建立後不可更改**。要換設定必須 destroy 後重新 create（記憶池路徑則是重新 `aec_init`）。
 也不要在處理中途直接改 `aec.cfg` 的內容。
 
 ---
@@ -497,7 +501,15 @@ cfg.enable_cng = 0;          /* 只覆寫你真的要改的 */
 ```
 
 `aec_config_defaults()` 給的就是 balanced 的值；`aec_config_from_preset()` 只在此之上
-改一個欄位（見 §7）。以下所有預設值與範圍都直接取自程式碼。
+改 §7 表列的三個 floor 欄位（`min_gain_floor_far_active_db`、`min_gain_floor_dt_db`、`min_gain_split_floor_enabled`）。以下所有預設值與範圍都直接取自程式碼。
+
+**參數分級**：建議對外開放的只有 `sample_rate`、`fft_size`、`filter_length`、`delay_mode`、
+`fixed_delay_samples`、`delay_num_filters`、`enable_res`、`enable_cng` 與 preset（經由
+`min_gain_floor_far_active_db`／`min_gain_floor_dt_db`／`min_gain_split_floor_enabled` 三個欄位）；
+進階外部為 `enable_highpass`、`highpass_cutoff_hz`、`enable_shadow`、`delay_est_period_s`；
+`return_res_context`、`spatial_linear_context` 是串鏈整合者專用；`enable_delay_est` 已 deprecated；
+其餘 38 個欄位（§6.5 與 §6.6 的欄位、live observer 等）屬內部調校參數，不建議開放。
+逐欄分級、出處行與理由見 [外部參數](html/aec_params.html) 與 [內部參數](html/aec_params_internal.html)。
 
 ### 6.1 訊號格點（建立後不可更改）
 
@@ -588,7 +600,7 @@ cfg.enable_cng = 0;          /* 只覆寫你真的要改的 */
 | `shadow_mu_nlms` | `float` | `0.5` | 0 – 10 | 輔助 filter 的標稱步進。 |
 | `epc_total_rise` | `float` | `1.5` | 0 – 1000 | 判定回音路徑改變的能量上升倍率門檻。誤判太多可調高。 |
 | `epc_delta_threshold` | `float` | `0.3` | 0 – 1000 | 同上，變化量門檻。 |
-| `epc_mu_floor` | `float` | `0.5` | 0 – 10 | 路徑改變恢復期間的步進下限。 |
+| `epc_mu_floor` | `float` | `0.5` | 0 – 10 | **保留欄位，C 庫內沒有任何使用處**（只有宣告、預設值與範圍驗證），調它不會有任何效果。 |
 | `kalman_q_high` | `float` | `1e-3` | 0 – 1 | 未收斂／路徑改變時的模型不確定度。 |
 | `kalman_q_low` | `float` | `1e-6` | 0 – 1 | 已收斂後的模型不確定度。 |
 | `ne_recent_threshold` | `float` | `0.3` | 0 – 1000 | 判定近端有聲音的能量門檻。近端偵測過鈍可調低。 |
@@ -815,8 +827,8 @@ balanced**；這是 setter，有呼叫端可以回報，所以**直接拒絕**�
 （目標存在 config、進度存在 state，這是刻意分開的）。
 
 **底層 primitive**。真正做事的是抑制器自己的入口。四麥克風產品共用的那個 post 級
-抑制器是一個 `AecRes`（沒有任何 `Aec` 擁有它；Audio_ALG 的 4ch 單元內含一個，以
-`audio_pipeline_4ch_res(p)` 取得，直接驅動 4ch 核心的呼叫端則自己初始化）；對它的入口是
+抑制器是一個 `AecRes`（沒有任何 `Aec` 擁有它；Audio_ALG 的 4ch 單元也不含它，由應用在
+單元之後自己 `aec_res_init()` 並持有）；對它的入口是
 `aec_res_set_preset()`（§8.5），語意與 `aec_set_preset()` 相同。`AecRes` 內部包的
 是 `SuppressionGain`，其底層函式為（內部 header，整合端不需要直接呼叫）：
 
@@ -847,9 +859,8 @@ preset 查表函式有三個：`aec_preset_floor_db()`、`aec_preset_dt_floor_db
 **四麥克風產品請勿對 lane 呼叫**。四條 lane 都以 `spatial_linear_context` 建立，
 根本不會走到 `suppression_gain_get_gain()`，所以對 lane 呼叫 `aec_set_preset()`
 **依建構方式即為無效操作**——塑形輸出的 gain 來自該產品自己那一個共用的 post 級
-抑制器。請對那個 `AecRes` 呼叫 `aec_res_set_preset()`（§8.5）——4ch 單元是
-`aec_res_set_preset(audio_pipeline_4ch_res(p), preset, ramp_ms)`——它針對的就是那個共用的
-post 級抑制器。
+抑制器。請對那個 `AecRes` 呼叫 `aec_res_set_preset(res, preset, ramp_ms)`（§8.5）——
+`res` 是應用在單元之後自己建立的那一個——它針對的就是那個共用的 post 級抑制器。
 
 **A/B 量測時該預期什麼**（先讀這段再下結論）：far-active 地板只在
 **far-active 且非 double-talk** 的 hop 上生效。double-talk 期間套用的是 DT 地板
@@ -969,7 +980,7 @@ AEC magnitude² 必須來自同一個 AEC kernel，不能任意以其他 power �
 | `r2` | 殘留回音功率譜。**int16² 尺度**：要換成 audio 功率尺度須除以 32768²。`spatial_linear_context = 2` 時為 `NULL`。 |
 | `comfort_noise` | 舒適噪音功率譜。同樣是 int16² 尺度。`spatial_linear_context = 2` 時為 `NULL`。 |
 | `linear_hop` / `formed_hop` | 時域中間結果。 |
-| `res_floor_protect` | 本 hop 是否啟用 double-talk RES floor 保護。它就是近端最近有聲音 latch 的實際決定；4ch post-beam consumer 只對有貢獻的 lane 做 OR，不能再用 `dt_indicator` 自行推導另一套規則。 |
+| `res_floor_protect` | 本 hop 是否啟用 double-talk RES floor 保護。它就是近端最近有聲音 latch 的實際決定；自己做後級的消費端應讀這個欄位，不要用 `dt_indicator` 另外推導一套規則（Audio_ALG 的 4ch fuse 目前只讓有貢獻的 lane 參與 `max_dt`／`max_saturation` 的彙整，不讀本欄位）。 |
 | `usable_linear` | 本 hop 的可用線性估計判定。`0` 時 `r2` 是保守的非線性估計（遠端功率乘上預設 echo-path 增益），並非由線性回音估計推導，可能遠高於根本不存在的殘留回音。 |
 | `far_power`、`erle_factor`、`dt_indicator`、`divergence`、`saturation_level`、`erl_estimate`、`shadow_dt`、`is_stationary_dt`、`filter_converged`、`filter_once_converged`、`epc_active` | 供外部判斷／診斷用的純量狀態。 |
 
@@ -1008,10 +1019,14 @@ engagement（`duty_hops_run / duty_hops_total`）。
 ### 8.5 獨立的 RES 級（`aec_res.h`）
 
 多條線性 AEC lane 先融合、再對融合後的頻譜算**一次**殘留回音抑制時使用（四麥克風
-線性 AEC + BF 之後的 post-beam RES）。`AecRes` 不屬於任何 `Aec`：Audio_ALG 的 4ch 單元
-（`AudioPipeline4Ch`）內含一個（`enable_res`、`res_preset`；`audio_pipeline_4ch_fuse()` 用它算出
-`g_res_ctx`，`audio_pipeline_4ch_res(p)` 取得實例來設強度或重設），直接驅動 4ch 核心的呼叫端則
-自己 `aec_res_init()`、持有與重設。單聲道不用它，RES 就在 `Aec` 裡（`ctx.res_gain`，見 §8.7）。
+線性 AEC + BF 之後的 post-beam RES）。`AecRes` 不屬於任何 `Aec`，也不屬於 Audio_ALG 的 4ch 單元
+（`AudioPipeline4Ch`）：單元只含 delay 對齊、4 條 lane、SRP-PHAT、BF 與 `audio_pipeline_4ch_fuse()`
+（fuse 之後 `frame.g_res_ctx` 為 NULL），沒有 `enable_res`／`res_preset`。要 RES 的 4ch 應用在自己的
+init 裡 `aec_res_init()`（設定來自 `aec_config_from_preset(preset, sample_rate)`，`fft_size` 取單元的格點），
+每 hop 在 fuse 之後呼叫 Audio_ALG 的 `se_res_stage_gain(res, &frame)`（包 `aec_res_process()`），並自己持有、
+設強度（`aec_res_set_preset()`）與重設（`aec_res_reset()`）；範例見 Audio_ALG 的
+`pipelines/4ch_aec_bf_nr_res/audio_pipeline_4ch_static.c`、`audio_pipeline_4ch_raw.c`、`4aec_nr_res_static.c`
+與 `4ch_aec_bf_dfn_res/main.c`。單聲道不用它，RES 就在 `Aec` 裡（`ctx.res_gain`，見 §8.7）。
 它把 `Aec` 內部那個抑制器獨立出來，設定來自 lane 自己用的
 同一個建構函式，所以同一個 `AecConfig` 建出的 `AecRes` 與 lane 內的抑制器設定逐位元相同。
 
@@ -1034,7 +1049,7 @@ aec_cng_fill(&rng, spec, fused_comfort, g_res, g_nr, 0.31622777f, aec_res_n_bins
 
 | 函式 | 說明 |
 |---|---|
-| `aec_res_get_mem_size(cfg)` | 所需 byte 數；`cfg` 為 NULL 或無效回 0。只有 `sample_rate`、`fft_size`、兩個最小增益地板會影響抑制器。 |
+| `aec_res_get_mem_size(cfg)` | 所需 byte 數；`cfg` 為 NULL 或無效回 0。只有 `sample_rate`、`fft_size`、兩個最小增益地板與 `min_gain_split_floor_enabled` 會影響抑制器（`aec.c` 的 `aec_build_sg_config`）；其餘欄位僅參與驗證。 |
 | `aec_res_init(mem, bytes, cfg)` | 在呼叫端的記憶體內建立；不配置記憶體、不用 stdio、不需 destroy。記憶體 NULL／未對齊／過小或 `cfg` 無效回 NULL。 |
 | `aec_res_reset(r)` | 清除抑制器全部狀態；**保留**目前的 far-active／dt 地板目標與 `min_gain_split_floor_enabled` 閂（含 `aec_res_set_preset` 改過的——這三者都存在 `r->sg_cfg` 鏡像裡，reset 的 `rebuild()` 就是從這個鏡像重新 `suppression_gain_init()`）。 |
 | `aec_res_process(r, in)` | 一個 hop。回傳的 `n_bins` 個增益由 `r` 擁有，到下一次對 `r` 的呼叫前有效；`r`／`in` 或任一輸入陣列為 NULL 回 NULL。 |
@@ -1103,7 +1118,8 @@ mic, ref (hop 個 float)
   ▼  aec_get_linear_context(a, &lin)           aligned_far_hop、delay_state
   │      （以上指標都借自 AEC 的 per-hop 緩衝，下一次 AEC 處理呼叫前有效）
   ▼  anr_process_gain(nr, ctx.error_spec,      NR 增益：r2 / 32768² 併入噪音底
-  │                     r2 / 32768², NULL)     ；anr_get_gain() 取得 g_nr
+  │                     r2 / 32768², NULL)     （僅在 ctx.usable_linear 為真時；否則純降噪）
+  │                                            ；anr_get_gain() 取得 g_nr
   ▼  g_total[k] = min(g_nr[k], ctx.res_gain[k])
   ▼  spec[k]    = ctx.error_spec[k] · g_total[k]
   ▼  aec_cng_fill(&rng, spec, ctx.comfort_noise, ctx.res_gain, g_nr,
@@ -1122,8 +1138,7 @@ mic, ref (hop 個 float)
   （`SE_CNG_RNG_SEED`）；`aec_reset()` 之外，整合者的 reset 還要同時清 NR 狀態、合成 OLA 與暫存增益，並把 `rng` 設回種子。
 - **`aec_set_preset()` 對這條鏈有效**：單聲道鏈的 `G_res` 來自 `Aec` 自己的
   post 區塊，所以強度旋鈕直接用 `aec_set_preset()`（§7.1）；四麥克風線性 AEC + BF 之後的
-  `G_res` 來自 4ch 單元內的 `AecRes`（`aec_res_set_preset(audio_pipeline_4ch_res(p), …)`）或
-  直接驅動核心的呼叫端自備的 `AecRes`，才需要 `aec_res_set_preset()`（§8.5）。
+  `G_res` 來自應用在 4ch 單元之後自己建立的 `AecRes`，才需要對它呼叫 `aec_res_set_preset()`（§8.5）。
 - 下游若另有噪音抑制或 CNG，不要在 `aec_cng_fill` 之外再疊一層（§6.2）。
 
 測試：單聲道鏈的行為由 `Audio_ALG` 的 `pipelines/mono_aec_nr_res` 測試涵蓋；本函式庫端的
@@ -1231,7 +1246,7 @@ BIN="$(make -s -C c_impl print-bin-dir)"
 | `--fixed-delay <samples>` | 覆寫 `cfg.fixed_delay_samples`（僅 `fixed` 合法，native-rate sample，≥0） |
 | `--delay-est-period <s>` | 覆寫 `cfg.delay_est_period_s`（秒；matched filter duty-cycle 週期，診斷用，範圍見 §6.4） |
 | `--print-mem-size` | 印出 resolved grid／mode／n 與 static-pool byte 拆解後**直接退出**，不開音檔輸出、不跑任何一個 hop（見下方「`--print-mem-size` 輸出」） |
-| `--debug-level <0..3>` | 設定 debug 等級 0–3（目前不影響輸出） |
+| `--debug-level <0..3>` | 設定 debug 等級 0–3（全域等級會被存下，但目前沒有任何程式碼讀它，所以不會多印任何東西；要看逐 hop 內部量請用 `--debug-trace` 或 `--debug`） |
 | `--debug-log <path>` | 將 debug log 導向檔案（預設 stderr） |
 | `--debug-trace <path>` | 每 frame 的 CSV trace |
 | `--debug` | 每秒印一行 `aec_debug_status()` 狀態 |

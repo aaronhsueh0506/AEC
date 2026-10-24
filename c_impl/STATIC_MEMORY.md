@@ -10,8 +10,9 @@ are identical within the same FFT backend.
 - Provide one writable, 16-byte-aligned pool of at least that size.
 - Keep the pool alive until the last `aec_process` and `aec_destroy` call.
 - `aec_init` returns `NULL` for an invalid config, alignment or pool size.
-- `aec_destroy` releases heap instances. It is a no-op for pool instances; the
-  caller still owns and releases the pool.
+- `aec_destroy` releases heap instances. For pool instances it releases nothing
+  (it only drops internal references and may be called again); the caller still
+  owns and releases the pool.
 - The static path performs no heap allocation from initialization through
   destruction. `test/test_zero_heap_aec.c` enforces this.
 - Heap construction also aligns its arena to 16 bytes explicitly; an ILP32
@@ -132,6 +133,10 @@ make test-zero-heap
 make test-static-aec TEST_STATIC_MIC=mic.wav TEST_STATIC_REF=ref.wav TEST_STATIC_SR=16000
 test/docs_smoke.sh
 ```
+
+`aec_get_mem_breakdown(&cfg, &out)` splits the same total into `estimator_bytes` and
+`ring_bytes` (`aec_wav --print-mem-size` prints it). Call order, sequence diagrams and the
+parameter tables are on [the HTML pages](../docs/html/aec_usage.html).
 
 Heap-vs-pool equality is checked by `make test-static-aec`.
 `make test-zero-heap` runs the allocator-hook acceptance test for the complete

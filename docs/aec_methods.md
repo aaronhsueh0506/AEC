@@ -171,6 +171,11 @@ shows their public configuration values, not necessarily the internal hop count.
 | | `return_res_context` | OFF | switches `process()` return type (§4); with `enable_res=False` it selects the context-only seam, whose FORM step admits the capture candidate (§3) |
 | | `clear_filter_history` | OFF | |
 
+Defaults above are the Python `AecConfig` dataclass values. The C `aec_config_defaults()`
+(`c_impl/src/aec.c`) differs in three fields: `enable_cng` (C: 1), `warmup_frames` (C: 100) and
+`delay_est_period_s` (C: 0.0, i.e. the matched filter analyses every hop). C also carries
+`spatial_linear_context` and the reserved `epc_mu_floor` (no consumer), which the Python config does not have.
+
 The **DT-aware recovery group** has two halves:
 `dt_aware_recovery_soft` softens the delay/EPC recovery (§2.3), gated on the
 `ne_recent_*` near-recent latch, and `dt_aware_res_floor_enabled` lifts the RES
@@ -416,7 +421,8 @@ bounded to `live_observer_max_hz` and gated on a corroboration check: the
 observer's own residual-error EMA must be no worse than the EMA of the
 *selected* linear output's residual over a `live_observer_corrob_ms` time
 constant, within `live_observer_corrob_margin_db`; injection is also limited by
-`live_observer_inject_dt_energy_max`. It never touches the linear filter, the
+`live_observer_inject_dt_energy_max` (Python only; the C port has no such guard, a known
+divergence pinned as scenario S-02 in `c_impl/test/pyc_parity/pyc_parity.py`). It never touches the linear filter, the
 delay estimate, or ERLE — only R² before SuppressionGain.
 
 ### 3.4 SuppressionGain

@@ -9,6 +9,7 @@ body{font-family:-apple-system,"PingFang TC","Noto Sans TC",sans-serif;margin:0;
 nav{padding:.6rem 0;border-bottom:2px solid #2a6;margin-bottom:1rem;font-size:.95rem}
 nav a{margin-right:1rem;color:#164;text-decoration:none;font-weight:600}
 nav a:hover{text-decoration:underline}
+nav .cur{margin-right:1rem;font-weight:700;color:#000}
 h1{font-size:1.5rem;border-bottom:1px solid #ccc;padding-bottom:.3rem}
 h2{font-size:1.15rem;margin-top:1.6rem;border-left:4px solid #2a6;padding-left:.5rem}
 table{border-collapse:collapse;margin:.6rem 0;font-size:.88rem}
@@ -23,12 +24,12 @@ pre code{background:none;padding:0}
 </style>
 </head>
 <body>
-<nav><a href="../../../Audio_ALG/docs/html/index.html">index</a><a href="aec.html">aec</a><a href="aec_detail.html">aec 細節</a><a href="../../../NR/docs/html/nr.html">nr</a><a href="../../../audiolib/common/docs/html/audio_common.html">audiolib</a><a href="aec_c_api.html">AEC API</a><a href="aec_res.html">AEC RES 級</a><a href="../../../NR/docs/html/nr_c_api.html">NR API</a><a href="../../../audiolib/common/docs/html/audio_common_c_api.html">audiolib API</a><a href="../../../Audio_ALG/docs/html/integration_example.html">串接範例</a></nav>
-<h1>AEC C library(單聲道)— <code>lib/aec/c_impl</code></h1>
+<nav><a href="../../../Audio_ALG/docs/html/index.html">index</a><b class="cur">aec</b><a href="aec_usage.html">呼叫使用</a><a href="aec_sequence.html">時序圖</a><a href="aec_params.html">外部參數</a><a href="aec_params_internal.html">內部參數</a><a href="aec_c_api.html">AEC API</a><a href="aec_c_api_params.html">參數效果</a><a href="aec_res.html">RES 級</a><a href="aec_detail.html">細節</a><a href="../../../NR/docs/html/nr.html">nr</a><a href="../../../NR/docs/html/nr_c_api_params.html">NR 參數</a><a href="../../../audiolib/common/docs/html/audio_common.html">audiolib</a><a href="../../../audiolib/common/docs/html/audio_common_params.html">audiolib 參數</a><a href="../../../audiolib/docs/html/spatial_chain.html">空間鏈</a><a href="../../../Audio_ALG/docs/html/integration_example.html">串接範例</a></nav>
+<h1>AEC C library(單聲道)— <code>AEC/c_impl</code></h1>
 
 <h2>概要</h2>
 <p>單聲道 PBFDKF 回音消除器的 float32 C 實作(Python <code>aec.py</code> 為演算法規格)。一個 hop 的處理鏈:mic 端 HPF → 飽和偵測 → AEC3 matched-filter 延遲估計 + 參考訊號 ring buffer 對齊 → PBFDAF shadow / PBFDKF main 線性濾波 → AEC3 post(殘留回音抑制 RES + CNG)。全部 state 收在單一 <code>Aec</code> struct(caller pool 或單一 heap arena),process 熱路徑零 malloc(<code>make test-zero-heap</code> 實測 50 個 init/process/reset/destroy 週期 allocator 呼叫為 0)。heap 與 caller-pool 兩條建構路徑輸出逐位元相同(<code>test_static_aec</code> 驗證 byte-equal)。</p>
-<p>沒有任何 NN/NPU 成分:本函式庫是純 DSP,跨 hop 的 state 全部由 C struct 保存,host 不需另存任何 state。<code>AecResContext</code> / <code>AecLinearContext</code> 兩個 seam 是外接 NN 後級(RES/NR)時的接點,見 <code>lib/aec/docs/nn_integration_interface.md</code>。</p>
+<p>沒有任何 NN/NPU 成分:本函式庫是純 DSP,跨 hop 的 state 全部由 C struct 保存,host 不需另存任何 state。<code>AecResContext</code> / <code>AecLinearContext</code> 兩個 seam 是外接 NN 後級(RES/NR)時的接點,見 <code>AEC/docs/nn_integration_interface.md</code>。</p>
 <div class="tblwrap"><table>
 <tr><th>sr</th><th>fft_size</th><th>hop</th><th>hop 時長</th><th>n_freqs</th><th>filter_length</th><th>n_partitions</th><th>aec_get_mem_size(balanced, MATCHED n=5, NE10 後端實測)</th></tr>
 <tr><td>8000</td><td>256(legacy)</td><td>128</td><td>16 ms</td><td>129</td><td>416(52 ms)</td><td>4</td><td>267,408 B</td></tr>
@@ -38,7 +39,10 @@ pre code{background:none;padding:0}
 </table></div>
 <p class="small">取樣率白名單 = {8000, 16000, 48000}(<code>aec_is_valid_sample_rate()</code>);sr/fft 配對由 <code>aec_resolve_signal_grid()</code> 強制(上表四組;8 kHz 為 legacy grid,只有本函式庫與 Audio_ALG 的 mono 範例支援,4 聲道線性 AEC + BF 單元不收)。hop = fft_size/2,n_freqs = fft_size/2+1。上表 bytes 是 <code>cfg.delay_mode = AEC_DELAY_MATCHED、delay_num_filters = 5</code>(預設)的總量;三態 delay mode 與 n 如何改變這個數字見下方「Delay mode / 記憶體」節。這些絕對值會隨 <code>Aec</code>/<code>AecConfig</code> 的結構大小整批移動(<code>sizeof(AecConfig)</code> = 224 B),而所有 delta(每 filter 5,728 B、mode 間差值)不變——必須重新查 <code>aec_get_mem_size()</code> 並重新 init,不可沿用記下的常數。</p>
 
+<div class="note"><b>快速入口</b>:<a href="aec_usage.html">如何呼叫使用</a>(呼叫順序、可編譯範例、錯誤處理)、<a href="aec_sequence.html">流程時序圖</a>(init／穩態 hop／refused／reset)、<a href="aec_params.html">外部參數與公開函式</a>、<a href="aec_params_internal.html">內部參數</a>。</div>
+
 <h2>API 用法</h2>
+<p class="small">下面是摘要;完整可編譯範例與錯誤處理見 <a href="aec_usage.html">aec_usage</a>。</p>
 <pre><code>#include "aec.h"
 
 AecConfig cfg;
@@ -58,7 +62,7 @@ int hop = aec_hop_size(a);
 for (每個 hop) {
     aec_process(a, mic, ref, out);   /* 各恰好 hop 個 float32 樣本 */
 }
-aec_destroy(a);   /* aec_init 實例為 no-op;pool 由呼叫端釋放 */</code></pre>
+aec_destroy(a);   /* aec_init 實例不釋放記憶體;pool 由呼叫端釋放 */</code></pre>
 
 <p><b>Delay mode</b>(<code>cfg.delay_mode</code>,init 時決定、instance 存活期間 immutable,三態互斥,非法組合被 <code>aec_validate_config()</code> 拒絕而非 clamp):</p>
 <div class="tblwrap"><table>
@@ -77,7 +81,7 @@ aec_destroy(a);   /* aec_init 實例為 no-op;pool 由呼叫端釋放 */</code><
 </table></div>
 <p class="small">記憶體拆解用 <code>aec_get_mem_breakdown(&amp;cfg, &amp;out)</code>,細節收在 <a href="aec_detail.html">aec_detail</a>。</p>
 
-<p class="small"><b>Live observer</b>(<code>cfg.live_observer_enabled</code>,<b>預設 0</b>=關閉,關閉時輸出逐位元不變):第三個獨立 PBFDAF 實例(跟 <code>shadow_filter</code> 同一個 struct,固定 NLMS、<code>lightweight=1</code> 省近端的加窗/未加窗兩個 FFT,同 shadow 省法),讀取遠端 ring 比主濾波器的延遲補償讀取早 <code>live_observer_shift_ms</code>(預設 24.0 ms)。每 hop 把自己的誤差能量 EMA 跟主濾波器(R² 實際採用的那條選線 <code>sel_esw</code>,不是恆取 main)的誤差能量 EMA 比較(EMA 時間常數 <code>live_observer_corrob_ms</code> 預設 100.0 ms、容忍度 <code>live_observer_corrob_margin_db</code> 預設 0.0 dB),只有在觀察器沒有比主濾波器差時才信任其證據;證據本身夾在主濾波器殘留回音功率以內(<code>min()</code>),經 <code>max(r2, evidence)</code> 注入 residual-echo R²(只到 <code>live_observer_max_hz</code> 預設 1000.0 Hz 的低頻段),從不碰輸出、delay 或任一濾波器的視窗/taps。注入邏輯跑在 <code>aec_post_run_observer_step()</code>(<code>src/aec_post.c</code>)內,不在 <code>aec_process_core()</code> 主迴圈(跟 shadow 不同),因為要讀當下 hop 才算出的 dominant_ne/usable_linear 判定。記憶體增量(<code>aec_get_mem_size()</code> 實測,delay_num_filters=5):8k/256 +29,472 B、16k/256(預設)+38,768 B、16k/512 +58,656 B、48k/1024 +141,648 B。算量增量用 <code>bench_rtf --live-observer</code> 在目標格點量測;未進任何預設組合。</p>
+<p class="small"><b>Live observer</b>(<code>cfg.live_observer_enabled</code>,<b>預設 0</b>,關閉時輸出逐位元不變;實驗功能,不要在產品路徑開啟)的機制、記憶體增量與參數見 <a href="aec_detail.html">aec_detail</a>。</p>
 
 <p>三個 process 進入點<b>推進完全相同的內部 state</b>(都經 <code>aec_process_core()</code>),只差結果怎麼交付,可在同一實例上自由交錯、不需 reset:</p>
 <div class="tblwrap"><table>
@@ -87,15 +91,9 @@ aec_destroy(a);   /* aec_init 實例為 no-op;pool 由呼叫端釋放 */</code><
 <tr><td><code>aec_process_context_shared_far_from(a, mic, ref, far_owner)</code></td><td>多實例共用遠端 FFT:同 hop 的遠端頻譜與其 magnitude² 一併取自另一個已處理完該 hop 的 <code>Aec</code>(<code>ref</code> 仍必填;無效 owner 退回自算)。儀表:<code>aec_far_fft_real_compute_count()</code>。</td></tr>
 </table></div>
 
-<p><b>Preset(強度軸)</b>:mild / balanced 只差 <code>min_gain_floor_far_active_db</code> = −20 / −28 dB(SuppressionGain far-active 最低增益地板)。aggressive 除了 <code>min_gain_floor_far_active_db</code>=−38 dB,也把 <code>min_gain_floor_dt_db</code>(double-talk 時改用的地板)從共用預設 −20 深化到 −30 dB——否則 dt_protect_active 觸發時(遠端單講時也會誤觸發)三個 preset 會硬蓋回同一個 −20,聽不出強度差。mild/balanced 的 <code>min_gain_floor_dt_db</code> 維持 −20。第四個 preset <code>no_floor</code>(<code>min_gain_split_floor_enabled=False</code>)整個拿掉地板機制,是這個軸上最深的操作點,近端代價也最大。</p>
+<p><b>Preset(強度軸)</b>:mild／balanced 只差 <code>min_gain_floor_far_active_db</code> = -20／-28 dB;aggressive 另把 <code>min_gain_floor_dt_db</code>(double-talk 時改用的地板)從 -20 深化到 -30 dB(否則三個 preset 在 DT 保護觸發時會蓋回同一個 -20,聽不出強度差);第四個 <code>no_floor</code>(<code>min_gain_split_floor_enabled = 0</code>)整個拿掉地板機制,是軸上最深的操作點。四個 preset 的數值表見 <a href="aec_params.html">外部參數</a>。</p>
 
-<p><b>執行期改強度</b>(<code>aec_set_preset()</code>):preset 可以在 <b>running 實例</b>上重新指定,不必重建——濾波器、延遲鎖定、每一條平滑歷史、far-active latch 與 DominantNearend 計數器全部繼續跑。<code>ramp_ms</code> 只管 far-active 地板的平滑走位;DT 地板沒有 ramp(它是逐 hop 的硬性覆寫,不是逐 hop 收斂的量),不論 <code>ramp_ms</code> 多少都立即套用——兩種語言都是同一條語意。<code>no_floor</code> 改的是布林開關,ramp 無法表示,所以閘門立即切換(切入或切出都允許),切回有地板的 preset 時 dB 欄位同一次呼叫寫成目標值。</p>
-<pre><code>int aec_set_preset(Aec* a, AecPreset preset, float ramp_ms);
-
-/* 使用者轉動強度旋鈕:在兩個 hop 之間呼叫,100 ms 內以 dB 線性走到新地板 */
-if (aec_set_preset(a, AEC_PRESET_AGGRESSIVE, 100.0f) != 0) { /* 引數不合法,實例未變 */ }
-aec_process(a, mic, ref, out);</code></pre>
-<p class="small"><code>ramp_ms == 0</code> 下一個 hop 套用(<b>不是錯誤</b>);<code>&gt; 0</code> 以 dB 線性走過去、精確落在目標,上限 60 s(只影響 far-active 地板,DT 地板永遠立即套用);回 0 或 −1(−1 時什麼都不寫);在兩個 hop 之間呼叫、<b>非 thread-safe</b>。以 <code>spatial_linear_context</code> 建的 lane 對本函式為無效操作(四麥克風產品對那個共用的 <code>AecRes</code>(Audio_ALG 的 4ch 單元以 <code>audio_pipeline_4ch_res(p)</code> 提供;直接驅動核心的呼叫端自備)呼叫 <code>aec_res_set_preset()</code>,語意相同,一樣會動到 DT 地板)。ramp 語意、底層 primitive <code>suppression_gain_set_split_floor_far_active_db()</code>/<code>suppression_gain_set_split_floor_dt_db()</code> 與量測前必須知道的兩件事收在 <a href="aec_detail.html">aec_detail</a>。</p>
+<p><b>執行期改強度</b>:<code>aec_set_preset(a, preset, ramp_ms)</code> 可在 running 實例上重新指定 preset(濾波器、延遲鎖定與平滑歷史都不動)。<code>ramp_ms</code> 只管 far-active 地板(dB 線性走位,[0, 60000]);DT 地板與 <code>no_floor</code> 旗標立即套用;回 0 或 -1(-1 時什麼都沒寫);hop 之間呼叫、<b>非 thread-safe</b>;以 <code>spatial_linear_context</code> 建的 lane 對它為無效操作,四麥克風產品改對應用自己建立的共用 <code>AecRes</code> 呼叫 <code>aec_res_set_preset()</code>(Audio_ALG 的 4ch 單元不含 RES,見 <a href="aec_res.html">aec_res</a> §2.3)。ramp 語意與量測前必須知道的兩件事見 <a href="aec_detail.html">aec_detail</a>,範例見 <a href="aec_usage.html">aec_usage</a>。</p>
 
 <p><b><code>AecResContext</code> seam</b>(<code>aec_get_res_context()</code>,頻域,外接 NR/RES 用):<code>error_spec</code> = formed 線性輸出的 50%-overlap periodic-sqrt-Hann STFT E(f)(音訊尺度);<code>echo_spec</code> 為對應回音估計、<code>near_spec</code> = error_spec + echo_spec;<code>res_gain</code> = AEC3 SuppressionGain G_res(f) ∈ [0,1];<code>r2</code>(殘留回音 PSD)與 <code>comfort_noise</code>(CNG N²)為 int16² 尺度(除以 32768² 得 |E|² 音訊功率尺度)。頻域欄位僅在 <code>enable_res=1</code> 或 <code>return_res_context=1</code> 時非 NULL;<code>spatial_linear_context=1</code> 時 <code>res_gain</code> 恆為 NULL(該 lane 的 G_res 根本沒算,NULL 表示「未計算」而非「全抑制」)。<b>context-only(<code>enable_res=0</code> + <code>return_res_context=1</code>)的 capture 回退</b>:上一 hop <code>usable_linear=0</code>、且選中殘差本 hop 能量大於 mic capture 時,formed 輸出(<code>formed_hop</code>/<code>error_spec</code>/<code>AecLinearContext.formed_linear_hop</code>)改吐 capture 本身——殘差比被減數還大代表濾波器在加訊號,不是在消回音。切換由既有 30-sample 交叉淡化承接,所以是<b>穩態退回</b>而非逐樣本上界。<code>near_spec = error_spec + echo_spec</code> 恆等式仍成立(連續落在 capture 時 <code>echo_spec</code> → 0;單一 hop 因為前半 block 仍是前一 hop 的 e_form 而不會恰為 0)。<code>linear_hop</code>(raw 線性殘差)不受影響,<code>enable_res=1</code> 仍由 post 鏈自己的頻域 guard 負責、輸出逐位元不變。<code>res_floor_protect</code>(本 hop 是否啟用 double-talk RES floor 保護;4ch 融合端只對實際有貢獻的 lane 做 OR)與 <code>usable_linear</code>(本 hop 的可用線性估計判定;<code>0</code> 時 <code>r2</code> 是保守的非線性估計——遠端功率乘上預設 echo-path 增益,不是由線性回音估計推導,可能遠高於根本不存在的殘留回音)是這個 seam 額外帶的兩個純量;<code>res_floor_protect</code> 由近端最近有聲音的 latch 觸發。所有指標都 alias AEC 內部 per-hop buffer——<b>下一次任何 process 呼叫前必須讀完</b>。</p>
 
@@ -113,42 +111,40 @@ aec_process(a, mic, ref, out);</code></pre>
 <pre>
  mic[hop]                     ref[hop]
     |                            |
-    | (1) hpf_process(hp_mic)    | (2) saturation_detect(sat_ref/sat_mic)
-    |     mic 端才有 HPF          |     saturation_soft_clip(far_hop)  [saturation_softclip_ref]
-    |                            |
-    |          (3) delay_aec_accumulate_ex(near,far)   ← duty-cycle: 鎖定後 1-in-K 分析
-    |               |  delay_aec_estimated_delay / _is_solid / _confidence
-    |               v
-    |          Path A 首次擷取 / Path B 位移確認
-    |            ├─ warm: pbfdaf_warm_shift_ir(main/shadow)      (tap 平移)
-    |            ├─ soft: pbfdkf_handle_echo_path_change(僅計數器) (DT-aware)
-    |            └─ hard: aec_reset_filter_derived_state + mark_diverged
-    |               |
-    |          ref_ring 寫入本 hop;依 current_delay 回讀 → far_hop 就地覆寫(對齊)
-    |               |     (far_hop_aligned=1;generation 於 offset 變動時 ++)
-    v               v
- (4) render_activity_update   (5) mu_scale   (7) render_signal_analyzer(RSA)
-    |
- (8.5) pbfdaf_process(shadow_filter, near, far)   → shadow_out   [先跑]
- (9)   pbfdkf_process_with_far_cmag2(main_filter, near, far) → raw_output   (線性殘差)
-    |
- (10) stationarity_estimator(下一 hop 用) (12) e2_coarse/erl + poor-coarse rescue
- (13) doubletalk_update_shadow_dt → shadow_copy_update(regime)
- (14) EPV trigger  (15) shadow_rise  (16) misadjustment estimator
-    |
- (17-18) RES/post 區塊(enable_res || return_res_context 時執行;兩者皆 0 時
-      整塊跳過,但 simple_mu_ratio、converged mu 凍結與 advance_erl_and_dt
-      (erl_estimate + doubletalk_update_energy_dt)改在 gate 外推進,
-      與 Python 一致):
-      doubletalk_update_energy_dt → filter_convergence_update_divergence
-      → aec_post_run(AecPost; 子模組 AecState / ResidualEchoEstimator /
-                      SuppressionGain / StationarityEstimator /
-                      LinearFilterSelect / comfort noise)
-      → final_out(WOLA 合成;enable_res=0 時 = raw_output 直通)
-    |
- (19) 功率 EMA  (20) filter_convergence_update_convergence
- (21) memcpy(out, final_out)      ← 只有 aec_process() 做這步
+ aec_prepare_capture_hop:  memcpy 進 near_hop / far_hop
+    | hpf_process(hp_mic)        | saturation_detect(sat_ref / sat_mic);saturation_soft_clip(far_hop) [saturation_softclip_ref]
+    |   (只有 mic 端有 HPF)       |
+    +-------------+--------------+
+                  v
+ aec_align_reference:
+    MATCHED: aec_update_delay_estimator -> delay_aec_accumulate_ex(near, far)   (duty-cycle: 鎖定後 1-in-K 分析)
+             delay_aec_estimated_delay / delay_aec_n_updates
+             aec_judge_delay_shift / aec_acquire_delay (Path A 首次擷取) / aec_track_delay_shift (Path B 位移確認)
+               ├─ warm: pbfdaf_warm_shift_ir(main/shadow)   (tap 平移)
+               ├─ soft: dt_aware_recovery_soft(僅計數器)
+               └─ hard: aec_reset_filter_derived_state + mark_diverged
+    MATCHED / FIXED: ref_ring 寫入本 hop;依 current_delay 回讀 -> far_hop 就地覆寫(far_hop_aligned = 1)
+    EXTERNAL_ALIGNED: 直通(ref 視為已對齊)
+                  v
+ render_activity_update -> aec_prepare_mu -> aec_prepare_rsa (render_signal_analyzer)
+                  v
+ aec_run_shadow       (PBFDAF shadow,先跑)
+ aec_run_main_filter  (PBFDKF main)             -> raw_output(線性殘差)
+                  v
+ aec_refresh_stationarity -> aec_update_shadow_quality -> aec_update_shadow_dt
+ -> aec_update_echo_path -> aec_update_misadjustment_erle -> aec_update_windowed_erle
+                  v
+ if (enable_res || return_res_context):         (兩者皆 0 時整塊跳過,final_out = raw_output)
+    aec_prepare_post_dt -> aec_run_post_chain (aec_post_run:AecState / ResidualEchoEstimator /
+                           SuppressionGain / StationarityEstimator / LinearFilterSelect / CNG -> WOLA 合成 -> final_out)
+    -> aec_update_post_mu
+ aec_update_linear_only_steering
+                  v
+ aec_finish_hop (功率 EMA、filter_convergence_update_convergence)
+                  v
+ memcpy(out, final_out)      &lt;- 只有 aec_process() 做這步
 </pre>
+<p class="small">順序取自 <code>AEC/c_impl/src/aec.c</code> 的 <code>aec_process_core()</code>;含 lifeline 的時序圖與初始化／錯誤／reset 路徑見 <a href="aec_sequence.html">aec_sequence</a>。</p>
 
 <h2>訊號泳道圖(hop 為欄;lag 標注)</h2>
 <pre>
@@ -206,14 +202,14 @@ seam 讀者     ctx(N-1) 有效至 ↘       ctx(N) 有效至 ↘         ctx(N+
 <tr><td>16 kHz / 512</td><td>16.000 ms(1 hop)</td><td>0 ms</td><td>608 ms</td></tr>
 <tr><td>48 kHz / 1024</td><td>10.667 ms(1 hop)</td><td>0 ms</td><td>608 ms</td></tr>
 </table></div>
-<p class="small">延遲為脈衝實測(<code>lib/aec/docs/c_user_manual_zh_TW.md</code> §3「演算法延遲(實測)」),無 look-ahead。可擷取上限是編譯期常數(matched filter 搜尋長度 × 4 倍降取樣),<b>調 <code>max_delay_ms</code> 不會提高</b>;48 kHz 內部先降到 16 kHz 估計再 ×3 回傳。另注意 <code>aec.h</code> 寫的 ~509 ms 是「可靠峰值」定義、608 ms 是幾何全跨度——兩種定義,非矛盾(見 nn_integration_interface.md)。delay estimator(matched filter)本身的機制/語意/語料延遲統計詳見 <code>lib/aec/docs/delay_estimator_design_zh_TW.md</code>。<code>delay_num_filters</code> config(Python+C,n=1..5,預設 5=行為不變)可依場景縮小 matched filter 算力:可靠搜尋上限 125/221/317/413/509 ms 對應 n=1..5,預設 <code>delay_est_period_s = 0</code>(每 hop 全速分析)時每少一組省 ~4.2 MMAC/s 的搜尋算力,**且固定省 5,728 B/filter(四個格點都一樣)**,見上方「Delay mode」節;僅在系統延遲已由 <code>fixed_delay_samples</code> 補償的部署縮小,bench/dataset 維持 5。</p>
+<p class="small">延遲為脈衝實測(<code>AEC/docs/c_user_manual_zh_TW.md</code> §3「演算法延遲(實測)」),無 look-ahead。可擷取上限是編譯期常數(matched filter 搜尋長度 × 4 倍降取樣),<b>調 <code>max_delay_ms</code> 不會提高</b>;48 kHz 內部先降到 16 kHz 估計再 ×3 回傳。另注意 <code>aec.h</code> 寫的 ~509 ms 是「可靠峰值」定義、608 ms 是幾何全跨度——兩種定義,非矛盾(見 nn_integration_interface.md)。delay estimator(matched filter)本身的機制/語意/語料延遲統計詳見 <code>AEC/docs/delay_estimator_design_zh_TW.md</code>。<code>delay_num_filters</code> config(Python+C,n=1..5,預設 5=行為不變)可依場景縮小 matched filter 算力:可靠搜尋上限 125/221/317/413/509 ms 對應 n=1..5,預設 <code>delay_est_period_s = 0</code>(每 hop 全速分析)時每少一組省 ~4.2 MMAC/s 的搜尋算力,**且固定省 5,728 B/filter(四個格點都一樣)**,見上方「Delay mode」節;僅在系統延遲已由 <code>fixed_delay_samples</code> 補償的部署縮小,bench/dataset 維持 5。</p>
 <p><b>Warm-up</b>:<code>warmup_frames=100</code>(10 ms 基準著作 ≈1000 ms;於 <code>aec_carve()</code> 對實際 hop 重定時,例如 16k/256 內部變 125 hop)期間濾波器以較積極方式收斂。延遲估計需 <code>delay_aec_n_updates() ≥ 3</code> 且 solid 才擷取;<code>delay_est_period_s &gt; 0</code> 時,估計穩定 <code>delay_est_init_s=0.3</code> 秒後 duty-cycle 把 matched-filter 分析降到 1-in-K(ERLE 看門狗回退);預設 0.0 = 每 hop 全速分析。<code>delay_acquire_warm_transfer=1</code>(預設)在首次擷取時平移已學到的 IR 而非歸零,避免開場「垂直線」回音。</p>
 
 <h2>相關檔案與測試路徑</h2>
 <ul>
-<li>API:<code>lib/aec/c_impl/include/aec.h</code>;主體:<code>lib/aec/c_impl/src/aec.c</code>(<code>aec_process_core()</code>);線性:<code>src/pbfdkf.c</code>;延遲:<code>src/delay_aec.c</code>;post:<code>src/aec_post.c</code>;執行期 preset 重指定:<code>aec_set_preset()</code>(<code>src/aec.c</code>)+ primitive(<code>src/suppression_gain.c</code>),回歸 <code>make test-runtime-preset</code>(<code>test/test_runtime_preset.c</code>)與 <code>python/tests/test_runtime_preset.py</code></li>
-<li>範例:<code>lib/aec/c_impl/example/aec_wav.c</code>(WAV 離線 runner,旗標:<code>--fft-size</code>/<code>--delay-mode {matched|fixed|external}</code>/<code>--delay-num-filters</code>/<code>--fixed-delay</code>/<code>--print-mem-size</code>(印 resolved grid/mode/n/total_bytes/estimator_bytes/ring_bytes 後不處理音訊即退出)/<code>--debug</code>;結尾另印一行 duty-cycle census)</li>
-<li>深入文件:<code>lib/aec/docs/nn_integration_interface.md</code>(NN seam 規格)、<code>lib/aec/docs/c_user_manual_zh_TW.md</code>(完整使用手冊;延遲契約、記憶池表、troubleshooting)、<code>lib/aec/docs/delay_estimator_productization_plan_zh_TW.md</code>(delay mode 選型與驗證)</li>
+<li>API:<code>AEC/c_impl/include/aec.h</code>;主體:<code>AEC/c_impl/src/aec.c</code>(<code>aec_process_core()</code>);線性:<code>src/pbfdkf.c</code>;延遲:<code>src/delay_aec.c</code>;post:<code>src/aec_post.c</code>;執行期 preset 重指定:<code>aec_set_preset()</code>(<code>src/aec.c</code>)+ primitive(<code>src/suppression_gain.c</code>),回歸 <code>make test-runtime-preset</code>(<code>test/test_runtime_preset.c</code>)與 <code>python/tests/test_runtime_preset.py</code></li>
+<li>範例:<code>AEC/c_impl/example/aec_wav.c</code>(WAV 離線 runner,旗標:<code>--fft-size</code>/<code>--delay-mode {matched|fixed|external}</code>/<code>--delay-num-filters</code>/<code>--fixed-delay</code>/<code>--print-mem-size</code>(印 resolved grid/mode/n/total_bytes/estimator_bytes/ring_bytes 後不處理音訊即退出)/<code>--debug</code>;結尾另印一行 duty-cycle census)</li>
+<li>深入文件:<code>AEC/docs/nn_integration_interface.md</code>(NN seam 規格)、<code>AEC/docs/c_user_manual_zh_TW.md</code>(完整使用手冊;延遲契約、記憶池表、troubleshooting)、<code>AEC/docs/delay_estimator_productization_plan_zh_TW.md</code>(delay mode 選型與驗證)</li>
 <li>測試入口：<code>make test-linear-context</code>、<code>make test-process-context</code>、<code>make test-avg-reverb-slots</code>、<code>make test-config-validation</code>、<code>make test-delay-num-filters</code>、<code>make test-duty-census</code>、<code>make test-cli-delay-flags</code>、<code>make test-shared-far-spec</code>、<code>make test-shared-fft-handle</code>、<code>make test-zero-heap</code>、<code>make test-static-aec</code> 及 <code>python3 -m pytest python/tests</code>。易變的測試總數不在本頁重複維護。</li>
 </ul>
 </body>

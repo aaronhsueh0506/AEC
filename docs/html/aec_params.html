@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AEC 外部參數</title>
+<style>
+body{font-family:-apple-system,"PingFang TC","Noto Sans TC",sans-serif;margin:0;padding:0 1rem 3rem;line-height:1.55;color:#1a1a1a;max-width:70rem;margin-left:auto;margin-right:auto}
+nav{padding:.6rem 0;border-bottom:2px solid #2a6;margin-bottom:1rem;font-size:.95rem}
+nav a{margin-right:1rem;color:#164;text-decoration:none;font-weight:600}
+nav a:hover{text-decoration:underline}
+nav .cur{margin-right:1rem;font-weight:700;color:#000}
+h1{font-size:1.5rem;border-bottom:1px solid #ccc;padding-bottom:.3rem}
+h2{font-size:1.15rem;margin-top:1.6rem;border-left:4px solid #2a6;padding-left:.5rem}
+h3{font-size:1rem;margin-top:1.2rem}
+table{border-collapse:collapse;margin:.6rem 0;font-size:.88rem}
+th,td{border:1px solid #bbb;padding:.25rem .5rem;text-align:left;vertical-align:top}
+th{background:#eef5f0}
+pre{background:#f4f6f5;border:1px solid #dde;padding:.6rem;overflow-x:auto;font-size:.8rem;line-height:1.35}
+code{font-family:ui-monospace,Menlo,monospace;font-size:.86em;background:#f2f2f2;padding:0 .15em}
+pre code{background:none;padding:0}
+.note{background:#fff8e6;border:1px solid #e0c878;padding:.4rem .6rem;font-size:.88rem;margin:.5rem 0}
+.warn{background:#fdeeee;border:1px solid #e0a0a0;padding:.4rem .6rem;font-size:.88rem;margin:.5rem 0}
+.small{font-size:.82rem;color:#555}
+.tblwrap{overflow-x:auto}
+.dead{color:#a00;font-weight:600}
+</style>
+</head>
+<body>
+<nav><a href="../../../Audio_ALG/docs/html/index.html">index</a><a href="aec.html">aec</a><a href="aec_usage.html">呼叫使用</a><a href="aec_sequence.html">時序圖</a><b class="cur">外部參數</b><a href="aec_params_internal.html">內部參數</a><a href="aec_c_api.html">AEC API</a><a href="aec_c_api_params.html">參數效果</a><a href="aec_res.html">RES 級</a><a href="aec_detail.html">細節</a><a href="../../../NR/docs/html/nr.html">nr</a><a href="../../../NR/docs/html/nr_c_api_params.html">NR 參數</a><a href="../../../audiolib/common/docs/html/audio_common.html">audiolib</a><a href="../../../audiolib/common/docs/html/audio_common_params.html">audiolib 參數</a><a href="../../../audiolib/docs/html/spatial_chain.html">空間鏈</a><a href="../../../Audio_ALG/docs/html/integration_example.html">串接範例</a></nav>
+
+<h1>AEC 外部參數與公開函式 — <code>aec.h</code>／<code>aec_res.h</code></h1>
+
+<h2>概要</h2>
+<p><b>外部</b>＝第三方整合者可以安心調整的參數與函式;<b>內部</b>＝程式碼裡存在、也能改,但不建議開放(見 <a href="aec_params_internal.html">內部參數</a>)。<code>AecConfig</code> 共 56 個欄位(<code>aec.h:59-156</code>):外部 11(其中 3 個經由 preset 一次設定)、進階外部 4、整合者專用 2、deprecated 1、內部 38。建議用法:<code>aec_config_from_preset()</code> 取得完整設定,<b>只覆寫下表欄位</b>。每列都附出處(<code>aec.h:行</code> 為欄位宣告,<code>aec.c:行</code> 為預設值或驗證);預設值用本機建置的 <code>aec_config_from_preset(&amp;cfg, AEC_PRESET_BALANCED, 16000)</code> 逐欄印出核對。各欄位「調了會怎樣」的效果說明見 <a href="aec_c_api_params.html">參數效果</a>。</p>
+<div class="note"><b>除 preset 的三個 floor 外,下表所有欄位都是「建立時決定」。</b>改了必須 <code>aec_destroy</code> 後重建,或重新 <code>aec_get_mem_size()</code> + <code>aec_init()</code>。<code>aec_create()</code>／<code>aec_init()</code> 複製設定,事後改手上那份無效,也不要改 <code>aec.cfg</code>。</div>
+
+<h2>1. 外部參數 A 級(建議開放)</h2>
+<div class="tblwrap"><table>
+<tr><th>欄位</th><th>出處</th><th>型別／範圍／單位</th><th>預設</th><th>作用與設定時機</th></tr>
+<tr><td><code>sample_rate</code></td><td><code>aec.h:60</code></td><td>int;8000／16000／48000(其他一律拒絕,含 44100)</td><td>呼叫端指定</td><td>取樣率;mic 與 ref 同率同時鐘。建立時,不可變。</td></tr>
+<tr><td><code>fft_size</code></td><td><code>aec.h:61</code>,<code>aec.c:242</code></td><td>int;與 sample_rate 成對:16k→256／512,48k→1024,8k→256(legacy);<b>0 被拒絕</b></td><td>8k→256、16k→256、48k→1024(由 <code>aec_config_defaults</code> 填)</td><td>決定 hop = fft_size/2。16k/512 的 hop 是 256(16 ms),延遲加倍、呼叫頻率減半。建立時,不可變。</td></tr>
+<tr><td><code>filter_length</code></td><td><code>aec.h:62</code>,<code>aec.c:243</code></td><td>int,<b>樣本數</b>(不是 ms);1–4096</td><td>8k:416;16k:832;48k:3072</td><td>涵蓋的回音路徑長度;調高→長殘響較好,記憶體與運算上升。建立時,不可變。</td></tr>
+<tr><td><code>delay_mode</code></td><td><code>aec.h:139</code>(enum <code>aec.h:42</code>)</td><td><code>AecDelayMode</code>:MATCHED(0)／FIXED(1)／EXTERNAL_ALIGNED(2)</td><td>MATCHED</td><td>對齊方式的唯一真值;同時決定 pool 佈局。非法組合在建立時被拒絕。建立時,不可變。</td></tr>
+<tr><td><code>fixed_delay_samples</code></td><td><code>aec.h:142</code>,<code>aec.c:322-338</code></td><td>int,native-rate 樣本;FIXED:0 – 120 x sample_rate;其他模式必須是 -1</td><td>-1</td><td>FIXED 的量測系統延遲,同時決定參考環大小(fixed + hop)。建立時,不可變。</td></tr>
+<tr><td><code>delay_num_filters</code></td><td><code>aec.h:104</code>,<code>aec.c:309</code></td><td>int 1–5;僅 MATCHED 合法(其他模式須維持 5)</td><td>5</td><td>matched filter bank 大小:主要是記憶體旋鈕(每少一組省 5,728 B);可靠搜尋上限 125／221／317／413／509 ms(n = 1..5)。建立時,不可變。</td></tr>
+<tr><td><code>enable_res</code></td><td><code>aec.h:73</code></td><td>0／1</td><td>1</td><td>殘留回音抑制。關閉→輸出是線性殘差、演算法延遲 0、回音殘留明顯變多;不影響 pool 大小。開啟固定多 1 hop 延遲(16k/256 = 8 ms)。建立時。</td></tr>
+<tr><td><code>enable_cng</code></td><td><code>aec.h:67</code>,<code>aec_post.c:242</code></td><td>0／1</td><td>1</td><td>時域輸出內的舒適噪音注入,<b>只在 <code>enable_res = 1</code> 時有作用</b>;下游已有 CNG 時請關。<code>ctx.comfort_noise</code>(PSD)不受它影響。建立時。</td></tr>
+<tr><td><b>Preset</b> <code>AecPreset</code></td><td><code>aec.h:26</code>;<code>aec_config_from_preset</code> <code>aec.c:152</code>;<code>aec_set_preset</code> <code>aec.c:1565</code></td><td>MILD(0)／BALANCED(1)／AGGRESSIVE(2)／NO_FLOOR(3)</td><td>BALANCED</td><td>「回音壓多乾淨 vs 近端保留多完整」的單一取捨軸;一次設定下表三個 floor 欄位。建立時,<b>或執行期</b> <code>aec_set_preset(a, preset, ramp_ms)</code>。</td></tr>
+</table></div>
+<p><b>Preset 實際改動的三個欄位</b>(本機逐 preset 印出核對;其餘 <code>AecConfig</code> 欄位四個 preset 完全相同):</p>
+<div class="tblwrap"><table>
+<tr><th>Preset</th><th><code>min_gain_floor_far_active_db</code><br><span class="small"><code>aec.h:129</code></span></th><th><code>min_gain_floor_dt_db</code><br><span class="small"><code>aec.h:121</code></span></th><th><code>min_gain_split_floor_enabled</code><br><span class="small"><code>aec.h:155</code></span></th><th>適用</th></tr>
+<tr><td>MILD</td><td>-20.0</td><td>-20.0</td><td>1</td><td>近端音質優先、耦合弱</td></tr>
+<tr><td><b>BALANCED</b>(預設)</td><td>-28.0</td><td>-20.0</td><td>1</td><td>一般通話</td></tr>
+<tr><td>AGGRESSIVE</td><td>-38.0</td><td>-30.0</td><td>1</td><td>回音優先、耦合強;double-talk 近端較易被壓</td></tr>
+<tr><td>NO_FLOOR</td><td>-28.0(惰性)</td><td>-20.0(惰性)</td><td>0</td><td>地板全關,軸上最深點,近端損失最大</td></tr>
+</table></div>
+<p class="small"><code>aec_set_preset()</code> 的 <code>ramp_ms</code>:0 = 下一 hop 套用(不是錯誤);&gt; 0 以 dB 線性走到目標,範圍 [0, 60000];DT 地板與 split-floor 旗標一律立即階躍。<b>不要直接開放 raw dB</b>:validator 範圍是 [-300, 50](<code>aec.c:296,298</code>),+20 dB 這種「增益地板高於 0 dB」的值會被接受;要提供中間強度請在對外層另外夾限。<code>aec_config_from_preset()</code> 對超出 enum 的值<b>不報錯</b>,靜默退回 balanced;<code>aec_set_preset()</code> 則拒絕(回 -1)——對外層請先自己檢查 enum 範圍。</p>
+
+<h2>2. 進階外部 B 級(選擇性開放,需附夾限與說明)</h2>
+<div class="tblwrap"><table>
+<tr><th>欄位</th><th>出處</th><th>範圍</th><th>預設</th><th>作用與開放條件</th></tr>
+<tr><td><code>enable_highpass</code></td><td><code>aec.h:70</code></td><td>0／1</td><td>1</td><td>mic 路徑高通(ref 路徑沒有 HPF)。上游已有高通可關。</td></tr>
+<tr><td><code>highpass_cutoff_hz</code></td><td><code>aec.h:105</code>,<code>aec.c:286-291</code></td><td>啟用高通時須 &gt; 0 且 &lt; 0.45 x sample_rate(16k 的 7200 Hz 以上被拒);關閉時 0–20000</td><td>80.0</td><td>低頻風噪重可調高;太高會切到語音。</td></tr>
+<tr><td><code>enable_shadow</code></td><td><code>aec.h:72</code></td><td>0／1</td><td>1</td><td>輔助 filter(偵測回音路徑改變)。關閉省 42,880 B(16k/256,本機實測),但路徑突變後恢復變慢;只建議給記憶體極緊的部署。</td></tr>
+<tr><td><code>delay_est_period_s</code></td><td><code>aec.h:99</code>,<code>aec.c:283</code></td><td>0–3600 s</td><td>0.0(每 hop 全速分析)</td><td>鎖定後 matched filter 降頻週期。<b>不是普通旋鈕</b>:非 0 可能改變選到哪個 lag(不只是慢)。標示「opt-in」才開放。</td></tr>
+</table></div>
+
+<h2>3. 整合者專用(拓樸,不是調參)與 deprecated</h2>
+<div class="tblwrap"><table>
+<tr><th>欄位</th><th>出處</th><th>範圍</th><th>預設</th><th>說明</th></tr>
+<tr><td><code>return_res_context</code></td><td><code>aec.h:78</code></td><td>0／1</td><td>0</td><td>1:post 區塊照跑並公開 <code>AecResContext</code>;搭配 <code>enable_res = 0</code> 即「線性 AEC + 外部 RES」seam。兩者皆 0 時 post 區塊整段不跑。</td></tr>
+<tr><td><code>spatial_linear_context</code></td><td><code>aec.h:82</code>,<code>aec.c:262-270</code></td><td>0／<code>AEC_CONTEXT_NO_GAIN</code>(1)／<code>AEC_CONTEXT_LINEAR_ONLY</code>(2)</td><td>0</td><td>1:不算本 lane 的 <code>res_gain</code>(讀為 NULL);2:只留線性半邊(<code>res_gain</code>／<code>r2</code>／<code>comfort_noise</code> 皆 NULL、<code>res_floor_protect</code> = 0)。<b>只在 <code>enable_res = 0 &amp;&amp; return_res_context = 1</code> 時合法</b>。對這種 lane 呼叫 <code>aec_set_preset()</code> 回 0 但依構造無效。</td></tr>
+<tr><td><code>enable_delay_est</code></td><td><code>aec.h:69</code>,<code>aec.c:202</code></td><td>0／1</td><td>1</td><td><b>deprecated</b>:<code>delay_mode</code> 的相容轉譯層(<code>aec_config_resolve_delay</code>);新介面不要暴露。</td></tr>
+</table></div>
+
+<h2>4. 執行期可呼叫的調整(hop 之間、與 process 序列化)</h2>
+<div class="tblwrap"><table>
+<tr><th>函式</th><th>出處</th><th>參數與範圍</th><th>回傳</th></tr>
+<tr><td><code>aec_set_preset(a, preset, ramp_ms)</code></td><td><code>aec.h:402</code></td><td>preset 在 enum 內;ramp_ms 有限且在 [0, 60000]</td><td>0 或 -1(NULL／enum 外／ramp 超界;-1 時什麼都沒寫)</td></tr>
+<tr><td><code>aec_res_set_preset(r, preset, ramp_ms)</code></td><td><code>aec_res.h:62</code></td><td>同上(對獨立的 <code>AecRes</code>)</td><td>同上</td></tr>
+<tr><td><code>aec_apply_external_realign(a, delta_samples)</code></td><td><code>aec.h:376</code></td><td>delta = 新對齊 - 舊對齊(樣本);僅 EXTERNAL_ALIGNED</td><td>1 = warm 平移;0 = 濾波器重置或 delta = 0;-1 = NULL 或模式不對</td></tr>
+<tr><td><code>aec_reset(a)</code></td><td><code>aec.h:365</code></td><td>—</td><td>void;NULL 會 crash</td></tr>
+</table></div>
+
+<h2>5. 整合者實際會呼叫的公開函式</h2>
+<div class="tblwrap"><table>
+<tr><th>層級</th><th>函式(出處行)</th><th>用途</th></tr>
+<tr><td><b>A. 最小必要</b></td><td><code>aec_config_from_preset</code>(159)、<code>aec_create</code>(363)／<code>aec_get_mem_size</code>(408)+<code>aec_init</code>(409)、<code>aec_hop_size</code>(440)、<code>aec_process</code>(413)、<code>aec_reset</code>(365)、<code>aec_destroy</code>(364)</td><td>建立、每 hop 處理、串流邊界、收尾</td></tr>
+<tr><td><b>B. 常用選用</b></td><td><code>aec_config_defaults</code>(158)、<code>aec_set_preset</code>(402)、<code>aec_default_fft_size</code>(193)、<code>aec_is_valid_sample_rate</code>(189)、<code>aec_resolve_signal_grid</code>(185)、<code>aec_get_mem_breakdown</code>(552)、<code>aec_debug_status</code>(540)、<code>aec_linear_is_cancelling</code>(437)、<code>aec_apply_external_realign</code>(376)</td><td>建立前解析格點、記憶體預算顯示、每秒輪詢健康度、執行期強度</td></tr>
+<tr><td><b>C. 串鏈整合者</b></td><td><code>aec_process_context</code>(419)、<code>aec_get_res_context</code>(480)、<code>aec_get_linear_context</code>(514)、<code>aec_process_context_shared_far_from</code>(426)、<code>aec_res_*</code> 系列與 <code>aec_cng_fill</code>(<code>aec_res.h</code>)、<code>aec_preset_floor_db</code>／<code>aec_preset_dt_floor_db</code>／<code>aec_preset_split_floor_enabled</code>(383／388／392)</td><td>頻域 seam、時域對齊 seam、多 lane 共用遠端 FFT、融合後共用 RES、舒適噪音填補、查 preset 表</td></tr>
+<tr><td><b>D. 診斷／測試</b></td><td><code>aec_get_last_timing</code>(358;建置需 <code>-DAEC_STAGE_TIMING=1</code>,否則全讀 0)、<code>aec_far_fft_real_compute_count</code>(431)、<code>aec_config_resolve_delay</code>(166)、<code>aec_debug.h</code> 的 <code>aec_debug_set_level</code>／<code>_log</code>／<code>_frame</code>／<code>_trace</code>(全域狀態、<code>AEC_NO_STDIO</code> 下不存在)</td><td>逐階段耗時、驗證共用 FFT、檢視轉譯、CSV trace</td></tr>
+<tr><td><b>E. 內部,不得依賴</b></td><td><code>aec_config_build.h</code>(<code>aec_resolve_valid_config</code>、<code>aec_build_sg_config</code>)、<code>suppression_gain_set_split_floor_*</code>、<code>aec_scale.h</code>、其餘約 24 個 header(<code>pbfdkf.h</code>、<code>delay_aec.h</code>、<code>aec_post.h</code>、<code>aec_state.h</code>…)、<code>struct Aec</code> 的所有欄位</td><td>隨版本改變;留在 include 路徑上只因 <code>aec.h</code> 攤開 <code>struct Aec</code></td></tr>
+</table></div>
+<p class="small"><code>include/</code> 共 29 個 header:對外 2 個(<code>aec.h</code>、<code>aec_res.h</code>),其餘 27 個內部(其中 <code>aec_debug.h</code> 供 CLI 與診斷使用)。<code>aec_process</code>／<code>aec_process_context</code>／<code>aec_process_context_shared_far_from</code> 三個進入點推進相同的內部 state,可在同一實例上任意交錯。</p>
+
+<h2>6. 驗證規則(被拒絕的設定)</h2>
+<p class="small">驗證在 <code>aec_create</code>／<code>aec_get_mem_size</code>／<code>aec_get_mem_breakdown</code>／<code>aec_init</code> 內都會先跑(<code>aec.c:234-345</code>);任一欄位不合法整組拒絕(create → -1、get_mem_size → 0、init → NULL)。<code>aec_validate_config</code> 是 static,外部拿不到失敗原因。</p>
+<div class="tblwrap"><table>
+<tr><th>類別</th><th>規則</th></tr>
+<tr><td>格點</td><td>(sample_rate, fft_size) 必須是 8k/256、16k/256、16k/512、48k/1024 之一;<code>fft_size = 0</code> 拒絕</td></tr>
+<tr><td>濾波器</td><td><code>filter_length</code> 1–4096;<code>n_partitions</code> 為 0 或 1–256</td></tr>
+<tr><td>布林</td><td>所有開關欄位必須是 0 或 1(含 <code>enable_delay_est</code>)</td></tr>
+<tr><td>延遲模式</td><td>MATCHED:fixed = -1;FIXED:fixed &gt;= 0 且 &lt;= 120 x sr、<code>delay_num_filters</code> = 5;EXTERNAL_ALIGNED:fixed = -1、<code>delay_num_filters</code> = 5;<code>delay_num_filters</code> 1–5</td></tr>
+<tr><td>context seam</td><td><code>spatial_linear_context</code> 0–2;非 0 時必須 <code>enable_res = 0 &amp;&amp; return_res_context = 1</code></td></tr>
+<tr><td>浮點</td><td>必須有限且在範圍內(<code>mu</code> [0,10]、<code>delta</code> [0,1]、floor dB [-300,50]…)</td></tr>
+</table></div>
+<div class="warn"><b>validator 不做的事</b>:沒有跨欄位檢查(<code>filter_misadjustment_scale_min &gt; scale_max</code> 會被接受);範圍只防「崩壞」不防「音質崩壞」(<code>mu = 10</code>、floor +20 dB 都會被接受)。這也是內部欄位不宜開放的理由。</div>
+
+<h2>7. 擁有權、對齊與呼叫契約</h2>
+<ul class="small">
+<li>輸入 float32、標稱 [-1, 1];每次呼叫恰好 <code>aec_hop_size()</code> 個樣本,無長度參數。不做 clock drift 補償、不處理負延遲、不做 peak limiting(<code>out</code> 可能略超出 [-1, 1])。</li>
+<li>單一實例非 thread-safe;不同實例彼此獨立。<code>AecResContext</code>／<code>AecLinearContext</code> 的指標在下一次 process／reset 後失效,不可修改、不可 free。</li>
+<li>NULL 行為:<code>aec_create</code>／<code>aec_get_mem_size</code>／<code>aec_init</code>／<code>aec_destroy</code>／<code>aec_linear_is_cancelling</code>／<code>aec_set_preset</code>／<code>aec_get_mem_breakdown</code> 安全;<code>aec_reset</code>、<code>aec_process</code>、<code>aec_process_context</code>、<code>aec_hop_size</code>、<code>aec_far_fft_real_compute_count</code> 會 crash;<code>aec_get_res_context</code>／<code>aec_get_linear_context</code>／<code>aec_debug_status</code> 靜默 no-op。</li>
+<li>pool 大小(本機 NE10 後端、balanced、MATCHED n = 5、<code>aec_get_mem_size</code>):8k/256 267,408 B;16k/256 364,416 B;16k/512 491,600 B;48k/1024 1,156,544 B。調整量(16k/256):<code>enable_shadow = 0</code> -42,880 B;<code>delay_num_filters</code> 5→1 -22,912 B;EXTERNAL_ALIGNED -165,008 B;FIXED 1600 -158,096 B;<code>live_observer_enabled = 1</code> +38,768 B;<code>enable_res</code>／<code>enable_cng</code> 不影響。絕對值隨 <code>sizeof(Aec)</code>／<code>sizeof(AecConfig)</code>(本機 224 B)整批移動,<b>一律以 <code>aec_get_mem_size()</code> 為準</b>。</li>
+<li>建置:同時連結 <code>libaudio_common.a</code> 與 <code>-lm</code>;<code>-ffp-contract=off</code> 必須;<code>SIMD=0</code> 與 <code>SIMD=1</code> 的輸出不保證逐位元相同,同一組旗標下 heap 與 pool 才保證相同(<code>test_static_aec</code>)。</li>
+</ul>
+
+<h2>相關檔案與測試</h2>
+<ul class="small">
+<li><code>AEC/c_impl/include/aec.h</code>、<code>aec_res.h</code>、<code>src/aec.c</code>(<code>aec_config_defaults</code> 46-113;<code>aec_validate_config</code> 234-345)</li>
+<li>測試:<code>make test-config-validation</code>(驗證規則)、<code>make test-runtime-preset</code>、<code>make test-external-realign</code>、<code>make test-delay-num-filters</code>(記憶體差值)、<code>make test-static-aec</code></li>
+<li>手冊:<code>AEC/docs/c_user_manual_zh_TW.md</code> §5(錯誤語意)、§6(完整欄位)</li>
+</ul>
+
+</body>
+</html>

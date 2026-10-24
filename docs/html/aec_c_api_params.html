@@ -9,6 +9,7 @@ body{font-family:-apple-system,"PingFang TC","Noto Sans TC",sans-serif;margin:0 
 nav{padding:.6rem 0;border-bottom:2px solid #2a6;margin-bottom:1rem;font-size:.95rem}
 nav a{margin-right:1rem;color:#164;text-decoration:none;font-weight:600}
 nav a:hover{text-decoration:underline}
+nav .cur{margin-right:1rem;font-weight:700;color:#000}
 nav .sep{color:#999;margin-right:1rem}
 h1{font-size:1.5rem;border-bottom:1px solid #ccc;padding-bottom:.3rem}
 h2{font-size:1.15rem;margin-top:1.6rem;border-left:4px solid #2a6;padding-left:.5rem}
@@ -27,21 +28,9 @@ pre code{background:none;padding:0}
 </style>
 </head>
 <body>
-<nav>
-<a href="../../../Audio_ALG/docs/html/index.html">index</a>
-<a href="aec.html">aec</a>
-<a href="../../../NR/docs/html/nr.html">nr</a>
-<a href="../../../audiolib/common/docs/html/audio_common.html">audiolib</a>
-<span class="sep">|</span>
-<a href="aec_c_api.html">AEC API</a>
-<a href="aec_c_api_params.html"><b>AEC 參數</b></a>
-<a href="aec_res.html">AEC RES 級</a>
-<a href="../../../NR/docs/html/nr_c_api.html">NR API</a>
-<a href="../../../audiolib/common/docs/html/audio_common_c_api.html">audiolib API</a>
-<a href="../../../Audio_ALG/docs/html/integration_example.html">串接範例</a>
-</nav>
+<nav><a href="../../../Audio_ALG/docs/html/index.html">index</a><a href="aec.html">aec</a><a href="aec_usage.html">呼叫使用</a><a href="aec_sequence.html">時序圖</a><a href="aec_params.html">外部參數</a><a href="aec_params_internal.html">內部參數</a><a href="aec_c_api.html">AEC API</a><b class="cur">參數效果</b><a href="aec_res.html">RES 級</a><a href="aec_detail.html">細節</a><a href="../../../NR/docs/html/nr.html">nr</a><a href="../../../NR/docs/html/nr_c_api_params.html">NR 參數</a><a href="../../../audiolib/common/docs/html/audio_common.html">audiolib</a><a href="../../../audiolib/common/docs/html/audio_common_params.html">audiolib 參數</a><a href="../../../audiolib/docs/html/spatial_chain.html">空間鏈</a><a href="../../../Audio_ALG/docs/html/integration_example.html">串接範例</a></nav>
 
-<p class="small">本頁是 <a href="aec_c_api.html">aec_c_api.html</a> 的第 8 節,因單頁篇幅上限拆出。呼叫順序、delay mode、每-hop 入口與診斷仍在該頁。</p>
+<p class="small">本頁是 <a href="aec_c_api.html">aec_c_api.html</a> 的第 8 節,因單頁篇幅上限拆出。呼叫順序、delay mode、每-hop 入口與診斷仍在該頁。哪些欄位建議對外開放、哪些屬內部,見 <a href="aec_params.html">外部參數</a> 與 <a href="aec_params_internal.html">內部參數</a>。</p>
 
 <h1>AEC 參數效果對照 — <code>AecConfig</code></h1>
 <h3>8.1 抑制強度 — mild/balanced 只差一個欄位,aggressive 差兩個</h3>
@@ -107,5 +96,12 @@ pre code{background:none;padding:0}
 <tr><td><code>enable_delay_est</code></td><td>deprecated 鏡像,只在 translation layer 被讀,下游一律讀 <code>delay_mode</code></td></tr>
 </table></div>
 
+<h2>相關檔案與測試</h2>
+<ul class="small">
+<li><code>AEC/c_impl/include/aec.h</code>(欄位宣告與預設值註解)、<code>AEC/c_impl/src/aec.c</code>(<code>aec_config_defaults</code> 46-113、<code>aec_validate_config</code> 234-345)</li>
+<li>手冊 <code>AEC/docs/c_user_manual_zh_TW.md</code> §6(完整欄位與範圍)、§7(preset)</li>
+<li>測試:<code>make test-config-validation</code>、<code>make test-runtime-preset</code>、<code>make test-rate-structural</code></li>
+<li>同系列頁面:<a href="aec_params.html">外部參數</a>、<a href="aec_params_internal.html">內部參數</a>、<a href="aec_c_api.html">AEC API</a></li>
+</ul>
 </body>
 </html>

@@ -80,16 +80,17 @@ resolve the exact path with `make print-bin-dir` (same flags as your build),
 or use the stable `dist/<backend>/current/` path after `make publish`:
 
 ```bash
+work="$(mktemp -d)"                 # scratch dir for the two renders; delete it when done
 cd c_impl && make clean && make   # BEFORE editing
 bin_before="$(make -s print-bin-dir)"
-mkdir -p /tmp/cbe_before /tmp/cbe_after
-for f in <stems>; do "$bin_before/aec_wav" "wav/${f}_mic.wav" "wav/${f}_lpb.wav" "/tmp/cbe_before/${f}.wav" --preset balanced --cng; done
+mkdir -p "$work/cbe_before" "$work/cbe_after"
+for f in <stems>; do "$bin_before/aec_wav" "wav/${f}_mic.wav" "wav/${f}_lpb.wav" "$work/cbe_before/${f}.wav" --preset balanced --cng; done
 # ... make edits ...
 cd c_impl && make clean && make   # AFTER editing
 bin_after="$(make -s print-bin-dir)"
-for f in <stems>; do "$bin_after/aec_wav" "wav/${f}_mic.wav" "wav/${f}_lpb.wav" "/tmp/cbe_after/${f}.wav" --preset balanced --cng; done
-for f in /tmp/cbe_after/*.wav; do \
-  cmp -s "$f" "/tmp/cbe_before/$(basename "$f")" \
+for f in <stems>; do "$bin_after/aec_wav" "wav/${f}_mic.wav" "wav/${f}_lpb.wav" "$work/cbe_after/${f}.wav" --preset balanced --cng; done
+for f in "$work"/cbe_after/*.wav; do \
+  cmp -s "$f" "$work/cbe_before/$(basename "$f")" \
     && echo "MATCH $(basename "$f")" || echo "DIFFER $(basename "$f")"; done
 ```
 
@@ -101,14 +102,15 @@ compare with `cmp`):
 
 ```bash
 # BEFORE editing: render a baseline (any small dir of mic/lpb cases)
+work="$(mktemp -d)"                 # scratch dir; delete it when done
 python3 python/eval_aec_challenge.py wav/<subset>/ --preset balanced \
-    --filter 832 --cng --parallel -o /tmp/be_before/ --workers 4
+    --filter 832 --cng --parallel -o "$work/be_before/" --workers 4
 # ... make edits ...
 python3 python/eval_aec_challenge.py wav/<subset>/ --preset balanced \
-    --filter 832 --cng --parallel -o /tmp/be_after/ --workers 4
+    --filter 832 --cng --parallel -o "$work/be_after/" --workers 4
 # _ours.wav must all be byte-identical:
-for f in /tmp/be_after/*_ours.wav; do \
-  cmp -s "$f" "/tmp/be_before/$(basename "$f")" \
+for f in "$work"/be_after/*_ours.wav; do \
+  cmp -s "$f" "$work/be_before/$(basename "$f")" \
     && echo "MATCH $(basename "$f")" || echo "DIFFER $(basename "$f")"; done
 ```
 
@@ -124,7 +126,7 @@ make                  # debug: `make debug` (adds -g -DAEC_DEBUG)
 # `make publish` for a stable dist/<backend>/current/ path:
 bin="$(make -s print-bin-dir)"
 "$bin/aec_wav" mic.wav ref.wav out.wav --preset balanced --cng
-"$bin/aec_wav" mic.wav ref.wav out.wav --debug-trace /tmp/aec_trace.csv
+"$bin/aec_wav" mic.wav ref.wav out.wav --debug-trace aec_trace.csv
 ```
 
 `-ffp-contract=off -fno-math-errno` in `CFLAGS` is mandatory for build

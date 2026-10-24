@@ -28,12 +28,19 @@ Enable with `AecConfig.return_res_context = True`; then `aec.process(mic_hop, re
 | `erle_factor` | float [0,1] | linear convergence quality. |
 | `dt_indicator` | float [0,0.8] | double-talk confidence. |
 | `divergence` | float [0,1] | filter divergence indicator. |
-| `over_sub` | float | dynamic over-subtraction factor. |
+| `over_sub` | float | dynamic over-subtraction factor (Python only; equal to `erle_factor`, absent from the C `AecResContext`). |
 | `erl_estimate` | float | dynamic echo-return-loss (render-based residual). |
 | `raw_output` | (hop_size,) float | Refined PBFDKF output before output selection. This is also what the context-only entry point returns as its audio, and it carries **no** over-output guard — see *The capture candidate* below. |
 | `formed_output` | (hop_size,) float | Current selected/crossfaded hop underlying `error_spec`; use this when a downstream block performs its own STFT. This, not `raw_output`, is the guarded seam — see *The capture candidate* below. |
 
 These are produced every hop by the production linear AEC with zero extra cost (already computed internally).
+
+**C names.** The C struct `AecResContext` (`c_impl/include/aec.h`) carries the same data under slightly
+different names: `raw_output` is `linear_hop`, `formed_output` is `formed_hop`; `res_gain`, `r2`,
+`comfort_noise`, `res_floor_protect` and `usable_linear` have the same names. The C call sequence is
+`cfg.enable_res = 0; cfg.return_res_context = 1;` at construction, then per hop
+`aec_process_context()` followed by `aec_get_res_context()` (pointers valid until the next process or
+reset call). A compile-checked example is on `docs/html/aec_usage.html`.
 
 ### The capture candidate (context-only seam)
 

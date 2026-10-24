@@ -207,7 +207,7 @@ size_t bytes = aec_get_mem_size(&cfg);   /* query at runtime; size is backend/co
 void*  pool  = your_static_alloc(bytes); /* MUST be 16-byte aligned (posix_memalign, etc.) */
 Aec*   a     = aec_init(pool, bytes, &cfg);  /* NULL on failure; byte-equal to aec_create output */
 /* ... aec_process(a, ...) ... */
-aec_destroy(a);   /* genuine no-op for pool instances; idempotent */
+aec_destroy(a);   /* pool instance: releases nothing (drops internal references only); idempotent */
 free(pool);
 ```
 
@@ -215,11 +215,14 @@ free(pool);
 the malloc path (`test_static_aec.c`). Both memory models ship in the same
 library: `aec_create` (heap) and `aec_get_mem_size`/`aec_init` (caller pool) are
 always compiled and selected at runtime; which constructor you call is the only
-switch. The three NE10 R2C/C2R twiddle configs (post-filter + main + shadow) are
+switch. The single NE10 R2C/C2R twiddle config of the one FFT handle shared by the
+post-filter, main, shadow and observer filters (`test/test_shared_fft_handle.c`) is
 carved from `pool` (vendored patch P0001, see
 audiolib/common/lib/ne10/VENDORED.md), so the static path is heap-free —
 verified with an allocator hook by `test/test_zero_heap_aec.c`.
 
 Full CLI options, C API reference, integration rules, runtime resource
 notes, and validation steps:
-[../docs/c_user_manual_zh_TW.md](../docs/c_user_manual_zh_TW.md).
+[../docs/c_user_manual_zh_TW.md](../docs/c_user_manual_zh_TW.md). HTML pages (call order with a
+compile-checked example, sequence diagrams, external/internal parameter tables):
+[../docs/html/aec_usage.html](../docs/html/aec_usage.html).

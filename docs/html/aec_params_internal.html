@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AEC 內部參數</title>
+<style>
+body{font-family:-apple-system,"PingFang TC","Noto Sans TC",sans-serif;margin:0;padding:0 1rem 3rem;line-height:1.55;color:#1a1a1a;max-width:70rem;margin-left:auto;margin-right:auto}
+nav{padding:.6rem 0;border-bottom:2px solid #2a6;margin-bottom:1rem;font-size:.95rem}
+nav a{margin-right:1rem;color:#164;text-decoration:none;font-weight:600}
+nav a:hover{text-decoration:underline}
+nav .cur{margin-right:1rem;font-weight:700;color:#000}
+h1{font-size:1.5rem;border-bottom:1px solid #ccc;padding-bottom:.3rem}
+h2{font-size:1.15rem;margin-top:1.6rem;border-left:4px solid #2a6;padding-left:.5rem}
+h3{font-size:1rem;margin-top:1.2rem}
+table{border-collapse:collapse;margin:.6rem 0;font-size:.88rem}
+th,td{border:1px solid #bbb;padding:.25rem .5rem;text-align:left;vertical-align:top}
+th{background:#eef5f0}
+pre{background:#f4f6f5;border:1px solid #dde;padding:.6rem;overflow-x:auto;font-size:.8rem;line-height:1.35}
+code{font-family:ui-monospace,Menlo,monospace;font-size:.86em;background:#f2f2f2;padding:0 .15em}
+pre code{background:none;padding:0}
+.note{background:#fff8e6;border:1px solid #e0c878;padding:.4rem .6rem;font-size:.88rem;margin:.5rem 0}
+.warn{background:#fdeeee;border:1px solid #e0a0a0;padding:.4rem .6rem;font-size:.88rem;margin:.5rem 0}
+.small{font-size:.82rem;color:#555}
+.tblwrap{overflow-x:auto}
+.dead{color:#a00;font-weight:600}
+</style>
+</head>
+<body>
+<nav><a href="../../../Audio_ALG/docs/html/index.html">index</a><a href="aec.html">aec</a><a href="aec_usage.html">呼叫使用</a><a href="aec_sequence.html">時序圖</a><a href="aec_params.html">外部參數</a><b class="cur">內部參數</b><a href="aec_c_api.html">AEC API</a><a href="aec_c_api_params.html">參數效果</a><a href="aec_res.html">RES 級</a><a href="aec_detail.html">細節</a><a href="../../../NR/docs/html/nr.html">nr</a><a href="../../../NR/docs/html/nr_c_api_params.html">NR 參數</a><a href="../../../audiolib/common/docs/html/audio_common.html">audiolib</a><a href="../../../audiolib/common/docs/html/audio_common_params.html">audiolib 參數</a><a href="../../../audiolib/docs/html/spatial_chain.html">空間鏈</a><a href="../../../Audio_ALG/docs/html/integration_example.html">串接範例</a></nav>
+
+<h1>AEC 內部參數 — 可以調,但不建議開放</h1>
+
+<h2>概要</h2>
+<p>本頁列出 <code>AecConfig</code> 中不屬於 <a href="aec_params.html">外部參數</a> 的 38 個欄位,以及完全不在 <code>AecConfig</code> 裡、編譯期固定的常數。這些「在程式碼裡存在、技術上能改」,但<b>不建議交給第三方</b>:共同原因是它們是<b>聯合調出來的</b>(預設值是整體調過的,見手冊 §6.6),單獨改任何一個都沒有保證;validator 的範圍只防崩壞,不防音質崩壞。每列附出處(<code>aec.h:行</code> 為宣告,<code>aec.c:行</code> 為使用處)。下表欄位仍可用 <code>AecConfig</code> 覆寫(內部測試與 bench 會用),但屬「改了自行負責」。</p>
+
+<h2>1. <code>AecConfig</code> 內部欄位(38 個)</h2>
+<div class="tblwrap"><table>
+<tr><th>家族</th><th>欄位(預設;<code>aec.h</code> 行／<code>aec.c</code> 使用行)</th><th>為什麼不開放</th></tr>
+<tr><td><b>10 ms 格點撰寫、建立時 retime 的時間欄位</b>(6)</td><td><code>warmup_frames</code>(100;89／1038)、<code>epc_hangover</code>(20;90／1039)、<code>ne_recent_hold</code>(150;124／1040)、<code>filter_misadjustment_stable_frames</code>(30;133／1041)、<code>filter_misadjustment_hangover_frames</code>(100;134／1043)、<code>shadow_err_alpha</code>(0.80;86／1037)</td><td>填的值是「N x 10 ms 的實際時長」,由 <code>aec_carve</code> 換成當前格點的 hop 數(例:16k/256 下 <code>warmup_frames = 100</code> 變 125 hop),<b>不是直接的 hop 計數</b>;外部極易誤解單位而靜默出錯。<code>shadow_err_alpha</code> 同樣依格點重算(16k/256 為 0.8365)。</td></tr>
+<tr><td><b>適應步進／模型不確定度</b>(7)</td><td><code>mu</code>(0.3;64／1109)、<code>delta</code>(1e-8;65／1109)、<code>kalman_q_high</code>(1e-3;107／1114)、<code>kalman_q_low</code>(1e-6;108／1115)、<code>shadow_mu_min</code>(0.5;87／493)、<code>shadow_mu_nlms</code>(0.5;88／1124)、<code>epc_mu_floor</code>(0.5;93／<b>無使用處</b>)</td><td>直接決定收斂／發散邊界;validator 範圍極寬(<code>mu</code> 到 10),範圍內大部分值會發散或不收斂。<b><code>epc_mu_floor</code> 是死旋鈕</b>:C 庫(<code>c_impl/</code>)內只有宣告、預設值(<code>aec.c:79</code>)與範圍驗證(<code>aec.c:279</code>),調它沒有任何效果。</td></tr>
+<tr><td><b>偵測門檻</b>(7)</td><td><code>epc_total_rise</code>(1.5;91／1187)、<code>epc_delta_threshold</code>(0.3;92／1187)、<code>ne_recent_threshold</code>(0.3;123／2065)、<code>ne_recent_sustain</code>(3;125／2066)、<code>saturation_threshold</code>(0.95;106／1057)、<code>filter_misadjustment_scale_min</code>(0.5;135／1727)、<code>filter_misadjustment_scale_max</code>(2.0;136／1728)</td><td>與其他偵測器聯合調過;<code>scale_min &gt; scale_max</code> 會被 validator 接受(無跨欄位檢查);<code>ne_recent_sustain</code> <b>刻意不 retime</b>(每 hop 遞增的計數,實際時長隨格點變:16k/256 約 24 ms、16k/512 約 48 ms、48k 約 32 ms),因為三個格點各自的行為已個別驗證。</td></tr>
+<tr><td><b>延遲取得策略</b>(6)</td><td><code>delay_acquire_protect_converged</code>(1;109／1881)、<code>delay_acquire_warm_transfer</code>(1;113／1891)、<code>delay_acquire_inst_erle_db</code>(4.0;114／1894)、<code>delay_est_init_s</code>(0.3;98／1453)、<code>max_delay_ms</code>(1024;96／766)、<code>delay_buffer_ms</code>(2048;97／767)</td><td>影響冷啟動前一秒有沒有回音。<code>max_delay_ms</code>／<code>delay_buffer_ms</code> 只決定 MATCHED 參考環大小(取 <code>max(delay_buffer_ms, max_delay_ms + 4096 samples)</code>),<b>不是可擷取上限</b>(上限由 <code>delay_num_filters</code> 決定);改小還會改變預設路徑的音訊。</td></tr>
+<tr><td><b>Double-talk 政策</b>(2)</td><td><code>dt_aware_recovery_soft</code>(1;119／1902)、<code>dt_aware_res_floor_enabled</code>(1;120／2475)</td><td>與 preset 的 DT 地板綁在一起,關掉會讓 preset 的 DT 差異失效。</td></tr>
+<tr><td><b>保護性開關(應維持預設)</b>(2)</td><td><code>enable_saturation</code>(1;71／1056)、<code>saturation_softclip_ref</code>(1;74／2083)</td><td>關掉沒有合理使用情境(削波偵測與參考訊號軟限幅)。</td></tr>
+<tr><td><b>預設關閉、未過 default-on 門檻的實驗</b>(7)</td><td><code>live_observer_enabled</code>(0;147／840、1140)、<code>live_observer_shift_ms</code>(24;148／1158)、<code>live_observer_max_hz</code>(1000;149／1227)、<code>live_observer_mu</code>(0.3;150／1143)、<code>live_observer_corrob_ms</code>(100;151／1229)、<code>live_observer_corrob_margin_db</code>(0;152／1234)、<code>cng_n2_windowed_psd</code>(0;68／1209)</td><td>不要在產品路徑開啟。observer 開啟的記憶體增量(<code>aec_get_mem_size</code> 實測):8k/256 +29,472 B、16k/256 +38,768 B、16k/512 +58,656 B、48k/1024 +141,648 B;算量增量以 <code>bench_rtf --live-observer</code> 在目標格點量測:待量測。</td></tr>
+<tr><td><b>衍生值</b>(1)</td><td><code>n_partitions</code>(0 = 自動;63／791)</td><td>由 <code>filter_length</code> 與 hop 推導;手填只會製造不一致。</td></tr>
+</table></div>
+<p class="small">加總 6+7+7+6+2+2+7+1 = 38,與外部 11(A 級 8 個欄位 + preset 的 3 個 floor 欄位)＋ 進階外部 4 ＋ 整合者專用 2 ＋ deprecated 1 ＝ 56 個 <code>AecConfig</code> 欄位相符。</p>
+
+<h2>2. 不在 <code>AecConfig</code>、編譯期固定的常數(runtime 完全改不了)</h2>
+<p>這些由 <code>aec_carve()</code>／<code>aec_build_sg_config()</code> 依 <code>(sample_rate, fft_size)</code> 查表產生,也不該提供介面。</p>
+<div class="tblwrap"><table>
+<tr><th>項目</th><th>規模(本機以原始碼逐欄計數)</th><th>位置</th></tr>
+<tr><td><code>SuppressionGainConfig</code></td><td>48 欄(ENR／EMR 門檻、audibility、HF limiter、gain ratchet、soft blend、DominantNearend、split floor…)</td><td><code>suppression_gain.h:16-78</code></td></tr>
+<tr><td><code>AecPostConfig</code></td><td>25 欄(ERLE coherence gate、CNG 追蹤常數、observer 參數)</td><td><code>aec_post.h:29-68</code></td></tr>
+<tr><td><code>AecStateConfig</code></td><td>17 欄(ERLE／ERL 啟動、initial state、delay headroom…)</td><td><code>aec_state.h:22-44</code></td></tr>
+<tr><td><code>ReeEchoModelConfig</code></td><td>5 欄</td><td><code>residual_echo_estimator.h:16-22</code></td></tr>
+<tr><td><code>AECB_*</code> 巨集</td><td>226 個 <code>#define</code>(16k 基準區與 8k／48k 的逐格點覆寫);檔頭 <code>AUTO-GENERATED … DO NOT EDIT BY HAND</code></td><td><code>aec_balanced_config.h</code></td></tr>
+<tr><td><code>DA_*</code> 延遲估計常數</td><td><code>DA_NUM_FILTERS</code>(5)、<code>DA_WINDOW_SIZE_SB</code>(32)、<code>DA_ALIGNMENT_SHIFT_SB</code>(24)、<code>DA_THRESH_INITIAL</code>(5)、<code>DA_THRESH_CONVERGED</code>(20)、<code>DA_HIST_WINDOW</code>(250)…</td><td><code>delay_aec.h:36-61</code></td></tr>
+<tr><td>其他常數</td><td><code>AEC_DELAY_SHIFT_JUDGMENT_HOPS</code>(100)、<code>AEC_DELAY_REJECT_CAP</code>(8)、<code>AEC_POOR_EXC_COUNTER_INITIAL_HOPS</code>(400)</td><td><code>aec.h:55,57</code>;<code>aec_scale.h:42</code></td></tr>
+<tr><td>時間常數盤點</td><td>80 條候選,其中 26 條仍待 retime 驗證(由 <code>python/diag/gen_timing_inventory.py</code> 產生)</td><td><code>AEC/docs/timing_constant_inventory.md</code></td></tr>
+</table></div>
+
+<h2>3. 內部函式與 header(整合者不得依賴)</h2>
+<div class="tblwrap"><table>
+<tr><th>範圍</th><th>內容</th><th>為什麼不開放</th></tr>
+<tr><td><code>aec_config_build.h</code></td><td><code>aec_resolve_valid_config</code>、<code>aec_build_sg_config</code></td><td>庫內部共用的設定建構器(<code>aec.c</code> 與 <code>aec_res.c</code>);回傳的 tuning 表指向靜態 per-rate 資料。</td></tr>
+<tr><td><code>aec_scale.h</code></td><td><code>aec_blocks_to_hops</code>、<code>aec_ms_to_hops</code>、<code>aec_growth_rehop</code>、<code>AEC_PSD_SCALE</code>…</td><td>參考常數(int16^2 PSD、4 ms 區塊)換算到本庫尺度的 init-only helper。</td></tr>
+<tr><td>子模組 header</td><td><code>pbfdkf.h</code>、<code>delay_aec.h</code>、<code>aec_post.h</code>、<code>aec_state.h</code>、<code>suppression_gain.h</code>、<code>residual_echo_estimator.h</code>、<code>epc_shadow.h</code>、<code>detectors.h</code>… 及其 <code>*_get_mem_size</code>／<code>*_init_static</code> 函式</td><td>隨版本改變;應用程式只用頂層 <code>aec_get_mem_size</code>／<code>aec_init</code>(<code>STATIC_MEMORY.md</code>)。</td></tr>
+<tr><td><code>suppression_gain_set_split_floor_*</code></td><td><code>_far_active_db</code>、<code>_dt_db</code>、<code>_enabled</code></td><td>是 <code>aec_set_preset</code>／<code>aec_res_set_preset</code> 的底層 primitive;整合端改用這兩個函式。</td></tr>
+<tr><td><code>struct Aec</code> 欄位</td><td><code>aec.h:197</code> 起整個攤開</td><td>「欄位是內部的」只是約定,不是編譯器強制;只因 <code>Aec</code> 由呼叫端持有或放在 pool 內才攤開。</td></tr>
+</table></div>
+
+<h2>4. 建置期旗標(內部)</h2>
+<p class="small"><code>SIMD</code>(<code>0</code> → <code>-DSIMD_KERNELS_FORCE_SCALAR</code>)、<code>NO_STDIO</code>、<code>PROFILE</code>(<code>-DAEC_STAGE_TIMING=1</code>)、<code>WERROR</code>、<code>EXTRA_CFLAGS</code>、<code>AEC_TESTING</code>(<b>絕不可出貨</b>);<code>-ffp-contract=off -fno-math-errno</code> 由 Makefile 強制,不是選項。說明見 <a href="aec_c_api.html">AEC API</a> §11 與 <code>AEC/c_impl/README.md</code>。</p>
+
+<h2>相關檔案與測試</h2>
+<ul class="small">
+<li><code>AEC/c_impl/include/aec.h</code>、<code>src/aec.c</code>(預設值 <code>aec.c:46-113</code>、驗證 <code>aec.c:234-345</code>、使用行如上表)</li>
+<li>測試:<code>make test-rate-structural</code>(時間欄位在各格點涵蓋約同樣的 wall-clock 時長)、<code>make test-config-validation</code>、<code>python3 -m pytest python/tests/test_timing_inventory.py</code></li>
+<li>外部參數:<a href="aec_params.html">aec_params</a>;各欄位調了會怎樣:<a href="aec_c_api_params.html">參數效果</a></li>
+</ul>
+
+</body>
+</html>

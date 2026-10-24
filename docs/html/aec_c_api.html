@@ -9,6 +9,7 @@ body{font-family:-apple-system,"PingFang TC","Noto Sans TC",sans-serif;margin:0 
 nav{padding:.6rem 0;border-bottom:2px solid #2a6;margin-bottom:1rem;font-size:.95rem}
 nav a{margin-right:1rem;color:#164;text-decoration:none;font-weight:600}
 nav a:hover{text-decoration:underline}
+nav .cur{margin-right:1rem;font-weight:700;color:#000}
 nav .sep{color:#999;margin-right:1rem}
 h1{font-size:1.5rem;border-bottom:1px solid #ccc;padding-bottom:.3rem}
 h2{font-size:1.15rem;margin-top:1.6rem;border-left:4px solid #2a6;padding-left:.5rem}
@@ -27,27 +28,15 @@ pre code{background:none;padding:0}
 </style>
 </head>
 <body>
-<nav>
-<a href="../../../Audio_ALG/docs/html/index.html">index</a>
-<a href="aec.html">aec</a>
-<a href="../../../NR/docs/html/nr.html">nr</a>
-<a href="../../../audiolib/common/docs/html/audio_common.html">audiolib</a>
-<span class="sep">|</span>
-<a href="aec_c_api.html"><b>AEC API</b></a>
-<a href="aec_c_api_params.html">AEC 參數</a>
-<a href="aec_res.html">AEC RES 級</a>
-<a href="../../../NR/docs/html/nr_c_api.html">NR API</a>
-<a href="../../../audiolib/common/docs/html/audio_common_c_api.html">audiolib API</a>
-<a href="../../../Audio_ALG/docs/html/integration_example.html">串接範例</a>
-</nav>
+<nav><a href="../../../Audio_ALG/docs/html/index.html">index</a><a href="aec.html">aec</a><a href="aec_usage.html">呼叫使用</a><a href="aec_sequence.html">時序圖</a><a href="aec_params.html">外部參數</a><a href="aec_params_internal.html">內部參數</a><b class="cur">AEC API</b><a href="aec_c_api_params.html">參數效果</a><a href="aec_res.html">RES 級</a><a href="aec_detail.html">細節</a><a href="../../../NR/docs/html/nr.html">nr</a><a href="../../../NR/docs/html/nr_c_api_params.html">NR 參數</a><a href="../../../audiolib/common/docs/html/audio_common.html">audiolib</a><a href="../../../audiolib/common/docs/html/audio_common_params.html">audiolib 參數</a><a href="../../../audiolib/docs/html/spatial_chain.html">空間鏈</a><a href="../../../Audio_ALG/docs/html/integration_example.html">串接範例</a></nav>
 
-<h1>AEC C API 使用說明 — <code>lib/aec/c_impl</code></h1>
-<p class="small">本頁是<b>整合者視角</b>的 API 說明:init/process 要呼叫什麼、input/output 怎麼給、每個參數調了會有什麼結果、跟 NN 後級搭配時要怎麼用。演算法內部機制見 <a href="aec.html">aec.html</a>;完整欄位與錯誤語意的 canonical 出處是 <code>AEC/docs/c_user_manual_zh_TW.md</code>。<b>函式內部自行呼叫的子模組不在本頁範圍。</b></p>
+<h1>AEC C API 使用說明 — <code>AEC/c_impl</code></h1>
+<p class="small">呼叫順序與可編譯範例見 <a href="aec_usage.html">aec_usage</a>、時序圖見 <a href="aec_sequence.html">aec_sequence</a>、外部／內部參數見 <a href="aec_params.html">aec_params</a>／<a href="aec_params_internal.html">aec_params_internal</a>。本頁是<b>整合者視角</b>的 API 說明:init/process 要呼叫什麼、input/output 怎麼給、每個參數調了會有什麼結果、跟 NN 後級搭配時要怎麼用。演算法內部機制見 <a href="aec.html">aec.html</a>;完整欄位與錯誤語意的 canonical 出處是 <code>AEC/docs/c_user_manual_zh_TW.md</code>。<b>函式內部自行呼叫的子模組不在本頁範圍。</b></p>
 
 <h2>1. 你只需要一個 header</h2>
 <pre>#include "aec.h"    /* 唯一使用者面 header */</pre>
 <p>Include path <b>必須同時</b>有兩個目錄——<code>aec.h</code> 會 include audiolib 的 <code>fft_wrapper.h</code> 與 <code>hpf.h</code>:</p>
-<pre>-I&lt;AEC&gt;/c_impl/include  -I&lt;audiolib&gt;/include</pre>
+<pre>-I&lt;AEC&gt;/c_impl/include  -I&lt;audiolib&gt;/common/include</pre>
 <div class="note"><code>include/</code> 底下另有 28 個 header,其中 <code>aec_res.h</code> 是第二個對外 header,其餘 27 個<b>全部是內部的</b>。<code>aec.h</code> 之所以 include 其中 7 個(外加 audiolib 的 <code>fft_wrapper.h</code> 與 <code>hpf.h</code>),是因為 <code>Aec</code> 與 <code>AecConfig</code> <b>不是 opaque struct</b>(子模組 by value 內嵌),編譯器需要完整定義——那是<b>編譯依賴,不是 API surface</b>。<code>pbfdkf.h</code>／<code>delay_aec.h</code>／<code>aec_post.h</code>／<code>suppression_gain.h</code> 這些不要直接呼叫。<br>唯一例外:自行在 AEC <b>之外</b>做 post-beam RES 時(4ch 就是這樣),改用另一個對外 header <code>aec_res.h</code>(見 <a href="aec_res.html">AEC RES 級</a>),不必再直接呼叫 <code>suppression_gain.h</code>。</div>
 
 <h2>2. 這個 lib 可以設定的 grid</h2>
@@ -81,7 +70,8 @@ cfg.fft_size = 256;                       /* 明確指定,不要留 0 */
 cfg.delay_mode = AEC_DELAY_MATCHED;       /* 三態之一,見 §4 */
 
 size_t bytes = aec_get_mem_size(&amp;cfg);    /* 0 = cfg 無效 */
-void  *pool  = board_alloc_aligned(16, bytes);   /* 基底必須 16-byte 對齊 */
+void  *pool  = NULL;
+if (bytes == 0 || posix_memalign(&amp;pool, 16, bytes) != 0) { /* cfg 無效或配置失敗 */ }  /* 基底必須 16-byte 對齊 */
 Aec   *aec   = pool ? aec_init(pool, bytes, &amp;cfg) : NULL;
 if (!aec) { /* cfg 無效 / 未對齊 / pool 太小 */ }
 
@@ -89,7 +79,7 @@ int hop = aec_hop_size(aec);              /* 128 */
 while (streaming) aec_process(aec, mic, ref, out);
 
 aec_destroy(aec);      /* static instance 不會釋放 caller pool */
-board_free(pool);</pre>
+free(pool);</pre>
 
 <h3>Heap(桌面/測試)</h3>
 <pre>Aec aec;                                  /* caller 擁有這個 struct */
@@ -174,7 +164,7 @@ aec_get_linear_context(aec, &amp;lin);      /* 時域 seam:線性殘差 + 已對
 <tr><td><code>enable_res = 0</code></td><td>NN 取代 <code>SuppressionGain</code>。輸出保持線性殘差,不套 DSP 抑制</td></tr>
 <tr><td><code>enable_cng</code> 自動失效</td><td>CNG 是在 <code>aec_post_apply_output()</code> 內注入的,<code>enable_res=0</code> 時該函式根本不會被呼叫 → <b>不必特別關,它已經是 inert</b></td></tr>
 <tr><td><code>return_res_context = 1</code></td><td><b>關鍵</b>。若也設 0,post block <b>整段不跑</b>,<code>error_spec</code>／<code>res_gain</code>／<code>r2</code>／<code>comfort_noise</code>／<code>formed_hop</code> <b>全部是 NULL</b></td></tr>
-<tr><td><code>spatial_linear_context = 1</code></td><td>只有多 lane fused post-stage 才用(4ch)。本 lane 的 <code>G_res</code> 完全不算(<code>res_gain</code> 回 NULL),但 DominantNearend hold-state 仍每 hop 更新。<b>強制</b>要求 <code>enable_res==0 &amp;&amp; return_res_context==1</code></td></tr>
+<tr><td><code>spatial_linear_context = 1</code>／<code>2</code></td><td>只有多 lane fused post-stage 才用(4ch)。<code>1</code>(<code>AEC_CONTEXT_NO_GAIN</code>):本 lane 的 <code>G_res</code> 完全不算(<code>res_gain</code> 回 NULL),但 DominantNearend hold-state 仍每 hop 更新;<code>2</code>(<code>AEC_CONTEXT_LINEAR_ONLY</code>):只留線性半邊,<code>res_gain</code>／<code>r2</code>／<code>comfort_noise</code> 皆 NULL。<b>強制</b>要求 <code>enable_res==0 &amp;&amp; return_res_context==1</code></td></tr>
 </table></div>
 <div class="warn"><b>borrowed pointer 的效期只到下一次 process。</b><code>AecResContext</code>／<code>AecLinearContext</code> 的每個指標都 alias 內部 per-hop buffer,<b>三個 process 入口任一個</b>都會覆寫它們。要跨 hop 保存必須自己複製走。</div>
 <div class="note"><b>接 NR 時 <code>r2</code> 要先換尺度</b>:<code>AecResContext.r2</code> 與 <code>comfort_noise</code> 是 <b>int16² scale</b>,要除以 <code>32768²</code> 才是 audio power。<code>res_gain</code> 則是 amplitude <code>[0,1]</code>。<br><b>用 <code>generation</code> 做快取失效</b>:<code>AecLinearContext.generation</code> 每次 ring offset 改變就 +1(飽和不 wrap)。只比較 <code>delay_samples</code> 會漏掉 A→B→A 的暫態。</div>
@@ -185,7 +175,7 @@ aec_get_linear_context(aec, &amp;lin);      /* 時域 seam:線性殘差 + 已對
 <tr><th><code>enable_res</code></th><th><code>return_res_context</code></th><th>post block</th><th><code>out</code> 內容</th><th>context 頻域欄位</th></tr>
 <tr><td>1</td><td>任意</td><td>跑</td><td>RES 抑制後 + CNG</td><td>全部有效</td></tr>
 <tr><td>0</td><td>1</td><td>跑(<code>context_only</code>)</td><td><b>線性殘差</b></td><td>全部有效</td></tr>
-<tr><td>0</td><td>0</td><td><b>不跑</b></td><td>線性殘差</td><td class="dead">大部分是 <b>NULL</b>;只剩診斷用的 <code>echo_spec</code>／<code>near_spec</code></td></tr>
+<tr><td>0</td><td>0</td><td><b>不跑</b></td><td>線性殘差</td><td class="dead">大部分是 <b>NULL</b>;只剩 <code>linear_hop</code>、<code>far_spec</code> 與診斷用的 <code>echo_spec</code>／<code>near_spec</code>(<code>aec_get_res_context</code>)</td></tr>
 </table></div>
 <p class="small">AEC <b>不做</b>最終 peak limiter。產品需要 limiter／AGC／DRC 時放在整條 chain 的最後。</p>
 
@@ -200,7 +190,7 @@ aec_get_linear_context(aec, &amp;lin);      /* 時域 seam:線性殘差 + 已對
 <tr><td><code>aec_reset(a)</code></td><td>回到「全新 instance」狀態。會重啟 WOLA → spectrogram 上會有垂直線。若只是外部對齊改變,<b>請用上一個函式而不是這個</b></td><td><code>void</code>,<b>⚠ 無 NULL 檢查</b></td></tr>
 </table></div>
 <div class="warn"><code>aec_set_preset()</code> 對非法 preset 是<b>拒絕</b>(回 −1),與 <code>aec_config_from_preset()</code> 靜默退回 balanced 的行為<b>相反</b>。<code>ramp_ms</code> 範圍 <code>[0, 60000]</code>,<code>ramp_ms==0</code> <b>不是</b>錯誤。ramp 進行中再呼叫 → 從當前 live 值重新起走。<br>全部必須<b>在 hop 之間</b>呼叫、與 <code>process()</code> 序列化;<b>非 thread-safe</b>。</div>
-<div class="note">若 lane 是用 <code>spatial_linear_context=1</code> 建立的(4ch),<code>aec_set_preset()</code> <b>依構造為 inert</b>——該 lane 根本不跑 suppressor 的 gain path。4ch 要改強度請對共用的 post 級抑制器——<a href="aec_res.html"><code>AecRes</code></a>(4ch 單元以 <code>audio_pipeline_4ch_res(p)</code> 提供;直接驅動核心的呼叫端自備)——呼叫 <code>aec_res_set_preset()</code>。</div>
+<div class="note">若 lane 是用 <code>spatial_linear_context=1</code> 建立的(4ch),<code>aec_set_preset()</code> <b>依構造為 inert</b>——該 lane 根本不跑 suppressor 的 gain path。4ch 要改強度請對共用的 post 級抑制器——<a href="aec_res.html"><code>AecRes</code></a>(由應用在 4ch 單元之後自己建立,單元不含 RES)——呼叫 <code>aec_res_set_preset()</code>。</div>
 
 <h2>10. 狀態查詢與診斷</h2>
 <div class="tblwrap"><table>
