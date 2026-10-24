@@ -135,7 +135,7 @@ them is inert by construction (a 4-channel product retargets the shared
 `aec_res_set_preset(res, preset, ramp_ms)`); and the far-active floor only binds on far-active,
 non-double-talk hops while the same gain also sets the comfort-noise level, so a
 whole-recording average moves less than the dB step suggests. Full contract and
-A/B guidance → [docs/c_user_manual_zh_TW.md §7.1](docs/c_user_manual_zh_TW.md).
+A/B guidance → [docs/c_user_manual_zh_TW_03_preset.md §7.1](docs/c_user_manual_zh_TW_03_preset.md#71-執行期切換-presetaec_set_preset).
 
 ---
 
@@ -270,7 +270,7 @@ gain so a downstream stage runs entirely in the frequency domain:
 | `res_gain`, `comfort_noise` | the AEC3 SuppressionGain + CNG this frame |
 | `erle_factor`, `dt_indicator`, `divergence`, `over_sub`, `erl_estimate` | per-frame telemetry (`over_sub` is a Python-only field, equal to `erle_factor`; the C `AecResContext` has no `over_sub`) |
 | `res_floor_protect` | this frame's near-recent-latch DT floor decision; a fused consumer ORs the contributing lanes' flags for its own suppressor |
-| `usable_linear` | this frame's usable-linear-estimate verdict; `False` means `r2` is the conservative nonlinear estimate (far-end power times a default echo-path gain), not one derived from the linear echo estimate — see `docs/aec_methods.md` §3.4 |
+| `usable_linear` | this frame's usable-linear-estimate verdict; `False` means `r2` is the conservative nonlinear estimate (far-end power times a default echo-path gain), not one derived from the linear echo estimate — see [`docs/aec_methods_02_post_filter.md` §3.4](docs/aec_methods_02_post_filter.md#34-suppressiongain) |
 
 **Reading the formed linear hop without building the full `AecResContext`.** A caller that only
 wants `formed_output` (e.g. a dataset-gen tool building a "clean linear AEC error" channel, with
@@ -288,7 +288,7 @@ lighter path that skips that chain. `AecConfig` raises `ValueError` at construct
 Note this is the *selected and crossfaded* linear output, not the raw main-filter output — and in
 context-only mode (`enable_res=False`, `return_res_context=True`) the selection can be the capture
 itself on a hop the filtering-quality analyzer has not cleared, see §3 of
-[docs/aec_methods.md](docs/aec_methods.md). Byte-identical to `context.formed_output` in every
+[docs/aec_methods_02_post_filter.md](docs/aec_methods_02_post_filter.md#3-aec3-post-filter-_aec3_post). Byte-identical to `context.formed_output` in every
 supported configuration; see `python/tests/test_formed_output_seam.py`.
 
 This seam is **already exercised** in the
@@ -460,8 +460,15 @@ AEC/
 │   ├── test/                        # test harnesses
 │   └── Makefile
 ├── docs/
-│   ├── aec_methods.md                   # algorithm specification
-│   ├── c_user_manual_zh_TW.md           # C user manual (API + CLI appendix)
+│   ├── aec_methods.md                   # algorithm specification (index + sections 1, 4-7)
+│   ├── aec_methods_01_front_end.md      # algorithm specification, section 2 (front-end blocks)
+│   ├── aec_methods_02_post_filter.md    # algorithm specification, section 3 (AEC3 post-filter)
+│   ├── c_user_manual_zh_TW.md           # C user manual (index, sections 1-3)
+│   ├── c_user_manual_zh_TW_01_lifecycle.md            # C user manual, sections 4-5 (lifecycle, error semantics)
+│   ├── c_user_manual_zh_TW_02_config.md               # C user manual, section 6 (AecConfig reference)
+│   ├── c_user_manual_zh_TW_03_preset.md               # C user manual, section 7 (presets)
+│   ├── c_user_manual_zh_TW_04_seam_troubleshooting.md # C user manual, sections 8-9 (integration seams, troubleshooting)
+│   ├── c_user_manual_zh_TW_05_appendix.md             # C user manual, appendix A (aec_wav CLI)
 │   ├── nn_integration_interface.md      # NN residual/NR/joint freq-domain seam
 │   ├── development_guide.md             # contributor invariants and validation commands
 │   ├── c_python_function_map.md         # C function <-> Python symbol map

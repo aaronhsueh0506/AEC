@@ -13,6 +13,36 @@ mirrors Python class boundaries.
 | [`nn_integration_interface.md`](nn_integration_interface.md) | NN residual/NR/joint swap seams |
 | [`../CHANGELOG.md`](../CHANGELOG.md) | Version history |
 
+**Contents (sections 2 and 3 live in part files)** <!-- split-toc -->
+- [AEC Algorithm Methods](#aec-algorithm-methods) <!-- split-toc -->
+  - [1. Pipeline overview](#1-pipeline-overview) <!-- split-toc -->
+    - [Presets — one production point + three operating points](#presets--one-production-point--three-operating-points) <!-- split-toc -->
+    - [Determinism](#determinism) <!-- split-toc -->
+    - [Tunable parameters (`AecConfig`)](#tunable-parameters-aecconfig) <!-- split-toc -->
+  - [2. Front-end blocks](aec_methods_01_front_end.md#2-front-end-blocks) <!-- split-toc -->
+    - [2.1 HPF (high-pass filter)](aec_methods_01_front_end.md#21-hpf-high-pass-filter) <!-- split-toc -->
+    - [2.2 Saturation detector + soft-clip](aec_methods_01_front_end.md#22-saturation-detector--soft-clip) <!-- split-toc -->
+    - [2.3 Delay estimator (AEC3-aligned)](aec_methods_01_front_end.md#23-delay-estimator-aec3-aligned) <!-- split-toc -->
+    - [2.4 PBFDKF refined filter](aec_methods_01_front_end.md#24-pbfdkf-refined-filter) <!-- split-toc -->
+    - [2.5 Shadow filter (coarse adapter)](aec_methods_01_front_end.md#25-shadow-filter-coarse-adapter) <!-- split-toc -->
+    - [2.6 Render signal analyzer](aec_methods_01_front_end.md#26-render-signal-analyzer) <!-- split-toc -->
+  - [3. AEC3 post-filter (`_aec3_post`)](aec_methods_02_post_filter.md#3-aec3-post-filter-_aec3_post) <!-- split-toc -->
+    - [3.1 StationarityEstimator](aec_methods_02_post_filter.md#31-stationarityestimator) <!-- split-toc -->
+    - [3.2 AecState](aec_methods_02_post_filter.md#32-aecstate) <!-- split-toc -->
+    - [3.3 ResidualEchoEstimator](aec_methods_02_post_filter.md#33-residualechoestimator) <!-- split-toc -->
+    - [3.4 SuppressionGain](aec_methods_02_post_filter.md#34-suppressiongain) <!-- split-toc -->
+    - [3.5 Comfort noise (CNG)](aec_methods_02_post_filter.md#35-comfort-noise-cng) <!-- split-toc -->
+    - [3.6 OLA synthesis](aec_methods_02_post_filter.md#36-ola-synthesis) <!-- split-toc -->
+    - [3.7 enable_res = False bypass](aec_methods_02_post_filter.md#37-enable_res--false-bypass) <!-- split-toc -->
+  - [4. Diagnostic surfaces (load-bearing — do not remove)](#4-diagnostic-surfaces-load-bearing--do-not-remove) <!-- split-toc -->
+    - [`AecStats` / `get_stats()`](#aecstats--get_stats) <!-- split-toc -->
+    - [`AecResContext`](#aecrescontext) <!-- split-toc -->
+    - [Regime classifier](#regime-classifier) <!-- split-toc -->
+  - [5. Tooling](#5-tooling) <!-- split-toc -->
+  - [6. Reference scores](#6-reference-scores) <!-- split-toc -->
+  - [7. Python ↔ C precision model](#7-python--c-precision-model) <!-- split-toc -->
+    - [Math backends](#math-backends) <!-- split-toc -->
+<!-- split-toc -->
 ---
 
 ## 1. Pipeline overview
@@ -69,7 +99,7 @@ AecConfig(
 strength axis as `balanced`. `mild`/`balanced` differ in exactly one field —
 `min_gain_floor_far_active_db`, the far-active min-gain floor. `aggressive`
 additionally deepens `min_gain_floor_dt_db` (the floor used in its place
-during double-talk, see §3.4): without that second field, `dt_protect_active`
+during double-talk, see [§3.4](aec_methods_02_post_filter.md#34-suppressiongain)): without that second field, `dt_protect_active`
 hard-overrides the far-active floor with the SAME shared −20 dB for every
 preset whenever it fires (it also false-arms in far-end single talk), so the
 presets would be indistinguishable on exactly the hops where a user would
@@ -118,19 +148,19 @@ shows their public configuration values, not necessarily the internal hop count.
 | | `frame_size` / `hop_size` | auto | frame=FFT、hop=frame/2；8k 256/128、16k 256/128（可選512/256）、48k 1024/512 |
 | | `filter_length` | auto | 52 ms (<44.1 kHz), 64 ms (≥44.1 kHz) |
 | | `mu` / `delta` | 0.3 / 1e-8 | step size / regularization |
-| Residual / CNG | `enable_res` | **ON** | post-filter master gate (§3.7) |
-| | `enable_cng` | OFF (preset **ON**) | comfort noise (§3.5) |
+| Residual / CNG | `enable_res` | **ON** | post-filter master gate ([§3.7](aec_methods_02_post_filter.md#37-enable_res--false-bypass)) |
+| | `enable_cng` | OFF (preset **ON**) | comfort noise ([§3.5](aec_methods_02_post_filter.md#35-comfort-noise-cng)) |
 | | `cng_n2_windowed_psd` | 0.0 (**OFF**) | feeds the N2 tracker a windowed capture PSD instead of a rectangular one |
 | | `comfort_noise_floor_dbfs` | −96.034 | |
 | | `enable_td_constraint` | **ON** | |
 | C′ ERLE coherence gate | `erle_coh_gate_enabled` | **ON** | Γ²(Ŷ,Y) per-bin ERLE freeze |
 | | `erle_coh_gate_threshold` / `_alpha` | 0.5 / 0.05 | |
-| Split min-gain floor (§3.4) | `min_gain_split_floor_enabled` | **ON** | OFF for the `no_floor` preset |
+| Split min-gain floor ([§3.4](aec_methods_02_post_filter.md#34-suppressiongain)) | `min_gain_split_floor_enabled` | **ON** | OFF for the `no_floor` preset |
 | | `min_gain_floor_far_active_db` | −28 | **preset strength knob** (mild −20 / balanced −28 / aggressive −38) |
 | | `min_gain_floor_far_silent_db` | −12 | pure-NE floor |
 | | `min_gain_far_latch_power` | 1e6 | far-active latch |
-| **DT-aware recovery group** | `dt_aware_recovery_soft` | **ON** | soft (non-destructive) delay/EPC recovery (§2.3) |
-| | `dt_aware_res_floor_enabled` | **ON** | RES floor lift (§3.4); default source is the near-recent latch alone |
+| **DT-aware recovery group** | `dt_aware_recovery_soft` | **ON** | soft (non-destructive) delay/EPC recovery ([§2.3](aec_methods_01_front_end.md#23-delay-estimator-aec3-aligned)) |
+| | `dt_aware_res_floor_enabled` | **ON** | RES floor lift ([§3.4](aec_methods_02_post_filter.md#34-suppressiongain)); default source is the near-recent latch alone |
 | | `min_gain_floor_dt_db` | −20 | floor used in double-talk; **−30 for aggressive**, shared −20 for mild/balanced |
 | | `ne_recent_threshold` | 0.3 | near-recent gate arm threshold |
 | | `ne_recent_hold` | 150 | 10 ms authored basis; approximately 1.5 s after grid retiming |
@@ -144,7 +174,7 @@ shows their public configuration values, not necessarily the internal hop count.
 | ERLE coordinate | `erle_render_x2_psd_scale` | **ON** | render PSD scale feeding the reverb model |
 | | `reverb_tail_strength` | 1.0 | reverb-tail R² scale |
 | | `erle_windowed_capture_psd` | **ON** | Y2/E2 sqrt-Hann coordinate consistency |
-| | `output_capture_when_linear_unusable` | **ON** | two mutually exclusive roles: E2 output base = Y on diverged frames under `enable_res`; capture admitted as the FORM step's third candidate in context-only (§3) |
+| | `output_capture_when_linear_unusable` | **ON** | two mutually exclusive roles: E2 output base = Y on diverged frames under `enable_res`; capture admitted as the FORM step's third candidate in context-only ([§3](aec_methods_02_post_filter.md#3-aec3-post-filter-_aec3_post)) |
 | Delay-acquire guard | `delay_acquire_protect_converged` | **ON** | reject spurious late FIRST acquisition (Path A only) |
 | Cold-start deadlock (OFF) | `h_error_refresh_erl_floor` | 0.0 (**OFF**) | Kalman-gain cold-start breakers |
 | | `h_error_floor_override` | 0.0 (**OFF**) | |
@@ -168,7 +198,7 @@ shows their public configuration values, not necessarily the internal hop count.
 | | `saturation_threshold` | 0.95 | |
 | | `saturation_softclip_ref` | **ON** | |
 | Mode / output | `mode` | `PBFDKF` | |
-| | `return_res_context` | OFF | switches `process()` return type (§4); with `enable_res=False` it selects the context-only seam, whose FORM step admits the capture candidate (§3) |
+| | `return_res_context` | OFF | switches `process()` return type (§4); with `enable_res=False` it selects the context-only seam, whose FORM step admits the capture candidate ([§3](aec_methods_02_post_filter.md#3-aec3-post-filter-_aec3_post)) |
 | | `clear_filter_history` | OFF | |
 
 Defaults above are the Python `AecConfig` dataclass values. The C `aec_config_defaults()`
@@ -177,357 +207,10 @@ Defaults above are the Python `AecConfig` dataclass values. The C `aec_config_de
 `spatial_linear_context` and the reserved `epc_mu_floor` (no consumer), which the Python config does not have.
 
 The **DT-aware recovery group** has two halves:
-`dt_aware_recovery_soft` softens the delay/EPC recovery (§2.3), gated on the
+`dt_aware_recovery_soft` softens the delay/EPC recovery ([§2.3](aec_methods_01_front_end.md#23-delay-estimator-aec3-aligned)), gated on the
 `ne_recent_*` near-recent latch, and `dt_aware_res_floor_enabled` lifts the RES
-floor (§3.4), gated on the same `ne_recent_*` latch. The exact per-hop floor
+floor ([§3.4](aec_methods_02_post_filter.md#34-suppressiongain)), gated on the same `ne_recent_*` latch. The exact per-hop floor
 decision is exported to fused consumers as `res_floor_protect`.
-
----
-
-## 2. Front-end blocks
-
-### 2.1 HPF (high-pass filter)
-
-2nd-order Butterworth high-pass, 80 Hz, on the mic path only:
-
-* Mic-path HPF: **ON** (suppresses DC + sub-bass before delay alignment).
-* Reference HPF: **OFF / bypassed** — the pipeline feeds the raw reference
-  straight into `Saturation` → `EchoPathDelayEstimator`.
-
-`HighPassFilter` lives in `modules/preprocessing.py`; the C port uses the shared
-`audiolib` HPF (`hpf_init()`).
-
-### 2.2 Saturation detector + soft-clip
-
-`SaturationDetector` (preprocessing.py) tracks the fraction of clipped
-samples (|x| > `saturation_threshold`, 0.95) and exposes a smoothed
-`saturation_level` ∈ [0, 1] (fast attack, slow release). The orchestrator combines the reference and
-mic levels; above 0.5 the capture counts as saturated (`AecState.update_capture_saturation`) and
-the filter step sizes are gated down.
-
-`saturation_softclip_ref=True` (default) soft-clips the reference
-prior to delay alignment so the refined filter sees a tractable
-nonlinear envelope.
-
-### 2.3 Delay estimator (AEC3-aligned)
-
-`modules/delay/`:
-
-* `EchoPathDelayEstimator` (matched filter + downsampled cross-correlation).
-* `MatchedFilter` (running matched-filter accumulator).
-* `MatchedFilterLagAggregator` (decision over the matched-filter histogram).
-* `ClockdriftDetector` (drift over a 30 s window; AEC3 reference is
-  7500 blocks ≈ 30 s).
-* `DownsampledRenderBuffer` (delay-aligned render history).
-* `RenderDelayController` (orchestrator-facing alignment + warmup).
-
-`legacy_compat.LegacyDelayShim` exposes the `DelayEstimator.accumulate()`
-API on top of the estimator; the orchestrator imports it via the public
-alias so external callers (`from aec import DelayEstimator`) work.
-
-The reference ring holds `max_delay_ms` (1024 ms by default) of skew; the
-matched filter's own reliable reach is about 509 ms (see
-[`delay_estimator_design_zh_TW.md`](delay_estimator_design_zh_TW.md)). The
-estimate feeds the refined filter through a delay-line on the reference.
-
-#### Pre-echo detection (matched-filter accumulated-error)
-
-`MatchedFilter` (`modules/delay/matched_filter.py`) is a bank of `num_filters=5`
-NLMS cross-correlators over staggered lag windows (128 ms window, 96 ms
-alignment shift). The winning lag is
-`max_square_peak_index(h) + n·intra_lag_shift` — the strongest squared tap. AEC3
-additionally tracks a **pre-echo lag** so *its* reported delay snaps to the
-echo *onset* rather than the strongest tap (which, with reverb, can sit well
-after onset). `detect_pre_echo` defaults to True in `EchoPathDelayEstimator`
-and the pre-echo lag aggregator runs, but this port **does not report its
-candidate**.
-
-⚠ **Deliberate divergence at the selection seam.** Upstream substitutes the
-pre-echo candidate for the reported delay while still qualifying it with the
-*dominant* peak's histogram — sound there, because its estimator feeds a
-`RenderDelayController` that wants the earliest onset. Here the reported sample
-delay aligns a short PBFDKF directly, so an onset further ahead of the dominant
-echo than that filter spans puts the echo it must cancel outside the filter,
-while confidence still reads 1.0 because confidence describes the dominant
-histogram and not the substituted delay. The product path therefore reports the
-dominant peak; the pre-echo histogram is still computed as the upstream
-reference and as a diagnostic. Pinned by `test_delay_dominant_selection`
-(Python and C).
-
-The pre-echo locator (`_compute_pre_echo_lag`, after AEC3 `ComputePreEchoLag`)
-walks the per-tap-group **accumulated squared error of the filter PREFIX** and
-returns the earliest group whose prefix already explains the capture (= onset).
-The curve is built in `matched_filter_core` from the cumulative sum of
-`h · x_window` over tap groups of `_ACCUMULATED_ERROR_SUBSAMPLE_RATE` (4); the
-squared prefix error of each group is accumulated per sub-block sample.
-
-#### DT-aware soft recovery (`dt_aware_recovery_soft`, default ON)
-
-The delay/EPC recovery triggers (Path A first-acquisition, Path B re-lock, EPV,
-shadow_rise) normally do a **destructive** full reset — clear the filter, set
-Kalman P=1.0, `mark_diverged` — and re-converge from cold. That reset is the
-right move at a true far-only path change, but its aggressive re-convergence
-tail overfits near-end speech that arrives shortly after, and the online
-(no-pre-align) pipeline pays this penalty that offline GCC pre-align never does.
-When `dt_aware_recovery_soft=True` and near-end was seen recently
-(`_ne_recent_frames > 0`, the held gate described in §3.4), those triggers drop
-the full reset and instead **realign softly** — keep the converged filter,
-re-adapt at normal step size. Far-end single-talk never arms the gate, so its
-recoveries stay aggressive and FS echo depth is preserved. This is the partner
-mechanism to the DT-gated RES floor (§3.4).
-
-### 2.4 PBFDKF refined filter
-
-`PBFDKF` (Partitioned Block Frequency Domain Kalman Filter,
-`modules/filters.py`) is the production filter. It is a `PBFDAF` with a per-bin
-Kalman gain: the overlap-save buffer is 2 × hop, the FFT size is the next power
-of two of that (256 on the 16 kHz default grid), and
-`n_partitions = ceil(filter_length / hop)`. Kalman state per partition: filter
-coefficients `W[p, k]`, error covariance `P[k]`, process noise `Q[k]`.
-
-Convergence schedule: `Q` runs at `kalman_q_high` (1e-3) on start and after an
-EPC / delay change, and settles to `kalman_q_low` (1e-6) in steady state;
-`warmup_frames` (preset 100) forces the high-step startup window.
-
-The refined filter consumes the `RenderSignalAnalyzer` per-bin mask
-(narrow-band tonal regions freeze the W update on those bins) and the
-`poor_signal_excitation` flag (insufficient reference excitation also
-freezes W).
-
-`FilterStateBridge` (`modules/filter/filter_state_bridge.py`) is the
-read-only seam that exposes refined-filter spectra / convergence state
-to the AEC3 post-filter chain.
-
-### 2.5 Shadow filter (coarse adapter)
-
-The shadow filter is NLMS (`PBFDAF`) at μ = 0.5, the AEC3 coarse-filter role.
-It runs in parallel with the refined filter; its job is to be
-the fast-tracker that survives echo path changes, while the refined
-filter holds the converged tuning.
-
-`PathChangeRegimeHandler` (`modules/epc.py`) arbitrates between the two
-filters:
-
-* Fires `boost_q` / `reverse_copy` / `main_paused` decisions per frame
-  based on relative error EMAs, render activity, and the shadow-DT
-  signals from `DoubleTalkAnalyzer` (energy-gated).
-* Load-bearing on the cohort tail: without it the main filter can diverge to
-  anti-correlated output on a nonstationary echo path.
-* Must not be removed or bypassed.
-
-### 2.6 Render signal analyzer
-
-`RenderSignalAnalyzer` (`modules/render/render_signal_analyzer.py`)
-mirrors AEC3's `render_signal_analyzer.cc`. Two outputs:
-
-1. Per-bin freeze mask for refined-filter gain compute (sustained narrow-band
-   peaks zero mu around them).
-2. `poor_signal_excitation` flag that zeroes the refined-filter mu when
-   a narrow-band counter shows the reference is too tonal / too quiet to excite
-   the filter.
-
----
-
-## 3. AEC3 post-filter (`_aec3_post`)
-
-After the refined filter produces the linear residual error spectrum
-`E(k)`, `AEC._aec3_post()` (in `modules/orchestrator.py`) runs the
-AEC3-aligned suppression chain.
-
-Its first step is the **FORM** stage, `_aec3_select_linear_filter_output`,
-mirrored by `linear_filter_select()` in `c_impl/src/linear_filter_output.c`.
-It picks one of **three** time-domain candidates — coarse (shadow), refined,
-and the capture itself (`_SEL_COARSE` / `_SEL_REFINED` / `_SEL_CAPTURE`;
-`LFS_SEL_*` in C) — carries any change across the 30-sample AEC3
-`SignalTransition` crossfade, and publishes the formed hop and its matching
-WOLA spectrum as a pair, so `E(k)` entering the rest of the chain is the
-FORMED output, not necessarily what the refined filter produced.
-
-The capture candidate is admitted only when all four hold:
-`output_capture_when_linear_unusable` is set (default ON), the
-FilteringQualityAnalyzer has not declared the linear estimate usable (the
-verdict as of the PREVIOUS hop — AecState updates later in `_aec3_post`), the
-selected residual carries more hop energy than the capture, and the instance
-is in **context-only** mode (`enable_res=False` with
-`return_res_context=True`). Under `enable_res` the chain's own E2 output-base
-switch still owns that rule and the emitted audio is unchanged; running both
-would let E2's frequency-domain hard switch overwrite the crossfade FORM just
-started. Because the 30-sample transition stays active, the capture candidate
-is a steady-state fallback, not a strict per-sample bound.
-
-The chain itself:
-
-### 3.1 StationarityEstimator
-
-`modules/state/stationarity_estimator.py` mirrors
-`stationarity_estimator.cc`. Per-frame per-bin EMA of render PSD plus a
-running coefficient-of-variation gate. Two consumers:
-
-* `_aec3_post` zeros R² (residual echo PSD estimate) on stationary bands, so a
-  steady far-end hum the filter has nothing to learn from does not drive the
-  suppressor against a near end speaking over it. The zeroing fires whenever
-  the filter has converged and the stationarity mask does, regardless of the
-  usable-linear verdict.
-* Refined filter skips W update on block-stationary frames, preventing
-  the PBFDKF from learning mic-as-echo coupling against an uncorrelated
-  stationary input.
-
-### 3.2 AecState
-
-`modules/state/aec_state.py` is the AEC3-aligned read-only ADT and the single
-source of `usable_linear_estimate()`. It wraps the analyzers under
-`modules/state/`:
-
-```
-AecState
-├─ InitialState          (startup gating)
-├─ FilterDelay           (filter-peak delay)
-├─ FilterAnalyzer        (impulse-response shape consistency)
-├─ FilteringQualityAnalyzer (multi-gate usable_linear_estimate)
-├─ ErlEstimator          (ERL adaptive EMA)
-├─ ErleEstimator         (subband + fullband ERLE)
-│    ├─ SubbandErleEstimator
-│    └─ FullBandErleEstimator
-└─ SaturationDetector    (capture / render saturation flags)
-```
-
-### 3.3 ResidualEchoEstimator
-
-`modules/residual/residual_echo_estimator.py` produces the per-bin
-residual-echo PSD estimate R²(k). Two paths:
-
-* **Linear**: `R² = ERLE_subband × E²(k)` — the AEC3-aligned ERLE-divide.
-  Active when AecState reports `usable_linear_estimate`.
-* **Render-based**: `R² = ERL_subband × X²(k)` — uses the long-window
-  far-PSD EMA when the linear path is unreliable (epc_active, saturation,
-  pre-convergence).
-
-A reverb-tail term from `ReverbModel` (`modules/residual/reverb_model.py`)
-is added when reverb estimation is online; tracks per-bin reverb energy
-across the impulse response tail using `ReverbDecayEstimator` +
-`ReverbFrequencyResponse`.
-
-#### Live observer (default OFF)
-
-`live_observer_enabled` (default OFF) adds a third, independent PBFDAF
-instance (C: `aec_post_run_observer_step()` in `aec_post.c`, called from the
-post chain rather than the main hop loop because it needs the current hop's
-`dominant_ne` / `usable_linear_estimate` verdicts). It reads the far-end ring
-`live_observer_shift_ms` earlier than the main filter's own
-delay-compensated read, so its echo estimate covers the span just ahead
-of the main filter's current window. Its evidence is injected as
-`R² = max(R², min(|observer.echo - sel_echo|², |sel_esw|²) × PSD_SCALE)`,
-bounded to `live_observer_max_hz` and gated on a corroboration check: the
-observer's own residual-error EMA must be no worse than the EMA of the
-*selected* linear output's residual over a `live_observer_corrob_ms` time
-constant, within `live_observer_corrob_margin_db`; injection is also limited by
-`live_observer_inject_dt_energy_max` (Python only; the C port has no such guard, a known
-divergence pinned as scenario S-02 in `c_impl/test/pyc_parity/pyc_parity.py`). It never touches the linear filter, the
-delay estimate, or ERLE — only R² before SuppressionGain.
-
-### 3.4 SuppressionGain
-
-`modules/residual/suppression_gain.py` mirrors AEC3
-`suppression_gain.cc`. Wiener-style gain on the residual model:
-
-```
-G(k) = (S²(k) - α R²(k)) / S²(k)
-S²(k) = mic PSD when usable_linear_estimate
-      = nearend_excess PSD otherwise
-```
-
-with α a frame-state-dependent over-estimation factor. The gain is then
-band-limited (HF cap), temporally smoothed (asymmetric attack / release),
-and floored by a per-bin spectral-floor mask.
-
-**Split min-gain floor (default ON).** The AEC3 min-gain floor
-`min_gain = min_echo_power / R²` collapses to ~0 in double-talk: near-end
-inflates the error → ERLE drops → R² spikes → the floor that should protect
-near-end vanishes exactly when near-end is present (RES over-suppresses
-near-end up to −8 dB; the linear filter only cuts −1.4..−2.9 dB). A
-coherence double-talk discriminator does not work (single-lag X–Y
-coherence cannot separate reverberant FS from DT). The fix is a power-domain
-floor on the deepest suppression, **split by far-end activity**:
-
-```
-min_gain(k) = max( min_echo_power / R²(k),  floor )
-floor = 10^(-28/10)  if far-active (FS/DT)   # balanced; deep far-active
-                                             #   suppression for more echo
-                                             #   cancellation
-      = 10^(-12/10)  if far-silent (pure NE) # lifts NE near-end, zero echo
-                                             #   cost (no echo to leak)
-```
-
-Routing uses a per-recording **latch** on instantaneous far energy
-(`mean(render_block²) > 1e6`, render int16-scaled — ≈ the orchestrator's own
-far-active criterion). It latches from the first far frame so FS/DT use the
-gentler floor throughout (no cold-start leak); only recordings where far is
-never active keep the strong floor. Config (`AecConfig`):
-`min_gain_split_floor_enabled`, `min_gain_floor_far_active_db` (balanced −28;
-mild −20 / aggressive −38 — the preset strength knob),
-`min_gain_floor_far_silent_db` (−12), `min_gain_far_latch_power` (1e6). The
-floors are amplitude-domain dB; the orchestrator constructs `SuppressionGain`
-with these as `split_floor_*`. The far-active floor above is further lifted in
-double-talk by the DT-aware floor gating below.
-
-**Double-talk floor protection (DT-aware floor gating, default ON).**
-The far-active floor (balanced −28 dB) is deliberately aggressive so pure
-far-end single-talk cancels deep echo — but applying that same deep floor
-*during double-talk* over-suppresses near-end. The DT-gated floor lifts the
-floor from `min_gain_floor_far_active_db` to `min_gain_floor_dt_db` *only when
-near-end is present*, selectively protecting near-end in DT while keeping the
-aggressive far-active floor in pure FS:
-
-```python
-# suppression_gain.py (_get_min_gain):
-if self._far_active_latched:
-    base_floor = (self._split_floor_dt if self._dt_protect_active   # DT
-                  else self._split_floor_far_active)                # FS
-else:
-    base_floor = self._split_floor_far_silent                       # pure NE: −12 dB
-```
-
-The `-20 dB` dt-floor default (mild/balanced) is a Pareto choice, not a free
-detector improvement: against `-16 dB` it buys far-end-single-talk ERLE and echo
-MOS at a small double-talk degradation cost (numbers in the CHANGELOG), and it
-does not make the near/far latch more accurate. **aggressive deepens this floor
-to −30 dB** instead — without a distinct value here, `dt_protect_active` (which
-also false-arms on pure far-end-singletalk hops) hard-overrides the
-far-active floor with the SAME −20 dB for every preset, masking most of the
-strength-axis difference exactly when a user would expect to hear it.
-
-The orchestrator sets `sg._dt_protect_active` immediately before `get_gain`:
-
-```python
-self._aec3_sg._dt_protect_active = bool(
-    self.config.dt_aware_res_floor_enabled        # default True
-    and _ne_recent)
-```
-
-The floor is armed by the energy-based `_ne_recent_frames` latch alone — the
-same gate `dt_aware_recovery_soft` uses. Config (`AecConfig`):
-`dt_aware_res_floor_enabled`, `min_gain_floor_dt_db` (−20; −30 for aggressive),
-`ne_recent_threshold`/`ne_recent_hold`/`ne_recent_sustain`.
-
-### 3.5 Comfort noise (CNG)
-
-When `enable_cng = True` (preset default), `_aec3_post` adds per-bin shaped
-noise scaled by `sqrt(1 - G²)` to mask the suppressed spectrum. State:
-per-bin noise PSD EMA + smoothed cn gain (init in `AEC.__init__`).
-
-### 3.6 OLA synthesis
-
-sqrt-Hann analysis × sqrt-Hann synthesis = Hann, sums to 1 across 50 %
-overlap hops. `_aec3_synth_window` + `_aec3_ola_buf` accumulate the
-windowed inverse FFT into the output stream.
-
-### 3.7 enable_res = False bypass
-
-With `enable_res=False` the `_aec3_post` body is skipped and the linear residual
-is emitted straight from the refined filter; `eval_aec_challenge.py` writes
-that render as `_ours_nores.wav` next to the production render. The gate at
-`_aec3_post` block-open uses
-`self.config.enable_res or self.config.return_res_context`.
 
 ---
 
@@ -545,7 +228,7 @@ an external (or NN) post-filter. Enabled via
 type to `(out, AecResContext)`.
 
 With `enable_res=False` (context-only) this is the **only** mode in which the
-FORM step admits the capture candidate (§3): the context path returns the
+FORM step admits the capture candidate ([§3](aec_methods_02_post_filter.md#3-aec3-post-filter-_aec3_post)): the context path returns the
 linear residual before the E2 output-base switch, so without it the seam would
 carry an over-output that the emitted audio never does. `formed_output`,
 `error_spec`, `echo_spec` and `near_spec` all follow the selection as a
@@ -587,7 +270,7 @@ Speex; `balanced / fl=832 / --cng`, no pre-alignment, official per-bucket
 segmentation, 16 kHz 256/128 grid) are in the root
 [README](../README.md#status-snapshot) with their measurement conditions. "No
 pre-alignment" means the delay is acquired online by the in-pipeline
-matched-filter self-align (§2.3), exactly as the shipped algorithm runs.
+matched-filter self-align ([§2.3](aec_methods_01_front_end.md#23-delay-estimator-aec3-aligned)), exactly as the shipped algorithm runs.
 Offline GCC pre-alignment is a benchmark-only crutch; its numbers are not a
 production result.
 
@@ -605,7 +288,7 @@ mic-path HPF. The relationship between the two implementations is:
 * **Python↔C comparison is tolerance-based**, not 0/0.
 
 The delay-estimator matched filter is float32 fast-math and duty-cycle capable
-(see §2.3 and `c_impl/include/delay_aec.h`).
+(see [§2.3](aec_methods_01_front_end.md#23-delay-estimator-aec3-aligned) and `c_impl/include/delay_aec.h`).
 
 The **FFT backend is NE10 (float32, ARM NEON)** (via the shared
 `audiolib` layer), which is not bit-exact to numpy's fp64 `np.fft`. Because

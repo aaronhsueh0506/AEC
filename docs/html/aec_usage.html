@@ -186,7 +186,7 @@ int run_aec_seam(int sample_rate)
 <tr><td><code>aec_destroy</code></td><td>heap 實例釋放單一 arena,<b>剛好一次</b>;pool 實例不釋放任何記憶體(只清內部參考)、可重複呼叫(NULL 也安全),池由呼叫端回收。</td></tr>
 <tr><td>零 heap</td><td>pool 路徑從 init 到 destroy 不呼叫 malloc(<code>make test-zero-heap</code>:50 個 init/process/reset/destroy 週期 allocator 呼叫為 0)。heap 路徑只在 <code>aec_create</code> 做<b>一次</b> 16-byte 對齊配置。</td></tr>
 </table></div>
-<p class="small">各函式對 NULL 的行為(會 crash／安全／no-op)的完整表在 <code>AEC/docs/c_user_manual_zh_TW.md</code> §5。</p>
+<p class="small">各函式對 NULL 的行為(會 crash／安全／no-op)的完整表在 <code>AEC/docs/c_user_manual_zh_TW_01_lifecycle.md</code> §5。</p>
 
 <h2>5. 接到 NR 與合成(單聲道整鏈)</h2>
 <p>AEC 庫本身不包 NR 或合成。整合者各自初始化 <code>Aec</code>、<code>AnrDenoiser</code>(NR 庫)、<code>AcIstft</code>(audiolib),並自己寫一小段每 hop 的串接;Audio_ALG 的 <code>pipelines/mono_aec_nr_res/main.c</code> 就是這樣(串接函式 <code>mono_form()</code>)。AEC 端以 <code>enable_res = 0</code>、<code>return_res_context = 1</code> 建立,單聲道的 RES 增益是 AEC 自己算的 <code>ctx.res_gain</code>(經 <code>se_frame_from_aec()</code> 成為 <code>frame.g_res_ctx</code>),不需另建 <code>AecRes</code>。</p>

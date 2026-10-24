@@ -72,7 +72,7 @@ p99.9 residual + jitter + drift + safety margin < bank reliable reach
 外部 coarse alignment 要刻意留下小幅正 residual（初始可驗 8～16 ms），不要過補成負 residual。
 
 實測的 duty-cycle engagement 用 `aec_wav` 結尾的 `duty:` 診斷行取得
-（`c_user_manual_zh_TW.md` §8.4）。
+（`c_user_manual_zh_TW_04_seam_troubleshooting.md` §8.4）。
 
 ## 3. 驗證項目
 
