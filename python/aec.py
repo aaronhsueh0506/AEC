@@ -2,7 +2,7 @@
 
 CLI: ``python3 python/aec.py mic.wav ref.wav out.wav --preset balanced``
 """
-__version__ = "4.0.0rc1"
+__version__ = "5.0.0rc1"
 
 from modules.enums import (  # noqa: F401
     AecMode, AecPreset, AecFilterState,

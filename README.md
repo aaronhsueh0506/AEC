@@ -8,7 +8,7 @@ Single-channel AEC (1 mic + 1 ref) supporting PBFDKF (frequency-domain Kalman),
 multi-ERLE, shadow filter, and post-filter residual echo suppression.
 Python reference implementation + C implementation.
 
-**Release**: v4.0.0rc1 (`__version__` in `python/aec.py`). **Not ship-ready**:
+**Release**: v5.0.0rc1 (`__version__` in `python/aec.py`). **Not ship-ready**:
 the open items are the `[4.0.0]` "Known limitations" in
 [CHANGELOG.md](CHANGELOG.md), which also holds the version history and the
 measurements behind each default.

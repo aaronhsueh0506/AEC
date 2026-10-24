@@ -72,8 +72,9 @@ when verdict requires it.
   the pool tables, `aec.html`, `aec_c_api.html`, `STATIC_MEMORY.md`, `c_impl/README.md` and
   `docs/c_python_function_map.md` follow (the map's counts are 409 C functions, 232 mirror, 101 partial, 76 C-only;
   `pbfdkf_process_with_far_cmag2` now carries the `PBFDAF.process` / `complete_update` mapping).
-- Public API removals are a breaking change under the versioning rule above; `__version__` in `python/aec.py` is
-  unchanged because that file is part of the behaviour-hashed Python reference.
+- Public API removals are a breaking change under the versioning rule above: `__version__` in `python/aec.py` goes
+  4.0.0rc1 -> **5.0.0rc1**. The behaviour hash ignores `__version__`, so `aec_python_behavior_hash()` is unchanged
+  (9fa7a2de...).
 
 ## [Unreleased] — 2026-10-24 — Test tiers: lean default, `make test`, `make test-full`
 
