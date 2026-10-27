@@ -88,12 +88,12 @@
 | `src/aec.c:aec_legacy10ms_hops` | — | C-only（Python 在呼叫處直接用 `ms_to_hops` 重新取整，沒有獨立函式） | — | `ctest:test_rate_structural.c` |
 | `src/aec.c:aec_legacy10ms_alpha` | — | C-only（Python 在呼叫處直接用 `growth_rehop`） | — | `ctest:test_rate_structural.c` |
 | `src/aec.c:aec_legacy10ms_rate` | — | C-only（加法型逐 hop 速率的線性換算；C 註解載明 Python 側尚無對應的共用 helper） | — | `ctest:test_rate_structural.c` |
-| `src/aec.c:aec_config_defaults` | `modules/config.py:AecConfig` | partial（C 只填 balanced 預設值，缺 Python-only 旋鈕） | S-02；S-18；S-22；D-02；D-06；D-07 | `ctest:test_config_validation.c` |
+| `src/aec.c:aec_config_defaults` | `modules/config.py:AecConfig` | partial（C 只填 balanced 預設值，缺 Python-only 旋鈕；不支援的取樣率 C 回 `fft_size`＝`filter_length`＝0 並由建立入口拒絕，Python 在 `__post_init__` 直接 `ValueError`） | S-02；S-18；S-22；D-02；D-06；D-07 | `ctest:test_config_validation.c` |
 | `src/aec.c:aec_preset_row` | — | C-only（三個 preset 查表共用的列查找；Python 以 `AecConfig.from_preset` 內的分支取得同樣數值） | — | `ctest:test_runtime_preset.c` |
 | `src/aec.c:aec_preset_floor_db` | `modules/config.py:AecConfig.from_preset` | partial（只回 far-active 地板 dB） | D-04 | `ctest:test_aec_res.c` |
 | `src/aec.c:aec_preset_dt_floor_db` | `modules/config.py:AecConfig.from_preset` | partial（只回 DT 地板 dB） | D-04 | `ctest:test_aec_res.c` |
 | `src/aec.c:aec_preset_split_floor_enabled` | `modules/config.py:AecConfig.from_preset` | partial（只回 split-floor 閂的布林值） | D-04 | `ctest:test_aec_res.c` |
-| `src/aec.c:aec_config_from_preset` | `modules/config.py:AecConfig.from_preset` | mirror（NO_FLOOR 雙邊建構期都有） | D-04 | — |
+| `src/aec.c:aec_config_from_preset` | `modules/config.py:AecConfig.from_preset` | mirror（NO_FLOOR 雙邊建構期都有；不支援的取樣率同 `aec_config_defaults`） | D-04 | — |
 | `src/aec.c:aec_resolve_signal_grid` | `modules/config.py:resolve_signal_grid` | mirror | — | `pytest:test_signal_grid.py`<br>`ctest:test_config_validation.c` |
 | `src/aec.c:aec_is_valid_sample_rate` | `modules/config.py:resolve_signal_grid`<br>`modules/config.py:default_fft_size` | partial（推定：Python 沒有獨立的「取樣率是否合法」函式，由格點表比對隱含） | — | `ctest:test_config_validation.c` |
 | `src/aec.c:aec_default_fft_size` | `modules/config.py:default_fft_size` | mirror | — | `pytest:test_signal_grid.py`<br>`ctest:test_config_validation.c` |

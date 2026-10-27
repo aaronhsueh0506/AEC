@@ -49,8 +49,10 @@ void aec_config_defaults(AecConfig* cfg, int sr) {
     /* Only place a default fft_size is applied (0 for an unsupported rate,
      * which the validator rejects). */
     cfg->fft_size = aec_default_fft_size(sr);
-    /* filter_length: 64 ms at sr >= 44100, 52 ms otherwise (0 for sr <= 0). */
-    cfg->filter_length = (sr <= 0) ? 0
+    /* filter_length: 64 ms at sr >= 44100, 52 ms otherwise; 0 for an
+     * unsupported rate (like fft_size, rejected by the validator), so the
+     * millisecond product is never formed from an arbitrary int. */
+    cfg->filter_length = !aec_is_valid_sample_rate(sr) ? 0
                         : (sr >= 44100) ? (sr * 64 / 1000)
                                         : (sr * 52 / 1000);
     cfg->n_partitions = 0;

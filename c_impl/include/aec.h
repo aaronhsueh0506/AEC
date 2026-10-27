@@ -155,6 +155,9 @@ typedef struct AecConfig {
     int    min_gain_split_floor_enabled;    /* 1 */
 } AecConfig;
 
+/* Both factories fill fft_size and filter_length from the rate. For a rate with
+ * no grid (anything but 8000/16000/48000, including 0 and negative values) both
+ * are 0, which aec_get_mem_size / aec_init / aec_create refuse. */
 void aec_config_defaults(AecConfig* cfg, int sample_rate);
 void aec_config_from_preset(AecConfig* cfg, AecPreset preset, int sample_rate);
 

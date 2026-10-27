@@ -60,7 +60,7 @@ pre code{background:none;padding:0}
 <div class="tblwrap"><table>
 <tr><th>欄位</th><th>預設</th><th>範圍</th><th>調了會怎樣</th></tr>
 <tr><td colspan="4" style="background:#eef5f0"><b>線性濾波器</b></td></tr>
-<tr><td><code>filter_length</code></td><td>16k → <b>832</b>(52 ms)</td><td><code>1..4096</code></td><td>echo tail 覆蓋長度。太短 → 長混響殘留;太長 → MAC 與 RAM 線性上升</td></tr>
+<tr><td><code>filter_length</code></td><td>16k → <b>832</b>(52 ms);不支援的取樣率為 0(建立時被拒絕)</td><td><code>1..4096</code></td><td>echo tail 覆蓋長度。太短 → 長混響殘留;太長 → MAC 與 RAM 線性上升</td></tr>
 <tr><td><code>n_partitions</code></td><td><code>0</code>(= 由 filter_length 推導)</td><td><code>0</code> 或 <code>1..256</code></td><td>直接覆寫 partition 數,實際 tap span = <code>n_partitions × hop</code></td></tr>
 <tr><td><code>mu</code></td><td>0.3</td><td><code>[0,10]</code></td><td>主 PBFDKF step size。大 → 收斂快但 DT 下易發散</td></tr>
 <tr><td><code>kalman_q_high</code> / <code>_low</code></td><td>1e-3 / 1e-6</td><td><code>[0,1]</code></td><td>未收斂 / 收斂後的 process noise。high 大 → 追蹤快;low 小 → 穩態 misadjustment 低</td></tr>

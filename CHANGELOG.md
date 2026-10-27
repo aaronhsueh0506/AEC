@@ -41,6 +41,41 @@ when verdict requires it.
 
 ---
 
+## [Unreleased] — 2026-10-27 — Config factories no longer overflow on an unsupported sample rate; timing-constant inventory cited by symbol
+
+### Fixed
+- `aec_config_defaults()` (and so `aec_config_from_preset()`) formed `sr * 64` in `int` for any `sr >= 44100`. A rate of
+  33554432 or more overflowed (signed overflow, undefined behaviour): with `-fsanitize=undefined`,
+  `src/aec.c:54: signed integer overflow: 33554432 * 64 cannot be represented in type 'int'`. The result depended on
+  the optimisation level: at 33554432 `filter_length` was -2147483 at -O1 and 2147483 at -O2, and at `INT_MAX` it was 0
+  at -O1 and 4294967 at -O2. The rate was always refused later (`fft_size` is 0 without a grid), so no config was
+  accepted, but the factory itself was undefined for an arbitrary `int`.
+- `filter_length` is now derived only for a supported rate (`aec_is_valid_sample_rate()`: 8000, 16000, 48000) and is 0
+  otherwise, next to the `fft_size = 0` the same factory already gives such a rate. `aec_get_mem_size()` returns 0,
+  `aec_init()` returns NULL and `aec_create()` returns nonzero for the result, as for any other rejected config. An
+  unsupported rate that used to keep a plausible `filter_length` (44100 gave 2822) now gives 0.
+- For 8000, 16000 and 48000 the config is unchanged (`filter_length` 416, 832, 3072; `fft_size` 256, 256, 1024) and
+  `aec_python_behavior_hash()` is unchanged (9fa7a2de...). The Python twin was never affected: `AecConfig.__post_init__`
+  resolves the grid first and raises `ValueError` for an unsupported rate, and Python integers do not overflow.
+
+- `docs/timing_constant_inventory.json`: one sentence now names the mcab flow like the committed `.md`, so
+  `gen_timing_inventory.py --check` (and the three `test_timing_inventory.py` cases that run it) pass again.
+
+### Changed
+- `docs/timing_constant_inventory.json` / `.md`: every source citation is now `file:function (`token`)`; the line-number
+  citations were stale and are gone. Entries that described code that no longer exists were reworded, and the
+  lag-aggregator histogram window entry is closed as already retimed (`da_hist_window_for_rate()` in `delay_aec.c`), so the
+  inventory counts 80 candidates, 25 still open (was 26). `python/diag/gen_timing_inventory.py` now rejects a line-number
+  citation (an integrity rule with a mutation case in `python/tests/test_timing_inventory.py`).
+- `docs/html`: the `aec.c` / `aec.h` line citations of `aec_params.html`, `aec_params_internal.html` and `aec_res.html` follow
+  the lines this entry's code change moved; the `filter_length` rows and the usage table name the zero for an unsupported rate.
+
+### Added
+- `test_config_validation.c`: `test_config_factories_unsupported_rate()` runs both factories over INT_MIN, -1, 0, 1, 44100,
+  33554431, 33554432, 100000000 and INT_MAX and requires `fft_size == 0`, `filter_length == 0` and refusal by all three
+  entry points, plus the unchanged factory values at the three supported rates. It fails on the previous `aec.c`
+  (10 checks: every rate from 44100 up) and passes with the fix, also under `-fsanitize=undefined`.
+
 ## [Unreleased] — 2026-10-24 — Unused C functions removed; streaming FIFO API and its pool storage dropped
 
 ### Removed

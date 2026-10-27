@@ -104,6 +104,51 @@ static void test_filter_length(void) {
     free(mem);
 }
 
+/* The config factories take the rate as a plain int. An unsupported rate must come back as an unusable config (fft_size 0,
+ * filter_length 0) that all three entry points reject, never as a value computed from an overflowing int product: before
+ * the guard, sr * 64 overflowed int for sr >= 2^25 (undefined; the resulting filter_length depended on the optimisation
+ * level) and a rate such as 44100 kept a plausible filter_length next to fft_size 0. A supported rate must keep its factory values exactly. */
+static void test_config_factories_unsupported_rate(void) {
+    AecConfig valid_cfg; base_cfg(&valid_cfg);
+    size_t sz = aec_get_mem_size(&valid_cfg);
+    void* mem = aec_test_pool_alloc(sz);
+    CHECK(sz > 0 && mem != NULL, "factory test setup: valid 16k config and aligned pool");
+    if (!mem) return;
+
+    const int bad_rates[] = { INT_MIN, -1, 0, 1, 44100, 33554431, 33554432, 100000000, INT_MAX };
+    for (size_t i = 0; i < sizeof(bad_rates) / sizeof(bad_rates[0]); ++i) {
+        char what[96];
+        AecConfig cfg;
+        aec_config_defaults(&cfg, bad_rates[i]);
+        snprintf(what, sizeof(what), "aec_config_defaults(sr=%d): fft_size 0, filter_length 0", bad_rates[i]);
+        CHECK(cfg.fft_size == 0 && cfg.filter_length == 0, what);
+        snprintf(what, sizeof(what), "aec_config_defaults(sr=%d)", bad_rates[i]);
+        check_rejected(what, &cfg, mem, sz);
+
+        aec_config_from_preset(&cfg, AEC_PRESET_BALANCED, bad_rates[i]);
+        snprintf(what, sizeof(what), "aec_config_from_preset(sr=%d): fft_size 0, filter_length 0", bad_rates[i]);
+        CHECK(cfg.fft_size == 0 && cfg.filter_length == 0, what);
+        snprintf(what, sizeof(what), "aec_config_from_preset(sr=%d)", bad_rates[i]);
+        check_rejected(what, &cfg, mem, sz);
+    }
+    free(mem);
+
+    /* Supported rates: 52 ms below 44.1 kHz, 64 ms at 48 kHz. */
+    const struct { int sr, fft, filter_length; } good[] = {
+        { 8000, 256, 416 }, { 16000, 256, 832 }, { 48000, 1024, 3072 },
+    };
+    for (size_t i = 0; i < sizeof(good) / sizeof(good[0]); ++i) {
+        char what[96];
+        AecConfig cfg;
+        aec_config_from_preset(&cfg, AEC_PRESET_BALANCED, good[i].sr);
+        snprintf(what, sizeof(what), "aec_config_from_preset(sr=%d): fft_size %d, filter_length %d unchanged",
+                 good[i].sr, good[i].fft, good[i].filter_length);
+        CHECK(cfg.fft_size == good[i].fft && cfg.filter_length == good[i].filter_length, what);
+        snprintf(what, sizeof(what), "aec_config_from_preset(sr=%d) sizes > 0", good[i].sr);
+        CHECK(aec_get_mem_size(&cfg) > 0, what);
+    }
+}
+
 /* aec_init() must reject a misaligned pool base BEFORE writing
  * anything to it. Prefill a raw buffer with a 0xA5 sentinel, hand aec_init
  * a deliberately-misaligned pointer +1..+15 into it, and assert (a) NULL
@@ -1010,6 +1055,7 @@ static void test_delay_mode_illegal_combinations(void) {
 int main(void) {
     test_sample_rate();
     test_filter_length();
+    test_config_factories_unsupported_rate();
     test_highpass_cutoff();
     test_misaligned_base();
     test_spatial_linear_context_requires_context_only();

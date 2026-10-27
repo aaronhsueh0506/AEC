@@ -3,7 +3,9 @@
 
 **永遠從 `aec_config_from_preset()`（或 `aec_config_defaults()`）開始**，再覆寫少數必要
 欄位。這兩個函式會先 `memset` 整個結構，所以未列出的欄位都會被歸零；自己手動填一個
-未初始化的 `AecConfig` 幾乎一定會被驗證擋下。
+未初始化的 `AecConfig` 幾乎一定會被驗證擋下。取樣率不是 8000／16000／48000 時（含 0 與負值），
+兩個函式回傳的 `fft_size` 與 `filter_length` 都是 `0`，`aec_get_mem_size()` 回傳 0、`aec_init()` 回傳 NULL、
+`aec_create()` 回傳非 0；函式本身不會溢位或中止。
 
 ```c
 AecConfig cfg;
@@ -28,7 +30,7 @@ cfg.enable_cng = 0;          /* 只覆寫你真的要改的 */
 |---|---|---|---|---|
 | `sample_rate` | `int` | 呼叫端指定 | 8000 / 16000 / 48000 | 必填。與音訊來源一致。 |
 | `fft_size` | `int` | 8k→256、16k→256、48k→1024（由 `aec_config_defaults()` 填入，＝`aec_default_fft_size()`） | 須與 `sample_rate` 成對（見 [§1](c_user_manual_zh_TW.md#1-這個函式庫是什麼不是什麼)）；**`0`（自動）會被拒絕** | 只有 16 kHz 有第二選擇（512）。改成 512 會讓 hop 變 16 ms、延遲加倍，但每秒呼叫次數減半。核心不會替你猜格點——所有入口都走同一支 `aec_resolve_signal_grid()`。 |
-| `filter_length` | `int` | `sr × 52/1000`（48 kHz 為 `sr × 64/1000`）→ 8k:416、16k:832、48k:3072 | 1 – 4096 | **單位是 sample，不是 ms。** 涵蓋的回音路徑長度。大房間／長殘響時調高，代價是記憶體與運算量上升。 |
+| `filter_length` | `int` | `sr × 52/1000`（48 kHz 為 `sr × 64/1000`）→ 8k:416、16k:832、48k:3072；不支援的取樣率為 `0`（與 `fft_size` 同為 `0`，建立時被拒絕） | 1 – 4096 | **單位是 sample，不是 ms。** 涵蓋的回音路徑長度。大房間／長殘響時調高，代價是記憶體與運算量上升。 |
 | `n_partitions` | `int` | `0`（自動） | `0` 或 1 – 256 | 留 `0` 即可，由 `filter_length` 與 hop 自動推導。 |
 
 ### 6.2 模組開關（全部只接受 0 或 1）

@@ -46,7 +46,7 @@ cc -std=gnu99 -O2 -ffp-contract=off app.c \
 <h2>2. 呼叫順序</h2>
 <div class="tblwrap"><table>
 <tr><th>#</th><th>步驟</th><th>函式</th><th>失敗時</th></tr>
-<tr><td>1</td><td>取得完整設定(不要手填)</td><td><code>aec_config_from_preset(&amp;cfg, preset, sample_rate)</code>(或 <code>aec_config_defaults</code>)</td><td>無回傳;不認得的 preset 值<b>靜默退回 balanced</b></td></tr>
+<tr><td>1</td><td>取得完整設定(不要手填)</td><td><code>aec_config_from_preset(&amp;cfg, preset, sample_rate)</code>(或 <code>aec_config_defaults</code>)</td><td>無回傳;不認得的 preset 值<b>靜默退回 balanced</b>;取樣率不是 8000／16000／48000 時 <code>fft_size</code> 與 <code>filter_length</code> 都是 0,<code>aec_get_mem_size()</code> 回 0、<code>aec_init()</code> 回 NULL、<code>aec_create()</code> 回非 0</td></tr>
 <tr><td>2</td><td>只覆寫<a href="aec_params.html">外部欄位</a>(<code>fft_size</code>、<code>delay_mode</code>…)</td><td>直接寫 <code>cfg.*</code></td><td>下一步才會被驗證</td></tr>
 <tr><td>3</td><td>(選用)確認格點</td><td><code>aec_resolve_signal_grid(sr, fft, &amp;grid)</code>、<code>aec_default_fft_size(sr)</code></td><td>回 0(不動 <code>*out</code>)</td></tr>
 <tr><td>4</td><td>查記憶池大小(pool 路徑)</td><td><code>aec_get_mem_size(&amp;cfg)</code>;拆解用 <code>aec_get_mem_breakdown</code></td><td><b>回 0</b>(不是負值)</td></tr>

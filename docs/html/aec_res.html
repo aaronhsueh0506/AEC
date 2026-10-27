@@ -35,7 +35,7 @@ pre code{background:none;padding:0}
 <ul>
 <li>設定來自與 lane 相同的建構函式(<code>aec_build_sg_config</code>),所以由同一個 <code>AecConfig</code> 建出的 <code>AecRes</code> 與 lane 內的抑制器設定逐位元相同。</li>
 <li>Static memory:呼叫端給一塊 16-byte 對齊的記憶體;process／reset／set_preset 不配置記憶體、不用 stdio、無全域狀態。</li>
-<li>只有 <code>sample_rate</code>、<code>fft_size</code>、<code>min_gain_floor_far_active_db</code>、<code>min_gain_floor_dt_db</code> 與 <code>min_gain_split_floor_enabled</code>(<code>aec.c:993-998</code>,讓 NO_FLOOR 在建構時就生效)會影響抑制器;其餘 <code>AecConfig</code> 欄位僅參與驗證(傳入的 <code>cfg</code> 必須通過完整驗證,否則 <code>aec_res_get_mem_size</code> 回 0)。</li>
+<li>只有 <code>sample_rate</code>、<code>fft_size</code>、<code>min_gain_floor_far_active_db</code>、<code>min_gain_floor_dt_db</code> 與 <code>min_gain_split_floor_enabled</code>(<code>aec.c:995-1000</code>,讓 NO_FLOOR 在建構時就生效)會影響抑制器;其餘 <code>AecConfig</code> 欄位僅參與驗證(傳入的 <code>cfg</code> 必須通過完整驗證,否則 <code>aec_res_get_mem_size</code> 回 0)。</li>
 </ul>
 
 <h2>2. API 用法</h2>
@@ -97,7 +97,7 @@ int res_one_hop(const AecConfig *cfg, const AecResInput *in, uint32_t *rng,
 <h2>2.2 外部／內部</h2>
 <div class="tblwrap"><table>
 <tr><th>類別</th><th>內容</th><th>出處</th></tr>
-<tr><td><b>外部(可調)</b></td><td>強度只有 <code>aec_res_set_preset(res, preset, ramp_ms)</code>(preset 四選一;ramp [0, 60000] ms);建立時由 <code>AecConfig</code> 的 <code>sample_rate</code>、<code>fft_size</code> 與 preset 決定的三個 floor 欄位帶入</td><td><code>aec_res.h:62</code>;<code>aec.c:993-998</code></td></tr>
+<tr><td><b>外部(可調)</b></td><td>強度只有 <code>aec_res_set_preset(res, preset, ramp_ms)</code>(preset 四選一;ramp [0, 60000] ms);建立時由 <code>AecConfig</code> 的 <code>sample_rate</code>、<code>fft_size</code> 與 preset 決定的三個 floor 欄位帶入</td><td><code>aec_res.h:62</code>;<code>aec.c:995-1000</code></td></tr>
 <tr><td><b>外部(輸入旗標)</b></td><td><code>AecResInput</code> 的 <code>all_converged</code>、<code>max_dt</code>(&gt; 0.2 啟用 DT 地板)、<code>max_saturation</code>(&gt; 0.5 視為飽和回音)、<code>clock_drift</code>:由整合者從各 lane 的判定彙整</td><td><code>aec_res.h:24-34</code></td></tr>
 <tr><td><b>內部(不開放)</b></td><td><code>SuppressionGainConfig</code> 48 欄與 tuning 表(由 <code>aec_build_sg_config</code> 依格點查表)、DominantNearend、ratchet、audibility 門檻;<code>aec_config_build.h</code> 為庫內部</td><td><code>suppression_gain.h:16-78</code>;<code>aec_config_build.h</code></td></tr>
 <tr><td>公開函式</td><td><code>aec_res_get_mem_size</code>、<code>aec_res_init</code>、<code>aec_res_process</code>、<code>aec_res_reset</code>、<code>aec_res_set_preset</code>、<code>aec_res_split_floor</code>、<code>aec_res_n_bins</code>、<code>aec_res_hop_size</code>、<code>aec_cng_fill</code></td><td><code>aec_res.h:38-74</code></td></tr>

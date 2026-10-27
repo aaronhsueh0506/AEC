@@ -80,6 +80,11 @@ BANNED = (r"\bparent\b", r"\bbrief\w*\b", r"\bintake\b", r"\bsubagent\b",
 # An absolute path in the data pins the document to one machine.
 ABSOLUTE_PATH = re.compile(r"(?<![\w.])/[A-Za-z][\w.-]*/")
 
+# A source citation names `file:function (`token`)`, never a line number: the
+# line moves with the next edit of that file and the citation then points at
+# unrelated code.
+LINE_CITATION = re.compile(r"\b[\w./-]+\.(?:py|c|h):\d+\b")
+
 
 def load():
     with DATA.open(encoding="utf-8") as fh:
@@ -133,6 +138,11 @@ def validate(data):
                 problems.append(
                     f"{e.get('name')!r} {field}: absolute path {m.group(0)!r} "
                     f"-- cite repository-relative paths only")
+            m = LINE_CITATION.search(value)
+            if m:
+                problems.append(
+                    f"{e.get('name')!r} {field}: line-number citation "
+                    f"{m.group(0)!r} -- cite file:function (`token`) instead")
     return problems
 
 

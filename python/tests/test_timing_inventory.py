@@ -379,6 +379,9 @@ def test_check_detects_data_that_diverges_from_the_document(sandbox):
      "empty consumers"),
     (lambda d: d.update(schema_version=99),
      "schema_version"),
+    (lambda d: d["entries"][0].update(
+        consumers=["suppression_gain.py:606-621 caches the ratchet"]),
+     "line-number citation"),
 ])
 def test_integrity_rules_actually_fail(sandbox, mutate, expect):
     """MUTATION per rule. A validator that never rejects anything is the same
