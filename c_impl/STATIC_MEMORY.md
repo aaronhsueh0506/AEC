@@ -75,8 +75,8 @@ The sample is compiled and run by `test/docs_smoke.sh`.
 | 16 kHz | 512 | 256 |
 | 48 kHz | 1024 | 512 |
 
-The library also retains an 8 kHz legacy grid for standalone compatibility;
-Audio_ALG production pipelines accept only the three rows above.
+The library also retains an 8 kHz legacy grid for standalone compatibility.
+In Audio_ALG the mono samples also accept the 8 kHz row; the 4ch flow and the ULCNet samples accept only the 16 kHz and 48 kHz rows above.
 
 Pool size depends on the complete config, backend and target ABI. Do not copy a
 checked-in byte count into firmware. Query `aec_get_mem_size` and reserve that

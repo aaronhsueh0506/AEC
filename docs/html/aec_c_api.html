@@ -190,7 +190,7 @@ aec_get_linear_context(aec, &amp;lin);      /* 時域 seam:線性殘差 + 已對
 <tr><td><code>aec_reset(a)</code></td><td>回到「全新 instance」狀態。會重啟 WOLA → spectrogram 上會有垂直線。若只是外部對齊改變,<b>請用上一個函式而不是這個</b></td><td><code>void</code>,<b>⚠ 無 NULL 檢查</b></td></tr>
 </table></div>
 <div class="warn"><code>aec_set_preset()</code> 對非法 preset 是<b>拒絕</b>(回 −1),與 <code>aec_config_from_preset()</code> 靜默退回 balanced 的行為<b>相反</b>。<code>ramp_ms</code> 範圍 <code>[0, 60000]</code>,<code>ramp_ms==0</code> <b>不是</b>錯誤。ramp 進行中再呼叫 → 從當前 live 值重新起走。<br>全部必須<b>在 hop 之間</b>呼叫、與 <code>process()</code> 序列化;<b>非 thread-safe</b>。</div>
-<div class="note">若 lane 是用 <code>spatial_linear_context=1</code> 建立的(4ch),<code>aec_set_preset()</code> <b>依構造為 inert</b>——該 lane 根本不跑 suppressor 的 gain path。4ch 要改強度請對共用的 post 級抑制器——<a href="aec_res.html"><code>AecRes</code></a>(由應用在 4ch 單元之後自己建立,單元不含 RES)——呼叫 <code>aec_res_set_preset()</code>。</div>
+<div class="note">若 lane 是用 <code>spatial_linear_context</code> 非 0(<code>1</code> 或 <code>2</code>)建立的(4ch),<code>aec_set_preset()</code> <b>依構造為 inert</b>——該 lane 根本不跑 suppressor 的 gain path。4ch 要改強度請對共用的 post 級抑制器——<a href="aec_res.html"><code>AecRes</code></a>(由應用在 4ch mcab flow 之後自己建立,mcab 不含 RES)——呼叫 <code>aec_res_set_preset()</code>。</div>
 
 <h2>10. 狀態查詢與診斷</h2>
 <div class="tblwrap"><table>

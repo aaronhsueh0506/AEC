@@ -131,7 +131,7 @@ lookups.
 Two things to know before measuring a preset change: lanes built with
 `spatial_linear_context` never reach the suppressor's gain path, so retargeting
 them is inert by construction (a 4-channel product retargets the shared
-`AecRes` that the application itself created after the Audio_ALG 4ch unit:
+`AecRes` that the application itself created after the Audio_ALG mcab flow:
 `aec_res_set_preset(res, preset, ramp_ms)`); and the far-active floor only binds on far-active,
 non-double-talk hops while the same gain also sets the comfort-noise level, so a
 whole-recording average moves less than the dB step suggests. Full contract and
@@ -269,7 +269,7 @@ gain so a downstream stage runs entirely in the frequency domain:
 | `far_spec` | X(f) — PBFDKF render spectrum (shared reference/diagnostic coordinate) |
 | `res_gain`, `comfort_noise` | the AEC3 SuppressionGain + CNG this frame |
 | `erle_factor`, `dt_indicator`, `divergence`, `over_sub`, `erl_estimate` | per-frame telemetry (`over_sub` is a Python-only field, equal to `erle_factor`; the C `AecResContext` has no `over_sub`) |
-| `res_floor_protect` | this frame's near-recent-latch DT floor decision; a fused consumer ORs the contributing lanes' flags for its own suppressor |
+| `res_floor_protect` | this frame's near-recent-latch DT floor decision; a fused consumer that wants it must combine the contributing lanes' flags itself (Audio_ALG's `mcab_fuse()` does not read it) |
 | `usable_linear` | this frame's usable-linear-estimate verdict; `False` means `r2` is the conservative nonlinear estimate (far-end power times a default echo-path gain), not one derived from the linear echo estimate — see [`docs/aec_methods_02_post_filter.md` §3.4](docs/aec_methods_02_post_filter.md#34-suppressiongain) |
 
 **Reading the formed linear hop without building the full `AecResContext`.** A caller that only

@@ -44,7 +44,7 @@ while (app_read_hop(mic, ref, hop)) {
 > 這條規則由 `output_capture_when_linear_unusable` 控制（預設開啟），且**只**在
 > context-only 生效。`enable_res = 1` 的產品路徑不受影響：那裡仍由後級輸出階段自己的
 > 保護負責，輸出逐位元不變；兩個保護同時作用會讓後者的頻域硬切覆蓋掉前者剛啟動的
-> 交叉淡入。四麥克風線性 AEC + BF 單元的四條 lane 全部落在這個模式。
+> 交叉淡入。Audio_ALG 的 4ch mcab flow（`mcab.h`）的四條 lane 全部落在這個模式。
 
 > **三個處理進入點可以自由混用。**
 >
@@ -96,7 +96,7 @@ AEC magnitude² 必須來自同一個 AEC kernel，不能任意以其他 power �
 | `r2` | 殘留回音功率譜。**int16² 尺度**：要換成 audio 功率尺度須除以 32768²。`spatial_linear_context = 2` 時為 `NULL`。 |
 | `comfort_noise` | 舒適噪音功率譜。同樣是 int16² 尺度。`spatial_linear_context = 2` 時為 `NULL`。 |
 | `linear_hop` / `formed_hop` | 時域中間結果。 |
-| `res_floor_protect` | 本 hop 是否啟用 double-talk RES floor 保護。它就是近端最近有聲音 latch 的實際決定；自己做後級的消費端應讀這個欄位，不要用 `dt_indicator` 另外推導一套規則（Audio_ALG 的 4ch fuse 目前只讓有貢獻的 lane 參與 `max_dt`／`max_saturation` 的彙整，不讀本欄位）。 |
+| `res_floor_protect` | 本 hop 是否啟用 double-talk RES floor 保護。它就是近端最近有聲音 latch 的實際決定；自己做後級的消費端應讀這個欄位，不要用 `dt_indicator` 另外推導一套規則（Audio_ALG 的 4ch fuse 目前只讓有貢獻的 lane 參與 `max_dt`／`max_sat`／`all_converged`／`usable_linear`（`McabFrame` 欄位）的彙整，不讀本欄位）。 |
 | `usable_linear` | 本 hop 的可用線性估計判定。`0` 時 `r2` 是保守的非線性估計（遠端功率乘上預設 echo-path 增益），並非由線性回音估計推導，可能遠高於根本不存在的殘留回音。 |
 | `far_power`、`erle_factor`、`dt_indicator`、`divergence`、`saturation_level`、`erl_estimate`、`shadow_dt`、`is_stationary_dt`、`filter_converged`、`filter_once_converged`、`epc_active` | 供外部判斷／診斷用的純量狀態。 |
 
@@ -135,14 +135,15 @@ engagement（`duty_hops_run / duty_hops_total`）。
 ### 8.5 獨立的 RES 級（`aec_res.h`）
 
 多條線性 AEC lane 先融合、再對融合後的頻譜算**一次**殘留回音抑制時使用（四麥克風
-線性 AEC + BF 之後的 post-beam RES）。`AecRes` 不屬於任何 `Aec`，也不屬於 Audio_ALG 的 4ch 單元
-（`AudioPipeline4Ch`）：單元只含 delay 對齊、4 條 lane、SRP-PHAT、BF 與 `audio_pipeline_4ch_fuse()`
-（fuse 之後 `frame.g_res_ctx` 為 NULL），沒有 `enable_res`／`res_preset`。要 RES 的 4ch 應用在自己的
-init 裡 `aec_res_init()`（設定來自 `aec_config_from_preset(preset, sample_rate)`，`fft_size` 取單元的格點），
-每 hop 在 fuse 之後呼叫 Audio_ALG 的 `se_res_stage_gain(res, &frame)`（包 `aec_res_process()`），並自己持有、
-設強度（`aec_res_set_preset()`）與重設（`aec_res_reset()`）；範例見 Audio_ALG 的
-`pipelines/4ch_aec_bf_nr_res/audio_pipeline_4ch_static.c`、`audio_pipeline_4ch_raw.c`、`4aec_nr_res_static.c`
-與 `4ch_aec_bf_dfn_res/main.c`。單聲道不用它，RES 就在 `Aec` 裡（`ctx.res_gain`，見 §8.7）。
+線性 AEC + BF 之後的 post-beam RES）。`AecRes` 不屬於任何 `Aec`，也不屬於 Audio_ALG 的 4ch 流程層
+`mcab`（`pipelines/4ch_aec_bf_nr_res/mcab.h`）：mcab 是 flow 層而不是 library，四條 lane 與（MATCHED 時）
+共用的 `DelayAec` 由應用建立後以指標注入，mcab 只管共用 delay 的對齊狀態、驅動這四條 lane（`mcab_process_front()`）與 `mcab_fuse()`
+（fuse 之後 `frame.g_res_ctx` 為 NULL），沒有 `enable_res`／`res_preset`，beamformer 也在 mcab 之外。
+要 RES 的 4ch 應用在自己的 init 裡 `aec_res_init()`（設定來自 `aec_config_from_preset(preset, sample_rate)`，
+`fft_size` 取 flow 的格點），每 hop 在 fuse 之後用 Audio_ALG 的 `mcab_sample_res_input(&frame, &in)`
+（`pipelines/4ch_aec_bf_nr_res/mcab_sample_post.h`）組出 `AecResInput` 再呼叫 `aec_res_process(res, &in)`，並自己持有、設強度（`aec_res_set_preset()`）與重設（`aec_res_reset()`）；
+範例見 Audio_ALG 的 `pipelines/4ch_aec_bf_nr_res/mcab_static.c`、`mcab_raw.c`、`mcab_external_static.c`
+與 `pipelines/dfn/4ch_aec_bf_dfn_res/main.c`。單聲道不用它，RES 就在 `Aec` 裡（`ctx.res_gain`，見 §8.7）。
 它把 `Aec` 內部那個抑制器獨立出來，設定來自 lane 自己用的
 同一個建構函式，所以同一個 `AecConfig` 建出的 `AecRes` 與 lane 內的抑制器設定逐位元相同。
 
@@ -221,8 +222,7 @@ aec_get_linear_context(&aec, &lin);   /* 在該 hop 的處理呼叫之後、下�
 AEC 以 `enable_res = 0`、`return_res_context = 1` 建立（`spatial_linear_context` 維持 preset
 的 `0`，所以 `res_gain`、`r2`、`comfort_noise` 都有值），AEC 自己**不**把抑制套到時域，
 抑制增益留給整合者與 NR 的增益合併後一次套用；單聲道的 RES 就在 `Aec` 裡面：增益是
-`Aec` 自己算的 `ctx.res_gain`（經 Audio_ALG 的 `se_frame_from_aec()` 成為 `SeSpecFrame` 的
-`g_res_ctx`），整合者不需要另外 `aec_res_init()` 一個 `AecRes`。
+`Aec` 自己算的 `ctx.res_gain`（由 `aec_get_res_context()` 取得），整合者不需要另外 `aec_res_init()` 一個 `AecRes`。
 每個 hop 的呼叫順序：
 
 ```
@@ -251,10 +251,10 @@ mic, ref (hop 個 float)
   同時決定舒適噪音的量，所以填補只反映 AEC 的抑制，NR 增益再以 `-10 dB`
   （`0.31622777f`）為下限縮放填補量。
 - **`aec_cng_fill` 的亂數狀態 `rng` 由呼叫端持有**，Audio_ALG 範例碼的種子是 `0x9e3779b9`
-  （`SE_CNG_RNG_SEED`）；`aec_reset()` 之外，整合者的 reset 還要同時清 NR 狀態、合成 OLA 與暫存增益，並把 `rng` 設回種子。
+  （mono 範例的 `CNG_RNG_SEED`、4ch 的 `MCAB_SAMPLE_CNG_RNG_SEED`）；`aec_reset()` 之外，整合者的 reset 還要同時清 NR 狀態、合成 OLA 與暫存增益，並把 `rng` 設回種子。
 - **`aec_set_preset()` 對這條鏈有效**：單聲道鏈的 `G_res` 來自 `Aec` 自己的
   post 區塊，所以強度旋鈕直接用 `aec_set_preset()`（[§7.1](c_user_manual_zh_TW_03_preset.md#71-執行期切換-presetaec_set_preset)）；四麥克風線性 AEC + BF 之後的
-  `G_res` 來自應用在 4ch 單元之後自己建立的 `AecRes`，才需要對它呼叫 `aec_res_set_preset()`（§8.5）。
+  `G_res` 來自應用在 4ch mcab flow 之後自己建立的 `AecRes`，才需要對它呼叫 `aec_res_set_preset()`（§8.5）。
 - 下游若另有噪音抑制或 CNG，不要在 `aec_cng_fill` 之外再疊一層（[§6.2](c_user_manual_zh_TW_02_config.md#62-模組開關全部只接受-0-或-1)）。
 
 測試：單聲道鏈的行為由 `Audio_ALG` 的 `pipelines/mono_aec_nr_res` 測試涵蓋；本函式庫端的

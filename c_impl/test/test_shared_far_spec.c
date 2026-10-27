@@ -15,8 +15,9 @@
  *      owner is destroyed after the reset and the instance keeps processing.
  *   4. aec_far_fft_real_compute_count() reflects "did this instance run its own far FFT this hop": it increments once per
  *      hop on an aec_process_context() instance and stays flat on an aec_process_context_shared_far_from()-only instance. A
- *      multi-lane caller (4aec_nr_res.c) uses it to prove its total per-hop far-FFT count dropped after lanes 1-3 share
- *      lane 0's spectrum.
+ *      multi-lane caller (the mcab flow layer, Audio_ALG pipelines/4ch_aec_bf_nr_res/mcab.c) sums it over its four lanes
+ *      (mcab_far_fft_real_compute_count()); the total rises by one per hop, not four, once lanes 1-3 share lane 0's
+ *      spectrum (a hop that mixes warm and soft realignments computes on all four lanes).
  *   5. The hop counters (frame_count, shadow_frame_count) saturate at LONG_MAX, and a shadow hop count past INT_MAX still
  *      reads as past the shadow warm-up gate where the detectors narrow it to int.
  *

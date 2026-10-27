@@ -348,10 +348,11 @@ static void test_res_context_wola_identity(void) {
 
 /* ── (e2) spatial_linear_context: skipping the unused per-lane G_res leaves every OTHER context field
  * byte-identical, every grid, shadow on/off ────
- * A multi-channel wrapper (e.g. pipelines/4ch_aec_bf_nr_res/4aec_nr_res.c) sets this to stop computing a per-lane
- * suppression gain that only a downstream fused stage reads, while suppression_gain_update_dominant_nearend() still
- * runs every hop, so the next hop's ERLE onset decision, and therefore r2, are unaffected. The DominantNearend state
- * machine itself is tested in test_suppression_gain_dne_prefix_matches_get_gain(). */
+ * A multi-channel flow layer (e.g. Audio_ALG pipelines/4ch_aec_bf_nr_res/mcab.c, through mcab_apply_lane_contract()
+ * with enable_post = 1) sets level 1 (AEC_CONTEXT_NO_GAIN) to stop computing a per-lane suppression gain that only a
+ * downstream fused stage reads, while suppression_gain_update_dominant_nearend() still runs every hop, so the next
+ * hop's ERLE onset decision, and therefore r2, are unaffected. The DominantNearend state machine itself is tested in
+ * test_suppression_gain_dne_prefix_matches_get_gain(). */
 static void test_spatial_linear_context_matches_baseline(void) {
     /* 200, not 80: at the default 16k/256 grid DominantNearend does not reach its ACTIVE hold state within 80 hops on this
      * synthetic signal. saw_dominant_nearend below asserts that dne_nearend_state == 1 is reached at least once, so a run

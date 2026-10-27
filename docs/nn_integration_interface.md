@@ -161,7 +161,7 @@ Each is a pure function on the shared grid; the network replaces the DSP functio
 
 ## Why this is safe for a DSP-first release
 - The interface is already present (`return_res_context`, `AecResContext`, `denoise_spectrum`, `run_res`)
-  and exercised by `Audio_ALG/pipelines/aec_nr_pipeline.py`. Shipping the DSP stages does not commit to any
+  and exercised by `Audio_ALG/pipelines/mono_aec_nr_res/pipeline.py`. Shipping the DSP stages does not commit to any
   model; it guarantees the seam exists so an NN arc can start without re-architecting the front end.
 - Training-data generation is free: the DSP stages produce `(input features = AecResContext, target = clean
   near-end)` pairs on the 800-case corpus and any field recording, at the exact grid the model will run on.

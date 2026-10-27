@@ -53,10 +53,7 @@ pre code{background:none;padding:0}
 
 <h3>8.3 輸入電平 / gain</h3>
 <p><b>AEC 的 <code>AecConfig</code> 沒有任何 gain 欄位</b>。輸入電平調整屬於 AEC <b>之前</b>的前級,由整合端負責:</p>
-<div class="tblwrap"><table>
-<tr><th>模組</th><th>位置</th><th>特性</th></tr>
-<tr><td><code>FixGain</code></td><td><code>Audio_ALG/pipelines/third_party/gain/fix_gain.h</code></td><td>多聲道、per-channel gain + 選配 clip、<b>沒有 retune 路徑</b>(改值要重建 instance)</td></tr>
-</table></div>
+<p>Audio_ALG 沒有現成的 gain 模組：整合端自行在餵進 AEC 之前乘上固定增益，需要時自己加 clip。</p>
 <div class="warn">電平會直接改變 AEC 行為:<code>saturation_threshold</code>(預設 0.95)判定 clipping、<code>saturation_softclip_ref</code>(預設 1)會對參考訊號做 soft-clip 以貼近實際被 clip 的喇叭輸出。<b>把輸入 gain 調到讓 ref 常態接近滿刻度,會讓線性模型失準、ERLE 下降。</b>詳見 <a href="../../../audiolib/common/docs/html/audio_common_c_api.html">audiolib API</a>。</div>
 
 <h3>8.4 其餘欄位分組速查</h3>

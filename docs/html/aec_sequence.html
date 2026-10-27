@@ -153,7 +153,7 @@ pre code{background:none;padding:0}
  | g = min(g_nr, g_res);spec = E * g;aec_cng_fill(...)
  |- aec_res_set_preset(res, preset, ramp_ms) ------------------------------------------------------------------&gt;| hop 之間
  |- aec_res_reset(res) ----------------------------------------------------------------------------------------&gt;| 串流邊界;保留地板目標</pre>
-<p class="small">Audio_ALG 的 4ch 單元(<code>AudioPipeline4Ch</code>)只含 delay 對齊、4 條 lane、SRP-PHAT、BF 與 fuse(<code>g_res_ctx = NULL</code>),<b>不含 RES</b>;RES 由應用在單元之後用 <code>AecRes</code> 自己建立並每 hop 呼叫(<code>se_res_stage_gain()</code>)。上圖是直接驅動各 lane 的寫法;單元加應用的完整呼叫序列(單元／AecRes／NR／ISTFT 四條生命線)見 <a href="aec_res.html">aec_res</a> §2.3,單元的時序見 <a href="../../../Audio_ALG/docs/html/pipeline_4ch.html">pipeline_4ch</a>。</p>
+<p class="small">Audio_ALG 的 4ch 流程層 <code>mcab</code> 只管共用 delay、四條由應用注入的 <code>Aec</code> lane 與 <code>mcab_fuse()</code>(<code>g_res_ctx = NULL</code>),<b>不含 RES</b>,也不含波束成形;RES 由應用在 mcab 之後用 <code>AecRes</code> 自己建立、每 hop 在 fuse 之後呼叫(<code>aec_res_process()</code>,輸入由 <code>mcab_sample_res_input()</code> 組出)。上圖是直接驅動各 lane 的寫法;mcab 加應用的完整呼叫序列(mcab／AecRes／NR／ISTFT 四條生命線)見 <a href="aec_res.html">aec_res</a> §2.3,流程的時序見 <a href="../../../Audio_ALG/docs/html/pipeline_4ch.html">pipeline_4ch</a>。</p>
 
 <h2>7. 泳道圖:啟動期與延遲(橫軸 hop)</h2>
 <p>以 16 kHz／256(hop 128 = 8 ms)為例;其他格點把 hop 換成 256／512 即可。</p>

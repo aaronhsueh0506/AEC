@@ -210,7 +210,7 @@
 
 ### 1.3 `aec_res.c`　aec_res.c（獨立 RES 增益模組，供 4ch 後波束 lane 使用）
 
-依據：本檔是 `SuppressionGain` 的獨立包裝，供 `Audio_ALG` 的 4ch 線性 AEC + BF 之後的 RES 使用；範圍內（`AEC/python`）沒有對應的 Python 類別。Python 孿生在 `Audio_ALG/pipelines/4ch_aec_bf_nr_res/pipeline.py` 的 `PostBeamResidualSuppressor`（範圍外，不在本表驗證；落差見 S-26）。`aec_cng_fill` 的孿生是 `Audio_ALG/pipelines/cng_aec3.py`（範圍外）。
+依據：本檔是 `SuppressionGain` 的獨立包裝，供 `Audio_ALG` 的 4ch 線性 AEC + BF 之後的 RES 使用；範圍內（`AEC/python`）沒有對應的 Python 類別。Python 孿生在 `Audio_ALG/pipelines/4ch_aec_bf_nr_res/pipeline.py` 的 `PostBeamResidualSuppressor`（範圍外，不在本表驗證；落差見 S-26）。`aec_cng_fill` 的孿生是 `Audio_ALG/pipelines/common/cng_aec3.py`（範圍外）。
 
 | C 檔:函式 | Python 檔:符號 | 關係 | 已知落差 | 對拍工具／測試 |
 |---|---|---|---| --- |
@@ -225,7 +225,7 @@
 | `src/aec_res.c:aec_res_process` | — | C-only（範圍內無 Python 對應；內部呼叫 `suppression_gain_get_gain`） | — | `ctest:test_aec_res.c` |
 | `src/aec_res.c:aec_res_set_preset` | — | C-only（範圍內無 Python 對應） | S-26；D-04 | `ctest:test_aec_res.c` |
 | `src/aec_res.c:aec_res_split_floor` | — | C-only（範圍內無 Python 對應） | — | `ctest:test_aec_res.c` |
-| `src/aec_res.c:aec_cng_fill` | `modules/orchestrator.py:AEC._post_add_comfort_noise#_aec3_cng_seed` | partial（與 `_aec3_post` 內的 CNG 注入同一組 LCG 與 sin 表；孿生另在 pipelines/cng_aec3.py） | — | `ctest:test_aec_res.c` |
+| `src/aec_res.c:aec_cng_fill` | `modules/orchestrator.py:AEC._post_add_comfort_noise#_aec3_cng_seed` | partial（與 `_aec3_post` 內的 CNG 注入同一組 LCG 與 sin 表；孿生另在 Audio_ALG/pipelines/common/cng_aec3.py） | — | `ctest:test_aec_res.c` |
 
 ### 1.4 `aec_debug.c`　aec_debug.c（除錯記錄與逐 hop trace）
 

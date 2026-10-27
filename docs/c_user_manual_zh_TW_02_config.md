@@ -185,7 +185,7 @@ make PROFILE=1 EXTRA_CFLAGS='-DAEC_NOW_US=board_timer_us -include my_timer.h'
 階段都讀 0，只剩對一個沒人回讀的結構做幾次純量寫入。
 
 包裝這個函式庫的上層元件各自有同名慣例的覆寫點（例如 Audio_ALG 的 4 聲道
-線性 AEC + BF 單元用 `FOUR_AEC_NR_RES_NOW_US`），刻意不共用：一個元件的
+mcab flow 用 `MCAB_NOW_US`），刻意不共用：一個元件的
 時鐘屬於該元件自己的建置契約。
 
 ### 6.6c Live observer（實驗性）

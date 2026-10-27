@@ -68,13 +68,13 @@
 
 只要自己用 `aec_process()` 取得時域輸出，就只需要 `aec.h`。另有一個 header 屬於
 **對外公開、範圍較窄的介面**，在自己組合頻域後處理鏈時需要（單聲道整鏈；以及直接驅動多通道核心、
-在 beamformer 之後自備 `AecRes` 的呼叫端——Audio_ALG 的 4ch 單元不含 RES，由應用在單元之後自己建立，見 [§8.5](c_user_manual_zh_TW_04_seam_troubleshooting.md#85-獨立的-res-級aec_resh)）：
+在 beamformer 之後自備 `AecRes` 的呼叫端——Audio_ALG 的 4ch mcab flow 不含 RES，由應用在 mcab 之後自己建立，見 [§8.5](c_user_manual_zh_TW_04_seam_troubleshooting.md#85-獨立的-res-級aec_resh)）：
 
 | Header | 何時需要 |
 |---|---|
 | `aec_res.h` | `aec_cng_fill()` 舒適噪音填補（單聲道、多通道兩種串接都用）；以及對 beamformer 之後的融合頻譜算 RES 增益的 `AecRes`（[§8.5](c_user_manual_zh_TW_04_seam_troubleshooting.md#85-獨立的-res-級aec_resh)、[§8.6](c_user_manual_zh_TW_04_seam_troubleshooting.md#86-線性對齊-contextaec_get_linear_context)） |
 
-`suppression_gain.h` 與 `aec_balanced_config.h` 是內部 header。Audio_ALG 的範例與多通道單元
+`suppression_gain.h` 與 `aec_balanced_config.h` 是內部 header。Audio_ALG 的範例與多通道 flow（mcab）
 只 include `aec.h` 與 `aec_res.h`，不直接 include 這兩個。
 
 `c_impl/include/` 底下其餘 27 個 header（`aec_post.h`、`pbfdkf.h`、`delay_aec.h`、`suppression_gain.h` 等）
@@ -142,7 +142,7 @@
 
 > 8 kHz 是 **legacy 格點**：本函式庫與 Audio_ALG 的 mono 範例支援它
 > （既有 8 kHz 測試路徑仍在用），但它不是產品正式格點，Audio_ALG 的
-> 4 聲道線性 AEC + BF 單元也不支援（該 API 只保證 16k/256、16k/512、48k/1024
+> 4 聲道 mcab flow 也不支援（`mcab_get_mem_requirements()`／`mcab_init()` 只接受 16k/256、16k/512、48k/1024
 > 三個產品格點）。`AecSignalGrid.is_legacy` 會為它、且只為它設為 1。
 
 ### 硬性限制

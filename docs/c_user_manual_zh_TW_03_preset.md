@@ -97,8 +97,8 @@ balanced**；這是 setter，有呼叫端可以回報，所以**直接拒絕**�
 （目標存在 config、進度存在 state，這是刻意分開的）。
 
 **底層 primitive**。真正做事的是抑制器自己的入口。四麥克風產品共用的那個 post 級
-抑制器是一個 `AecRes`（沒有任何 `Aec` 擁有它；Audio_ALG 的 4ch 單元也不含它，由應用在
-單元之後自己 `aec_res_init()` 並持有）；對它的入口是
+抑制器是一個 `AecRes`（沒有任何 `Aec` 擁有它；Audio_ALG 的 4ch mcab flow 也不含它，由應用在
+mcab 之後自己 `aec_res_init()` 並持有）；對它的入口是
 `aec_res_set_preset()`（[§8.5](c_user_manual_zh_TW_04_seam_troubleshooting.md#85-獨立的-res-級aec_resh)），語意與 `aec_set_preset()` 相同。`AecRes` 內部包的
 是 `SuppressionGain`，其底層函式為（內部 header，整合端不需要直接呼叫）：
 
@@ -130,7 +130,7 @@ preset 查表函式有三個：`aec_preset_floor_db()`、`aec_preset_dt_floor_db
 根本不會走到 `suppression_gain_get_gain()`，所以對 lane 呼叫 `aec_set_preset()`
 **依建構方式即為無效操作**——塑形輸出的 gain 來自該產品自己那一個共用的 post 級
 抑制器。請對那個 `AecRes` 呼叫 `aec_res_set_preset(res, preset, ramp_ms)`（[§8.5](c_user_manual_zh_TW_04_seam_troubleshooting.md#85-獨立的-res-級aec_resh)）——
-`res` 是應用在單元之後自己建立的那一個——它針對的就是那個共用的 post 級抑制器。
+`res` 是應用在 mcab flow 之後自己建立的那一個——它針對的就是那個共用的 post 級抑制器。
 
 **A/B 量測時該預期什麼**（先讀這段再下結論）：far-active 地板只在
 **far-active 且非 double-talk** 的 hop 上生效。double-talk 期間套用的是 DT 地板
