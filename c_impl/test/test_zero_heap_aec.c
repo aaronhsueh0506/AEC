@@ -24,7 +24,7 @@ static float lcg_sample(void) {
     return ((float)(int)(lcg_state >> 9) / 4194304.0f - 1.0f) * 0.25f;
 }
 
-/* The standalone RES stage over the same lifecycle: init, hops, reset, preset
+/* The standalone RES stage over the same lifecycle: init, hops, reset, level
  * change, comfort-noise fill. Inputs are fixed buffers owned by the caller. */
 static int run_res_cycle(void* mem, size_t bytes, const AecConfig* cfg) {
     static Complex spec[1024];
@@ -47,7 +47,7 @@ static int run_res_cycle(void* mem, size_t bytes, const AecConfig* cfg) {
         const float* g;
         if (h == HOPS_PER_PHASE) {
             aec_res_reset(res);
-            if (aec_res_set_preset(res, AEC_PRESET_AGGRESSIVE, 50.0f) != 0) return -1;
+            if (aec_res_set_level(res, AEC_LEVEL_AGGRESSIVE, 50.0f) != 0) return -1;
         }
         g = aec_res_process(res, &in);
         if (!g) return -1;
@@ -73,7 +73,7 @@ static int run_phase(Aec* aec, int hop, int hops) {
 
 int main(void) {
     AecConfig cfg;
-    aec_config_from_preset(&cfg, AEC_PRESET_BALANCED, 16000);
+    aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, 16000);
     cfg.enable_cng = 1;
 
     size_t need = aec_get_mem_size(&cfg);

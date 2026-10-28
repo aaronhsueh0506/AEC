@@ -51,7 +51,7 @@ static void section_aec_level(void) {
     int hop, i;
     float *mic, *ref, *out;
 
-    aec_config_from_preset(&cfg, AEC_PRESET_BALANCED, 16000);
+    aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, 16000);
     CHECK(aec_create(&a, &cfg) == 0, "aec_create succeeds");
     hop = aec_hop_size(&a);
     mic = (float*)calloc((size_t)hop, sizeof(float));

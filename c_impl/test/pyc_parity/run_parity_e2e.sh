@@ -68,7 +68,7 @@ done < "$PIN"
 if [ "$pin_bad" -ne 0 ]; then echo "FAIL: pinned input check failed"; exit 1; fi
 
 # ---- 2/3. rows --------------------------------------------------------------------------------
-# id | sr | preset | extra flags (given to BOTH generator and checker) | expected
+# id | sr | level | extra flags (given to BOTH generator and checker) | expected
 ROWS="e2e_16k_balanced|16000|balanced||GREEN
 e2e_16k_balanced_nores|16000|balanced|--no-res|GREEN
 e2e_16k_balanced_observer|16000|balanced|--live-observer|GREEN
@@ -79,13 +79,13 @@ echo
 printf '%-26s %6s %9s %12s %12s %4s  %s\n' row sr tol linear_max out_max rc status
 fail=0
 JSON_ROWS=""
-while IFS='|' read -r id sr preset flags expect; do
+while IFS='|' read -r id sr level flags expect; do
     g=$WORK/golden_$id.bin
     log=$WORK/$id.log
-    if ! "$PYTHON" "$GEN" "$g" "$preset" --sr "$sr" $flags > "$log.gen" 2>&1; then
+    if ! "$PYTHON" "$GEN" "$g" "$level" --sr "$sr" $flags > "$log.gen" 2>&1; then
         echo "FAIL(setup): golden generation failed for $id (see $log.gen)"; tail -5 "$log.gen" >&2; fail=1; continue
     fi
-    "$CHECKER" "$g" "$preset" $flags > "$log" 2>&1; rc=$?
+    "$CHECKER" "$g" "$level" $flags > "$log" 2>&1; rc=$?
     tol=$(sed -n 's/.*(tol=\([^)]*\)).*/\1/p' "$log" | head -1)
     lin=$(sed -n 's/^  raw_output(linear) mism=[0-9]* (max=\([^ ]*\) .*/\1/p' "$log" | head -1)
     outm=$(sed -n 's/^  >>> out\[hop\] mism=[0-9]* (max=\([^ ]*\) .*/\1/p' "$log" | head -1)
@@ -98,7 +98,7 @@ while IFS='|' read -r id sr preset flags expect; do
     esac
     printf '%-26s %6s %9s %12s %12s %4s  %s\n' "$id" "$sr" "${tol:--}" "${lin:--}" "${outm:--}" "$rc" "$status"
     JSON_ROWS="${JSON_ROWS}${JSON_ROWS:+,}
-    {\"id\":\"$id\",\"sr\":$sr,\"preset\":\"$preset\",\"flags\":\"$flags\",\"tol\":\"${tol:-}\",\"linear_max\":\"${lin:-}\",\"out_max\":\"${outm:-}\",\"checker_rc\":$rc,\"status\":\"$status\"}"
+    {\"id\":\"$id\",\"sr\":$sr,\"preset\":\"$level\",\"flags\":\"$flags\",\"tol\":\"${tol:-}\",\"linear_max\":\"${lin:-}\",\"out_max\":\"${outm:-}\",\"checker_rc\":$rc,\"status\":\"$status\"}"
 done <<EOF
 $ROWS
 EOF

@@ -84,11 +84,11 @@ work="$(mktemp -d)"                 # scratch dir for the two renders; delete it
 cd c_impl && make clean && make   # BEFORE editing
 bin_before="$(make -s print-bin-dir)"
 mkdir -p "$work/cbe_before" "$work/cbe_after"
-for f in <stems>; do "$bin_before/aec_wav" "wav/${f}_mic.wav" "wav/${f}_lpb.wav" "$work/cbe_before/${f}.wav" --preset balanced --cng; done
+for f in <stems>; do "$bin_before/aec_wav" "wav/${f}_mic.wav" "wav/${f}_lpb.wav" "$work/cbe_before/${f}.wav" --level balanced --cng; done
 # ... make edits ...
 cd c_impl && make clean && make   # AFTER editing
 bin_after="$(make -s print-bin-dir)"
-for f in <stems>; do "$bin_after/aec_wav" "wav/${f}_mic.wav" "wav/${f}_lpb.wav" "$work/cbe_after/${f}.wav" --preset balanced --cng; done
+for f in <stems>; do "$bin_after/aec_wav" "wav/${f}_mic.wav" "wav/${f}_lpb.wav" "$work/cbe_after/${f}.wav" --level balanced --cng; done
 for f in "$work"/cbe_after/*.wav; do \
   cmp -s "$f" "$work/cbe_before/$(basename "$f")" \
     && echo "MATCH $(basename "$f")" || echo "DIFFER $(basename "$f")"; done
@@ -125,7 +125,7 @@ make                  # debug: `make debug` (adds -g -DAEC_DEBUG)
 # `make print-bin-dir` (same flags) resolves the exact path, or use
 # `make publish` for a stable dist/<backend>/current/ path:
 bin="$(make -s print-bin-dir)"
-"$bin/aec_wav" mic.wav ref.wav out.wav --preset balanced --cng
+"$bin/aec_wav" mic.wav ref.wav out.wav --level balanced --cng
 "$bin/aec_wav" mic.wav ref.wav out.wav --debug-trace aec_trace.csv
 ```
 

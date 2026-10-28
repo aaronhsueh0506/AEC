@@ -46,7 +46,7 @@ int main(int argc, char** argv) {
     int n = n_mic < n_ref ? n_mic : n_ref;
 
     AecConfig cfg;
-    aec_config_from_preset(&cfg, AEC_PRESET_BALANCED, sr);
+    aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, sr);
 
     /* Dynamic path */
     Aec aec_dyn;

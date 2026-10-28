@@ -18,7 +18,7 @@ int main(void) {
     for (int highpass = 0; highpass < 2; ++highpass)
     for (int delay = 0; delay < 3; ++delay) {
         AecConfig cfg;
-        aec_config_from_preset(&cfg, AEC_PRESET_BALANCED, rates[g]);
+        aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, rates[g]);
         cfg.fft_size = ffts[g];
         cfg.enable_shadow = shadow;
         cfg.live_observer_enabled = observer;

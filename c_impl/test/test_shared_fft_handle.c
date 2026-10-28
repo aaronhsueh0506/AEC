@@ -55,7 +55,7 @@ static void check_shared_identity(const Aec* a, int enable_shadow, const char* l
  * Alignment") x shadow on/off. */
 static void test_shared_identity_heap(int sample_rate, int fft_size, int enable_shadow) {
     AecConfig cfg;
-    aec_config_from_preset(&cfg, AEC_PRESET_BALANCED, sample_rate);
+    aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, sample_rate);
     if (fft_size > 0) cfg.fft_size = fft_size;
     cfg.enable_shadow = enable_shadow;
 
@@ -95,7 +95,7 @@ static void test_shared_identity_heap(int sample_rate, int fft_size, int enable_
  * the heap-arena construction path only. */
 static void test_shared_identity_static(int sample_rate, int fft_size, int enable_shadow) {
     AecConfig cfg;
-    aec_config_from_preset(&cfg, AEC_PRESET_BALANCED, sample_rate);
+    aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, sample_rate);
     if (fft_size > 0) cfg.fft_size = fft_size;
     cfg.enable_shadow = enable_shadow;
 

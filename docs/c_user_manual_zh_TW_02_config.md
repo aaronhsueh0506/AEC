@@ -1,7 +1,7 @@
-> [索引](c_user_manual_zh_TW.md) · 上一部分：[c_user_manual_zh_TW_01_lifecycle.md](c_user_manual_zh_TW_01_lifecycle.md) · 下一部分：[c_user_manual_zh_TW_03_preset.md](c_user_manual_zh_TW_03_preset.md) <!-- split-nav -->
+> [索引](c_user_manual_zh_TW.md) · 上一部分：[c_user_manual_zh_TW_01_lifecycle.md](c_user_manual_zh_TW_01_lifecycle.md) · 下一部分：[c_user_manual_zh_TW_03_level.md](c_user_manual_zh_TW_03_level.md) <!-- split-nav -->
 ## 6. `AecConfig` 完整參考
 
-**永遠從 `aec_config_from_preset()`（或 `aec_config_defaults()`）開始**，再覆寫少數必要
+**永遠從 `aec_config_from_level()`（或 `aec_config_defaults()`）開始**，再覆寫少數必要
 欄位。這兩個函式會先 `memset` 整個結構，所以未列出的欄位都會被歸零；自己手動填一個
 未初始化的 `AecConfig` 幾乎一定會被驗證擋下。取樣率不是 8000／16000／48000 時（含 0 與負值），
 兩個函式回傳的 `fft_size` 與 `filter_length` 都是 `0`，`aec_get_mem_size()` 回傳 0、`aec_init()` 回傳 NULL、
@@ -9,15 +9,15 @@
 
 ```c
 AecConfig cfg;
-aec_config_from_preset(&cfg, AEC_PRESET_BALANCED, 16000);
+aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, 16000);
 cfg.enable_cng = 0;          /* 只覆寫你真的要改的 */
 ```
 
-`aec_config_defaults()` 給的就是 balanced 的值；`aec_config_from_preset()` 只在此之上
-改 [§7](c_user_manual_zh_TW_03_preset.md#7-preset-選擇) 表列的三個 floor 欄位（`min_gain_floor_far_active_db`、`min_gain_floor_dt_db`、`min_gain_split_floor_enabled`）。以下所有預設值與範圍都直接取自程式碼。
+`aec_config_defaults()` 給的就是 balanced 的值；`aec_config_from_level()` 只在此之上
+改 [§7](c_user_manual_zh_TW_03_level.md#7-level-選擇) 表列的三個 floor 欄位（`min_gain_floor_far_active_db`、`min_gain_floor_dt_db`、`min_gain_split_floor_enabled`）。以下所有預設值與範圍都直接取自程式碼。
 
 **參數分級**：建議對外開放的只有 `sample_rate`、`fft_size`、`filter_length`、`delay_mode`、
-`fixed_delay_samples`、`delay_num_filters`、`enable_res`、`enable_cng` 與 preset（經由
+`fixed_delay_samples`、`delay_num_filters`、`enable_res`、`enable_cng` 與 level（經由
 `min_gain_floor_far_active_db`／`min_gain_floor_dt_db`／`min_gain_split_floor_enabled` 三個欄位）；
 進階外部為 `enable_highpass`、`highpass_cutoff_hz`、`enable_shadow`、`delay_est_period_s`；
 `return_res_context`、`spatial_linear_context` 是串鏈整合者專用；`enable_delay_est` 已 deprecated；
@@ -51,8 +51,8 @@ cfg.enable_cng = 0;          /* 只覆寫你真的要改的 */
 
 | 欄位 | 型別 | 預設 | 允許範圍 | 說明／何時調整 |
 |---|---|---:|---|---|
-| `min_gain_floor_far_active_db` | `float` | `-28.0` | -300 – 50 | **mild/balanced preset 唯一的差別**，也是主要的強度旋鈕。遠端在說話時允許的最低增益。**調低**（例如 -38）＝回音壓得更乾淨，但 double-talk 時近端更容易被壓掉；**調高**（例如 -20）＝近端保留較好，回音殘留較多。優先用 preset（[§7](c_user_manual_zh_TW_03_preset.md#7-preset-選擇)）而不是自己填數字。 |
-| `min_gain_floor_dt_db` | `float` | `-20.0` | -300 – 50 | double-talk 期間專用的最低增益，與上一項分開；aggressive preset 把這個欄位也調低到 `-30.0`（mild/balanced 仍共用 `-20.0`），不然 double-talk 觸發時三個 preset 會蓋回同一個值,聽不出強度差。**調高**可在雙方同時說話時多保留近端。需 `dt_aware_res_floor_enabled = 1` 才生效。 |
+| `min_gain_floor_far_active_db` | `float` | `-28.0` | -300 – 50 | **mild/balanced level 唯一的差別**，也是主要的強度旋鈕。遠端在說話時允許的最低增益。**調低**（例如 -38）＝回音壓得更乾淨，但 double-talk 時近端更容易被壓掉；**調高**（例如 -20）＝近端保留較好，回音殘留較多。優先用 level（[§7](c_user_manual_zh_TW_03_level.md#7-level-選擇)）而不是自己填數字。 |
+| `min_gain_floor_dt_db` | `float` | `-20.0` | -300 – 50 | double-talk 期間專用的最低增益，與上一項分開；aggressive level 把這個欄位也調低到 `-30.0`（mild/balanced 仍共用 `-20.0`），不然 double-talk 觸發時三個 level 會蓋回同一個值,聽不出強度差。**調高**可在雙方同時說話時多保留近端。需 `dt_aware_res_floor_enabled = 1` 才生效。 |
 | `dt_aware_res_floor_enabled` | `int` | `1` | 0 / 1 | 是否啟用上面這個 double-talk 專用下限。 |
 | `dt_aware_recovery_soft` | `int` | `1` | 0 / 1 | 近端最近有聲音時，改用非破壞性的方式做重新對齊，避免把近端語音削掉。 |
 
@@ -193,7 +193,7 @@ mcab flow 用 `MCAB_NOW_US`），刻意不共用：一個元件的
 ### 6.6c Live observer（實驗性）
 
 **預設關閉（`live_observer_enabled = 0`），關閉時輸出逐位元不變。未進任何
-出貨 preset，不要在產品路徑上開啟。**
+出貨 level，不要在產品路徑上開啟。**
 
 機制：第三個獨立 PBFDAF 實例（NLMS，跟 `shadow_filter` 同一個 struct），讀
 遠端 ring 比主濾波器的延遲補償讀取早 `live_observer_shift_ms`。每 hop 把
@@ -213,7 +213,7 @@ delay 或任一濾波器的視窗／taps。
 | `live_observer_corrob_margin_db` | `float` | `0.0` | 必須是有限值 | corroboration 容忍度（dB）；觀察器誤差 EMA 超過主濾波器誤差 EMA 這個容忍倍率就不信任。 |
 
 記憶體增量（`aec_get_mem_size()` 實測，delay_num_filters=5，balanced
-preset）：8 kHz/256 +29,472 B、16 kHz/256（預設）+38,768 B、16 kHz/512
+level）：8 kHz/256 +29,472 B、16 kHz/256（預設）+38,768 B、16 kHz/512
 +58,656 B、48 kHz/1024 +141,648 B。算量增量用 `bench_rtf --live-observer`
 在目標格點量測（`make bench` 建置）；固定開銷來自觀察器每 hop 3 個與分接數
 無關的 FFT。
@@ -242,4 +242,4 @@ int aec_get_mem_breakdown(const AecConfig* cfg, AecMemBreakdown* out);
 
 ---
 
-> [索引](c_user_manual_zh_TW.md) · 上一部分：[c_user_manual_zh_TW_01_lifecycle.md](c_user_manual_zh_TW_01_lifecycle.md) · 下一部分：[c_user_manual_zh_TW_03_preset.md](c_user_manual_zh_TW_03_preset.md) <!-- split-nav -->
+> [索引](c_user_manual_zh_TW.md) · 上一部分：[c_user_manual_zh_TW_01_lifecycle.md](c_user_manual_zh_TW_01_lifecycle.md) · 下一部分：[c_user_manual_zh_TW_03_level.md](c_user_manual_zh_TW_03_level.md) <!-- split-nav -->

@@ -64,6 +64,8 @@ tail-length-matched comparison.
 
 ### Presets — a strength axis, four operating points
 
+The Python API and CLIs call this axis the *preset*; the C API and C CLIs call it the *level* (`AecLevel`, `AEC_LEVEL_*`, `--level`): **C level == Python preset**, with the same names and the same numbers 0..3 (default `1` = balanced). The old C spellings `AecPreset` / `AEC_PRESET_*` stay in `aec.h`, and `--preset` stays an alias of `--level` in the C CLIs.
+
 `mild` / `balanced` differ **only** in `min_gain_floor_far_active_db`, the
 far-active residual-gain floor that trades echo suppression against near-end
 preservation. `aggressive` also deepens `min_gain_floor_dt_db` (the floor
@@ -75,12 +77,12 @@ expect to hear it. `no_floor` is a fourth tier that removes the floor
 mechanism entirely (`min_gain_split_floor_enabled=False`) instead of
 deepening it further:
 
-| Preset | far-active floor | dt floor | character |
+| Preset (C: level) | far-active floor | dt floor | character |
 |---|---|---|---|
 | `mild`       | −20 dB | −20 dB | near-priority — more near-end kept, more echo leak |
 | **`balanced` ★** | −28 dB | −20 dB | **production** |
 | `aggressive`   | −38 dB | −30 dB | echo-priority — deeper suppression, more near-end loss; dev-pool (47-case) DT_static echo +0.17/+0.14 MOS vs a shared-dt-floor aggressive, at a bounded near-end cost |
-| `no_floor`   | inert (gate off) | inert (gate off) | deepest point on the axis — purely audibility/R²-derived gain; most near-end loss. `AecPreset.NO_FLOOR` / `AEC_PRESET_NO_FLOOR` (C enum value `3`); the dB columns are never read once `min_gain_split_floor_enabled` is `False` |
+| `no_floor`   | inert (gate off) | inert (gate off) | deepest point on the axis — purely audibility/R²-derived gain; most near-end loss. `AecPreset.NO_FLOOR` / `AEC_LEVEL_NO_FLOOR` (C enum value `3`); the dB columns are never read once `min_gain_split_floor_enabled` is `False` |
 
 `mild` / `aggressive` / `no_floor` are deliberate Pareto operating points on the
 single-channel DT-deg-vs-echo trade-off; all share the same `_aec3_post` chain
@@ -88,20 +90,20 @@ and base tuning.
 
 #### Retargeting a running instance
 
-The preset can be changed on a live instance without rebuilding it — the
+The preset (C: level) can be changed on a live instance without rebuilding it — the
 filter, the delay lock and every smoothing history carry on. `no_floor`
 changes a boolean (`min_gain_split_floor_enabled`), which the ramp below
 cannot represent, so it STEPS immediately instead of ramping, as the DT floor
-does. Both C (`aec_set_preset()` / `aec_res_set_preset()`) and Python
+does. Both C (`aec_set_level()` / `aec_res_set_level()`) and Python
 (`AEC.set_preset()`) allow switching to or from `no_floor` with no
 accept/reject guard: the gate steps on the same call that writes the
 far-active and dt floors, so a round trip through `no_floor` always lands on
 the target preset's exact values. Construction-time `no_floor`
-(`aec_config_from_preset()` / `AecConfig.from_preset()`) and runtime
+(`aec_config_from_level()` / `AecConfig.from_preset()`) and runtime
 retargeting behave the same in both languages.
 
 ```c
-int aec_set_preset(Aec* a, AecPreset preset, float ramp_ms);   /* aec.h */
+int aec_set_level(Aec* a, AecLevel level, float ramp_ms);   /* aec.h */
 ```
 
 `ramp_ms == 0` applies the far-active floor on the next hop (not an error) and
@@ -109,8 +111,8 @@ lands on exactly the floor a fresh instance would hold; a positive value walks
 there linearly in dB, bounded at 60 s — worth using, since mild ↔ aggressive is
 an 18 dB step into a
 hard clamp. Call between hops, serialised with processing; not thread-safe.
-Returns `0`, or `-1` with nothing written on NULL / out-of-enum preset /
-out-of-range `ramp_ms`. Unlike `aec_config_from_preset()`, which falls back to
+Returns `0`, or `-1` with nothing written on NULL / out-of-enum level /
+out-of-range `ramp_ms`. Unlike `aec_config_from_level()`, which falls back to
 balanced for an unrecognised value, this **refuses** — a setter has a caller to
 tell.
 
@@ -122,20 +124,20 @@ toward, so `ramp_ms` does not apply to it), and
 has no continuous path to ramp along; gates all three floor variants
 together: far-active, far-silent/pure-NE, and DT-lifted) — are internal; a
 caller that owns a post-stage suppressor outside any `Aec` (the four-channel
-product) uses `aec_res_set_preset()` from `aec_res.h`, same semantics.
-`aec_preset_split_floor_enabled(AecPreset, int*)` is the public lookup for
-the gate's value alone, mirroring `aec_preset_floor_db()` /
-`aec_preset_dt_floor_db()`, for a caller that wants the gate without the dB
+product) uses `aec_res_set_level()` from `aec_res.h`, same semantics.
+`aec_level_split_floor_enabled(AecLevel, int*)` is the public lookup for
+the gate's value alone, mirroring `aec_level_floor_db()` /
+`aec_level_dt_floor_db()`, for a caller that wants the gate without the dB
 lookups.
 
-Two things to know before measuring a preset change: lanes built with
+Two things to know before measuring a level change: lanes built with
 `spatial_linear_context` never reach the suppressor's gain path, so retargeting
 them is inert by construction (a 4-channel product retargets the shared
 `AecRes` that the application itself created after the Audio_ALG mcab flow:
-`aec_res_set_preset(res, preset, ramp_ms)`); and the far-active floor only binds on far-active,
+`aec_res_set_level(res, level, ramp_ms)`); and the far-active floor only binds on far-active,
 non-double-talk hops while the same gain also sets the comfort-noise level, so a
 whole-recording average moves less than the dB step suggests. Full contract and
-A/B guidance → [docs/c_user_manual_zh_TW_03_preset.md §7.1](docs/c_user_manual_zh_TW_03_preset.md#71-執行期切換-presetaec_set_preset).
+A/B guidance → [docs/c_user_manual_zh_TW_03_level.md §7.1](docs/c_user_manual_zh_TW_03_level.md#71-執行期切換-levelaec_set_level).
 
 ---
 
@@ -181,12 +183,13 @@ per-region breakdown → [c_impl/STATIC_MEMORY.md](c_impl/STATIC_MEMORY.md).
 
 Both Python (`aec.py`) and C (`c_impl`'s `aec_wav`) use the same algorithm; the
 adjustments below apply to both unless noted. CLI flag examples shown for
-C; equivalent Python flags differ only in syntax (`--mode pbfdkf` etc.).
+C; the Python CLIs have no `--level` and spell the same axis `--preset` (`--level aggressive`
+in C is `--preset aggressive` in Python), and otherwise differ only in syntax (`--mode pbfdkf` etc.).
 
 | Symptom | Diagnosis & adjustment |
 |---|---|
-| **Residual echo too high (FS / NE)** | 1. With `--no-res`, output should be a clean linear-AEC residual. Echo still dominating → ref signal is wrong, mic-ref delay > filter length, or sample rates differ. 2. `--preset aggressive` for stronger RES (cost: more NE compression). 3. For big rooms, increase `AecConfig.filter_length` through the C API before `aec_get_mem_size()`/`aec_init()` and recreate the instance. The value is in samples; there is no `--filter-length` or `--filter-length-ms` CLI flag. |
-| **NE clipped during double-talk** | Lower preset → `--preset mild` (−20 dB floor, near-priority: keeps more near-end at the cost of more echo leak). Don't tweak individual RES knobs — preset values are co-tuned. |
+| **Residual echo too high (FS / NE)** | 1. With `--no-res`, output should be a clean linear-AEC residual. Echo still dominating → ref signal is wrong, mic-ref delay > filter length, or sample rates differ. 2. `--level aggressive` for stronger RES (cost: more NE compression). 3. For big rooms, increase `AecConfig.filter_length` through the C API before `aec_get_mem_size()`/`aec_init()` and recreate the instance. The value is in samples; there is no `--filter-length` or `--filter-length-ms` CLI flag. |
+| **NE clipped during double-talk** | Lower level → `--level mild` (−20 dB floor, near-priority: keeps more near-end at the cost of more echo leak). Don't tweak individual RES knobs — level values are co-tuned. |
 | **Slow startup / first-second echo** | Filter convergence needs ≥ 0.5 s of meaningful far energy. Normal adaptive behavior. Consider muting output during application warm-up (e.g. play a "connecting…" cue). |
 | **Echo spikes when device moves** | Echo path changes → EPC fires → ~200 ms re-convergence with brief leak. Usually self-recovers. For frequent movement, increase filter length. |
 | **Output sounds muffled / pumping in NE-only** | Comfort noise mismatch. CNG is on by default in C (`--no-cng` disables) and with any Python preset (`--cng` / `--no-cng` override); check it is enabled, and do NOT stack a second CNG layer downstream. |
@@ -194,7 +197,7 @@ C; equivalent Python flags differ only in syntax (`--mode pbfdkf` etc.).
 | **Linear-AEC residual sounds wrong (separate filter from RES)** | `"$BIN"/aec_wav mic ref linear_only.wav --no-res` after resolving `BIN="$(make -s print-bin-dir)"` in `c_impl/` (or use the Python `--no-res` equivalent). This isolates filter-side issues from RES-side issues. |
 | **Per-frame state inspection** | C: `--debug-trace trace.csv` (one CSV row per hop: `usable_linear`, `fullband_erle`, `r2_mean`, `gain_mean`, …). Python: `python3 aec.py mic ref out --diag`. |
 | **Detect mic/ref drift or wrong delay** | Run with `--no-delay-est`, supply pre-aligned files, compare output vs the online-delay-est version. Large divergence → drift, or a delay beyond the acquirable ceiling (1216 / 608 / 608 ms at 8 / 16 / 48 kHz — compile-time, not raised by `max_delay_ms`; see the C manual §3). |
-| **Build mismatch between Python and C output** | Verify C built with `-ffp-contract=off` (mandatory) and same preset / `--cng` setting. Output WAV defaults to fp32 PCM in C; `AEC_OUT_FLOAT=0` for 16-bit PCM. |
+| **Build mismatch between Python and C output** | Verify C built with `-ffp-contract=off` (mandatory) and same level (Python: preset) / `--cng` setting. Output WAV defaults to fp32 PCM in C; `AEC_OUT_FLOAT=0` for 16-bit PCM. |
 
 ---
 
@@ -355,8 +358,8 @@ cd c_impl
 make
 BIN="$(make -s print-bin-dir)"
 
-"$BIN"/aec_wav mic.wav ref.wav out.wav                  # BALANCED preset
-"$BIN"/aec_wav mic.wav ref.wav out.wav --preset 2       # 0 mild | 1 balanced | 2 aggressive | 3 no_floor (names also accepted)
+"$BIN"/aec_wav mic.wav ref.wav out.wav                  # BALANCED level
+"$BIN"/aec_wav mic.wav ref.wav out.wav --level 2        # 0 mild | 1 balanced | 2 aggressive | 3 no_floor (names also accepted)
 "$BIN"/aec_wav mic.wav ref.wav out.wav --no-cng         # disable CNG (default on)
 "$BIN"/aec_wav mic.wav ref.wav out.wav --no-res         # skip residual filter
 "$BIN"/aec_wav mic.wav ref.wav out.wav --debug-trace trace.csv  # per-hop CSV trace
@@ -385,7 +388,7 @@ while has_audio:
     out = aec.process(mic_block, ref_block)
     erle = aec.get_erle()
 
-# Retarget the strength axis on the running instance (C twin: aec_set_preset).
+# Retarget the strength axis on the running instance (C twin: aec_set_level).
 # ramp_ms=0 applies next hop; a positive value walks there linearly in dB.
 aec.set_preset(AecPreset.AGGRESSIVE, ramp_ms=100.0)
 ```
@@ -466,7 +469,7 @@ AEC/
 │   ├── c_user_manual_zh_TW.md           # C user manual (index, sections 1-3)
 │   ├── c_user_manual_zh_TW_01_lifecycle.md            # C user manual, sections 4-5 (lifecycle, error semantics)
 │   ├── c_user_manual_zh_TW_02_config.md               # C user manual, section 6 (AecConfig reference)
-│   ├── c_user_manual_zh_TW_03_preset.md               # C user manual, section 7 (presets)
+│   ├── c_user_manual_zh_TW_03_level.md               # C user manual, section 7 (levels)
 │   ├── c_user_manual_zh_TW_04_seam_troubleshooting.md # C user manual, sections 8-9 (integration seams, troubleshooting)
 │   ├── c_user_manual_zh_TW_05_appendix.md             # C user manual, appendix A (aec_wav CLI)
 │   ├── nn_integration_interface.md      # NN residual/NR/joint freq-domain seam

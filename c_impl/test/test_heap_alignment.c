@@ -58,7 +58,7 @@ int main(void) {
     static const int grids[][2] = {{16000, 256}, {16000, 512}, {48000, 1024}};
     for (size_t i = 0; i < sizeof(grids) / sizeof(grids[0]); ++i) {
         AecConfig cfg;
-        aec_config_from_preset(&cfg, AEC_PRESET_BALANCED, grids[i][0]);
+        aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, grids[i][0]);
         cfg.fft_size = grids[i][1];
         Aec a, untouched;
         memset(&a, 0xa5, sizeof(a));

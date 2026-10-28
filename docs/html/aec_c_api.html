@@ -49,7 +49,7 @@ pre code{background:none;padding:0}
 <tr><td>8000</td><td>256</td><td>128</td><td>16 ms</td><td>129</td><td class="dead">LEGACY,非產品 grid</td></tr>
 </table></div>
 <p><b>兩個產品 sample rate(16k／48k),而 16 kHz 是唯一有兩種 hop 可選的。</b></p>
-<div class="warn"><code>fft_size = 0</code>(auto)<b>一律被拒</b>。16 kHz 有兩個合法 grid,library <b>不猜</b>——建立實例前必須 resolve 成明確值。只有 <code>aec_config_defaults()</code>／<code>aec_config_from_preset()</code> 會替你填該 rate 的<b>第一列</b>作為預設。</div>
+<div class="warn"><code>fft_size = 0</code>(auto)<b>一律被拒</b>。16 kHz 有兩個合法 grid,library <b>不猜</b>——建立實例前必須 resolve 成明確值。只有 <code>aec_config_defaults()</code>／<code>aec_config_from_level()</code> 會替你填該 rate 的<b>第一列</b>作為預設。</div>
 <h3>16k 選 hop 128 還是 256</h3>
 <div class="tblwrap"><table>
 <tr><th></th><th>fft 256 / hop 128</th><th>fft 512 / hop 256</th></tr>
@@ -65,7 +65,7 @@ pre code{background:none;padding:0}
 <h2>3. 建立與生命週期</h2>
 <h3>Static pool(板端路徑)</h3>
 <pre>AecConfig cfg;
-aec_config_from_preset(&amp;cfg, AEC_PRESET_BALANCED, 16000);
+aec_config_from_level(&amp;cfg, AEC_LEVEL_BALANCED, 16000);
 cfg.fft_size = 256;                       /* 明確指定,不要留 0 */
 cfg.delay_mode = AEC_DELAY_MATCHED;       /* 三態之一,見 §4 */
 
@@ -145,7 +145,7 @@ aec_destroy(&amp;aec);                        /* 會 free 內部 arena */</pre>
 <h2>6. 搭配 NN model:不需要 DSP 後級時怎麼用</h2>
 <p>線性 AEC 常常只當前級,殘留回音抑制交給 NN(Align-ULCNet 等)。此時<b>不要</b>照預設整條跑完再丟掉後半段——那是白算的。正確做法:</p>
 <pre>AecConfig cfg;
-aec_config_from_preset(&amp;cfg, AEC_PRESET_BALANCED, 16000);
+aec_config_from_level(&amp;cfg, AEC_LEVEL_BALANCED, 16000);
 cfg.fft_size           = 256;
 cfg.enable_res         = 0;   /* 不跑 DSP 殘留抑制器,NN 取代它 */
 cfg.return_res_context = 1;   /* 但 post block 仍跑,把頻域 seam 填好 */
@@ -185,12 +185,12 @@ aec_get_linear_context(aec, &amp;lin);      /* 時域 seam:線性殘差 + 已對
 <h2>9. 執行期控制</h2>
 <div class="tblwrap"><table>
 <tr><th>函式</th><th>語意</th><th>回傳</th></tr>
-<tr><td><code>aec_set_preset(a, preset, ramp_ms)</code></td><td>改 <code>min_gain_floor_far_active_db</code>(受 <code>ramp_ms</code> 控制,線性走到 target)<b>與</b> <code>min_gain_floor_dt_db</code>(aggressive 才跟其他兩個不同;無 ramp,立即套用,跟 <code>ramp_ms</code> 無關)。濾波器／delay state／所有平滑歷史／far-active latch／DominantNearend 計數器<b>全部不動</b>。<code>ramp_ms==0</code> → far-active 地板下一 hop 生效,落點與「一開始就用該 preset 建構」<b>逐位元相同</b>;<code>&gt;0</code> → far-active 地板在 dB 上線性走,且<b>精確落到 target</b>(不是漸近逼近),DT 地板這段時間早已落地</td><td><code>0</code>／<code>-1</code>。<code>-1</code> 時<b>一個 byte 都沒寫</b></td></tr>
+<tr><td><code>aec_set_level(a, level, ramp_ms)</code></td><td>改 <code>min_gain_floor_far_active_db</code>(受 <code>ramp_ms</code> 控制,線性走到 target)<b>與</b> <code>min_gain_floor_dt_db</code>(aggressive 才跟其他兩個不同;無 ramp,立即套用,跟 <code>ramp_ms</code> 無關)。濾波器／delay state／所有平滑歷史／far-active latch／DominantNearend 計數器<b>全部不動</b>。<code>ramp_ms==0</code> → far-active 地板下一 hop 生效,落點與「一開始就用該 level 建構」<b>逐位元相同</b>;<code>&gt;0</code> → far-active 地板在 dB 上線性走,且<b>精確落到 target</b>(不是漸近逼近),DT 地板這段時間早已落地</td><td><code>0</code>／<code>-1</code>。<code>-1</code> 時<b>一個 byte 都沒寫</b></td></tr>
 <tr><td><code>aec_apply_external_realign(a, delta)</code></td><td><b>僅 EXTERNAL_ALIGNED</b>。<code>delta = 新對齊 − 舊對齊</code>。條件符合時<b>平移已學到的 IR</b>,否則做 filter-only reset(保留 synthesis OLA,輸出連續無垂直線)</td><td><code>1</code>=warm transfer／<code>0</code>=filter reset 或 <code>delta==0</code>／<code>-1</code>=NULL 或 mode 不對</td></tr>
 <tr><td><code>aec_reset(a)</code></td><td>回到「全新 instance」狀態。會重啟 WOLA → spectrogram 上會有垂直線。若只是外部對齊改變,<b>請用上一個函式而不是這個</b></td><td><code>void</code>,<b>⚠ 無 NULL 檢查</b></td></tr>
 </table></div>
-<div class="warn"><code>aec_set_preset()</code> 對非法 preset 是<b>拒絕</b>(回 −1),與 <code>aec_config_from_preset()</code> 靜默退回 balanced 的行為<b>相反</b>。<code>ramp_ms</code> 範圍 <code>[0, 60000]</code>,<code>ramp_ms==0</code> <b>不是</b>錯誤。ramp 進行中再呼叫 → 從當前 live 值重新起走。<br>全部必須<b>在 hop 之間</b>呼叫、與 <code>process()</code> 序列化;<b>非 thread-safe</b>。</div>
-<div class="note">若 lane 是用 <code>spatial_linear_context</code> 非 0(<code>1</code> 或 <code>2</code>)建立的(4ch),<code>aec_set_preset()</code> <b>依構造為 inert</b>——該 lane 根本不跑 suppressor 的 gain path。4ch 要改強度請對共用的 post 級抑制器——<a href="aec_res.html"><code>AecRes</code></a>(由應用在 4ch mcab flow 之後自己建立,mcab 不含 RES)——呼叫 <code>aec_res_set_preset()</code>。</div>
+<div class="warn"><code>aec_set_level()</code> 對非法 level 是<b>拒絕</b>(回 −1),與 <code>aec_config_from_level()</code> 靜默退回 balanced 的行為<b>相反</b>。<code>ramp_ms</code> 範圍 <code>[0, 60000]</code>,<code>ramp_ms==0</code> <b>不是</b>錯誤。ramp 進行中再呼叫 → 從當前 live 值重新起走。<br>全部必須<b>在 hop 之間</b>呼叫、與 <code>process()</code> 序列化;<b>非 thread-safe</b>。</div>
+<div class="note">若 lane 是用 <code>spatial_linear_context</code> 非 0(<code>1</code> 或 <code>2</code>)建立的(4ch),<code>aec_set_level()</code> <b>依構造為 inert</b>——該 lane 根本不跑 suppressor 的 gain path。4ch 要改強度請對共用的 post 級抑制器——<a href="aec_res.html"><code>AecRes</code></a>(由應用在 4ch mcab flow 之後自己建立,mcab 不含 RES)——呼叫 <code>aec_res_set_level()</code>。</div>
 
 <h2>10. 狀態查詢與診斷</h2>
 <div class="tblwrap"><table>

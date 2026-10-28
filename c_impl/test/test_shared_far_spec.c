@@ -50,7 +50,7 @@ static int g_pass = 0;
 
 static void context_only_config(AecConfig* cfg, int sample_rate, int fft_size,
                                  int enable_shadow) {
-    aec_config_from_preset(cfg, AEC_PRESET_BALANCED, sample_rate);
+    aec_config_from_level(cfg, AEC_LEVEL_BALANCED, sample_rate);
     cfg->enable_res = 0;
     cfg->return_res_context = 1;
     if (fft_size > 0) cfg->fft_size = fft_size;
@@ -338,7 +338,7 @@ static void test_far_fft_counter_saturation(void) {
  * real increment sites; each field must also return to zero on reset. */
 static void test_hop_counter_saturation(void) {
     AecConfig cfg;
-    aec_config_from_preset(&cfg, AEC_PRESET_BALANCED, 16000);
+    aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, 16000);
     cfg.enable_shadow = 1;
     Aec a;
     if (aec_create(&a, &cfg) != 0) { CHECK(0, "hop counter saturation: create"); return; }
@@ -368,7 +368,7 @@ static void test_shadow_count_past_int_max(void) {
         return;
     }
     AecConfig cfg;
-    aec_config_from_preset(&cfg, AEC_PRESET_BALANCED, 16000);
+    aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, 16000);
     cfg.enable_shadow = 1;
     Aec lo, hi;
     if (aec_create(&lo, &cfg) != 0 || aec_create(&hi, &cfg) != 0) {

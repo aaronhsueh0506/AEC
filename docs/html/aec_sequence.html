@@ -37,7 +37,7 @@ pre code{background:none;padding:0}
 <h2>1. 初始化與關閉</h2>
 <pre> Application                                      Aec (aec.c)                                       audiolib
  |                                                |                                                 |
- | aec_config_from_preset(&amp;cfg, preset, sr)  --  填滿 cfg;preset 超出 enum 時靜默退回 balanced
+ | aec_config_from_level(&amp;cfg, level, sr)  --  填滿 cfg;level 超出 enum 時靜默退回 balanced
  | 只覆寫外部欄位(cfg.fft_size、cfg.delay_mode ...)
  |- aec_get_mem_size(&amp;cfg) ----------------------&gt;|                                                 | 驗證 cfg、aec_derive_dims
  |&lt; bytes (0 = rejected) -------------------------|                                                 |
@@ -112,9 +112,9 @@ pre code{background:none;padding:0}
  |&lt; -1 -------------------------------------------------------| cfg 無效或 malloc 失敗
  |- aec_process(...) ----------------------------------------&gt;|
  |&lt; void -----------------------------------------------------| 沒有錯誤路徑:所有可偵測的錯在建立階段擋下
- |- aec_set_preset(aec, bad_preset | bad_ramp) --------------&gt;|
+ |- aec_set_level(aec, bad_level | bad_ramp) --------------&gt;|
  |&lt; -1 -------------------------------------------------------| NULL / enum 外 / ramp_ms 非有限或不在 [0, 60000];什麼都沒寫
- |- aec_set_preset(spatial_linear_context lane, ...) --------&gt;|
+ |- aec_set_level(spatial_linear_context lane, ...) --------&gt;|
  |&lt; 0 --------------------------------------------------------| 回 0 但依構造無效:該 lane 不走抑制增益路徑
  |- aec_apply_external_realign(aec, d) ----------------------&gt;|
  |&lt; -1 -------------------------------------------------------| NULL 或 delay_mode != EXTERNAL_ALIGNED(d == 0 回 0)
@@ -122,7 +122,7 @@ pre code{background:none;padding:0}
  |&lt; (no-op) --------------------------------------------------| NULL 實例或 NULL 輸出:你的結構不被寫入
  |- aec_reset(NULL) / aec_process(NULL, ...) ----------------&gt;|
  |                                                            | NULL 會 crash(無檢查)</pre>
-<div class="note"><code>aec_set_preset</code> 對 <code>spatial_linear_context</code> lane 的結果依構造無效,但<b>不是</b>回 -1(本機實測回 0):它只寫該 lane 的 cfg 與其 <code>SuppressionGain</code> 目標,而該 lane 從不計算增益。需要改強度時,對那個融合後共用的 <code>AecRes</code> 呼叫 <code>aec_res_set_preset()</code>。</div>
+<div class="note"><code>aec_set_level</code> 對 <code>spatial_linear_context</code> lane 的結果依構造無效,但<b>不是</b>回 -1(本機實測回 0):它只寫該 lane 的 cfg 與其 <code>SuppressionGain</code> 目標,而該 lane 從不計算增益。需要改強度時,對那個融合後共用的 <code>AecRes</code> 呼叫 <code>aec_res_set_level()</code>。</div>
 
 <h2>5. 串流邊界、外部對齊改變、執行期強度</h2>
 <pre> Application                                                  Aec
@@ -130,14 +130,14 @@ pre code{background:none;padding:0}
  | stream A 的最後一個 hop 已處理完
  |- aec_reset(aec) ------------------------------------------&gt;|
  |                                                            | 清延遲估計 / ref ring / 濾波器 / 偵測器 / OLA / CNG 種子;generation +1
- |                                                            | 保留 cfg、記憶體與 aec_set_preset 設的目標
+ |                                                            | 保留 cfg、記憶體與 aec_set_level 設的目標
  |- aec_process(... stream B ...) ---------------------------&gt;|
   ==== EXTERNAL_ALIGNED:呼叫端把 far 的對齊量改了 delta 個樣本 ====
  |- aec_apply_external_realign(aec, delta) ------------------&gt;|
  |                                                            | aec_linear_is_cancelling() 且 |delta| 在 tap 範圍內 -&gt; 平移 IR;否則只重置濾波器
  |&lt; 1 (warm shift) / 0 (filter reset) ------------------------| generation +1;不重啟 OLA,輸出連續
   ==== 使用者轉強度旋鈕(hop 之間) ====
- |- aec_set_preset(aec, AGGRESSIVE, 100.0f) -----------------&gt;|
+ |- aec_set_level(aec, AGGRESSIVE, 100.0f) -----------------&gt;|
  |                                                            | far-active 地板 100 ms 內以 dB 線性走到目標;DT 地板與 split-floor 旗標立即階躍
  |&lt; 0 --------------------------------------------------------| 濾波器與平滑歷史不動</pre>
 
@@ -151,7 +151,7 @@ pre code{background:none;padding:0}
  |- aec_res_process(res, &amp;in) ---------------------------------------------------------------------------------&gt;|
  |&lt; g_res[n_bins] ----------------------------------------------------------------------------------------------| NULL = 輸入不完整
  | g = min(g_nr, g_res);spec = E * g;aec_cng_fill(...)
- |- aec_res_set_preset(res, preset, ramp_ms) ------------------------------------------------------------------&gt;| hop 之間
+ |- aec_res_set_level(res, level, ramp_ms) ------------------------------------------------------------------&gt;| hop 之間
  |- aec_res_reset(res) ----------------------------------------------------------------------------------------&gt;| 串流邊界;保留地板目標</pre>
 <p class="small">Audio_ALG 的 4ch 流程層 <code>mcab</code> 只管共用 delay、四條由應用注入的 <code>Aec</code> lane 與 <code>mcab_fuse()</code>(<code>g_res_ctx = NULL</code>),<b>不含 RES</b>,也不含波束成形;RES 由應用在 mcab 之後用 <code>AecRes</code> 自己建立、每 hop 在 fuse 之後呼叫(<code>aec_res_process()</code>,輸入由 <code>mcab_sample_res_input()</code> 組出)。上圖是直接驅動各 lane 的寫法;mcab 加應用的完整呼叫序列(mcab／AecRes／NR／ISTFT 四條生命線)見 <a href="aec_res.html">aec_res</a> §2.3,流程的時序見 <a href="../../../Audio_ALG/docs/html/pipeline_4ch.html">pipeline_4ch</a>。</p>
 

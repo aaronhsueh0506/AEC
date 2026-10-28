@@ -5,7 +5,7 @@
 #            std-math build = SIMD=0 + -DUSE_STANDARD_MATH (no optimisation-only macros exist in this repo)
 #   Layer 2  shipping build (Makefile default: SIMD=1, fast_math)  vs  the std-math build
 #
-# Grids 8k/256, 16k/256, 16k/512, 48k/1024; presets balanced, aggressive (mild sampled); inputs: the tracked
+# Grids 8k/256, 16k/256, 16k/512, 48k/1024; levels balanced, aggressive (mild sampled); inputs: the tracked
 # aec_record recording (+ 8k/48k resamples) and seeded synthetic echo / double-talk scenes; observer off/on,
 # mic HPF on/off, context seam, plus a regenerate-and-diff check of aec_balanced_config.h.
 #
@@ -19,7 +19,7 @@
 #
 #   (default)       the lean suite: 10 scenes, one per mechanism a planted regression is known to move
 #   --full          every scenario (the full matrix; `make test-full` runs this)
-#   --quick         an older, narrower subset; no aggressive-preset scene and its observer scene misses a +1 hop shift
+#   --quick         an older, narrower subset; no aggressive-level scene and its observer scene misses a +1 hop shift
 #   --only          substring filter over the full matrix (comma separated = any)
 #   --repeat-check  run the whole evaluation twice from fresh run directories and require byte-identical JSON
 #   --write-pins    (maintainers) rewrite test/pyc_parity/inputs.sha256 from the current environment

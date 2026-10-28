@@ -35,12 +35,12 @@ pre code{background:none;padding:0}
 <h1>AEC 參數效果對照 — <code>AecConfig</code></h1>
 <h3>8.1 抑制強度 — mild/balanced 只差一個欄位,aggressive 差兩個</h3>
 <div class="tblwrap"><table>
-<tr><th>Preset</th><th><code>min_gain_floor_far_active_db</code></th><th><code>min_gain_floor_dt_db</code></th><th>效果</th></tr>
-<tr><td><code>AEC_PRESET_MILD</code></td><td>−20.0</td><td>−20.0</td><td>遠端單講時 echo 壓得最淺,近端被誤削的風險最低</td></tr>
-<tr><td><code>AEC_PRESET_BALANCED</code></td><td><b>−28.0</b>(預設)</td><td><b>−20.0</b>(預設)</td><td>—</td></tr>
-<tr><td><code>AEC_PRESET_AGGRESSIVE</code></td><td>−38.0</td><td>−30.0</td><td>echo 壓最深,近端被誤削風險最高;DT 地板也跟著深化,否則 double-talk 觸發時三個 preset 會蓋回同一個 −20.0,聽不出差異</td></tr>
+<tr><th>Level</th><th><code>min_gain_floor_far_active_db</code></th><th><code>min_gain_floor_dt_db</code></th><th>效果</th></tr>
+<tr><td><code>AEC_LEVEL_MILD</code></td><td>−20.0</td><td>−20.0</td><td>遠端單講時 echo 壓得最淺,近端被誤削的風險最低</td></tr>
+<tr><td><code>AEC_LEVEL_BALANCED</code></td><td><b>−28.0</b>(預設)</td><td><b>−20.0</b>(預設)</td><td>—</td></tr>
+<tr><td><code>AEC_LEVEL_AGGRESSIVE</code></td><td>−38.0</td><td>−30.0</td><td>echo 壓最深,近端被誤削風險最高;DT 地板也跟著深化,否則 double-talk 觸發時三個 level 會蓋回同一個 −20.0,聽不出差異</td></tr>
 </table></div>
-<p>合法範圍 <code>[-300, 50]</code>。可用 <code>aec_preset_floor_db()</code> / <code>aec_preset_dt_floor_db()</code> 純查表(不需要 instance),或用 <code>aec_set_preset()</code> 執行期改(§9)。</p>
+<p>合法範圍 <code>[-300, 50]</code>。可用 <code>aec_level_floor_db()</code> / <code>aec_level_dt_floor_db()</code> 純查表(不需要 instance),或用 <code>aec_set_level()</code> 執行期改(§9)。</p>
 <div class="warn"><b>量測前務必知道</b>:far-active 地板<b>只在 far-active 且非 double-talk 的 hop 咬得到</b>。DT 期間走的是 <code>min_gain_floor_dt_db</code>(mild/balanced 共用 −20 dB,<b>aggressive 是 −30 dB</b>);far-active latch 觸發前用的是 far-silent 地板。而且同一個 gain 也決定 comfort noise 的量 → <b>只量 echo／degradation 的 A/B 會把 CNG 的變化錯記到別的機制</b>。請在 echo 對齊或 degradation 對齊的條件下比較,並實際試聽。</div>
 
 <h3 id="hpf">8.2 前端 HPF</h3>
@@ -96,7 +96,7 @@ pre code{background:none;padding:0}
 <h2>相關檔案與測試</h2>
 <ul class="small">
 <li><code>AEC/c_impl/include/aec.h</code>(欄位宣告與預設值註解)、<code>AEC/c_impl/src/aec.c</code>(<code>aec_config_defaults</code> 46-113、<code>aec_validate_config</code> 234-345)</li>
-<li>手冊 <code>AEC/docs/c_user_manual_zh_TW_02_config.md</code> §6(完整欄位與範圍)、<code>AEC/docs/c_user_manual_zh_TW_03_preset.md</code> §7(preset)</li>
+<li>手冊 <code>AEC/docs/c_user_manual_zh_TW_02_config.md</code> §6(完整欄位與範圍)、<code>AEC/docs/c_user_manual_zh_TW_03_level.md</code> §7(level)</li>
 <li>測試:<code>make test-config-validation</code>、<code>make test-runtime-preset</code>、<code>make test-rate-structural</code></li>
 <li>同系列頁面:<a href="aec_params.html">外部參數</a>、<a href="aec_params_internal.html">內部參數</a>、<a href="aec_c_api.html">AEC API</a></li>
 </ul>

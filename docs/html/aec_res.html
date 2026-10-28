@@ -31,10 +31,10 @@ pre code{background:none;padding:0}
 
 <h2>1. 概要</h2>
 <p><code>Aec</code> 內部的 post chain 會算出一組逐 bin 的殘留回音抑制增益 G<sub>res</sub>(f)。多 lane 的整合(例如 4ch:四條線性 AEC → beamform／融合 → 一個共用的 RES)需要的是「對<b>融合後</b>的頻譜算一次 G<sub>res</sub>」,而不是每條 lane 各算一次。<code>aec_res.h</code> 把同一個抑制器獨立出來,並附上與它搭配的舒適噪音填補 <code>aec_cng_fill()</code>。</p>
-<p>誰持有 RES:單聲道的 RES 就在 <code>Aec</code> 裡面(增益是 <code>ctx.res_gain</code>,強度用 <code>aec_set_preset()</code>,由 <code>aec_get_res_context()</code> 取得),不需要另建 <code>AecRes</code>;單聲道是唯一的例外。Audio_ALG 的 4ch 流程層 <code>mcab</code>(<code>pipelines/4ch_aec_bf_nr_res/mcab.h</code>)<b>不是 library</b>:四條 <code>Aec</code> lane 與(MATCHED 時)共用的 <code>DelayAec</code> 由應用自己建立、以指標交給 mcab;mcab 只擁有 flow 狀態,並以 <code>mcab_fuse()</code> 把呼叫端波束成形權重投影出的 E、R²、CN 組成 <code>McabFrame</code>(<code>g_res_ctx = NULL</code>)。波束成形不在 mcab 內(sample 層 helper <code>mcab_sample_beam.h</code> 提供 SRP-PHAT＋BF 的接法),mcab <b>不持有、不建立、也不執行 RES</b>。4ch 應用要 RES,就在自己的 init 裡用本頁的函式建一個 <code>AecRes</code>(設定來自 <code>aec_config_from_preset(preset, sample_rate)</code>,<code>fft_size</code> 取 flow 的格點),每 hop 在 fuse 之後以 <code>mcab_sample_res_input(&amp;frame, &amp;in)</code>(<code>pipelines/4ch_aec_bf_nr_res/mcab_sample_post.h</code>)組出 <code>AecResInput</code>,再呼叫 <code>aec_res_process(res, &amp;in)</code>,強度用 <code>aec_res_set_preset()</code>,串流邊界用 <code>aec_res_reset()</code>;做法見 §2.3。範例:<code>4ch_aec_bf_nr_res/mcab_static.c</code>、<code>mcab_raw.c</code>、<code>mcab_external_static.c</code>,以及 <code>pipelines/dfn/4ch_aec_bf_dfn_res/main.c</code>;<code>pipelines/ulcnet/4ch_alignulcnet</code> 以 <code>cfg.enable_post = 0</code> 跑 flow、不接 RES。</p>
+<p>誰持有 RES:單聲道的 RES 就在 <code>Aec</code> 裡面(增益是 <code>ctx.res_gain</code>,強度用 <code>aec_set_level()</code>,由 <code>aec_get_res_context()</code> 取得),不需要另建 <code>AecRes</code>;單聲道是唯一的例外。Audio_ALG 的 4ch 流程層 <code>mcab</code>(<code>pipelines/4ch_aec_bf_nr_res/mcab.h</code>)<b>不是 library</b>:四條 <code>Aec</code> lane 與(MATCHED 時)共用的 <code>DelayAec</code> 由應用自己建立、以指標交給 mcab;mcab 只擁有 flow 狀態,並以 <code>mcab_fuse()</code> 把呼叫端波束成形權重投影出的 E、R²、CN 組成 <code>McabFrame</code>(<code>g_res_ctx = NULL</code>)。波束成形不在 mcab 內(sample 層 helper <code>mcab_sample_beam.h</code> 提供 SRP-PHAT＋BF 的接法),mcab <b>不持有、不建立、也不執行 RES</b>。4ch 應用要 RES,就在自己的 init 裡用本頁的函式建一個 <code>AecRes</code>(設定來自 <code>aec_config_from_level(level, sample_rate)</code>,<code>fft_size</code> 取 flow 的格點),每 hop 在 fuse 之後以 <code>mcab_sample_res_input(&amp;frame, &amp;in)</code>(<code>pipelines/4ch_aec_bf_nr_res/mcab_sample_post.h</code>)組出 <code>AecResInput</code>,再呼叫 <code>aec_res_process(res, &amp;in)</code>,強度用 <code>aec_res_set_level()</code>,串流邊界用 <code>aec_res_reset()</code>;做法見 §2.3。範例:<code>4ch_aec_bf_nr_res/mcab_static.c</code>、<code>mcab_raw.c</code>、<code>mcab_external_static.c</code>,以及 <code>pipelines/dfn/4ch_aec_bf_dfn_res/main.c</code>;<code>pipelines/ulcnet/4ch_alignulcnet</code> 以 <code>cfg.enable_post = 0</code> 跑 flow、不接 RES。</p>
 <ul>
 <li>設定來自與 lane 相同的建構函式(<code>aec_build_sg_config</code>),所以由同一個 <code>AecConfig</code> 建出的 <code>AecRes</code> 與 lane 內的抑制器設定逐位元相同。</li>
-<li>Static memory:呼叫端給一塊 16-byte 對齊的記憶體;process／reset／set_preset 不配置記憶體、不用 stdio、無全域狀態。</li>
+<li>Static memory:呼叫端給一塊 16-byte 對齊的記憶體;process／reset／set_level 不配置記憶體、不用 stdio、無全域狀態。</li>
 <li>只有 <code>sample_rate</code>、<code>fft_size</code>、<code>min_gain_floor_far_active_db</code>、<code>min_gain_floor_dt_db</code> 與 <code>min_gain_split_floor_enabled</code>(<code>aec.c:995-1000</code>,讓 NO_FLOOR 在建構時就生效)會影響抑制器;其餘 <code>AecConfig</code> 欄位僅參與驗證(傳入的 <code>cfg</code> 必須通過完整驗證,否則 <code>aec_res_get_mem_size</code> 回 0)。</li>
 </ul>
 
@@ -57,7 +57,7 @@ int res_one_hop(const AecConfig *cfg, const AecResInput *in, uint32_t *rng,
         /* spec = error_spec * min(g_nr, g_res) is applied by the caller, then: */
         aec_cng_fill(rng, spec, in-&gt;comfort_noise, g_res, g_nr, 0.31622777f, aec_res_n_bins(res));
     }
-    (void)aec_res_set_preset(res, AEC_PRESET_AGGRESSIVE, 100.0f);   /* between hops */
+    (void)aec_res_set_level(res, AEC_LEVEL_AGGRESSIVE, 100.0f);   /* between hops */
     aec_res_reset(res);                               /* stream boundary; no destroy exists */
     free(mem);
     return g_res ? 0 : -1;
@@ -67,9 +67,9 @@ int res_one_hop(const AecConfig *cfg, const AecResInput *in, uint32_t *rng,
 <tr><th>函式</th><th>語意</th><th>回傳</th></tr>
 <tr><td><code>aec_res_get_mem_size(cfg)</code></td><td>所需 byte 數</td><td>0 = cfg 為 NULL／無效</td></tr>
 <tr><td><code>aec_res_init(mem, bytes, cfg)</code></td><td>在 <code>mem</code> 內建立實例;不需 destroy</td><td>NULL = 記憶體 NULL／未對齊／過小，或 cfg 無效</td></tr>
-<tr><td><code>aec_res_reset(r)</code></td><td>清除抑制器全部狀態;<b>保留</b>目前的 far-active 地板目標(含 <code>set_preset</code> 改過的)</td><td>void;NULL 安全</td></tr>
+<tr><td><code>aec_res_reset(r)</code></td><td>清除抑制器全部狀態;<b>保留</b>目前的 far-active 地板目標(含 <code>set_level</code> 改過的)</td><td>void;NULL 安全</td></tr>
 <tr><td><code>aec_res_process(r, in)</code></td><td>一個 hop。回傳的指標由 <code>r</code> 擁有,到下一次對 <code>r</code> 的呼叫前有效</td><td>NULL = r／in 為 NULL 或任一輸入陣列為 NULL</td></tr>
-<tr><td><code>aec_res_set_preset(r, preset, ramp_ms)</code></td><td>與 <code>aec_set_preset()</code> 同語意:改 far-active 地板(<code>ramp_ms==0</code> 於下一 hop 生效,上限 60 s)與 DT 地板(aggressive 才跟其他兩個不同;無 ramp,立即套用)</td><td>0／−1(NULL、非法 preset、ramp 超範圍;−1 時什麼都不寫)</td></tr>
+<tr><td><code>aec_res_set_level(r, level, ramp_ms)</code></td><td>與 <code>aec_set_level()</code> 同語意:改 far-active 地板(<code>ramp_ms==0</code> 於下一 hop 生效,上限 60 s)與 DT 地板(aggressive 才跟其他兩個不同;無 ramp,立即套用)</td><td>0／−1(NULL、非法 level、ramp 超範圍;−1 時什麼都不寫)</td></tr>
 <tr><td><code>aec_res_split_floor(r, &amp;live, &amp;target)</code></td><td>far-active 地板的功率比:<code>live</code> = 現行值,<code>target</code> = 正在走向的值</td><td>0／−1(r 為 NULL)</td></tr>
 <tr><td><code>aec_res_n_bins(r)</code>、<code>aec_res_hop_size(r)</code></td><td>陣列長度</td><td>0 = NULL</td></tr>
 <tr><td><code>aec_cng_fill(&amp;rng, spec, cn, g_res, g_nr, nr_floor, n)</code></td><td>在 bin 1…n−2 加上舒適噪音,見 §3</td><td>void;任一必要指標為 NULL 或 n&lt;3 則什麼都不動</td></tr>
@@ -89,22 +89,22 @@ int res_one_hop(const AecConfig *cfg, const AecResInput *in, uint32_t *rng,
      | g = min(g_nr, g_res);  spec = E * g                  |
      |-- aec_cng_fill(&amp;rng, spec, cn, g_res, g_nr, floor, n) -&gt;(純函式,不經 res;rng 由呼叫端持有;任一必要指標 NULL 或 n &lt; 3 則不動)
      |   ===== hop 之間 / 串流邊界 =====                     |
-     |-- aec_res_set_preset(res, preset, ramp_ms) ---------&gt;|  0 / -1(NULL、enum 外、ramp 不在 [0, 60000]:什麼都不寫)
+     |-- aec_res_set_level(res, level, ramp_ms) ---------&gt;|  0 / -1(NULL、enum 外、ramp 不在 [0, 60000]:什麼都不寫)
      |-- aec_res_split_floor(res, &amp;live, &amp;target) -------&gt;|  讀地板(功率比);-1 僅當 res 為 NULL
-     |-- aec_res_reset(res) --------------------------------&gt;|  清抑制器狀態;保留 set_preset 設的目標;NULL 安全
+     |-- aec_res_reset(res) --------------------------------&gt;|  清抑制器狀態;保留 set_level 設的目標;NULL 安全
 </pre>
 
 <h2>2.2 外部／內部</h2>
 <div class="tblwrap"><table>
 <tr><th>類別</th><th>內容</th><th>出處</th></tr>
-<tr><td><b>外部(可調)</b></td><td>強度只有 <code>aec_res_set_preset(res, preset, ramp_ms)</code>(preset 四選一;ramp [0, 60000] ms);建立時由 <code>AecConfig</code> 的 <code>sample_rate</code>、<code>fft_size</code> 與 preset 決定的三個 floor 欄位帶入</td><td><code>aec_res.h:62</code>;<code>aec.c:995-1000</code></td></tr>
+<tr><td><b>外部(可調)</b></td><td>強度只有 <code>aec_res_set_level(res, level, ramp_ms)</code>(level 四選一;ramp [0, 60000] ms);建立時由 <code>AecConfig</code> 的 <code>sample_rate</code>、<code>fft_size</code> 與 level 決定的三個 floor 欄位帶入</td><td><code>aec_res.h:62</code>;<code>aec.c:995-1000</code></td></tr>
 <tr><td><b>外部(輸入旗標)</b></td><td><code>AecResInput</code> 的 <code>all_converged</code>、<code>max_dt</code>(&gt; 0.2 啟用 DT 地板)、<code>max_saturation</code>(&gt; 0.5 視為飽和回音)、<code>clock_drift</code>:由整合者從各 lane 的判定彙整</td><td><code>aec_res.h:24-34</code></td></tr>
 <tr><td><b>內部(不開放)</b></td><td><code>SuppressionGainConfig</code> 48 欄與 tuning 表(由 <code>aec_build_sg_config</code> 依格點查表)、DominantNearend、ratchet、audibility 門檻;<code>aec_config_build.h</code> 為庫內部</td><td><code>suppression_gain.h:16-78</code>;<code>aec_config_build.h</code></td></tr>
-<tr><td>公開函式</td><td><code>aec_res_get_mem_size</code>、<code>aec_res_init</code>、<code>aec_res_process</code>、<code>aec_res_reset</code>、<code>aec_res_set_preset</code>、<code>aec_res_split_floor</code>、<code>aec_res_n_bins</code>、<code>aec_res_hop_size</code>、<code>aec_cng_fill</code></td><td><code>aec_res.h:38-74</code></td></tr>
+<tr><td>公開函式</td><td><code>aec_res_get_mem_size</code>、<code>aec_res_init</code>、<code>aec_res_process</code>、<code>aec_res_reset</code>、<code>aec_res_set_level</code>、<code>aec_res_split_floor</code>、<code>aec_res_n_bins</code>、<code>aec_res_hop_size</code>、<code>aec_cng_fill</code></td><td><code>aec_res.h:38-74</code></td></tr>
 </table></div>
 
 <h2>2.3 4ch 應用:在 mcab flow 之後建立並使用 RES</h2>
-<p>四條 lane、共用 delay 估計器與 mcab 自己的 pool 由應用依 <code>mcab.h</code> 的順序建好(<code>aec_get_mem_size()</code>／<code>delay_aec_get_mem_size()</code>／<code>mcab_get_mem_requirements()</code>，<code>mcab_static.c</code> 的 <code>unit_plan()</code>／<code>unit_init()</code> 是一份完整寫法；<code>mcab_sample_flow.h</code> 的 <code>mcab_sample_flow_init()</code> 把這幾步放進一塊 pool)。RES 由應用接著建,pool 另外查大小(<code>aec_res_get_mem_size()</code>)；<code>mcab_static.c</code> 把 RES 與 NR、合成、暫存向量併成另一塊 post pool 再依序切(<code>post_plan()</code>,<code>aec_res_init</code> 在 post pool 上)。呼叫順序:查大小 → 配置 → <code>aec_res_init</code> → 每 hop(front＋beam → fuse → <code>aec_res_process</code>)→ hop 之間 <code>aec_res_set_preset</code> → 串流邊界或任一階段拒絕時 <code>mcab_sample_beam_reset</code>(或自帶 beamformer 時 <code>mcab_reset</code>)加 <code>aec_res_reset</code>。</p>
+<p>四條 lane、共用 delay 估計器與 mcab 自己的 pool 由應用依 <code>mcab.h</code> 的順序建好(<code>aec_get_mem_size()</code>／<code>delay_aec_get_mem_size()</code>／<code>mcab_get_mem_requirements()</code>，<code>mcab_static.c</code> 的 <code>unit_plan()</code>／<code>unit_init()</code> 是一份完整寫法；<code>mcab_sample_flow.h</code> 的 <code>mcab_sample_flow_init()</code> 把這幾步放進一塊 pool)。RES 由應用接著建,pool 另外查大小(<code>aec_res_get_mem_size()</code>)；<code>mcab_static.c</code> 把 RES 與 NR、合成、暫存向量併成另一塊 post pool 再依序切(<code>post_plan()</code>,<code>aec_res_init</code> 在 post pool 上)。呼叫順序:查大小 → 配置 → <code>aec_res_init</code> → 每 hop(front＋beam → fuse → <code>aec_res_process</code>)→ hop 之間 <code>aec_res_set_level</code> → 串流邊界或任一階段拒絕時 <code>mcab_sample_beam_reset</code>(或自帶 beamformer 時 <code>mcab_reset</code>)加 <code>aec_res_reset</code>。</p>
 <pre>#include &lt;stdlib.h&gt;
 #include "4ch_aec_bf_nr_res/mcab_sample_beam.h"  /* mcab flow + sample SRP-PHAT/BF helper */
 #include "aec_res.h"                              /* libaec: AecRes, aec_res_* */
@@ -118,10 +118,10 @@ typedef struct App4ch {
 } App4ch;
 
 /* Init, after the flow exists: the RES is the application's own object on the flow's grid. */
-int app_res_init(App4ch *a, AecPreset preset)
+int app_res_init(App4ch *a, AecLevel level)
 {
     AecConfig cfg;
-    aec_config_from_preset(&amp;cfg, preset, mcab_sample_rate(a-&gt;flow));
+    aec_config_from_level(&amp;cfg, level, mcab_sample_rate(a-&gt;flow));
     cfg.fft_size = mcab_fft_size(a-&gt;flow);
     size_t bytes = aec_res_get_mem_size(&amp;cfg);                 /* 0 = cfg invalid */
     if (bytes == 0 || posix_memalign(&amp;a-&gt;res_mem, 16, bytes) != 0) return -1;
@@ -149,7 +149,7 @@ int app_hop(App4ch *a, const float *mics, const float *ref, int vad, McabFrame *
 }
 
 /* Between hops / at a stream boundary. */
-int app_res_strength(App4ch *a, AecPreset preset) { return aec_res_set_preset(a-&gt;res, preset, 100.0f); }
+int app_res_strength(App4ch *a, AecLevel level) { return aec_res_set_level(a-&gt;res, level, 100.0f); }
 void app_reset(App4ch *a) { mcab_sample_beam_reset(a-&gt;beam); aec_res_reset(a-&gt;res); }
 </pre>
 <p class="small">上列已在暫存複本以 <code>clang -fsyntax-only -Wall -Wextra -Werror</code> 對 <code>mcab_sample_beam.h</code>、<code>mcab_sample_post.h</code>、<code>aec_res.h</code> 檢查通過(只檢查語法、未連結；include 路徑以 <code>pipelines/</code> 為根)。<code>app_hop</code> 之後的 NR 增益、<code>min</code>、CNG、合成見下方時序圖與 <code>mcab_static.c</code> 的 <code>static_chain()</code>。</p>
@@ -170,7 +170,7 @@ Application                        mcab flow + beam helper     AecRes (libaec) N
  |-- mcab_sample_beam_reset -------&gt;|                           |               |               |   (flow 自己回 MCAB_DSP_ERROR 時已重置;其餘階段由應用重置)
  |-- aec_res_reset --------------------------------------------&gt;|               |               |   其餘照樣重置:anr_reset、ac_istft_reset、rng 設回 MCAB_SAMPLE_CNG_RNG_SEED
  ==== hop 之間 ====
- |-- aec_res_set_preset(res, preset, ramp_ms) -----------------&gt;|               |               |   強度;回 0 或 -1(-1 時什麼都沒寫)
+ |-- aec_res_set_level(res, level, ramp_ms) -----------------&gt;|               |               |   強度;回 0 或 -1(-1 時什麼都沒寫)
 </pre>
 <p class="small">flow 的庫內時序見 <a href="../../../Audio_ALG/docs/html/pipeline_4ch.html">pipeline_4ch</a>;本頁的 RES 與上圖的 NR、CNG、合成都屬於應用。</p>
 
@@ -219,7 +219,7 @@ t              各 lane 線性 AEC 完成
 <div class="tblwrap"><table>
 <tr><th>狀態</th><th>大小</th><th>誰保存</th><th>reset 後</th></tr>
 <tr><td>抑制器 last_gain／last_nearend／last_echo、smoother ring、DominantNearend 計數、far-active latch、initial_state</td><td>(10 + smoother_n) × n_bins floats + 結構</td><td><code>AecRes</code>(呼叫端給的記憶體)</td><td>清除(initial_state = 1)</td></tr>
-<tr><td>設定 <code>SuppressionGainConfig</code>(含 far-active 地板目標)</td><td>一個結構</td><td><code>AecRes</code></td><td>保留;<code>aec_res_set_preset</code> 會更新它</td></tr>
+<tr><td>設定 <code>SuppressionGainConfig</code>(含 far-active 地板目標)</td><td>一個結構</td><td><code>AecRes</code></td><td>保留;<code>aec_res_set_level</code> 會更新它</td></tr>
 <tr><td>ramp 進度(live 地板)</td><td>2 個 float</td><td><code>AecRes</code></td><td>丟棄,live = target</td></tr>
 <tr><td>近端功率／縮放後參考暫存</td><td>n_bins + hop_size floats</td><td><code>AecRes</code></td><td>每 hop 覆寫</td></tr>
 <tr><td><code>aec_cng_fill</code> 的亂數狀態 <code>rng</code></td><td>uint32_t</td><td><b>呼叫端</b></td><td>由呼叫端決定(Audio_ALG 範例碼的種子是 <code>0x9e3779b9</code>,即 4ch 的 <code>MCAB_SAMPLE_CNG_RNG_SEED</code>、mono 範例的 <code>CNG_RNG_SEED</code>)</td></tr>

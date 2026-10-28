@@ -17,7 +17,7 @@
 struct AecRes {
     int n_bins;
     int hop_size;
-    /* Configuration as built; reset re-applies it and a preset change updates it. */
+    /* Configuration as built; reset re-applies it and a level change updates it. */
     SuppressionGainConfig sg_cfg;
     SuppressionGainTuning sg_tun;
     SuppressionGain sg;
@@ -144,13 +144,13 @@ const float* aec_res_process(AecRes* r, const AecResInput* in) {
                                      in->max_saturation > AEC_RES_SATURATION_THRESHOLD);
 }
 
-int aec_res_set_preset(AecRes* r, AecPreset preset, float ramp_ms) {
+int aec_res_set_level(AecRes* r, AecLevel level, float ramp_ms) {
     float db, dt_db;
     int en;
     if (!r) return -1;
-    if (aec_preset_floor_db(preset, &db) != 0) return -1;
-    if (aec_preset_dt_floor_db(preset, &dt_db) != 0) return -1;
-    if (aec_preset_split_floor_enabled(preset, &en) != 0) return -1;
+    if (aec_level_floor_db(level, &db) != 0) return -1;
+    if (aec_level_dt_floor_db(level, &dt_db) != 0) return -1;
+    if (aec_level_split_floor_enabled(level, &en) != 0) return -1;
     /* The suppressor validates and applies first and writes nothing on refusal. ramp_ms governs the
      * far-active floor only; the DT floor and the split-floor gate step immediately. */
     if (suppression_gain_set_split_floor_far_active_db(&r->sg, db, ramp_ms) != 0)

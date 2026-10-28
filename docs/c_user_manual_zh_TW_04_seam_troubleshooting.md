@@ -1,4 +1,4 @@
-> [索引](c_user_manual_zh_TW.md) · 上一部分：[c_user_manual_zh_TW_03_preset.md](c_user_manual_zh_TW_03_preset.md) · 下一部分：[c_user_manual_zh_TW_05_appendix.md](c_user_manual_zh_TW_05_appendix.md) <!-- split-nav -->
+> [索引](c_user_manual_zh_TW.md) · 上一部分：[c_user_manual_zh_TW_03_level.md](c_user_manual_zh_TW_03_level.md) · 下一部分：[c_user_manual_zh_TW_05_appendix.md](c_user_manual_zh_TW_05_appendix.md) <!-- split-nav -->
 ## 8. 進階整合 seam
 
 一般使用者不需要這一節。只有在你要自己接上外部的噪音抑制／後處理，或是要驅動多個
@@ -12,7 +12,7 @@
 
 ```c
 AecConfig cfg;
-aec_config_from_preset(&cfg, AEC_PRESET_BALANCED, 16000);
+aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, 16000);
 cfg.enable_res          = 0;   /* 後級的抑制不套用到時域訊號 */
 cfg.return_res_context  = 1;   /* 但後級仍然執行並公開結果 */
 aec_create(&aec, &cfg);
@@ -138,10 +138,10 @@ engagement（`duty_hops_run / duty_hops_total`）。
 線性 AEC + BF 之後的 post-beam RES）。`AecRes` 不屬於任何 `Aec`，也不屬於 Audio_ALG 的 4ch 流程層
 `mcab`（`pipelines/4ch_aec_bf_nr_res/mcab.h`）：mcab 是 flow 層而不是 library，四條 lane 與（MATCHED 時）
 共用的 `DelayAec` 由應用建立後以指標注入，mcab 只管共用 delay 的對齊狀態、驅動這四條 lane（`mcab_process_front()`）與 `mcab_fuse()`
-（fuse 之後 `frame.g_res_ctx` 為 NULL），沒有 `enable_res`／`res_preset`，beamformer 也在 mcab 之外。
-要 RES 的 4ch 應用在自己的 init 裡 `aec_res_init()`（設定來自 `aec_config_from_preset(preset, sample_rate)`，
+（fuse 之後 `frame.g_res_ctx` 為 NULL），沒有 `enable_res`／RES 強度欄位，beamformer 也在 mcab 之外。
+要 RES 的 4ch 應用在自己的 init 裡 `aec_res_init()`（設定來自 `aec_config_from_level(level, sample_rate)`，
 `fft_size` 取 flow 的格點），每 hop 在 fuse 之後用 Audio_ALG 的 `mcab_sample_res_input(&frame, &in)`
-（`pipelines/4ch_aec_bf_nr_res/mcab_sample_post.h`）組出 `AecResInput` 再呼叫 `aec_res_process(res, &in)`，並自己持有、設強度（`aec_res_set_preset()`）與重設（`aec_res_reset()`）；
+（`pipelines/4ch_aec_bf_nr_res/mcab_sample_post.h`）組出 `AecResInput` 再呼叫 `aec_res_process(res, &in)`，並自己持有、設強度（`aec_res_set_level()`）與重設（`aec_res_reset()`）；
 範例見 Audio_ALG 的 `pipelines/4ch_aec_bf_nr_res/mcab_static.c`、`mcab_raw.c`、`mcab_external_static.c`
 與 `pipelines/dfn/4ch_aec_bf_dfn_res/main.c`。單聲道不用它，RES 就在 `Aec` 裡（`ctx.res_gain`，見 §8.7）。
 它把 `Aec` 內部那個抑制器獨立出來，設定來自 lane 自己用的
@@ -168,9 +168,9 @@ aec_cng_fill(&rng, spec, fused_comfort, g_res, g_nr, 0.31622777f, aec_res_n_bins
 |---|---|
 | `aec_res_get_mem_size(cfg)` | 所需 byte 數；`cfg` 為 NULL 或無效回 0。只有 `sample_rate`、`fft_size`、兩個最小增益地板與 `min_gain_split_floor_enabled` 會影響抑制器（`aec.c` 的 `aec_build_sg_config`）；其餘欄位僅參與驗證。 |
 | `aec_res_init(mem, bytes, cfg)` | 在呼叫端的記憶體內建立；不配置記憶體、不用 stdio、不需 destroy。記憶體 NULL／未對齊／過小或 `cfg` 無效回 NULL。 |
-| `aec_res_reset(r)` | 清除抑制器全部狀態；**保留**目前的 far-active／dt 地板目標與 `min_gain_split_floor_enabled` 閂（含 `aec_res_set_preset` 改過的——這三者都存在 `r->sg_cfg` 鏡像裡，reset 的 `rebuild()` 就是從這個鏡像重新 `suppression_gain_init()`）。 |
+| `aec_res_reset(r)` | 清除抑制器全部狀態；**保留**目前的 far-active／dt 地板目標與 `min_gain_split_floor_enabled` 閂（含 `aec_res_set_level` 改過的——這三者都存在 `r->sg_cfg` 鏡像裡，reset 的 `rebuild()` 就是從這個鏡像重新 `suppression_gain_init()`）。 |
 | `aec_res_process(r, in)` | 一個 hop。回傳的 `n_bins` 個增益由 `r` 擁有，到下一次對 `r` 的呼叫前有效；`r`／`in` 或任一輸入陣列為 NULL 回 NULL。 |
-| `aec_res_set_preset(r, preset, ramp_ms)` | 與 `aec_set_preset()` 同語意：far-active 地板用 `ramp_ms` 走（範圍 `[0, 60000]`），dt 地板與 `min_gain_split_floor_enabled` 閂一律立即套用；含 `no_floor` 的切入/切出。拒絕時（NULL、out-of-enum、`ramp_ms` 超界）什麼都不寫。 |
+| `aec_res_set_level(r, level, ramp_ms)` | 與 `aec_set_level()` 同語意：far-active 地板用 `ramp_ms` 走（範圍 `[0, 60000]`），dt 地板與 `min_gain_split_floor_enabled` 閂一律立即套用；含 `no_floor` 的切入/切出。拒絕時（NULL、out-of-enum、`ramp_ms` 超界）什麼都不寫。 |
 | `aec_res_split_floor(r, &live, &target)` | 讀 far-active 地板（功率比）：`live` 是現行值，`target` 是正走向的值，後者跨 reset 保留。 |
 | `aec_res_n_bins(r)`／`aec_res_hop_size(r)` | 陣列長度（`fft_size/2 + 1`、`fft_size/2`）。 |
 | `aec_cng_fill(&rng, spec, cn, g_res, g_nr, nr_floor, n)` | 在 bin `1 … n-2` 加舒適噪音：`sqrt(cn/32768²)·sqrt(1-g_res²)·max(g_nr, nr_floor)` 乘上由 `rng` 遞推選出的隨機相位（`rng = (rng·69069+1) & 0x7FFFFFFF`，取高 5 bit 查 32 點 √2·sin 表，虛部取 +8）。`g_nr` 可為 NULL（視為 1）。 |
@@ -219,7 +219,7 @@ aec_get_linear_context(&aec, &lin);   /* 在該 hop 的處理呼叫之後、下�
 單聲道沒有單一的包裝函式：`Aec`、`AnrDenoiser`、合成用的 `AcIstft` 由整合者各自初始化，
 只有串接順序是整合者的責任。Audio_ALG 的 `pipelines/mono_aec_nr_res/main.c`（每 hop 的增益序列
 是該檔的 `mono_form()`）就是用上面的公開介面接起來的範例；每個範例 `main` 自己初始化它用到的函式庫並寫出這段序列。
-AEC 以 `enable_res = 0`、`return_res_context = 1` 建立（`spatial_linear_context` 維持 preset
+AEC 以 `enable_res = 0`、`return_res_context = 1` 建立（`spatial_linear_context` 維持 level
 的 `0`，所以 `res_gain`、`r2`、`comfort_noise` 都有值），AEC 自己**不**把抑制套到時域，
 抑制增益留給整合者與 NR 的增益合併後一次套用；單聲道的 RES 就在 `Aec` 裡面：增益是
 `Aec` 自己算的 `ctx.res_gain`（由 `aec_get_res_context()` 取得），整合者不需要另外 `aec_res_init()` 一個 `AecRes`。
@@ -252,9 +252,9 @@ mic, ref (hop 個 float)
   （`0.31622777f`）為下限縮放填補量。
 - **`aec_cng_fill` 的亂數狀態 `rng` 由呼叫端持有**，Audio_ALG 範例碼的種子是 `0x9e3779b9`
   （mono 範例的 `CNG_RNG_SEED`、4ch 的 `MCAB_SAMPLE_CNG_RNG_SEED`）；`aec_reset()` 之外，整合者的 reset 還要同時清 NR 狀態、合成 OLA 與暫存增益，並把 `rng` 設回種子。
-- **`aec_set_preset()` 對這條鏈有效**：單聲道鏈的 `G_res` 來自 `Aec` 自己的
-  post 區塊，所以強度旋鈕直接用 `aec_set_preset()`（[§7.1](c_user_manual_zh_TW_03_preset.md#71-執行期切換-presetaec_set_preset)）；四麥克風線性 AEC + BF 之後的
-  `G_res` 來自應用在 4ch mcab flow 之後自己建立的 `AecRes`，才需要對它呼叫 `aec_res_set_preset()`（§8.5）。
+- **`aec_set_level()` 對這條鏈有效**：單聲道鏈的 `G_res` 來自 `Aec` 自己的
+  post 區塊，所以強度旋鈕直接用 `aec_set_level()`（[§7.1](c_user_manual_zh_TW_03_level.md#71-執行期切換-levelaec_set_level)）；四麥克風線性 AEC + BF 之後的
+  `G_res` 來自應用在 4ch mcab flow 之後自己建立的 `AecRes`，才需要對它呼叫 `aec_res_set_level()`（§8.5）。
 - 下游若另有噪音抑制或 CNG，不要在 `aec_cng_fill` 之外再疊一層（[§6.2](c_user_manual_zh_TW_02_config.md#62-模組開關全部只接受-0-或-1)）。
 
 測試：單聲道鏈的行為由 `Audio_ALG` 的 `pipelines/mono_aec_nr_res` 測試涵蓋；本函式庫端的
@@ -281,14 +281,14 @@ mic, ref (hop 個 float)
    若始終是 `-1`，確認遠端有足夠能量，並確認實際延遲落在 [§3](c_user_manual_zh_TW.md#3-資料契約) 表列的可擷取上限內。
 3. **加長 filter。** 大房間或長殘響時調高 `filter_length`（單位是 **sample**）。
    必須 destroy 後重新 create，並重新評估記憶體與運算量。
-4. **加強抑制。** 改用 `AEC_PRESET_AGGRESSIVE`；或直接把
+4. **加強抑制。** 改用 `AEC_LEVEL_AGGRESSIVE`；或直接把
    `min_gain_floor_far_active_db` **調低**。代價是 double-talk 時近端更容易被壓。
 
 ### 9.2 Double-talk 時近端被壓掉
 
 | 動作 | 方向 |
 |---|---|
-| 換較溫和的 preset | `AEC_PRESET_BALANCED` → `AEC_PRESET_MILD` |
+| 換較溫和的 level | `AEC_LEVEL_BALANCED` → `AEC_LEVEL_MILD` |
 | 或直接調 `min_gain_floor_far_active_db` | **調高**（例如 -28 → -20） |
 | 放寬 double-talk 專用下限 `min_gain_floor_dt_db` | **調高**（例如 -20 → -16），需 `dt_aware_res_floor_enabled = 1` |
 | 近端一停就被壓掉 → 延長保護 `ne_recent_hold` | **調高**（單位是 10 ms） |
@@ -333,4 +333,4 @@ mic, ref (hop 個 float)
 
 ---
 
-> [索引](c_user_manual_zh_TW.md) · 上一部分：[c_user_manual_zh_TW_03_preset.md](c_user_manual_zh_TW_03_preset.md) · 下一部分：[c_user_manual_zh_TW_05_appendix.md](c_user_manual_zh_TW_05_appendix.md) <!-- split-nav -->
+> [索引](c_user_manual_zh_TW.md) · 上一部分：[c_user_manual_zh_TW_03_level.md](c_user_manual_zh_TW_03_level.md) · 下一部分：[c_user_manual_zh_TW_05_appendix.md](c_user_manual_zh_TW_05_appendix.md) <!-- split-nav -->

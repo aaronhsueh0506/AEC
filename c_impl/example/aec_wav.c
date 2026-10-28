@@ -1,5 +1,5 @@
 /* aec_wav.c -- WAV processing CLI on top of aec.
- *  - --preset takes 0/1/2/3 or mild/balanced/aggressive/no_floor.
+ *  - --level takes 0/1/2/3 or mild/balanced/aggressive/no_floor; --preset is an alias.
  *  - The hop size comes from the library's signal grid (fft_size / 2).
  *  - --debug-level / --debug sets the debug level and periodic status print. */
 #include "aec.h"
@@ -13,7 +13,8 @@ static void print_usage(const char* prog) {
     fprintf(stderr,
         "Usage: %s <mic.wav> <ref.wav> <out.wav> [options]\n\n"
         "Options:\n"
-        "  --preset {0|1|2|3|mild|balanced|aggressive|no_floor}   default: balanced (1)\n"
+        "  --level {0|1|2|3|mild|balanced|aggressive|no_floor}   default: balanced (1)\n"
+        "                                 (--preset is accepted as an alias)\n"
         "  --cng                          Enable comfort noise\n"
         "  --no-cng                       Explicitly disable CNG\n"
         "  --no-delay-est                 EXTERNAL_ALIGNED mode: no online delay\n"
@@ -70,11 +71,11 @@ static void print_config_rejected(const char* who, int sr,
             cfg->delay_num_filters, cfg->fixed_delay_samples);
 }
 
-static int parse_preset(const char* s, AecPreset* out) {
-    if (!strcmp(s, "0") || !strcmp(s, "mild"))       { *out = AEC_PRESET_MILD;       return 0; }
-    if (!strcmp(s, "1") || !strcmp(s, "balanced"))   { *out = AEC_PRESET_BALANCED;   return 0; }
-    if (!strcmp(s, "2") || !strcmp(s, "aggressive")) { *out = AEC_PRESET_AGGRESSIVE; return 0; }
-    if (!strcmp(s, "3") || !strcmp(s, "no_floor"))   { *out = AEC_PRESET_NO_FLOOR;   return 0; }
+static int parse_level(const char* s, AecLevel* out) {
+    if (!strcmp(s, "0") || !strcmp(s, "mild"))       { *out = AEC_LEVEL_MILD;       return 0; }
+    if (!strcmp(s, "1") || !strcmp(s, "balanced"))   { *out = AEC_LEVEL_BALANCED;   return 0; }
+    if (!strcmp(s, "2") || !strcmp(s, "aggressive")) { *out = AEC_LEVEL_AGGRESSIVE; return 0; }
+    if (!strcmp(s, "3") || !strcmp(s, "no_floor"))   { *out = AEC_LEVEL_NO_FLOOR;   return 0; }
     return -1;
 }
 
@@ -84,7 +85,7 @@ int main(int argc, char* argv[]) {
     const char* ref_path = argv[2];
     const char* out_path = argv[3];
 
-    AecPreset preset = AEC_PRESET_BALANCED;
+    AecLevel level = AEC_LEVEL_BALANCED;
     int explicit_cng = -1;
     int no_delay_est = 0, no_res = 0, no_shadow = 0, no_hpf = 0;
     int debug_level = 0;
@@ -103,10 +104,10 @@ int main(int argc, char* argv[]) {
 
     for (int i = 4; i < argc; ++i) {
         const char* arg = argv[i];
-        if (!strcmp(arg, "--preset") && i + 1 < argc) {
-            if (parse_preset(argv[++i], &preset) != 0) {
-                fprintf(stderr, "ERROR: unknown preset '%s'. "
-                                "Valid: 0|1|2|mild|balanced|aggressive\n", argv[i]);
+        if ((!strcmp(arg, "--level") || !strcmp(arg, "--preset")) && i + 1 < argc) {
+            if (parse_level(argv[++i], &level) != 0) {
+                fprintf(stderr, "ERROR: unknown level '%s'. "
+                                "Valid: 0|1|2|3|mild|balanced|aggressive|no_floor\n", argv[i]);
                 return 2;
             }
         } else if (!strcmp(arg, "--cng"))           explicit_cng = 1;
@@ -177,7 +178,7 @@ int main(int argc, char* argv[]) {
            ? mr->info.num_samples : rr->info.num_samples;
 
     AecConfig cfg;
-    aec_config_from_preset(&cfg, preset, sr);
+    aec_config_from_level(&cfg, level, sr);
     /* Grid resolution happens here: the fft_size handed to aec_create() is always concrete (the
      * rate's default unless --fft-size is given), since the core refuses fft_size == 0. */
     if (fft_size > 0) cfg.fft_size = fft_size;
@@ -276,12 +277,12 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    fprintf(stderr, "Processed %d frames @ hop=%d sr=%d preset=%s cng=%d delay_est=%d "
+    fprintf(stderr, "Processed %d frames @ hop=%d sr=%d level=%s cng=%d delay_est=%d "
             "delay_mode=%s num_filters=%d fixed_delay_samples=%d\n",
             frame_idx, hop, sr,
-            preset == AEC_PRESET_MILD ? "mild" :
-            preset == AEC_PRESET_BALANCED ? "balanced" :
-            preset == AEC_PRESET_AGGRESSIVE ? "aggressive" : "no_floor",
+            level == AEC_LEVEL_MILD ? "mild" :
+            level == AEC_LEVEL_BALANCED ? "balanced" :
+            level == AEC_LEVEL_AGGRESSIVE ? "aggressive" : "no_floor",
             cfg.enable_cng, cfg.enable_delay_est,
             delay_mode_name(cfg.delay_mode), cfg.delay_num_filters,
             cfg.fixed_delay_samples);

@@ -45,7 +45,7 @@ ck() {  # ck <ok|no> <description>
 }
 
 # ============================================================================
-# 1. Plumbing: no flags -> preset defaults are reported (options are opt-in)
+# 1. Plumbing: no flags -> level defaults are reported (options are opt-in)
 # ============================================================================
 out="$("$AEC_WAV" "$MIC" "$REF" "$TMP/o1.wav" --cng 2>&1 || true)"
 if grep -q "delay_mode=matched num_filters=5 fixed_delay_samples=-1" <<<"$out"; then

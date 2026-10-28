@@ -42,12 +42,12 @@ static int g_pass = 0;
     } while (0)
 
 static void context_only_config(AecConfig* cfg, int sample_rate) {
-    aec_config_from_preset(cfg, AEC_PRESET_BALANCED, sample_rate);
+    aec_config_from_level(cfg, AEC_LEVEL_BALANCED, sample_rate);
     cfg->enable_res = 0;
     cfg->return_res_context = 1;
 }
 
-/* fft_size=0 means "use the preset's default grid for this sample_rate". spatial_linear_context
+/* fft_size=0 means "use the level's default grid for this sample_rate". spatial_linear_context
  * mirrors the config the 4ch wrapper uses for every lane (enable_res=0 / return_res_context=1 /
  * spatial_linear_context=1); it is only valid on top of context_only_config's enable_res=0 /
  * return_res_context=1 base (aec_validate_config rejects any other combination). */

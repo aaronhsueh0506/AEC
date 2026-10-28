@@ -104,16 +104,17 @@ stdio symbols, and runs the consumer.
 
 ```bash
 BIN="$(make -s print-bin-dir)"
-"$BIN"/aec_wav mic.wav ref.wav out.wav --preset balanced --cng
+"$BIN"/aec_wav mic.wav ref.wav out.wav --level balanced --cng
 ```
 
-Presets (single residual-echo strength axis `min_gain_floor_far_active_db`,
+Levels (single residual-echo strength axis `min_gain_floor_far_active_db`,
 plus `no_floor`'s separate boolean gate `min_gain_split_floor_enabled`):
 `mild` (−20, near-priority) / `balanced` (−28, production) /
 `aggressive` (−38, echo-priority) / `no_floor` (floor mechanism off
-entirely — `--preset 3` or `--preset no_floor`, deepest point on the axis,
-most near-end loss). Other flags: `--cng`, `--debug` (one status line per
-second), `--debug-trace <path>` (opt-in per-frame CSV of post-filter internals —
+entirely — `--level 3` or `--level no_floor`, deepest point on the axis,
+most near-end loss). `--preset` is accepted as an alias of `--level`; the
+Python twins call the same axis "preset" (C level == Python preset). Other
+flags: `--cng`, `--debug` (one status line per second), `--debug-trace <path>` (opt-in per-frame CSV of post-filter internals —
 `usable_linear`, `fullband_erle`, `r2_mean`, `gain_mean`, `comfort_noise_mean`,
 … one row per hop; one NULL test per hop when off). `aec_wav --help` lists all
 options.
@@ -175,7 +176,7 @@ caller-pool path (`aec_get_mem_size`/`aec_init`), and differs from numpy's fp64
   structure at each of the four whitelisted grids (8k/256, 16k/256, 16k/512,
   48k/1024): synthesis-window COLA, impulse-through-linear and
   impulse-through-full-post-chain convergence, `aec_get_mem_size`
-  monotonicity/preset-invariance, `aec_init` (pool) byte-equal to `aec_create`
+  monotonicity/level-invariance, `aec_init` (pool) byte-equal to `aec_create`
   (heap), and that `shadow_err_alpha`/`warmup_frames`/`epc_hangover`/
   `ne_recent_hold`/`filter_misadjustment_{stable,hangover}_frames`/
   `EPV_FAST_TC`/`EPV_SLOW_TC` cover approximately the same wall-clock duration

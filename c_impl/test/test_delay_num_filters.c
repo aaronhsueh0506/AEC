@@ -6,7 +6,7 @@
  * search). 5 is the default for bench/dataset use; a target that compensates the system delay out of band can use fewer.
  *
  * What this test proves (nothing else in the suite can):
- *   1. The default is 5 on aec_config_defaults and on all three presets, and a default Aec builds a 5-filter bank.
+ *   1. The default is 5 on aec_config_defaults and on all three levels, and a default Aec builds a 5-filter bank.
  *   2. The knob moves the bank geometry end to end from AecConfig through aec_create. Reliable reach is
  *      (n-1)*DA_FILTER_INTRA_SHIFT + (DA_FILTER_SIZE - 11) downsampled samples at 0.25 ms: 221 ms at n=2, 509 ms at n=5.
  *      A 150 ms echo locks at n=2 (inside reach, so the no-lock case below is about reach, not a broken estimator); a
@@ -96,7 +96,7 @@ static int run_case(int num_filters, int delay, int *bank_out) {
     Aec a;
     int i, n_hops = N_SAMPLES / HOP;
 
-    aec_config_from_preset(&cfg, AEC_PRESET_BALANCED, SR);
+    aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, SR);
     cfg.delay_num_filters = num_filters;
     if (aec_create(&a, &cfg) != 0) {
         *bank_out = -1;
@@ -123,12 +123,12 @@ static void test_default_is_five(void) {
           "aec_config_defaults: delay_num_filters == DA_NUM_FILTERS (5)");
     CHECK(DA_NUM_FILTERS == 5, "DA_NUM_FILTERS is still 5 (the default)");
 
-    aec_config_from_preset(&cfg, AEC_PRESET_MILD, SR);
-    CHECK(cfg.delay_num_filters == 5, "preset mild: delay_num_filters == 5");
-    aec_config_from_preset(&cfg, AEC_PRESET_BALANCED, SR);
-    CHECK(cfg.delay_num_filters == 5, "preset balanced: delay_num_filters == 5");
-    aec_config_from_preset(&cfg, AEC_PRESET_AGGRESSIVE, SR);
-    CHECK(cfg.delay_num_filters == 5, "preset aggressive: delay_num_filters == 5");
+    aec_config_from_level(&cfg, AEC_LEVEL_MILD, SR);
+    CHECK(cfg.delay_num_filters == 5, "level mild: delay_num_filters == 5");
+    aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, SR);
+    CHECK(cfg.delay_num_filters == 5, "level balanced: delay_num_filters == 5");
+    aec_config_from_level(&cfg, AEC_LEVEL_AGGRESSIVE, SR);
+    CHECK(cfg.delay_num_filters == 5, "level aggressive: delay_num_filters == 5");
 
     aec_config_defaults(&cfg, SR);
     CHECK(aec_create(&a, &cfg) == 0, "default cfg: aec_create");
@@ -301,7 +301,7 @@ static void test_low_level_init_contract(void) {
         for (g = 0; g < sizeof grids / sizeof grids[0]; ++g) {
             AecConfig cfg;
             Aec a;
-            aec_config_from_preset(&cfg, AEC_PRESET_BALANCED, grids[g].sr);
+            aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, grids[g].sr);
             cfg.fft_size = grids[g].fft;
             if (aec_create(&a, &cfg) != 0) {
                 snprintf(msg, sizeof msg, "sr=%d fft=%d: aec_create",
@@ -362,7 +362,7 @@ static void test_pool_geometry_literals(void) {
     for (i = 0; i < sizeof expect / sizeof expect[0]; ++i) {
         AecConfig cfg;
         Aec a;
-        aec_config_from_preset(&cfg, AEC_PRESET_BALANCED, SR);
+        aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, SR);
         cfg.delay_num_filters = expect[i].n;
         if (aec_create(&a, &cfg) != 0) {
             snprintf(msg, sizeof msg, "n=%d: aec_create for geometry check", expect[i].n);
@@ -407,7 +407,7 @@ static void test_mem_size_shrinks_with_bank(void) {
         for (n = 1; n <= DA_NUM_FILTERS; ++n) {
             AecConfig cfg;
             size_t got;
-            aec_config_from_preset(&cfg, AEC_PRESET_BALANCED, grids[g].sr);
+            aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, grids[g].sr);
             cfg.fft_size = grids[g].fft;
             cfg.delay_num_filters = n;
             got = aec_get_mem_size(&cfg);
@@ -431,7 +431,7 @@ static void test_mem_size_shrinks_with_bank(void) {
         {
             AecConfig c1, cf, ce;
             size_t m1, mf, me;
-            aec_config_from_preset(&c1, AEC_PRESET_BALANCED, grids[g].sr);
+            aec_config_from_level(&c1, AEC_LEVEL_BALANCED, grids[g].sr);
             c1.fft_size = grids[g].fft; c1.delay_num_filters = 1;
             m1 = aec_get_mem_size(&c1);
             cf = c1; cf.delay_num_filters = DA_NUM_FILTERS;
@@ -484,7 +484,7 @@ static void test_fixed_pool_scales_with_the_delay(void) {
         size_t m5, me, prev = 0;
         int prev_fixed = 0;
 
-        aec_config_from_preset(&cm, AEC_PRESET_BALANCED, grids[g].sr);
+        aec_config_from_level(&cm, AEC_LEVEL_BALANCED, grids[g].sr);
         cm.fft_size = grids[g].fft;
         m5 = aec_get_mem_size(&cm);              /* MATCHED n=5 reference */
         ce = cm;
@@ -562,7 +562,7 @@ static void test_heap_vs_pool_parity_every_n(void) {
         int i, n_hops = (SR * 2) / HOP, diffs = 0;
         static float out_heap[HOP], out_pool[HOP];
 
-        aec_config_from_preset(&cfg, AEC_PRESET_BALANCED, SR);
+        aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, SR);
         cfg.delay_num_filters = n;
         need = aec_get_mem_size(&cfg);
         if (need == 0 || aec_create(&heap_inst, &cfg) != 0) {

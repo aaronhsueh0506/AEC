@@ -80,7 +80,7 @@ static void free_aec(Aec *a) {
 
 static void run_grid(int sr, int fft, int shadow) {
     AecConfig cfg;
-    aec_config_from_preset(&cfg, AEC_PRESET_BALANCED, sr);
+    aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, sr);
     cfg.fft_size = fft; cfg.enable_shadow = shadow;
     cfg.delay_mode = AEC_DELAY_EXTERNAL_ALIGNED; cfg.enable_delay_est = 0;
     cfg.fixed_delay_samples = -1; cfg.enable_res = 0; cfg.return_res_context = 1;

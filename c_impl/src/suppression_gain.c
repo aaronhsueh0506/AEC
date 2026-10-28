@@ -170,7 +170,7 @@ int suppression_gain_is_dominant_nearend(const SuppressionGain *sg) {
     return sg->dne_nearend_state ? 1 : 0;
 }
 
-/* Raw DominantNearend state unless the stat-aware proxy is enabled (off in the shipped presets). */
+/* Raw DominantNearend state unless the stat-aware proxy is enabled (off in the shipped levels). */
 static int ne_state_for_gain_rules(const SuppressionGain *sg) {
     if (!sg->cfg.stat_aware_ne_proxy_enabled) return sg->dne_nearend_state;
     if (sg->dne_nearend_state) return 1;

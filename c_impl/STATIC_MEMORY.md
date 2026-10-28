@@ -29,7 +29,7 @@ are identical within the same FFT backend.
 #include <stdlib.h>
 
 AecConfig cfg;
-aec_config_from_preset(&cfg, AEC_PRESET_BALANCED, 16000);
+aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, 16000);
 
 size_t pool_bytes = aec_get_mem_size(&cfg);
 void *pool = NULL;

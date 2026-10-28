@@ -15,7 +15,7 @@ BIN="$(make -s -C c_impl print-bin-dir)"
 
 | 旗標 | 說明 |
 |---|---|
-| `--preset {0\|1\|2\|3\|mild\|balanced\|aggressive\|no_floor}` | 預設 `balanced`（`1`）；`0` = mild、`1` = balanced、`2` = aggressive、`3` = no_floor（即 `AecPreset` 的數值），名稱也可用 |
+| `--level {0\|1\|2\|3\|mild\|balanced\|aggressive\|no_floor}` | 預設 `balanced`（`1`）；`0` = mild、`1` = balanced、`2` = aggressive、`3` = no_floor（即 `AecLevel` 的數值），名稱也可用；`--preset` 仍可作為別名 |
 | `--cng` | 開啟舒適噪音 |
 | `--no-cng` | 關閉舒適噪音 |
 | `--no-delay-est` | 關閉線上延遲估計 |
@@ -97,7 +97,7 @@ duty: matched_filter_ran=0/0 hops (n/a -- no matched-filter estimator in delay_m
 |---:|---|
 | 0 | 成功 |
 | 1 | 參數不足（印出用法） |
-| 2 | 未知的 preset 或未知的選項 |
+| 2 | 未知的 level 或未知的選項 |
 | 3 | 無法開啟輸入檔或無法寫入輸出檔 |
 | 4 | 取樣率不支援、mic/ref 取樣率不一致，或訊號格點無效 |
 
@@ -106,6 +106,6 @@ duty: matched_filter_ran=0/0 hops (n/a -- no matched-filter estimator in delay_m
 ## 回報問題
 
 請附上：mic/ref 測試片段、完整的呼叫方式（CLI 命令或 `AecConfig` 設定）、
-sample rate 與 preset、使用的 BACKEND，以及問題發生前後至少一秒的
+sample rate 與 level、使用的 BACKEND，以及問題發生前後至少一秒的
 `--debug-trace <path>` CSV。
 > [索引](c_user_manual_zh_TW.md) · 上一部分：[c_user_manual_zh_TW_04_seam_troubleshooting.md](c_user_manual_zh_TW_04_seam_troubleshooting.md) <!-- split-nav -->

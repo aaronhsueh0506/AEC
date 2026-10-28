@@ -99,7 +99,7 @@ static int case_run(int sr, int fft_size, int ctx_only) {
     long d_out = 0, d_formed = 0, d_espec = 0;
     int first_bad = -1;
 
-    aec_config_from_preset(&cfg, AEC_PRESET_BALANCED, sr);
+    aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, sr);
     cfg.fft_size = fft_size;
     if (ctx_only) { cfg.enable_res = 0; cfg.return_res_context = 1; }
 

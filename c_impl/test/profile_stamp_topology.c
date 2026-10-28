@@ -39,7 +39,7 @@ int main(void) {
     float *mic, *far, *out;
     int hop;
 
-    aec_config_from_preset(&cfg, AEC_PRESET_BALANCED, 16000);
+    aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, 16000);
     a = (Aec *)malloc(sizeof(Aec));
     if (!a) { printf("FAIL: out of memory\n"); return 2; }
     if (aec_create(a, &cfg) != 0) { printf("FAIL: aec_create\n"); free(a); return 2; }

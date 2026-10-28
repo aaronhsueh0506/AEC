@@ -42,7 +42,7 @@ static int g_pass = 0;
     } while (0)
 
 static void base_cfg(AecConfig* cfg) {
-    aec_config_from_preset(cfg, AEC_PRESET_BALANCED, 16000);
+    aec_config_from_level(cfg, AEC_LEVEL_BALANCED, 16000);
 }
 
 /* Exercise all three public entry points against one deliberately-invalid
@@ -125,10 +125,10 @@ static void test_config_factories_unsupported_rate(void) {
         snprintf(what, sizeof(what), "aec_config_defaults(sr=%d)", bad_rates[i]);
         check_rejected(what, &cfg, mem, sz);
 
-        aec_config_from_preset(&cfg, AEC_PRESET_BALANCED, bad_rates[i]);
-        snprintf(what, sizeof(what), "aec_config_from_preset(sr=%d): fft_size 0, filter_length 0", bad_rates[i]);
+        aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, bad_rates[i]);
+        snprintf(what, sizeof(what), "aec_config_from_level(sr=%d): fft_size 0, filter_length 0", bad_rates[i]);
         CHECK(cfg.fft_size == 0 && cfg.filter_length == 0, what);
-        snprintf(what, sizeof(what), "aec_config_from_preset(sr=%d)", bad_rates[i]);
+        snprintf(what, sizeof(what), "aec_config_from_level(sr=%d)", bad_rates[i]);
         check_rejected(what, &cfg, mem, sz);
     }
     free(mem);
@@ -140,11 +140,11 @@ static void test_config_factories_unsupported_rate(void) {
     for (size_t i = 0; i < sizeof(good) / sizeof(good[0]); ++i) {
         char what[96];
         AecConfig cfg;
-        aec_config_from_preset(&cfg, AEC_PRESET_BALANCED, good[i].sr);
-        snprintf(what, sizeof(what), "aec_config_from_preset(sr=%d): fft_size %d, filter_length %d unchanged",
+        aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, good[i].sr);
+        snprintf(what, sizeof(what), "aec_config_from_level(sr=%d): fft_size %d, filter_length %d unchanged",
                  good[i].sr, good[i].fft, good[i].filter_length);
         CHECK(cfg.fft_size == good[i].fft && cfg.filter_length == good[i].filter_length, what);
-        snprintf(what, sizeof(what), "aec_config_from_preset(sr=%d) sizes > 0", good[i].sr);
+        snprintf(what, sizeof(what), "aec_config_from_level(sr=%d) sizes > 0", good[i].sr);
         CHECK(aec_get_mem_size(&cfg) > 0, what);
     }
 }
@@ -217,7 +217,7 @@ static void test_highpass_cutoff(void) {
     };
     for (size_t i = 0; i < sizeof(bad_hp) / sizeof(bad_hp[0]); ++i) {
         AecConfig cfg;
-        aec_config_from_preset(&cfg, AEC_PRESET_BALANCED, bad_hp[i].sr);
+        aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, bad_hp[i].sr);
         cfg.enable_highpass = 1;
         cfg.highpass_cutoff_hz = bad_hp[i].cutoff;
         char what[80];
@@ -239,7 +239,7 @@ static void test_highpass_cutoff(void) {
         };
         for (size_t i = 0; i < sizeof(inert_ok) / sizeof(inert_ok[0]); ++i) {
             AecConfig cfg;
-            aec_config_from_preset(&cfg, AEC_PRESET_BALANCED, inert_ok[i].sr);
+            aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, inert_ok[i].sr);
             cfg.enable_highpass = 0;
             cfg.highpass_cutoff_hz = inert_ok[i].cutoff;
             char what[96];
@@ -264,7 +264,7 @@ static void test_highpass_cutoff(void) {
     };
     for (size_t i = 0; i < sizeof(good_hp) / sizeof(good_hp[0]); ++i) {
         AecConfig cfg;
-        aec_config_from_preset(&cfg, AEC_PRESET_BALANCED, good_hp[i].sr);
+        aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, good_hp[i].sr);
         cfg.enable_highpass = 1;
         cfg.highpass_cutoff_hz = good_hp[i].cutoff;
         char what[96];
@@ -470,7 +470,7 @@ static void test_multi_rate_valid_smoke(void) {
     for (size_t i = 0; i < sizeof(rates) / sizeof(rates[0]); ++i) {
         int sr = rates[i];
         AecConfig cfg;
-        aec_config_from_preset(&cfg, AEC_PRESET_BALANCED, sr);
+        aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, sr);
         char what[64];
 
         snprintf(what, sizeof(what), "sr=%d: aec_is_valid_sample_rate()", sr);
@@ -674,7 +674,7 @@ static void test_signal_grid_resolver(void) {
 
         /* LOCKSTEP: size, init, and process must all see this same grid. */
         AecConfig cfg;
-        aec_config_from_preset(&cfg, AEC_PRESET_BALANCED, grids[i].sr);
+        aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, grids[i].sr);
         cfg.fft_size = grids[i].fft;
         size_t need = aec_get_mem_size(&cfg);
         snprintf(label, sizeof(label), "%s: aec_get_mem_size() > 0", grids[i].tag);
@@ -740,7 +740,7 @@ static void test_signal_grid_resolver(void) {
             snprintf(label, sizeof(label),
                      "sr=%d: aec_resolve_signal_grid(fft=0) == 0", rates[i]);
             CHECK(aec_resolve_signal_grid(rates[i], 0, NULL) == 0, label);
-            AecConfig c; aec_config_from_preset(&c, AEC_PRESET_BALANCED, rates[i]);
+            AecConfig c; aec_config_from_level(&c, AEC_LEVEL_BALANCED, rates[i]);
             c.fft_size = 0;
             snprintf(label, sizeof(label), "sr=%d + fft_size=0 (auto)", rates[i]);
             check_rejected(label, &c, mem, sz);
@@ -754,7 +754,7 @@ static void test_signal_grid_resolver(void) {
             snprintf(label, sizeof(label), "sr=%d + fft_size=%d does not resolve",
                      bad[i].sr, bad[i].fft);
             CHECK(aec_resolve_signal_grid(bad[i].sr, bad[i].fft, NULL) == 0, label);
-            AecConfig c; aec_config_from_preset(&c, AEC_PRESET_BALANCED, bad[i].sr);
+            AecConfig c; aec_config_from_level(&c, AEC_LEVEL_BALANCED, bad[i].sr);
             c.fft_size = bad[i].fft;
             snprintf(label, sizeof(label), "sr=%d + fft_size=%d",
                      bad[i].sr, bad[i].fft);
@@ -880,10 +880,10 @@ static void test_delay_mode_translation(void) {
               "defaults: fixed_delay_samples == -1 (not the memset 0)");
         CHECK(cfg.enable_delay_est == 1,
               "defaults: deprecated mirror agrees with MATCHED");
-        aec_config_from_preset(&cfg, AEC_PRESET_AGGRESSIVE, 48000);
+        aec_config_from_level(&cfg, AEC_LEVEL_AGGRESSIVE, 48000);
         CHECK(cfg.delay_mode == AEC_DELAY_MATCHED &&
               cfg.fixed_delay_samples == -1,
-              "from_preset: keeps the default delay mode/fixed sentinel");
+              "from_level: keeps the default delay mode/fixed sentinel");
     }
 }
 

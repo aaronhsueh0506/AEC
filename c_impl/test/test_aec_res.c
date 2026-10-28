@@ -2,9 +2,9 @@
  *
  *  A  configuration: the suppressor an AecRes builds is bit-for-bit the one an
  *     Aec lane builds (heap and caller-pool lanes), on every supported grid
- *     and preset.
+ *     and level.
  *  D  contract: argument checks, sizing, alignment, no write outside the
- *     block, reset and preset semantics.
+ *     block, reset and level semantics.
  *  E  stage details: the exact 32768 scale of the render block (a block
  *     straddling the split-floor latch power), the initial-state exit (with
  *     the two flags that make it inert in the shipped configuration cleared),
@@ -35,11 +35,11 @@ static float srand_f(void) { return 2.0f * urand() - 1.0f; }
 
 static const int GRIDS[4][2] = {{8000, 256}, {16000, 256}, {16000, 512}, {48000, 1024}};
 #define N_GRIDS 4
-#define N_PRESETS 3
+#define N_LEVELS 3
 
-static AecConfig make_cfg(int g, int preset) {
+static AecConfig make_cfg(int g, int level) {
     AecConfig cfg;
-    aec_config_from_preset(&cfg, (AecPreset)preset, GRIDS[g][0]);
+    aec_config_from_level(&cfg, (AecLevel)level, GRIDS[g][0]);
     cfg.fft_size = GRIDS[g][1];
     return cfg;
 }
@@ -61,7 +61,7 @@ static void* aligned_block(size_t bytes) {
 static void test_config(void) {
     int g, p;
     for (g = 0; g < N_GRIDS; ++g) {
-        for (p = 0; p < N_PRESETS; ++p) {
+        for (p = 0; p < N_LEVELS; ++p) {
             AecConfig cfg = make_cfg(g, p);
             Aec heap_lane;
             Aec* pool_lane;
@@ -69,7 +69,7 @@ static void test_config(void) {
             AecRes* r;
             size_t need = aec_res_get_mem_size(&cfg);
             char id[48];
-            snprintf(id, sizeof id, "%d/%d/preset%d", GRIDS[g][0], GRIDS[g][1], p);
+            snprintf(id, sizeof id, "%d/%d/level%d", GRIDS[g][0], GRIDS[g][1], p);
 
             CHECK(need > 0, "%s: aec_res_get_mem_size", id);
             res_mem = aligned_block(need);
@@ -157,24 +157,24 @@ static void test_contract(void) {
     CHECK(g1 != NULL, "300 hops return finite gains in [0, 1]");
     CHECK(memcmp(blk + need, canary, 64) == 0, "no write past the end of the block");
 
-    /* presets */
+    /* levels */
     CHECK(aec_res_split_floor(NULL, &live, &target) == -1, "split_floor rejects NULL");
     CHECK(aec_res_split_floor(r, NULL, NULL) == 0, "split_floor accepts NULL outputs");
     aec_res_split_floor(r, &live, &target);
     floor_mild = 0.0f; floor_aggr = 0.0f;
     CHECK(live == target && target > 0.0f, "fresh instance: live floor equals target");
-    CHECK(aec_res_set_preset(NULL, AEC_PRESET_MILD, 0.0f) == -1, "set_preset rejects NULL");
-    CHECK(aec_res_set_preset(r, (AecPreset)9, 0.0f) == -1, "set_preset rejects an unknown preset");
-    CHECK(aec_res_set_preset(r, AEC_PRESET_MILD, -1.0f) == -1, "set_preset rejects a negative ramp");
-    CHECK(aec_res_set_preset(r, AEC_PRESET_MILD, 1e9f) == -1, "set_preset rejects a ramp past the limit");
+    CHECK(aec_res_set_level(NULL, AEC_LEVEL_MILD, 0.0f) == -1, "set_level rejects NULL");
+    CHECK(aec_res_set_level(r, (AecLevel)9, 0.0f) == -1, "set_level rejects an unknown level");
+    CHECK(aec_res_set_level(r, AEC_LEVEL_MILD, -1.0f) == -1, "set_level rejects a negative ramp");
+    CHECK(aec_res_set_level(r, AEC_LEVEL_MILD, 1e9f) == -1, "set_level rejects a ramp past the limit");
     { float l2, t2; aec_res_split_floor(r, &l2, &t2);
-      CHECK(l2 == live && t2 == target, "a rejected preset change writes nothing"); }
-    CHECK(aec_res_set_preset(r, AEC_PRESET_AGGRESSIVE, 0.0f) == 0, "set_preset aggressive");
+      CHECK(l2 == live && t2 == target, "a rejected level change writes nothing"); }
+    CHECK(aec_res_set_level(r, AEC_LEVEL_AGGRESSIVE, 0.0f) == 0, "set_level aggressive");
     aec_res_split_floor(r, &live, &floor_aggr);
-    CHECK(aec_res_process(r, &in) != NULL, "process after preset change");
+    CHECK(aec_res_process(r, &in) != NULL, "process after level change");
     aec_res_split_floor(r, &live, &target);
     CHECK(live == floor_aggr && target == floor_aggr, "immediate retarget lands on the next hop");
-    CHECK(aec_res_set_preset(r, AEC_PRESET_MILD, 0.0f) == 0, "set_preset mild");
+    CHECK(aec_res_set_level(r, AEC_LEVEL_MILD, 0.0f) == 0, "set_level mild");
     aec_res_split_floor(r, &live, &floor_mild);
     CHECK(floor_mild > floor_aggr, "mild floor is above aggressive floor");
     aec_res_reset(r);
@@ -189,7 +189,7 @@ static void test_contract(void) {
      * here. */
     CHECK(r->sg.cfg.split_floor_enabled == 1,
           "no_floor: mild left the gate enabled");
-    CHECK(aec_res_set_preset(r, AEC_PRESET_NO_FLOOR, 0.0f) == 0,
+    CHECK(aec_res_set_level(r, AEC_LEVEL_NO_FLOOR, 0.0f) == 0,
           "no_floor: retarget to NO_FLOOR accepted");
     CHECK(r->sg.cfg.split_floor_enabled == 0,
           "no_floor: gate off immediately, before any reset");
@@ -198,7 +198,7 @@ static void test_contract(void) {
     aec_res_reset(r);
     CHECK(r->sg.cfg.split_floor_enabled == 0,
           "no_floor: aec_res_reset() preserves the gate OFF across reset");
-    CHECK(aec_res_set_preset(r, AEC_PRESET_BALANCED, 0.0f) == 0,
+    CHECK(aec_res_set_level(r, AEC_LEVEL_BALANCED, 0.0f) == 0,
           "no_floor: retarget back to BALANCED accepted");
     CHECK(r->sg.cfg.split_floor_enabled == 1,
           "no_floor: gate back on immediately");
@@ -218,14 +218,14 @@ static void test_contract(void) {
         int same = 1;
         memset(blk2, 0x5A, need);
         f = aec_res_init(blk2, need, &cfg);
-        aec_res_set_preset(f, AEC_PRESET_MILD, 0.0f);
+        aec_res_set_level(f, AEC_LEVEL_MILD, 0.0f);
         aec_res_reset(r);
         for (i = 0; i < 50; ++i) {
             g1 = aec_res_process(r, &in);
             g2 = aec_res_process(f, &in);
             if (!g1 || !g2 || memcmp(g1, g2, (size_t)n * sizeof(float)) != 0) same = 0;
         }
-        CHECK(same, "reset instance equals a fresh instance with the same preset");
+        CHECK(same, "reset instance equals a fresh instance with the same level");
         free(blk2);
     }
     /* the result does not depend on what the block held before init */
@@ -235,7 +235,7 @@ static void test_contract(void) {
         int same = 1;
         memset(blk3, 0x00, need);
         f = aec_res_init(blk3, need, &cfg);
-        aec_res_set_preset(f, AEC_PRESET_MILD, 0.0f);
+        aec_res_set_level(f, AEC_LEVEL_MILD, 0.0f);
         aec_res_reset(r);
         for (i = 0; i < 50; ++i) {
             g1 = aec_res_process(r, &in);
@@ -336,7 +336,7 @@ static void echo_dominated_inputs(int n, Complex* err, Complex* near, float* r2,
 static void test_render_scale(void) {
     int g, p, side;
     for (g = 0; g < N_GRIDS; ++g) {
-        for (p = 0; p < N_PRESETS; ++p) {
+        for (p = 0; p < N_LEVELS; ++p) {
             AecConfig cfg = make_cfg(g, p);
             size_t need = aec_res_get_mem_size(&cfg);
             void* mem = aligned_block(need);
@@ -347,7 +347,7 @@ static void test_render_scale(void) {
             int latched[2] = {-1, -1};
             AecResInput in;
             char id[48];
-            snprintf(id, sizeof id, "%d/%d/preset%d", GRIDS[g][0], GRIDS[g][1], p);
+            snprintf(id, sizeof id, "%d/%d/level%d", GRIDS[g][0], GRIDS[g][1], p);
             if (!r) { CHECK(0, "%s: init", id); free(mem); continue; }
             n = r->n_bins; hop = r->hop_size;
             err = (Complex*)calloc((size_t)n, sizeof(Complex));

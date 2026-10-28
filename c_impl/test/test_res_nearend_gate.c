@@ -82,7 +82,7 @@ int main(void) {
     int hop, i, nonzero;
     float *mic, *ref, *out;
 
-    aec_config_from_preset(&cfg, AEC_PRESET_BALANCED, 16000);
+    aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, 16000);
     cfg.enable_res = 0;
     cfg.return_res_context = 1;         /* r2 is readable through the seam */
     CHECK(aec_create(&a, &cfg) == 0, "aec_create succeeds");

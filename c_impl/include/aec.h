@@ -20,15 +20,25 @@ extern "C" {
 #include "render_signal_analyzer.h"
 #include "aec_post.h"   /* AecPost and its sub-modules */
 
-/* Preset strengths: min_gain_floor_far_active_db = -20 / -28 / -38 dB for
- * MILD / BALANCED / AGGRESSIVE. NO_FLOOR sets min_gain_split_floor_enabled =
- * 0 (the dB fields are then unused). */
+/* Residual-echo strength level, ordered 0..3 (default BALANCED = 1):
+ * min_gain_floor_far_active_db = -20 / -28 / -38 dB for MILD / BALANCED /
+ * AGGRESSIVE. NO_FLOOR sets min_gain_split_floor_enabled = 0 (dB fields unused). */
 typedef enum {
+    AEC_LEVEL_MILD       = 0,
+    AEC_LEVEL_BALANCED   = 1,
+    AEC_LEVEL_AGGRESSIVE = 2,
+    AEC_LEVEL_NO_FLOOR   = 3,
+
+    /* Legacy names of the four levels above (same values; the Python twins call this ladder a
+     * preset and their tests read these lines). Keep the literal digits. */
     AEC_PRESET_MILD       = 0,
     AEC_PRESET_BALANCED   = 1,
     AEC_PRESET_AGGRESSIVE = 2,
     AEC_PRESET_NO_FLOOR   = 3
-} AecPreset;
+} AecLevel;
+
+/* Legacy type name of AecLevel. */
+typedef AecLevel AecPreset;
 
 /* Delay mode (init-time, immutable): how the far-end is aligned to the mic.
  *   MATCHED           a matched-filter bank estimates the delay online and a
@@ -159,7 +169,7 @@ typedef struct AecConfig {
  * no grid (anything but 8000/16000/48000, including 0 and negative values) both
  * are 0, which aec_get_mem_size / aec_init / aec_create refuse. */
 void aec_config_defaults(AecConfig* cfg, int sample_rate);
-void aec_config_from_preset(AecConfig* cfg, AecPreset preset, int sample_rate);
+void aec_config_from_level(AecConfig* cfg, AecLevel level, int sample_rate);
 
 /* Folds the deprecated enable_delay_est into delay_mode in place (idempotent;
  * called by validate / get_mem_size / create / init): enable_delay_est = 0
@@ -378,21 +388,21 @@ void aec_reset(Aec* a);
  * delay mode. */
 int aec_apply_external_realign(Aec* a, int delta_samples);
 
-/* Far-active min-gain floor (dB) for a preset: mild -20, balanced -28,
- * aggressive -38. Public so a product that owns a SuppressionGain without an
- * Aec can use the same table. Returns 0 and writes *db_out for an in-enum
- * preset, -1 otherwise (aec_config_from_preset instead falls back to
- * balanced). */
-int aec_preset_floor_db(AecPreset preset, float* db_out);
+/* Far-active min-gain floor (dB) for a level: mild -20, balanced -28,
+ * aggressive -38 (no_floor: -28, an inert placeholder). Public so a product
+ * that owns a SuppressionGain without an Aec can use the same table. Returns
+ * 0 and writes *db_out for an in-enum level, -1 otherwise; aec_config_from_level
+ * instead falls back to balanced. */
+int aec_level_floor_db(AecLevel level, float* db_out);
 
-/* DT-lifted floor (min_gain_floor_dt_db) for a preset; only aggressive
- * differs from the shared -20 dB. Returns 0 and writes *db_out for an in-enum
- * preset, -1 (nothing written) otherwise. */
-int aec_preset_dt_floor_db(AecPreset preset, float* db_out);
+/* DT-lifted floor (min_gain_floor_dt_db) for a level; only aggressive differs
+ * from the shared -20 dB (no_floor: inert -20). Returns 0 and writes *db_out
+ * for an in-enum level, -1 (nothing written) otherwise. */
+int aec_level_dt_floor_db(AecLevel level, float* db_out);
 
-/* min_gain_split_floor_enabled for a preset. Returns 0 and writes
- * *enabled_out for an in-enum preset, -1 (nothing written) otherwise. */
-int aec_preset_split_floor_enabled(AecPreset preset, int* enabled_out);
+/* min_gain_split_floor_enabled for a level. Returns 0 and writes
+ * *enabled_out for an in-enum level, -1 (nothing written) otherwise. */
+int aec_level_split_floor_enabled(AecLevel level, int* enabled_out);
 
 /* Retargets the residual-echo strength of a running instance; filter, delay
  * state and histories carry on. Updates min_gain_floor_far_active_db and, for
@@ -401,8 +411,8 @@ int aec_preset_split_floor_enabled(AecPreset preset, int* enabled_out);
  * floor linearly in dB (0 = next hop); the DT floor and the split-floor flag
  * step immediately. Inert on a spatial_linear_context lane. Call between
  * hops, serialised with aec_process(). Returns 0, or -1 (nothing written) on
- * NULL, an out-of-enum preset or an out-of-range ramp_ms. */
-int aec_set_preset(Aec* a, AecPreset preset, float ramp_ms);
+ * NULL, an out-of-enum level or an out-of-range ramp_ms. */
+int aec_set_level(Aec* a, AecLevel level, float ramp_ms);
 
 /* Static-memory construction: aec_get_mem_size() returns the pool bytes (0 if
  * cfg is invalid). aec_init() places the Aec at mem[0] without malloc and

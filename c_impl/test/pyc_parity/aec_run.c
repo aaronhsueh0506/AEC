@@ -14,10 +14,10 @@
  *                    leaves them NULL). Scalars: far_power erle_factor dt_indicator divergence
  *                    saturation_level erl_estimate filter_converged res_floor_protect usable_linear
  *
- *   usage: aec_run mic.f32 ref.f32 outprefix sr fft preset [--obs] [--no-hpf] [--no-res]
+ *   usage: aec_run mic.f32 ref.f32 outprefix sr fft level [--obs] [--no-hpf] [--no-res]
  *                  [--no-cng] [--ctx]
  *          aec_run --hpf-only in.f32 out.f32 sr [cutoff_hz]
- *   preset: mild | balanced | aggressive | no_floor
+ *   level: mild | balanced | aggressive | no_floor
  *
  * No algorithm lives here: it is a thin driver over aec.h. The hop loop matches the Python runner
  * (`for i in range(0, n - hop, hop)`), i.e. the same number of hops from the same samples. */
@@ -52,7 +52,7 @@ static int hpf_only(int argc, char **argv) {
     int sr = atoi(argv[4]);
     float cutoff = argc > 5 ? (float)atof(argv[5]) : 80.0f;
     /* One hop-sized call per block, like aec_process: the filter state carries across calls. */
-    AecConfig cfg; aec_config_from_preset(&cfg, AEC_PRESET_BALANCED, sr);
+    AecConfig cfg; aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, sr);
     int hop = cfg.fft_size / 2;
     Hpf *h = hpf_create(cutoff, sr);
     if (!h) { fprintf(stderr, "aec_run: hpf_create rejected cutoff=%g sr=%d\n", (double)cutoff, sr); return 3; }
@@ -67,22 +67,22 @@ static int hpf_only(int argc, char **argv) {
 int main(int argc, char **argv) {
     if (argc >= 2 && !strcmp(argv[1], "--hpf-only")) return hpf_only(argc, argv);
     if (argc < 7) {
-        fprintf(stderr, "usage: aec_run mic.f32 ref.f32 outprefix sr fft preset [--obs] [--no-hpf] [--no-res] [--no-cng] [--ctx]\n");
+        fprintf(stderr, "usage: aec_run mic.f32 ref.f32 outprefix sr fft level [--obs] [--no-hpf] [--no-res] [--no-cng] [--ctx]\n");
         return 2;
     }
     long nm, nr;
     float *mic = load_f32(argv[1], &nm), *ref = load_f32(argv[2], &nr);
     const char *pre = argv[3];
     int sr = atoi(argv[4]), fft = atoi(argv[5]);
-    AecPreset preset;
-    if (!strcmp(argv[6], "mild")) preset = AEC_PRESET_MILD;
-    else if (!strcmp(argv[6], "balanced")) preset = AEC_PRESET_BALANCED;
-    else if (!strcmp(argv[6], "aggressive")) preset = AEC_PRESET_AGGRESSIVE;
-    else if (!strcmp(argv[6], "no_floor")) preset = AEC_PRESET_NO_FLOOR;
-    else { fprintf(stderr, "aec_run: unknown preset %s\n", argv[6]); return 2; }
+    AecLevel level;
+    if (!strcmp(argv[6], "mild")) level = AEC_LEVEL_MILD;
+    else if (!strcmp(argv[6], "balanced")) level = AEC_LEVEL_BALANCED;
+    else if (!strcmp(argv[6], "aggressive")) level = AEC_LEVEL_AGGRESSIVE;
+    else if (!strcmp(argv[6], "no_floor")) level = AEC_LEVEL_NO_FLOOR;
+    else { fprintf(stderr, "aec_run: unknown level %s (valid: mild|balanced|aggressive|no_floor)\n", argv[6]); return 2; }
 
     AecConfig cfg;
-    aec_config_from_preset(&cfg, preset, sr);
+    aec_config_from_level(&cfg, level, sr);
     cfg.fft_size = fft;
     int want_ctx = 0;
     for (int i = 7; i < argc; ++i) {
@@ -132,7 +132,7 @@ int main(int argc, char **argv) {
     }
     fclose(fo); fclose(fr); fclose(ft);
     if (fc) fclose(fc);
-    fprintf(stderr, "aec_run: %ld hops hop=%d sr=%d fft=%d preset=%s obs=%d hpf=%d res=%d cng=%d ctx=%d\n", h, hop, sr, fft,
+    fprintf(stderr, "aec_run: %ld hops hop=%d sr=%d fft=%d level=%s obs=%d hpf=%d res=%d cng=%d ctx=%d\n", h, hop, sr, fft,
             argv[6], cfg.live_observer_enabled, cfg.enable_highpass, cfg.enable_res, cfg.enable_cng, want_ctx);
     aec_destroy(&a);
     free(out); free(zeros); free(mic); free(ref);

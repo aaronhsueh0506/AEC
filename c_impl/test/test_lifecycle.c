@@ -76,7 +76,7 @@ static int run_one_cycle(const AecConfig* cfg) {
 
 static void test_cycles(int n_iters) {
     AecConfig cfg;
-    aec_config_from_preset(&cfg, AEC_PRESET_BALANCED, 16000);
+    aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, 16000);
 
     int all_ok = 1;
     for (int i = 0; i < n_iters; ++i) {
@@ -103,7 +103,7 @@ static void test_destroy_null(void) {
  * (aec_create) and the static-pool path (aec_init). */
 static void test_double_destroy_heap(void) {
     AecConfig cfg;
-    aec_config_from_preset(&cfg, AEC_PRESET_BALANCED, 16000);
+    aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, 16000);
 
     Aec a;
     int created = (aec_create(&a, &cfg) == 0);
@@ -121,7 +121,7 @@ static void test_double_destroy_heap(void) {
 
 static void test_double_destroy_static(void) {
     AecConfig cfg;
-    aec_config_from_preset(&cfg, AEC_PRESET_BALANCED, 16000);
+    aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, 16000);
 
     size_t sz = aec_get_mem_size(&cfg);
     CHECK(sz > 0, "double-destroy (static-pool path): aec_get_mem_size() > 0");

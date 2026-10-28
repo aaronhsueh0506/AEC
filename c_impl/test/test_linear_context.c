@@ -57,7 +57,7 @@ static int g_pass = 0;
     } while (0)
 
 static void context_only_config(AecConfig* cfg, int sample_rate, int fft_size) {
-    aec_config_from_preset(cfg, AEC_PRESET_BALANCED, sample_rate);
+    aec_config_from_level(cfg, AEC_LEVEL_BALANCED, sample_rate);
     cfg->enable_res = 0;
     cfg->return_res_context = 1;
     if (fft_size > 0) cfg->fft_size = fft_size;
@@ -760,7 +760,7 @@ static void scenario_far_active_no_echo(int silent_mic, const char *label) {
     double e_out = 0.0, e_mic = 0.0, worst = 0.0;
 
     g_rng_state = 0x11EC5EEDu;
-    aec_config_from_preset(&cfg, AEC_PRESET_BALANCED, 16000);
+    aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, 16000);
     cfg.enable_res = 0;
     cfg.return_res_context = 1;      /* the seam the NN post-filter consumes */
     if (aec_create(&a, &cfg) != 0) { CHECK(0, "create"); return; }
@@ -817,7 +817,7 @@ static void scenario_capture_fallback_requires_unusable(void) {
     float *near, *err;
     Complex *esw, *echo, *out_esw, *out_echo;
 
-    aec_config_from_preset(&cfg, AEC_PRESET_BALANCED, 16000);
+    aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, 16000);
     cfg.enable_res = 0;
     cfg.return_res_context = 1;
     create_rc = aec_create(&a, &cfg);

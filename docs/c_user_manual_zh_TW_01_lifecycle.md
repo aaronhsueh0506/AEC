@@ -9,7 +9,7 @@
 AecConfig cfg;
 Aec aec;                                    /* Aec 結構由呼叫端持有 */
 
-aec_config_from_preset(&cfg, AEC_PRESET_BALANCED, 16000);
+aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, 16000);
 if (aec_create(&aec, &cfg) != 0) { /* 設定無效或記憶體不足 */ }
 
 /* ... 每個 hop 呼叫 aec_process(&aec, mic, ref, out) ... */
@@ -26,7 +26,7 @@ aec_destroy(&aec);                          /* 必須剛好一次，釋放內部
 
 ```c
 AecConfig cfg;
-aec_config_from_preset(&cfg, AEC_PRESET_BALANCED, 16000);
+aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, 16000);
 
 size_t need = aec_get_mem_size(&cfg);       /* 0 = 設定無效 */
 if (need == 0) { /* 設定無效 */ }
@@ -50,7 +50,7 @@ free(pool);                                 /* 記憶池由呼叫端自行回收
 - 這條路徑**完全不呼叫 malloc**。`aec_destroy()` 對記憶池實例是真正的 no-op，
   重複呼叫安全，也可以直接省略後回收整個 pool。
 
-### 記憶池大小（實測，balanced preset，其餘為預設值）
+### 記憶池大小（實測，balanced level，其餘為預設值）
 
 **記憶池大小會隨 `delay_mode` 與 `delay_num_filters` 改變**，因為 matched
 filter bank、降取樣 render ring 與兩個 lag histogram 都是依 init 設定從記憶池
@@ -119,7 +119,7 @@ histogram 1,536 B ＋ pre-echo histogram 96 B。所以 `n=1` 相對預設 `n=5` 
 換算成 byte：每個 sample 4 B，再對齊到 16 B。以 16 kHz/256（hop 128）為例，
 每多 1 ms 的 `fixed_delay_samples` 就多 64 B；48 kHz/1024 每多 1 ms 多 192 B。
 
-各格點的 `FIXED` 實測值（balanced preset）：
+各格點的 `FIXED` 實測值（balanced level）：
 
 | 格點 | fixed=0 | 25 ms | 100 ms | 500 ms |
 |---|---:|---:|---:|---:|

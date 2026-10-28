@@ -267,7 +267,7 @@ TEST_RNG_SRCS   = $(TEST_DIR)/test_res_nearend_gate.c
 TEST_RNG_OBJS   = $(patsubst $(TEST_DIR)/%.c,$(OBJ_DIR)/%.o,$(TEST_RNG_SRCS))
 TEST_RNG_TARGET = $(BIN_DIR)/test_res_nearend_gate
 
-# Runtime strength retarget (suppression_gain_set_split_floor_far_active_db, aec_set_preset): immediate retarget, ramp timing,
+# Runtime strength retarget (suppression_gain_set_split_floor_far_active_db, aec_set_level): immediate retarget, ramp timing,
 # retarget mid-ramp, reset keeps the target, rejection writes nothing, spatial_linear_context lanes never ramp. Needs the full
 # Aec and SuppressionGain types.
 TEST_RP_SRCS   = $(TEST_DIR)/test_runtime_preset.c
@@ -533,6 +533,14 @@ test-header-fresh:
 	  exit 1; \
 	fi
 
+# Compile-only C++ check of include/aec.h (the library itself has no C++ TU): both spellings of the level, AecLevel and
+# AecPreset, must be assignable from the legacy AEC_PRESET_* names and accepted by aec_set_level(). It needs no audiolib
+# archive, so it sits outside the COMMON_LIB dispatch like test-header-fresh.
+.PHONY: test-header-cpp
+test-header-cpp:
+	$(CXX) -std=c++11 -fsyntax-only -Wall -Wextra -Werror -I./include -I$(COMMON_DIR)/include -I$(COMMON_DIR) $(TEST_DIR)/test_header_cpp.cpp
+	@echo "test-header-cpp: aec.h compiles as C++11 and the legacy level names convert"
+
 # Builds AND runs (unlike `bench`, which only builds) the delay_aec_reset() test. It is self-contained (synthetic signals,
 # no fixture file).
 .PHONY: test-delay-reset
@@ -742,7 +750,7 @@ TEST_SIMD_DEP   = selftest test-process-context test-linear-context test-aec-res
                   test-rate-structural test-counter-saturation
 TEST_SIMD_INDEP = test-heap-alignment test-memory-layout test-config-validation test-avg-reverb-slots \
                   test-shared-far-spec test-spectral-reuse test-shared-fft-handle test-static-aec test-zero-heap \
-                  test-header-fresh test-detectors-parity-all test-cli-delay-flags
+                  test-header-fresh test-header-cpp test-detectors-parity-all test-cli-delay-flags
 TEST_BUILD_GATES = test-no-testing-symbols audit-no-stdio
 CLEAN_ENV       = env -u MAKEFLAGS -u MFLAGS -u MAKELEVEL
 
@@ -1307,6 +1315,7 @@ help:
 	@echo "                  vs a portable model of the AArch64 NEON dataflow; scalar kernels vs the scalar model otherwise"
 	@echo "  test-aec-res    Standalone RES stage (aec_res.h): lane-equal config, API contract, render scale, initial phase"
 	@echo "  test-header-fresh  Regenerate include/aec_balanced_config.h and diff it against the checked-in copy"
+	@echo "  test-header-cpp  Compile-only C++11 check that aec.h's legacy AEC_PRESET_* names convert to AecLevel/AecPreset"
 	@echo "  test-detectors-parity  Gate detectors.c against the Python reference (regenerates the golden)"
 	@echo "  test-detectors-parity-all  Run detector parity on legacy 8 kHz and all three product grids"
 	@echo "  debug   Build with -g -DAEC_DEBUG"
@@ -1324,7 +1333,7 @@ help:
 	@echo "   COMMON_LIB the same way phase 1 does -- see the two-phase dispatch"
 	@echo "   comment in this Makefile -- and pass it: make print-bin-dir COMMON_LIB=\"...\")"
 	@echo "  ./bin/<backend>-<config-hash>/aec_wav <mic.wav> <ref.wav> <out.wav> [options]"
-	@echo "  ./bin/<backend>-<config-hash>/bench_rtf [--seconds N] [--repeat M] [--preset 0|1|2|3|mild|balanced|aggressive|no_floor] [--sr HZ] [--fft N] [--stage full|linear|both] [--scene noise|bursts]"
+	@echo "  ./bin/<backend>-<config-hash>/bench_rtf [--seconds N] [--repeat M] [--level 0|1|2|3|mild|balanced|aggressive|no_floor] [--sr HZ] [--fft N] [--stage full|linear|both] [--scene noise|bursts]"
 	@echo "  make COMMON_DIR=<path>       (override audiolib location)"
 	@echo "  make WERROR=1            (opt-in: -Werror for this repo's own sources)"
 	@echo "  make lib NO_STDIO=1      (opt-in: stdio-free libaec.a for board/no-stdio builds --"

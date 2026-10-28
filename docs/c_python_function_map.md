@@ -8,7 +8,7 @@
 
 演算法在 Python 端開發，C 要先和 Python 的效果同步，之後才能優化或改寫。本表回答：每個 C 函式對到哪個 Python 檔案的哪個符號、兩者關係是什麼、已知有哪些落差、有哪些對拍工具或測試。
 
-注意 C 與 Python 的名稱不對稱：Python 側仍帶 `aec3`，C 側沒有：`AEC._aec3_post`、`AEC._aec3_select_linear_filter_output`、`AEC._fire_aec3_misadj_scale`、`AEC._reset_aec3_post`、`PBFDKF._update_weights_aec3`、`modules/aec3_scale.py`、`ReverbDecayEstimator._lazy_init_aec3` 等。這份表記下的就是這種追溯資訊。
+注意 C 與 Python 的名稱不對稱：Python 側仍帶 `aec3`，C 側沒有：`AEC._aec3_post`、`AEC._aec3_select_linear_filter_output`、`AEC._fire_aec3_misadj_scale`、`AEC._reset_aec3_post`、`PBFDKF._update_weights_aec3`、`modules/aec3_scale.py`、`ReverbDecayEstimator._lazy_init_aec3` 等。這份表記下的就是這種追溯資訊。強度軸的命名也不對稱：C 稱 **level**（`AecLevel`、`aec_set_level`、`aec_config_from_level`），Python 稱 **preset**（`AecPreset`、`AEC.set_preset`、`AecConfig.from_preset`）；**C level == Python preset**，名稱與數字（0..3）相同。第 1 欄寫 C 名稱，第 2 欄寫 Python 名稱。
 
 ### 0.2 欄位與符號語法
 
@@ -89,11 +89,11 @@
 | `src/aec.c:aec_legacy10ms_alpha` | — | C-only（Python 在呼叫處直接用 `growth_rehop`） | — | `ctest:test_rate_structural.c` |
 | `src/aec.c:aec_legacy10ms_rate` | — | C-only（加法型逐 hop 速率的線性換算；C 註解載明 Python 側尚無對應的共用 helper） | — | `ctest:test_rate_structural.c` |
 | `src/aec.c:aec_config_defaults` | `modules/config.py:AecConfig` | partial（C 只填 balanced 預設值，缺 Python-only 旋鈕；不支援的取樣率 C 回 `fft_size`＝`filter_length`＝0 並由建立入口拒絕，Python 在 `__post_init__` 直接 `ValueError`） | S-02；S-18；S-22；D-02；D-06；D-07 | `ctest:test_config_validation.c` |
-| `src/aec.c:aec_preset_row` | — | C-only（三個 preset 查表共用的列查找；Python 以 `AecConfig.from_preset` 內的分支取得同樣數值） | — | `ctest:test_runtime_preset.c` |
-| `src/aec.c:aec_preset_floor_db` | `modules/config.py:AecConfig.from_preset` | partial（只回 far-active 地板 dB） | D-04 | `ctest:test_aec_res.c` |
-| `src/aec.c:aec_preset_dt_floor_db` | `modules/config.py:AecConfig.from_preset` | partial（只回 DT 地板 dB） | D-04 | `ctest:test_aec_res.c` |
-| `src/aec.c:aec_preset_split_floor_enabled` | `modules/config.py:AecConfig.from_preset` | partial（只回 split-floor 閂的布林值） | D-04 | `ctest:test_aec_res.c` |
-| `src/aec.c:aec_config_from_preset` | `modules/config.py:AecConfig.from_preset` | mirror（NO_FLOOR 雙邊建構期都有；不支援的取樣率同 `aec_config_defaults`） | D-04 | — |
+| `src/aec.c:aec_level_row` | — | C-only（三個 level 查表共用的列查找；Python 以 `AecConfig.from_preset` 內的分支取得同樣數值） | — | `ctest:test_runtime_preset.c` |
+| `src/aec.c:aec_level_floor_db` | `modules/config.py:AecConfig.from_preset` | partial（只回 far-active 地板 dB） | D-04 | `ctest:test_aec_res.c` |
+| `src/aec.c:aec_level_dt_floor_db` | `modules/config.py:AecConfig.from_preset` | partial（只回 DT 地板 dB） | D-04 | `ctest:test_aec_res.c` |
+| `src/aec.c:aec_level_split_floor_enabled` | `modules/config.py:AecConfig.from_preset` | partial（只回 split-floor 閂的布林值） | D-04 | `ctest:test_aec_res.c` |
+| `src/aec.c:aec_config_from_level` | `modules/config.py:AecConfig.from_preset` | mirror（NO_FLOOR 雙邊建構期都有；不支援的取樣率同 `aec_config_defaults`） | D-04 | — |
 | `src/aec.c:aec_resolve_signal_grid` | `modules/config.py:resolve_signal_grid` | mirror | — | `pytest:test_signal_grid.py`<br>`ctest:test_config_validation.c` |
 | `src/aec.c:aec_is_valid_sample_rate` | `modules/config.py:resolve_signal_grid`<br>`modules/config.py:default_fft_size` | partial（推定：Python 沒有獨立的「取樣率是否合法」函式，由格點表比對隱含） | — | `ctest:test_config_validation.c` |
 | `src/aec.c:aec_default_fft_size` | `modules/config.py:default_fft_size` | mirror | — | `pytest:test_signal_grid.py`<br>`ctest:test_config_validation.c` |
@@ -170,7 +170,7 @@
 | `src/aec.c:aec_hop_size` | `modules/orchestrator.py:AEC.hop_size` | mirror | — | — |
 | `src/aec.c:aec_bump_delay_generation` | — | C-only（AecLinearContext 的對齊世代記號） | D-12 | `ctest:test_linear_context.c` |
 | `src/aec.c:aec_far_fft_real_compute_count` | — | C-only（遠端 FFT 共用的計數儀表） | D-12 | `ctest:test_shared_far_spec.c` |
-| `src/aec.c:aec_set_preset` | `modules/orchestrator.py:AEC.set_preset` | mirror（NO_FLOOR 雙邊執行期都可切換，無守衛） | D-04 | `pytest:test_runtime_preset.py`<br>`ctest:test_runtime_preset.c` |
+| `src/aec.c:aec_set_level` | `modules/orchestrator.py:AEC.set_preset` | mirror（NO_FLOOR 雙邊執行期都可切換，無守衛） | D-04 | `pytest:test_runtime_preset.py`<br>`ctest:test_runtime_preset.c` |
 | `src/aec.c:aec_apply_external_realign` | `modules/orchestrator.py:AEC.apply_external_realign` | mirror | — | `pytest:test_external_realign.py`<br>`ctest:test_external_realign.c` |
 | `src/aec.c:aec_reset` | `modules/orchestrator.py:AEC.reset` | mirror | — | `pytest:test_aec_reset.py`<br>`ctest:test_reset_parity.c` |
 | `src/aec.c:misadj_update` | `modules/orchestrator.py:AEC._update_misadjustment_estimator` | mirror | — | — |
@@ -223,7 +223,7 @@
 | `src/aec_res.c:aec_res_n_bins` | — | C-only（範圍內無 Python 對應） | — | `ctest:test_aec_res.c` |
 | `src/aec_res.c:aec_res_hop_size` | — | C-only（範圍內無 Python 對應） | — | `ctest:test_aec_res.c` |
 | `src/aec_res.c:aec_res_process` | — | C-only（範圍內無 Python 對應；內部呼叫 `suppression_gain_get_gain`） | — | `ctest:test_aec_res.c` |
-| `src/aec_res.c:aec_res_set_preset` | — | C-only（範圍內無 Python 對應） | S-26；D-04 | `ctest:test_aec_res.c` |
+| `src/aec_res.c:aec_res_set_level` | — | C-only（範圍內無 Python 對應） | S-26；D-04 | `ctest:test_aec_res.c` |
 | `src/aec_res.c:aec_res_split_floor` | — | C-only（範圍內無 Python 對應） | — | `ctest:test_aec_res.c` |
 | `src/aec_res.c:aec_cng_fill` | `modules/orchestrator.py:AEC._post_add_comfort_noise#_aec3_cng_seed` | partial（與 `_aec3_post` 內的 CNG 注入同一組 LCG 與 sin 表；孿生另在 Audio_ALG/pipelines/common/cng_aec3.py） | — | `ctest:test_aec_res.c` |
 
@@ -766,7 +766,7 @@ PBF/Kalman H-error refresh、subband ERLE accumulation/release、render peak cou
 | — | `modules/detectors.py:DoubleTalkAnalyzer.dt_from_energy`、`modules/detectors.py:DoubleTalkAnalyzer.dt_from_shadow`、`modules/detectors.py:DoubleTalkAnalyzer.shadow_advantage` | Python-only（C 以結構欄位或回傳值直接取得；`DoubleTalk` 欄位） | — | — |
 | — | `modules/detectors.py:FilterPlateauDetector`、`modules/detectors.py:FilterPlateauDetector.__init__`、`modules/detectors.py:FilterPlateauDetector.reset`、`modules/detectors.py:FilterPlateauDetector.update`、`modules/detectors.py:FilterPlateauDetector.attempts`、`modules/detectors.py:FilterPlateauDetector.last_reset_frame` | Python-only（C 無此機制；Python 類別目前沒有任何實例化處，C 端沒有移植） | — | — |
 | — | `modules/enums.py:AecMode`、`modules/enums.py:AecFilterState` | Python-only（C 無此機制；Python 的濾波器模式與狀態列舉（FDAF／PBFDAF／PBFDKF／SUBBAND 等）；C 只實作 PBFDKF 路徑） | D-07 | — |
-| `struct:AecPreset` | `modules/enums.py:AecPreset` | Python-only（C 以資料結構、列舉或常數承載；C 的 `AecPreset` 列舉有 `AEC_PRESET_NO_FLOOR=3`；pytest 比對 aec.h 的整數值） | D-04 | `pytest:test_preset_arg.py` |
+| `struct:AecLevel` | `modules/enums.py:AecPreset` | Python-only（C 以資料結構、列舉或常數承載；C 的 `AecLevel` 列舉有 `AEC_LEVEL_NO_FLOOR=3`，舊名 `AecPreset`／`AEC_PRESET_*` 以字面數值保留在 aec.h；pytest 比對 aec.h 內舊名那四行的整數值） | D-04 | `pytest:test_preset_arg.py` |
 | `struct:AecDelayMode` | `modules/enums.py:AecDelayMode`、`modules/enums.py:AecDelayMode.coerce` | Python-only（C 以資料結構、列舉或常數承載；列舉，`coerce` 只在 Python（接受字串）） | — | `pytest:test_delay_mode.py` |
 | — | `modules/epc.py:classify_epc_event` | Python-only（C 無此機制；EpcEvent 到 AecEvent 的分類，orchestrator 未使用） | — | — |
 | `struct:EpcDetector` | `modules/epc.py:EchoPathChangeDetector` | Python-only（C 以資料結構、列舉或常數承載；方法已對照到 `epc_*`） | — | — |
@@ -866,7 +866,7 @@ PBF/Kalman H-error refresh、subband ERLE accumulation/release、render peak cou
 | D-01 | mic-path HPF：C 為 float32 DF2T，Python 為 fp64，非逐位元（文件化） |
 | D-02 | `delay_est_period_s` 預設 Python 0.5／C 0.0 |
 | D-03 | matched-filter duty-cycle 節流、reject list 固定 8 格、延遲鏈為 float32 非逐位元 |
-| D-04 | preset 軸的承載形式不同：C 為三個查表函式加 `aec_set_preset`，Python 為 `AecConfig.from_preset` 內的一張表加 `AEC.set_preset`；NO_FLOOR 兩邊在建構期與執行期都有 |
+| D-04 | preset 軸（C 稱 level）的承載形式不同：C 為三個查表函式加 `aec_set_level`，Python 為 `AecConfig.from_preset` 內的一張表加 `AEC.set_preset`；NO_FLOOR 兩邊在建構期與執行期都有 |
 | D-05 | `return_formed_output` 為 Python-only；`AecResContext` 欄位兩邊不同 |
 | D-06 | 預設為 True 的 AEC3 對齊旗標在 C 為編譯期寫死，無法在 runtime 關閉 |
 | D-07 | C 只實作 PBFDKF；Python 另有 FDAF／PBFDAF／SUBBAND 與調校選項 |
@@ -901,4 +901,4 @@ PBF/Kalman H-error refresh、subband ERLE accumulation/release、render peak cou
 | `e2e:parity_aec_e2e` | `c_impl/test/parity_aec_e2e.c` 加 `python/diag/gen_aec_e2e_golden.py`：端到端對拍，由 `make test-parity-e2e` 建置並執行（16／48 kHz 通過，8 kHz 列為預期紅燈，見 S-19）；覆蓋限制見 T-02。 |
 | `manual:<檔名>` | `c_impl/test/` 下沒有接任何 Makefile target 的 harness。`parity_saturation.c` 需要外部 dump 的 `sat.bin`、repo 內沒有產生器。 |
 | `ctest:<檔名>` | `c_impl/test/`（含 `test/modules/`）下的 C 測試。多數是 C 自洽的回歸或結構測試，不是 Python 數值對拍；`test_delay_*`、`test_external_realign`、`test_runtime_preset`、`test_res_nearend_gate`、`test_reset_parity` 與同名（或對應）的 pytest 用同一組場景。 |
-| `pytest:<檔名>` | `python/tests/` 下的 Python 測試。`test_signal_grid.py` 會讀 `c_impl/src/aec.c` 的文字比對格點表（`AEC_GRID_TABLE`），`test_preset_arg.py` 讀 `aec.h` 的整數值；其餘只測 Python 行為。 |
+| `pytest:<檔名>` | `python/tests/` 下的 Python 測試。`test_signal_grid.py` 會讀 `c_impl/src/aec.c` 的文字比對格點表（`AEC_GRID_TABLE`），`test_preset_arg.py` 讀 `aec.h` 內 `AEC_PRESET_*` 舊名那四行的整數值；其餘只測 Python 行為。 |

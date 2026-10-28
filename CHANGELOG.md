@@ -42,6 +42,50 @@ when verdict requires it.
 
 ---
 
+## [Unreleased] — 2026-10-28 — C strength setting renamed from preset to level
+
+### Changed
+- The C name of the residual-echo strength ladder (`mild` 0 / `balanced` 1 / `aggressive` 2 / `no_floor` 3, default 1)
+  is now **level**. Pure rename: the value names, the integers, the per-function out-of-range behaviour
+  (`aec_config_from_level` falls back to balanced; `aec_set_level` / `aec_res_set_level` reject with -1) and every output are
+  unchanged. A hash of `aec_config_from_level` for 8000/16000/48000 x levels 0..3 (plus out-of-enum values),
+  `aec_get_mem_size`, the lookup getters, a 120-hop `aec_process` stream with `aec_set_level` and the standalone RES is
+  identical to the pre-change tree. Python is unchanged: it keeps `preset`, so **C level == Python preset**; the function
+  map column 1 and the C manual carry the bridge.
+
+  | Old C name | New C name |
+  |---|---|
+  | `AecPreset` | `AecLevel` |
+  | `AEC_PRESET_{MILD,BALANCED,AGGRESSIVE,NO_FLOOR}` | `AEC_LEVEL_{MILD,BALANCED,AGGRESSIVE,NO_FLOOR}` |
+  | `aec_config_from_preset` | `aec_config_from_level` |
+  | `aec_set_preset` / `aec_res_set_preset` | `aec_set_level` / `aec_res_set_level` |
+  | `aec_preset_floor_db` / `aec_preset_dt_floor_db` / `aec_preset_split_floor_enabled` | `aec_level_floor_db` / `aec_level_dt_floor_db` / `aec_level_split_floor_enabled` |
+  | `aec_wav` / `bench_rtf` `--preset` | `--level` (`--preset` still accepted) |
+
+- `aec_level_floor_db` / `aec_level_dt_floor_db` return -28 / -20 for `AEC_LEVEL_NO_FLOOR`: an inert placeholder (that
+  level disables the floors), not a floor.
+- Printed text: the `aec_wav` summary line (stderr) and the `bench_rtf` header line (`# ...`) print `level=` where they
+  printed `preset=`; the `aec_run` stderr line likewise. The `parity_aec_e2e` / `aec_run` positional argument and the
+  `run_parity_e2e.sh` JSON key `preset` are unchanged.
+- `docs/c_user_manual_zh_TW_03_preset.md` is now `docs/c_user_manual_zh_TW_03_level.md` (section 7 anchors follow);
+  the test file `c_impl/test/test_runtime_preset.c` and its `make test-runtime-preset` target keep their names because they
+  pair by name with `python/tests/test_runtime_preset.py`.
+
+### Kept
+- `AEC_PRESET_*` (four enumerators with literal values 0..3) and `typedef AecLevel AecPreset` stay in `aec.h`: the Python
+  tests `python/tests/test_preset_arg.py` read those lines. They stay for as long as the Python twins say `preset`. The
+  four names are members of `AecLevel` itself (as `AEC_PRESET_*` were members of `AecPreset`), so in C++ they convert to
+  `AecLevel` / `AecPreset` and can be passed to `aec_set_level()`; `make test-header-cpp` compiles that.
+- The generated comment in `include/aec_balanced_config.h` ("the preset axis") is emitted by
+  `python/diag/gen_aec_balanced_config_h.py` and is not edited (`make test-header-fresh`).
+
+### Compatibility
+- Link-incompatible for prebuilt objects: the old function names are gone, so recompile and relink callers.
+  Struct layouts, enum values and `aec_get_mem_size` are unchanged, so no pool size or layout version moves.
+- Python unchanged; stale `preset` wording about the C names remains in Python comments at
+  `c_impl/test/pyc_parity/pyc_parity.py:310`, `python/preset_arg.py:1-3,10`, `python/diag/gen_aec_balanced_config_h.py:14`
+  and `python/tests/test_preset_arg.py:1,36`.
+
 ## [Unreleased] — 2026-10-28 — A/B evidence and simple-mu research tools archived out of the tree
 
 ### Removed

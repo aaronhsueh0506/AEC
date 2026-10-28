@@ -5,7 +5,7 @@
  *   (b)  impulse through the linear path (enable_res = 0, enable_cng = 0): finite output from hop 0 and residual
  *        energy well below mic energy after convergence. (b2): the same excitation through the full post chain
  *        (enable_res = 1), which reads the per-grid aecb_rate_cfg() tuning row.
- *   (c)  aec_get_mem_size grows 8k < 16k < 48k and is identical across the four presets at a fixed rate. (c2):
+ *   (c)  aec_get_mem_size grows 8k < 16k < 48k and is identical across the four levels at a fixed rate. (c2):
  *        aec_init (static pool) is byte-equal to aec_create (heap) on every grid.
  *   (d)  retiming of the top-level constants authored as hop counts / per-hop EMAs on the 10 ms / 16 kHz grid
  *        (shadow_err_alpha, warmup_frames, epc_hangover, ne_recent_hold, filter_misadjustment_{stable,hangover}_frames,
@@ -151,7 +151,7 @@ static void run_impulse_test(int enable_res, const char *label) {
         g_lcg_state = 0x2026075Fu;   /* fixed seed per rate: reproducible */
 
         AecConfig cfg;
-        aec_config_from_preset(&cfg, AEC_PRESET_BALANCED, sr);
+        aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, sr);
         cfg.fft_size = GRIDS[r].fft_size;
         cfg.enable_res = enable_res;
         cfg.enable_cng = 0;   /* deterministic -- no dither noise floor */
@@ -250,7 +250,7 @@ static void test_res_context_wola_identity(void) {
             float max_sum_error = 0.0f;
             int context_valid = 1;
 
-            aec_config_from_preset(&cfg, AEC_PRESET_BALANCED, sr);
+            aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, sr);
             cfg.fft_size = fft_size;
             cfg.enable_shadow = shadow;
             cfg.enable_res = 0;
@@ -376,7 +376,7 @@ static void test_spatial_linear_context_matches_baseline(void) {
             int saw_dominant_nearend = 0;
             int valid = 1;
 
-            aec_config_from_preset(&cfg, AEC_PRESET_BALANCED, sr);
+            aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, sr);
             cfg.fft_size = fft_size;
             cfg.enable_shadow = shadow;
             cfg.enable_res = 0;
@@ -550,7 +550,7 @@ static void test_suppression_gain_dne_prefix_matches_get_gain(void) {
         int saw_enter = 0, saw_hold = 0, saw_exit = 0;
         int valid = 1;
 
-        aec_config_from_preset(&cfg, AEC_PRESET_BALANCED, sr);
+        aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, sr);
         cfg.fft_size = fft_size;
         cfg.enable_cng = 0;
         cfg.enable_delay_est = 0;
@@ -659,7 +659,7 @@ static void test_static_pool_matches_heap(void) {
         g_lcg_state = 0x53746174u;   /* fixed seed, independent of the impulse test's */
 
         AecConfig cfg;
-        aec_config_from_preset(&cfg, AEC_PRESET_BALANCED, sr);
+        aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, sr);
         cfg.fft_size = fft_size;
         cfg.enable_res = 1;   /* exercise the full post-chain, not just the linear filter */
         cfg.enable_cng = 0;   /* deterministic */
@@ -710,7 +710,7 @@ static void test_mem_size_consistency(void) {
     size_t sizes[N_GRIDS];
     for (int r = 0; r < N_GRIDS; ++r) {
         AecConfig cfg;
-        aec_config_from_preset(&cfg, AEC_PRESET_BALANCED, GRIDS[r].sample_rate);
+        aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, GRIDS[r].sample_rate);
         cfg.fft_size = GRIDS[r].fft_size;
         sizes[r] = aec_get_mem_size(&cfg);
         char what[96];
@@ -722,20 +722,20 @@ static void test_mem_size_consistency(void) {
     CHECK(sizes[1] < sizes[2], "mem_size(16000/256) < mem_size(16000/512)");
     CHECK(sizes[2] < sizes[3], "mem_size(16000/512) < mem_size(48000/1024)");
 
-    AecPreset presets[] = { AEC_PRESET_MILD, AEC_PRESET_BALANCED, AEC_PRESET_AGGRESSIVE, AEC_PRESET_NO_FLOOR };
-    const char *preset_names[] = { "mild", "balanced", "aggressive", "no_floor" };
+    AecLevel levels[] = { AEC_LEVEL_MILD, AEC_LEVEL_BALANCED, AEC_LEVEL_AGGRESSIVE, AEC_LEVEL_NO_FLOOR };
+    const char *level_names[] = { "mild", "balanced", "aggressive", "no_floor" };
     for (int r = 0; r < N_GRIDS; ++r) {
         size_t base = 0;
         for (int p = 0; p < 4; ++p) {
             AecConfig cfg;
-            aec_config_from_preset(&cfg, presets[p], GRIDS[r].sample_rate);
+            aec_config_from_level(&cfg, levels[p], GRIDS[r].sample_rate);
             cfg.fft_size = GRIDS[r].fft_size;
             size_t sz = aec_get_mem_size(&cfg);
             if (p == 0) base = sz;
             char what[128];
             snprintf(what, sizeof(what),
-                     "sr=%d preset=%s: mem_size == mild's mem_size (%zu == %zu, presets don't affect sizing)",
-                     GRIDS[r].sample_rate, preset_names[p], sz, base);
+                     "sr=%d level=%s: mem_size == mild's mem_size (%zu == %zu, levels don't affect sizing)",
+                     GRIDS[r].sample_rate, level_names[p], sz, base);
             CHECK(sz == base, what);
         }
     }
@@ -770,7 +770,7 @@ static void test_top_level_constant_retiming(void) {
         int fft = GRIDS[r].fft_size;
 
         AecConfig cfg;
-        aec_config_from_preset(&cfg, AEC_PRESET_BALANCED, sr);
+        aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, sr);
         /* Post-defaults grid override -- mirrors aec_wav.c's --fft-size
          * flag / this file's own (b)/(c)/(c2) pattern, and is exactly the
          * path that forced retiming to live in aec_carve() rather than
@@ -819,7 +819,7 @@ static void test_top_level_constant_retiming(void) {
      * wasn't exercised there. */
     for (int r = 0; r < N_GRIDS; ++r) {
         AecConfig cfg;
-        aec_config_from_preset(&cfg, AEC_PRESET_BALANCED, GRIDS[r].sample_rate);
+        aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, GRIDS[r].sample_rate);
         cfg.fft_size = GRIDS[r].fft_size;
         char what[128];
         snprintf(what, sizeof(what),
@@ -869,7 +869,7 @@ static void test_adaptation_constant_retiming(void) {
         int fft = GRIDS[r].fft_size;
 
         AecConfig cfg;
-        aec_config_from_preset(&cfg, AEC_PRESET_BALANCED, sr);
+        aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, sr);
         cfg.fft_size = fft;             /* post-defaults override; see (d) */
         cfg.enable_shadow = 1;          /* the shadow is built through its own
                                          * call site; a retime applied to only
@@ -1047,7 +1047,7 @@ static void test_retimed_constants_reach_the_audio_path(void) {
         Aec aec;
         char what[224];
 
-        aec_config_from_preset(&cfg, AEC_PRESET_BALANCED, sr);
+        aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, sr);
         cfg.fft_size = fft;
         cfg.enable_delay_est = 0;
         cfg.enable_highpass = 0;    /* a DC near level must survive to near_hop */
@@ -1114,7 +1114,7 @@ static void test_mu_holdoff_rearm_guard(void) {
         Aec aec;
         char what[192];
 
-        aec_config_from_preset(&cfg, AEC_PRESET_BALANCED, sr);
+        aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, sr);
         cfg.fft_size = fft;
         int rc = aec_create(&aec, &cfg);
         snprintf(what, sizeof(what), "sr=%d fft=%d: aec_create() for holdoff test", sr, fft);
@@ -1426,7 +1426,7 @@ static void test_simple_mu_frozen_exception(void) {
         Aec aec;
         char what[224];
 
-        aec_config_from_preset(&cfg, AEC_PRESET_BALANCED, sr);
+        aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, sr);
         cfg.fft_size = fft;
         int rc = aec_create(&aec, &cfg);
         snprintf(what, sizeof(what), "sr=%d fft=%d: aec_create() for simple-mu test",
@@ -1538,7 +1538,7 @@ static void test_filter_restart_clears_derived_counters(void) {
         Aec aec;
         char what[192];
 
-        aec_config_from_preset(&cfg, AEC_PRESET_BALANCED, sr);
+        aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, sr);
         cfg.fft_size = fft;
         int rc = aec_create(&aec, &cfg);
         snprintf(what, sizeof(what),

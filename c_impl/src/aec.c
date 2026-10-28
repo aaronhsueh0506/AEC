@@ -110,57 +110,57 @@ void aec_config_defaults(AecConfig* cfg, int sr) {
     cfg->live_observer_mu = 0.3f;
     cfg->live_observer_corrob_ms = 100.0f;
     cfg->live_observer_corrob_margin_db = 0.0f;
-    /* Default on, so a config that skips aec_config_from_preset keeps the split floor. */
+    /* Default on, so a config that skips aec_config_from_level keeps the split floor. */
     cfg->min_gain_split_floor_enabled = 1;
 }
 
-/* Preset strength table in AecPreset order; NO_FLOOR repeats balanced's
+/* Level strength table in AecLevel order; NO_FLOOR repeats balanced's
  * (unused) values. */
-typedef struct { float far_active_db, dt_db; int split_floor_enabled; } AecPresetFloors;
-static const AecPresetFloors AEC_PRESET_FLOORS[] = {
-    [AEC_PRESET_MILD]       = { -20.0f, -20.0f, 1 },
-    [AEC_PRESET_BALANCED]   = { -28.0f, -20.0f, 1 },
-    [AEC_PRESET_AGGRESSIVE] = { -38.0f, -30.0f, 1 },
-    [AEC_PRESET_NO_FLOOR]   = { -28.0f, -20.0f, 0 },
+typedef struct { float far_active_db, dt_db; int split_floor_enabled; } AecLevelFloors;
+static const AecLevelFloors AEC_LEVEL_FLOORS[] = {
+    [AEC_LEVEL_MILD]       = { -20.0f, -20.0f, 1 },
+    [AEC_LEVEL_BALANCED]   = { -28.0f, -20.0f, 1 },
+    [AEC_LEVEL_AGGRESSIVE] = { -38.0f, -30.0f, 1 },
+    [AEC_LEVEL_NO_FLOOR]   = { -28.0f, -20.0f, 0 },
 };
 
-/* Row for an in-enum preset, NULL otherwise (every lookup below then fails). */
-static const AecPresetFloors* aec_preset_row(AecPreset p) {
-    return ((unsigned)p < sizeof(AEC_PRESET_FLOORS) / sizeof(AEC_PRESET_FLOORS[0]))
-               ? &AEC_PRESET_FLOORS[p] : NULL;
+/* Row for an in-enum level, NULL otherwise (every lookup below then fails). */
+static const AecLevelFloors* aec_level_row(AecLevel p) {
+    return ((unsigned)p < sizeof(AEC_LEVEL_FLOORS) / sizeof(AEC_LEVEL_FLOORS[0]))
+               ? &AEC_LEVEL_FLOORS[p] : NULL;
 }
 
-int aec_preset_floor_db(AecPreset p, float* db_out) {
-    const AecPresetFloors* r = aec_preset_row(p);
+int aec_level_floor_db(AecLevel p, float* db_out) {
+    const AecLevelFloors* r = aec_level_row(p);
     if (db_out == NULL || r == NULL) return -1;
     *db_out = r->far_active_db;
     return 0;
 }
 
-int aec_preset_dt_floor_db(AecPreset p, float* db_out) {
-    const AecPresetFloors* r = aec_preset_row(p);
+int aec_level_dt_floor_db(AecLevel p, float* db_out) {
+    const AecLevelFloors* r = aec_level_row(p);
     if (db_out == NULL || r == NULL) return -1;
     *db_out = r->dt_db;
     return 0;
 }
 
-int aec_preset_split_floor_enabled(AecPreset p, int* enabled_out) {
-    const AecPresetFloors* r = aec_preset_row(p);
+int aec_level_split_floor_enabled(AecLevel p, int* enabled_out) {
+    const AecLevelFloors* r = aec_level_row(p);
     if (enabled_out == NULL || r == NULL) return -1;
     *enabled_out = r->split_floor_enabled;
     return 0;
 }
 
-void aec_config_from_preset(AecConfig* cfg, AecPreset p, int sr) {
+void aec_config_from_level(AecConfig* cfg, AecLevel p, int sr) {
     float db, dt_db;
     int en;
     aec_config_defaults(cfg, sr);
     cfg->min_gain_floor_far_active_db =
-        (aec_preset_floor_db(p, &db) == 0) ? db : -28.0f;
+        (aec_level_floor_db(p, &db) == 0) ? db : -28.0f;
     cfg->min_gain_floor_dt_db =
-        (aec_preset_dt_floor_db(p, &dt_db) == 0) ? dt_db : -20.0f;
+        (aec_level_dt_floor_db(p, &dt_db) == 0) ? dt_db : -20.0f;
     cfg->min_gain_split_floor_enabled =
-        (aec_preset_split_floor_enabled(p, &en) == 0) ? en : 1;
+        (aec_level_split_floor_enabled(p, &en) == 0) ? en : 1;
 }
 
 /* Signal-grid table: admissible (sample_rate, fft_size) pairs and their
@@ -1564,15 +1564,15 @@ long aec_far_fft_real_compute_count(const Aec* a) {
     return total;
 }
 
-int aec_set_preset(Aec* a, AecPreset preset, float ramp_ms) {
+int aec_set_level(Aec* a, AecLevel level, float ramp_ms) {
     float db, dt_db;
     int en;
     if (a == NULL) return -1;
-    if (aec_preset_floor_db(preset, &db) != 0) return -1;
-    if (aec_preset_dt_floor_db(preset, &dt_db) != 0) return -1;
+    if (aec_level_floor_db(level, &db) != 0) return -1;
+    if (aec_level_dt_floor_db(level, &dt_db) != 0) return -1;
     /* Lookups are validated before any write; the suppressor applies first
      * and refuses without writing, leaving a->cfg unchanged. */
-    if (aec_preset_split_floor_enabled(preset, &en) != 0) return -1;
+    if (aec_level_split_floor_enabled(level, &en) != 0) return -1;
     if (suppression_gain_set_split_floor_far_active_db(&a->a3_sg, db,
                                                        ramp_ms) != 0) {
         return -1;

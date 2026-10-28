@@ -26,7 +26,7 @@
   - [4. 生命週期](c_user_manual_zh_TW_01_lifecycle.md#4-生命週期) <!-- split-toc -->
     - [A. Heap 路徑（`aec_create`）](c_user_manual_zh_TW_01_lifecycle.md#a-heap-路徑aec_create) <!-- split-toc -->
     - [B. 呼叫端自備記憶池（`aec_get_mem_size` + `aec_init`）](c_user_manual_zh_TW_01_lifecycle.md#b-呼叫端自備記憶池aec_get_mem_size--aec_init) <!-- split-toc -->
-    - [記憶池大小（實測，balanced preset，其餘為預設值）](c_user_manual_zh_TW_01_lifecycle.md#記憶池大小實測balanced-preset其餘為預設值) <!-- split-toc -->
+    - [記憶池大小（實測，balanced level，其餘為預設值）](c_user_manual_zh_TW_01_lifecycle.md#記憶池大小實測balanced-level其餘為預設值) <!-- split-toc -->
     - [`aec_reset`](c_user_manual_zh_TW_01_lifecycle.md#aec_reset) <!-- split-toc -->
     - [什麼不能改](c_user_manual_zh_TW_01_lifecycle.md#什麼不能改) <!-- split-toc -->
   - [5. 錯誤語意表](c_user_manual_zh_TW_01_lifecycle.md#5-錯誤語意表) <!-- split-toc -->
@@ -40,8 +40,8 @@
     - [6.6b 逐階段耗時（`aec_get_last_timing`）](c_user_manual_zh_TW_02_config.md#66b-逐階段耗時aec_get_last_timing) <!-- split-toc -->
     - [6.6c Live observer（實驗性）](c_user_manual_zh_TW_02_config.md#66c-live-observer實驗性) <!-- split-toc -->
     - [6.7 靜態記憶體拆解（`aec_get_mem_breakdown`）](c_user_manual_zh_TW_02_config.md#67-靜態記憶體拆解aec_get_mem_breakdown) <!-- split-toc -->
-  - [7. Preset 選擇](c_user_manual_zh_TW_03_preset.md#7-preset-選擇) <!-- split-toc -->
-    - [7.1 執行期切換 preset（`aec_set_preset`）](c_user_manual_zh_TW_03_preset.md#71-執行期切換-presetaec_set_preset) <!-- split-toc -->
+  - [7. Level 選擇](c_user_manual_zh_TW_03_level.md#7-level-選擇) <!-- split-toc -->
+    - [7.1 執行期切換 level（`aec_set_level`）](c_user_manual_zh_TW_03_level.md#71-執行期切換-levelaec_set_level) <!-- split-toc -->
   - [8. 進階整合 seam](c_user_manual_zh_TW_04_seam_troubleshooting.md#8-進階整合-seam) <!-- split-toc -->
     - [8.1 Context-only 處理路徑](c_user_manual_zh_TW_04_seam_troubleshooting.md#81-context-only-處理路徑) <!-- split-toc -->
     - [8.2 多實例共用遠端 FFT](c_user_manual_zh_TW_04_seam_troubleshooting.md#82-多實例共用遠端-fft) <!-- split-toc -->
@@ -116,7 +116,7 @@
 `aec_create()` / `aec_init()` / `aec_get_mem_size()` 拒絕（和任何不成對的
 組合一樣）。
 
-填值的正確做法只有一條鏈：`aec_config_defaults()` / `aec_config_from_preset()`
+填值的正確做法只有一條鏈：`aec_config_defaults()` / `aec_config_from_level()`
 是**唯一**會替你填預設格點的地方（8k→256、16k→256、48k→1024，同
 `aec_default_fft_size()`），填完之後核心不再猜第二次。要用 16 kHz 的 512
 格點，就在 `aec_create()` 前自行覆寫 `cfg.fft_size = 512`。CLI／上層應用
@@ -208,7 +208,7 @@ int run_aec(int sample_rate)
     float    *mic, *ref, *out;
     int       hop;
 
-    aec_config_from_preset(&cfg, AEC_PRESET_BALANCED, sample_rate);
+    aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, sample_rate);
     if (aec_create(&aec, &cfg) != 0) return -1;      /* 0 = 成功，-1 = 失敗 */
 
     hop = aec_hop_size(&aec);                        /* 每次剛好餵這麼多 sample */

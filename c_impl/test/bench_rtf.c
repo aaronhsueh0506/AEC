@@ -9,7 +9,7 @@
  *
  * Usage:
  *   ./bin/bench_rtf [--seconds N] [--repeat M]
- *                    [--preset 0|1|2|3|mild|balanced|aggressive|no_floor]
+ *                    [--level 0|1|2|3|mild|balanced|aggressive|no_floor]
  *                    [--sr HZ] [--fft N] [--stage full|linear|both]
  *                    [--scene noise|bursts] [--live-observer]
  *                    [--wav mic.wav ref.wav]
@@ -22,7 +22,7 @@
  * PROFILE=1 adds one line per stage, "buckets_us_per_hop", with the mean of each stage-timing bucket over the fastest pass.
  *
  * Stages:
- *   full   - production config (preset's enable_res=1, enable_cng=1; the same config aec_wav's `--preset <p> --cng` builds).
+ *   full   - production config (level's enable_res=1, enable_cng=1; the same config aec_wav's `--level <p> --cng` builds).
  *   linear - identical config with enable_res=0 (linear-filter-only path).
  *   post   - derived (full.total_s - linear.total_s); an approximation of the post-filter chain's own cost, not an
  *            independently timed stage.
@@ -151,9 +151,9 @@ static void print_usage(const char* prog) {
         "Options:\n"
         "  --seconds N                          synthetic input length (default 60)\n"
         "  --repeat M                            passes per stage, report min and median (default 1)\n"
-        "  --preset {0|1|2|3|mild|balanced|aggressive|no_floor}   default: balanced (1)\n"
+        "  --level {0|1|2|3|mild|balanced|aggressive|no_floor}   default: balanced (1); --preset is an alias\n"
         "  --sr HZ                               sample rate of the synthetic input (default 16000)\n"
-        "  --fft N                               FFT size (default: the preset's)\n"
+        "  --fft N                               FFT size (default: the level's)\n"
         "  --stage {full|linear|both}            stages to run (default: both)\n"
         "  --scene {noise|bursts}                synthetic input: white noise (default) or the speech-like scene\n"
         "  --wav <mic.wav> <ref.wav>             use a recording instead of synthetic input\n"
@@ -161,19 +161,19 @@ static void print_usage(const char* prog) {
         prog);
 }
 
-static int parse_preset(const char* s, AecPreset* out) {
-    if (!strcmp(s, "0") || !strcmp(s, "mild"))       { *out = AEC_PRESET_MILD;       return 0; }
-    if (!strcmp(s, "1") || !strcmp(s, "balanced"))   { *out = AEC_PRESET_BALANCED;   return 0; }
-    if (!strcmp(s, "2") || !strcmp(s, "aggressive")) { *out = AEC_PRESET_AGGRESSIVE; return 0; }
-    if (!strcmp(s, "3") || !strcmp(s, "no_floor"))   { *out = AEC_PRESET_NO_FLOOR;   return 0; }
+static int parse_level(const char* s, AecLevel* out) {
+    if (!strcmp(s, "0") || !strcmp(s, "mild"))       { *out = AEC_LEVEL_MILD;       return 0; }
+    if (!strcmp(s, "1") || !strcmp(s, "balanced"))   { *out = AEC_LEVEL_BALANCED;   return 0; }
+    if (!strcmp(s, "2") || !strcmp(s, "aggressive")) { *out = AEC_LEVEL_AGGRESSIVE; return 0; }
+    if (!strcmp(s, "3") || !strcmp(s, "no_floor"))   { *out = AEC_LEVEL_NO_FLOOR;   return 0; }
     return -1;
 }
 
-static const char* preset_name(AecPreset p) {
+static const char* level_name(AecLevel p) {
     switch (p) {
-        case AEC_PRESET_MILD:       return "mild";
-        case AEC_PRESET_AGGRESSIVE: return "aggressive";
-        case AEC_PRESET_NO_FLOOR:   return "no_floor";
+        case AEC_LEVEL_MILD:       return "mild";
+        case AEC_LEVEL_AGGRESSIVE: return "aggressive";
+        case AEC_LEVEL_NO_FLOOR:   return "no_floor";
         default:                    return "balanced";
     }
 }
@@ -278,7 +278,7 @@ int main(int argc, char** argv) {
     int fft_override = 0;
     int stage_sel = 0;   /* 0 both, 1 full only, 2 linear only */
     int scene_bursts = 0;
-    AecPreset preset = AEC_PRESET_BALANCED;
+    AecLevel level = AEC_LEVEL_BALANCED;
     int use_wav = 0;
     const char* mic_path = NULL;
     const char* ref_path = NULL;
@@ -290,9 +290,9 @@ int main(int argc, char** argv) {
             seconds = atoi(argv[++i]);
         } else if (!strcmp(arg, "--repeat") && i + 1 < argc) {
             repeat = atoi(argv[++i]);
-        } else if (!strcmp(arg, "--preset") && i + 1 < argc) {
-            if (parse_preset(argv[++i], &preset) != 0) {
-                fprintf(stderr, "ERROR: unknown preset '%s'. Valid: 0|1|2|3|mild|balanced|aggressive|no_floor\n", argv[i]);
+        } else if ((!strcmp(arg, "--level") || !strcmp(arg, "--preset")) && i + 1 < argc) {
+            if (parse_level(argv[++i], &level) != 0) {
+                fprintf(stderr, "ERROR: unknown level '%s'. Valid: 0|1|2|3|mild|balanced|aggressive|no_floor\n", argv[i]);
                 return 2;
             }
         } else if (!strcmp(arg, "--sr") && i + 1 < argc) {
@@ -366,12 +366,12 @@ int main(int argc, char** argv) {
     }
 
     AecConfig full_cfg;
-    aec_config_from_preset(&full_cfg, preset, sample_rate);
+    aec_config_from_level(&full_cfg, level, sample_rate);
     full_cfg.enable_cng = 1;   /* mirrors aec_wav's --cng path */
     if (fft_override > 0) full_cfg.fft_size = fft_override;
     full_cfg.live_observer_enabled = live_observer;
 
-    /* Probe hop size once (hop is a pure function of sample_rate/preset,
+    /* Probe hop size once (hop is a pure function of sample_rate/level,
      * identical for the full and linear configs below); this instance is
      * not part of either timed stage. */
     Aec probe;
@@ -385,8 +385,8 @@ int main(int argc, char** argv) {
     int n_hops = hop > 0 ? n_samples / hop : 0;
     double audio_seconds = (double)n_hops * hop / (double)sample_rate;
 
-    printf("# preset=%s input=%s sample_rate=%d hop=%d audio_s=%.3f\n",
-           preset_name(preset), use_wav ? "wav" : "synthetic", sample_rate, hop, audio_seconds);
+    printf("# level=%s input=%s sample_rate=%d hop=%d audio_s=%.3f\n",
+           level_name(level), use_wav ? "wav" : "synthetic", sample_rate, hop, audio_seconds);
     printf("runs=%d\n", repeat);
 
     double full_s = 0.0, linear_s = 0.0;

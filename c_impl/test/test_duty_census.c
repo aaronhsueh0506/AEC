@@ -109,7 +109,7 @@ static void build_watchdog_signals(void) {
 /* Run `hops` hops under the given delay_mode and return the census through
  * *total / *run, plus the polled delay_confidence through *conf (check 6).
  * fixed_delay_samples is only meaningful (and only applied) for
- * AEC_DELAY_FIXED; every other mode keeps the preset default (-1). */
+ * AEC_DELAY_FIXED; every other mode keeps the level default (-1). */
 static int run_case(AecDelayMode mode, int fixed_delay_samples, int hops,
                     unsigned long long* total, unsigned long long* run,
                     float* conf) {
@@ -118,7 +118,7 @@ static int run_case(AecDelayMode mode, int fixed_delay_samples, int hops,
     AecDebugStatus st;
     int i;
 
-    aec_config_from_preset(&cfg, AEC_PRESET_BALANCED, SR);
+    aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, SR);
     /* The DEFAULT is 0.0 (full-rate, matches Python). This test's whole
      * point is measuring the decimation machine itself, which only engages
      * when opted into explicitly, so opt in here for the census below. */
@@ -235,7 +235,7 @@ int main(void) {
         AecDebugStatus st;
         int i;
 
-        aec_config_from_preset(&cfg, AEC_PRESET_BALANCED, SR);
+        aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, SR);
         if (aec_create(&aec, &cfg) != 0) {
             printf("FAIL: aec_create (reset case)\n");
             return 1;
@@ -274,7 +274,7 @@ int main(void) {
         Aec aec;
         int i, leak_hops = 0, mismatches = 0;
 
-        aec_config_from_preset(&cfg, AEC_PRESET_BALANCED, SR);
+        aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, SR);
         if (aec_create(&aec, &cfg) != 0) {
             printf("FAIL: aec_create (watchdog leak case)\n");
             return 1;

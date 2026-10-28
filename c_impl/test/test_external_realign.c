@@ -132,7 +132,7 @@ static void run_silent_hop(Aec* a, float* out)
 static int make_external_ctx(Aec* a, int warm_transfer, int res_context)
 {
     AecConfig cfg;
-    aec_config_from_preset(&cfg, AEC_PRESET_BALANCED, SR);
+    aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, SR);
     cfg.fft_size = FFT;
     cfg.enable_res = 0;                    /* output IS the linear residual */
     cfg.return_res_context = res_context;
@@ -230,7 +230,7 @@ int main(void)
     {
         AecConfig cfg;
         Aec matched;
-        aec_config_from_preset(&cfg, AEC_PRESET_BALANCED, SR);
+        aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, SR);
         cfg.fft_size = FFT;
         rc = aec_create(&matched, &cfg);
         CHECK(rc == 0 &&

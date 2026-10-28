@@ -43,7 +43,7 @@ size_t aec_res_get_mem_size(const AecConfig* cfg);
 AecRes* aec_res_init(void* mem, size_t bytes, const AecConfig* cfg);
 
 /* Clears all suppressor state. The configured floor (including one set by
- * aec_res_set_preset) is kept. */
+ * aec_res_set_level) is kept. */
 void aec_res_reset(AecRes* r);
 
 /* Number of frequency bins and hop length the instance was built for; 0 for
@@ -55,11 +55,11 @@ int aec_res_hop_size(const AecRes* r);
  * next call on `r`; NULL if r or in is NULL or an input array is NULL. */
 const float* aec_res_process(AecRes* r, const AecResInput* in);
 
-/* Retargets the far-end-active gain floor to the preset's floor, reached after ramp_ms
+/* Retargets the far-end-active gain floor to the level's floor, reached after ramp_ms
  * (0: next hop), and the DT-lifted floor, which steps immediately. Same semantics as
- * aec_set_preset(). Returns 0, or -1 for NULL, an unknown preset or an out-of-range ramp
+ * aec_set_level(). Returns 0, or -1 for NULL, an unknown level or an out-of-range ramp
  * (nothing changes). */
-int aec_res_set_preset(AecRes* r, AecPreset preset, float ramp_ms);
+int aec_res_set_level(AecRes* r, AecLevel level, float ramp_ms);
 
 /* Reads the far-end-active floor as a power ratio: `live` is the value in force
  * now, `target` the one it is heading to (kept across aec_res_reset). Either

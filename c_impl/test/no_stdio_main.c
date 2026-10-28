@@ -25,7 +25,7 @@
 
 int main(void) {
     AecConfig cfg;
-    aec_config_from_preset(&cfg, AEC_PRESET_BALANCED, 16000);
+    aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, 16000);
 
     Aec a;
     if (aec_create(&a, &cfg) != 0) return 1;

@@ -11,7 +11,7 @@
  * Usage:
  *   print_mem_size_ref <sample_rate> [--fft-size N] [--delay-mode M]
  *                       [--delay-num-filters N] [--fixed-delay S]
- * (M in {matched,fixed,external}; unset options leave the balanced-preset default, as aec_wav.c's own CLI does.)
+ * (M in {matched,fixed,external}; unset options leave the balanced-level default, as aec_wav.c's own CLI does.)
  *
  * On success prints exactly one line:
  *   total_bytes=N estimator_bytes=N ring_bytes=N
@@ -64,7 +64,7 @@ int main(int argc, char* argv[]) {
     }
 
     AecConfig cfg;
-    aec_config_from_preset(&cfg, AEC_PRESET_BALANCED, sr);
+    aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, sr);
     if (fft_size > 0)            cfg.fft_size = fft_size;
     if (have_delay_mode)         cfg.delay_mode = delay_mode;
     if (have_delay_num_filters)  cfg.delay_num_filters = delay_num_filters;

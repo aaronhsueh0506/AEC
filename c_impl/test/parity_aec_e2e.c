@@ -10,7 +10,7 @@
  *
  * Measured (NE10 backend, 4186-hop doubletalk case; SIMD=1 and SIMD=0 give the same maxima to the digits shown):
  *
- *   rate    preset                linear max   out max     tolerance
+ *   rate    level                 linear max   out max     tolerance
  *   16 kHz  mild/balanced/aggr.   1.6e-4       4.3e-3      TOL_E2E     2e-2
  *   16 kHz  balanced --no-res     1.3e-5       1.3e-5      TOL_E2E     2e-2
  *   48 kHz  mild/balanced         1.2e-2       6.2e-2      TOL_E2E_48K 1e-1
@@ -32,7 +32,7 @@
  *       $(find src -name '*.c') test/parity_aec_e2e.c \
  *       $(make -s -C ../../audiolib/common print-lib-path) -lm -o bin/p_e2e
  *   python3 ../python/diag/gen_aec_e2e_golden.py bin/aec_e2e_golden.bin balanced --sr 16000
- *   bin/p_e2e bin/aec_e2e_golden.bin [preset]      # preset: 1|0|2|3 or balanced|mild|aggressive|no_floor
+ *   bin/p_e2e bin/aec_e2e_golden.bin [level]      # level: 1|0|2|3 or balanced|mild|aggressive|no_floor
  *   # 8k/48k: --sr 8000 / --sr 48000 on the generator; the checker reads sr back out of the golden header and applies the
  *   # matching tolerance, so no extra argv is needed.
  *   # Linear-filter-only case (no post-filter block on either side): pass --no-res to BOTH, or the golden and the replay
@@ -69,19 +69,19 @@ int main(int argc, char **argv) {
     if (!rd(f, hdr, sizeof(int) * 3)) { fprintf(stderr, "hdr\n"); return 2; }
     int hop = hdr[0], sr = hdr[1], n_hops = hdr[2];
 
-    AecPreset preset = AEC_PRESET_BALANCED;
+    AecLevel level = AEC_LEVEL_BALANCED;
     if (argc > 2) {
-        if (!strcmp(argv[2], "0") || !strcmp(argv[2], "mild")) preset = AEC_PRESET_MILD;
-        else if (!strcmp(argv[2], "2") || !strcmp(argv[2], "aggressive")) preset = AEC_PRESET_AGGRESSIVE;
-        else if (!strcmp(argv[2], "3") || !strcmp(argv[2], "no_floor")) preset = AEC_PRESET_NO_FLOOR;
+        if (!strcmp(argv[2], "0") || !strcmp(argv[2], "mild")) level = AEC_LEVEL_MILD;
+        else if (!strcmp(argv[2], "2") || !strcmp(argv[2], "aggressive")) level = AEC_LEVEL_AGGRESSIVE;
+        else if (!strcmp(argv[2], "3") || !strcmp(argv[2], "no_floor")) level = AEC_LEVEL_NO_FLOOR;
         else if (strcmp(argv[2], "1") != 0 && strcmp(argv[2], "balanced") != 0) {
-            fprintf(stderr, "unknown preset '%s' (0|1|2|3 or "
+            fprintf(stderr, "unknown level '%s' (0|1|2|3 or "
                             "mild|balanced|aggressive|no_floor)\n", argv[2]);
             return 2;
         }
     }
     AecConfig cfg;
-    aec_config_from_preset(&cfg, preset, sr);
+    aec_config_from_level(&cfg, level, sr);
     /* Golden produced with --no-res: the post-filter block never runs, so the
      * quantities that steer the filter from outside it are what this case
      * checks. `out` is then the linear residual, i.e. equal to raw. */
