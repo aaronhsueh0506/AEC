@@ -34,6 +34,7 @@ mirrors Python class boundaries.
     - [3.5 Comfort noise (CNG)](aec_methods_02_post_filter.md#35-comfort-noise-cng) <!-- split-toc -->
     - [3.6 OLA synthesis](aec_methods_02_post_filter.md#36-ola-synthesis) <!-- split-toc -->
     - [3.7 enable_res = False bypass](aec_methods_02_post_filter.md#37-enable_res--false-bypass) <!-- split-toc -->
+    - [3.8 Output guard, rendering base and post reset serial](aec_methods_02_post_filter.md#38-output-guard-rendering-base-and-post-reset-serial) <!-- split-toc -->
   - [4. Diagnostic surfaces (load-bearing — do not remove)](#4-diagnostic-surfaces-load-bearing--do-not-remove) <!-- split-toc -->
     - [`AecStats` / `get_stats()`](#aecstats--get_stats) <!-- split-toc -->
     - [`AecResContext`](#aecrescontext) <!-- split-toc -->
@@ -174,7 +175,7 @@ shows their public configuration values, not necessarily the internal hop count.
 | ERLE coordinate | `erle_render_x2_psd_scale` | **ON** | render PSD scale feeding the reverb model |
 | | `reverb_tail_strength` | 1.0 | reverb-tail R² scale |
 | | `erle_windowed_capture_psd` | **ON** | Y2/E2 sqrt-Hann coordinate consistency |
-| | `output_capture_when_linear_unusable` | **ON** | two mutually exclusive roles: E2 output base = Y on diverged frames under `enable_res`; capture admitted as the FORM step's third candidate in context-only ([§3](aec_methods_02_post_filter.md#3-aec3-post-filter-_aec3_post)) |
+| | `output_capture_when_linear_unusable` | **ON** | output guard: when the linear estimate is unusable this hop and the residual energy exceeds the capture energy, the rendering base is the capture Y instead of E; decided once per hop in every API mode, never alters the analysis seam ([§3.8](aec_methods_02_post_filter.md#38-output-guard-rendering-base-and-post-reset-serial)) |
 | Delay-acquire guard | `delay_acquire_protect_converged` | **ON** | reject spurious late FIRST acquisition (Path A only) |
 | Cold-start deadlock (OFF) | `h_error_refresh_erl_floor` | 0.0 (**OFF**) | Kalman-gain cold-start breakers |
 | | `h_error_floor_override` | 0.0 (**OFF**) | |
@@ -198,7 +199,7 @@ shows their public configuration values, not necessarily the internal hop count.
 | | `saturation_threshold` | 0.95 | |
 | | `saturation_softclip_ref` | **ON** | |
 | Mode / output | `mode` | `PBFDKF` | |
-| | `return_res_context` | OFF | switches `process()` return type (§4); with `enable_res=False` it selects the context-only seam, whose FORM step admits the capture candidate ([§3](aec_methods_02_post_filter.md#3-aec3-post-filter-_aec3_post)) |
+| | `return_res_context` | OFF | switches `process()` return type (§4); with `enable_res=False` it selects the context-only seam, which publishes the same analysis seam and rendering base as the full mode ([§3.8](aec_methods_02_post_filter.md#38-output-guard-rendering-base-and-post-reset-serial)) |
 | | `clear_filter_history` | OFF | |
 
 Defaults above are the Python `AecConfig` dataclass values. The C `aec_config_defaults()`
@@ -227,13 +228,24 @@ an external (or NN) post-filter. Enabled via
 `AecConfig.return_res_context = True`; switches `aec.process()` return
 type to `(out, AecResContext)`.
 
-With `enable_res=False` (context-only) this is the **only** mode in which the
-FORM step admits the capture candidate ([§3](aec_methods_02_post_filter.md#3-aec3-post-filter-_aec3_post)): the context path returns the
-linear residual before the E2 output-base switch, so without it the seam would
-carry an over-output that the emitted audio never does. `formed_output`,
-`error_spec`, `echo_spec` and `near_spec` all follow the selection as a
-matched set. `AecConfig.return_formed_output` requires this flag or
-`enable_res` and raises at construction otherwise — the formed seam is
+The context carries two separate groups of spectra
+([§3.8](aec_methods_02_post_filter.md#38-output-guard-rendering-base-and-post-reset-serial)):
+
+* **Analysis seam** — `formed_output`, `error_spec`, `echo_spec`, `near_spec`
+  (`= error_spec + echo_spec`). The real selected linear residual and its echo
+  estimate, a matched set, in every mode; the output guard never alters them,
+  and a unity IFFT with overlap-add of `error_spec` reproduces the previous
+  formed hop on every hop.
+* **Rendering base** — `output_base_spec` and `guard_active`. The guard is
+  evaluated once per hop in every mode; a consumer that renders audio itself
+  multiplies `output_base_spec` (not `error_spec`) by its gain(s), adds comfort
+  noise and synthesizes. The base does not pair with `formed_output`.
+
+`post_reset_serial` is the non-consuming hard-reset counter
+(`AEC.get_post_reset_serial()`): on a change the consumer clears its OLA tail and
+reseeds its CNG to `AEC_CNG_SEED` before synthesizing that hop. NR and NN state
+are the application's to reset. `AecConfig.return_formed_output` requires this
+flag or `enable_res` and raises at construction otherwise — the formed seam is
 produced by the post chain and cannot be requested without it.
 
 ### Regime classifier

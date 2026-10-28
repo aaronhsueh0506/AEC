@@ -50,7 +50,7 @@ BIN="$(make -s -C c_impl print-bin-dir)"
 （[§6.7](c_user_manual_zh_TW_02_config.md#67-靜態記憶體拆解aec_get_mem_breakdown)）後印一行到 **stdout**（其餘旗標一律印到 stderr）：
 
 ```text
-mem: sr=16000 fft=256 hop=128 mode=matched n=5 fixed_delay_samples=-1 total_bytes=364416 estimator_bytes=33936 ring_bytes=131072
+mem: sr=16000 fft=256 hop=128 mode=matched n=5 fixed_delay_samples=-1 total_bytes=366000 estimator_bytes=33936 ring_bytes=131072
 ```
 
 欄位依序：resolved 後的 `sample_rate`／`fft_size`／`hop_size`、`delay_mode`、

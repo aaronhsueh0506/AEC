@@ -25,6 +25,10 @@
 extern "C" {
 #endif
 
+/* Seed of the comfort-noise generator after construction and after every hard post-chain reset.
+ * Exported through aec.h; an external synthesizer that calls aec_cng_fill() reseeds with it. */
+#define AEC_CNG_SEED 42u
+
 /* Driver config and wall-clock-rescaled CNG constants; pass the values computed at construction. */
 typedef struct {
     int    n_bins;
@@ -82,12 +86,17 @@ typedef struct {
     /* Convergence-flags y2 threshold, scaled to the live hop_size. */
     float y2_thr;
 
-    /* Synthesis window (block_size) and sqrt(2) * sin table (32 entries), caller-owned, read-only.
-     * */
+    /* Synthesis window (block_size), caller-owned, read-only. */
     const float *synth_window;
-    const float *sqrt2_sin_lut;
 
+    /* Comfort-noise LCG state: AEC_CNG_SEED after every aec_post_reset(). */
     uint32_t cng_seed;
+    /* Number of hard resets since aec_post_init() (wrapping); aec_post_reset_serial() publishes it. */
+    uint32_t reset_serial;
+    /* This hop's output guard (aec_post_run): 1 when the rendering base is the capture spectrum
+     * error + echo instead of the linear residual. Cleared by aec_post_reset() and at the start of
+     * every aec_post_run(). */
+    int      output_guard_active;
     int      noise_initialized;
     int      n2_counter;
     float   *y2_smoothed;
@@ -130,7 +139,7 @@ void aec_post_config_defaults(AecPostConfig *cfg);
  * backing storage; avg_reverb_storage is the ReverbModel's n_bins floats. */
 void aec_post_init(AecPost *p, const AecPostConfig *cfg,
                    FftHandle *fft,
-                   const float *synth_window, const float *sqrt2_sin_lut,
+                   const float *synth_window,
                    float *avg_reverb_storage,
                    float *y2_smoothed, float *n2, float *n2_initial,
                    float *coh_sye_re, float *coh_sye_im,
@@ -142,7 +151,9 @@ void aec_post_init(AecPost *p, const AecPostConfig *cfg,
                    float *comfort_noise, float *nf,
                    Complex *e_out_spec, float *e_out_full);
 
-/* Reset the driver-owned state: OLA buffer, CNG, coherence EMAs and avg-reverb. */
+/* Hard reset of the driver-owned state: OLA buffer, CNG (seed AEC_CNG_SEED), coherence EMAs and
+ * avg-reverb; clears the output-guard decision and advances reset_serial. aec_post_init() restarts
+ * reset_serial at 0 after its own initial reset. */
 void aec_post_reset(AecPost *p);
 
 /* Per-hop magnitudes |.| of the spectra, passed in by the caller. */
@@ -153,8 +164,6 @@ typedef struct {
     const float *abs_error;
     const float *abs_echo_coh;
     const float *abs_nsw_e1;
-    /* Read only by the output-capture guard; NULL when context_only. */
-    const float *abs_ybase;
 } AecPostAbs;
 
 /* Stage 1-2: PSDs and capture_psd_win. */
@@ -180,12 +189,11 @@ void aec_post_compute_coherence(AecPost *p,
 /* Stage 5: CNG N2 tracking -> p->comfort_noise. */
 void aec_post_compute_comfort_noise(AecPost *p, int saturated_capture);
 
-/* Stage 6: output-base select, gain apply, CNG inject, irfft, OLA. */
+/* Stage 6: gain apply on the rendering base, CNG inject (aec_cng_fill), irfft, OLA. output_base is
+ * the base chosen by this hop's output guard (aec_post_run): the linear residual spectrum, or
+ * error + echo when p->output_guard_active; nothing is re-derived here. */
 void aec_post_apply_output(AecPost *p,
-                           const Complex *error_spec,
-                           const Complex *echo_spec_sel,
-                           const AecPostAbs *mag,
-                           int usable_linear,
+                           const Complex *output_base,
                            const float *gain,
                            float *out);
 
@@ -282,6 +290,10 @@ typedef struct {
     Complex *sel_echo;
     Complex *nsw_e1;
     Complex *ybase;
+    /* Dedicated rendering-base buffer (n_bins): error + echo, written only on hops where the output
+     * guard fires; the exposed base of aec_get_output_base() so that no other scratch can overwrite
+     * it before the caller reads it. */
+    Complex *output_base;
     float   *abs_near;
     float   *abs_far;
     float   *abs_sel_echo;
@@ -305,6 +317,14 @@ typedef struct {
     float   *observer_diff_mag2;
     float   *observer_cap_mag2;
 } AecPostRunScratch;
+
+/* Output guard (stage 6a), evaluated by aec_post_run once per hop after the usable verdict of this hop is
+ * final and before any context exit: with output_capture_when_linear_unusable set, usable == 0 and
+ * sum(abs_error^2) > sum(abs_ybase^2) (strict; float32 magnitudes, float32 pairwise reduction; abs_ybase is
+ * computed here from sc->ybase), p->output_guard_active becomes 1 and the capture spectrum sel_esw + sel_echo
+ * is written to sc->output_base; otherwise it becomes 0. Needs sc->sel_esw, sel_echo, ybase and abs_error of
+ * this hop. Exposed for the threshold fixture test; callers outside aec_post_run need not call it. */
+void aec_post_eval_output_guard(AecPost *p, AecPostRunScratch *sc, int usable);
 
 /* Process one hop. out[hop] is always written: the synthesized output, or in->raw_output when
  * context_only. *out_pending_gain_change / *out_pending_delay_change receive the post-call state of

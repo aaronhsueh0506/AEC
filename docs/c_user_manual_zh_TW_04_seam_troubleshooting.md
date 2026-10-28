@@ -8,7 +8,7 @@
 
 如果你**完全不使用** `aec_process()` 產出的時域音訊，只想讀頻域中間結果自己做後處理，
 用 `aec_process_context()`：它跑完整條線性 filter 與後級運算並填好 `AecResContext`，
-但不做輸出限幅、也不寫 `out` buffer（沒有 `out` 參數）。
+但不合成時域輸出、也不寫 `out` buffer（沒有 `out` 參數）。
 
 ```c
 AecConfig cfg;
@@ -26,25 +26,25 @@ while (app_read_hop(mic, ref, hop)) {
 }
 ```
 
-> **這個模式下 formed 線性 seam 可能改送擷取訊號。**
+> **分析 seam 與渲染底座是兩組不同的頻譜。**
 >
-> `enable_res = 0` 時，後級最後那個「套用抑制並寫出時域訊號」的階段不會執行，它內建的
-> 過輸出保護也就跟著不執行——那道保護守的是 `aec_process()` 真正輸出的音訊，守不到只給
-> 外部後處理讀的 seam。所以在 context-only 模式下改由 formed 線性輸出的選擇器承擔：當
-> filtering-quality 分析器**尚未**判定線性估計可用、且被選中的殘差在這個 hop 的能量
-> **高於**擷取訊號時，選擇器會把擷取訊號本身當成 refined／coarse 之外的**第三個候選**
-> 送出。殘差比被減數還大，代表線性估計不是在消除回音，而是在加訊號。
+> - **分析 seam**：`formed_hop`、`error_spec`、`echo_spec`、`near_spec`（`= error_spec + echo_spec`）。
+>   任何 API 模式（`aec_process()`、context-only、`spatial_linear_context` 1／2）下都是被選中
+>   （refined 或 coarse）的**真實線性殘差**及其配對的回音估計；輸出守衛永遠不改它們。`error_spec` 是
+>   `[前一個 formed hop | 本 hop 的 formed hop]` 的 STFT，所以 unity IFFT 加 overlap-add 在每個 hop
+>   （包含守衛觸發的 hop）都重建「前一個 formed hop」，晚一個 framing hop。AecState、ERLE、R² 與各 PSD
+>   都讀這一組；AIAEC 的 `linear_error`、訓練特徵或任何需要可配對波形／STFT 的消費端也讀這一組。
+> - **渲染底座**：`aec_get_output_base()`（§8.3）。輸出守衛在**每個 hop、每個模式**求值一次，時點在
+>   本 hop 的 usable 判定確定之後、任何 context 提前離開之前。規則（`output_capture_when_linear_unusable`，
+>   預設開啟）：本 hop 線性估計不可用，且 `sum(|error_spec|²) > sum(|error_spec + echo_spec|²)`
+>   （嚴格大於、加窗頻譜、float32 pairwise 歸約，C 與 Python 的歸約相同，所以相同頻譜得到相同決定；兩邊各自算 STFT，上游頻譜約差 1e-7 相對值，所以 C 對 Python 的契約是：除了雙方都 unusable 且相對能量差 `|Σ|E|²−Σ|Y|²|/Σ|E|²` 落在 1e-6 tie band 內的 hop，每個 hop 的決定都一致；band 內的 hop 在對拍的每個 cell 逐一計數並印出，band 外的不一致即失敗，固定的近門檻 fixture 要求完全相等；同樣的捨入也可能落在自適應濾波器的逐 bin 判定上（refined 濾波器 H_error leakage 比較 `e2_refined[k] <= e2_coarse[k]`，或噪聲門 `X2[k] >= gate`），這類 cell 在 `pyc_parity.py` 登記為 T-01，只有在守衛、serial、delay 閘門照跑全綠，且 Python 依 C 的方向強制登記的判定後每個閘門都綠時才是 INFO；`res_gain` 以各 bin 近端功率 `|E + echo|²` 加權的相對 L2 比較（上限 1e-4），逐 bin 最大差只印出），底座就是擷取訊號
+>   `error_spec + echo_spec`（`guard_active = 1`），否則底座是 `error_spec`。自己合成音訊的消費端要渲染
+>   **`output_base_spec × 增益`**，不是 `error_spec × 增益`；全模式的 `aec_process()` 內部就是這麼算，
+>   所以拆開的路徑與一體的路徑得到同樣的音訊。底座**不**與 `formed_hop` 配對：守衛 hop 上它是頻域的
+>   切換，對它做 unity 反轉換不會重建任何 formed hop。
 >
-> 對讀 `AecResContext` 的人的影響：這些 hop 上 `error_spec` / `formed_hop` 是擷取訊號而
-> 不是線性殘差，`echo_spec` 隨之趨近 0（`near_spec = error_spec + echo_spec` 的恆等式仍
-> 然成立；連續落在擷取訊號時才會趨近 0，單一 hop 因為前半個 block 仍是前一 hop 的
-> formed 輸出而不會恰為 0）。切換由既有的 30-sample 交叉淡入承接，所以這是**穩態的
-> 退回**，不是逐樣本的硬上界——過渡中那 30 個樣本是兩者的混合。
->
-> 這條規則由 `output_capture_when_linear_unusable` 控制（預設開啟），且**只**在
-> context-only 生效。`enable_res = 1` 的產品路徑不受影響：那裡仍由後級輸出階段自己的
-> 保護負責，輸出逐位元不變；兩個保護同時作用會讓後者的頻域硬切覆蓋掉前者剛啟動的
-> 交叉淡入。Audio_ALG 的 4ch mcab flow（`mcab.h`）的四條 lane 全部落在這個模式。
+> 守衛只在線性估計不可用時才可能觸發，因此多半發生在第一個 usable 判定之前，但從未變成 usable 的片段
+> 會一直觸發，不只在開頭幾秒。
 
 > **三個處理進入點可以自由混用。**
 >
@@ -90,15 +90,44 @@ AEC magnitude² 必須來自同一個 AEC kernel，不能任意以其他 power �
 | 欄位 | 說明 |
 |---|---|
 | `n_freqs` / `hop_size` | 陣列長度。所有頻域陣列長度都是 `n_freqs`。 |
-| `error_spec` | formed 線性輸出的頻譜 E(f)，**audio 尺度**（與 [-1,1] 時域一致）。**在 context-only 模式（`enable_res = 0` 且 `return_res_context = 1`）下不保證是線性殘差**：線性估計尚未被判定可用、且選中的殘差能量高於擷取訊號時，送出的是擷取訊號本身（見 §8.1）。 |
+| `error_spec` | formed 線性輸出的頻譜 E(f)，**audio 尺度**（與 [-1,1] 時域一致）。是分析 seam：任何模式下都是真實的線性殘差，輸出守衛不會改它（見 §8.1）；要渲染音訊請用 `aec_get_output_base()` 的底座。 |
 | `echo_spec` / `near_spec` | 對應的回音估計與擷取訊號頻譜，滿足 `near_spec = error_spec + echo_spec`。 |
 | `res_gain` | 抑制增益，振幅 [0, 1]。**`spatial_linear_context` 為 1 或 2 時為 `NULL`** —— 代表「沒有計算」，若誤讀成全 0 會變成「全部靜音」。**使用前務必檢查非 NULL。** |
 | `r2` | 殘留回音功率譜。**int16² 尺度**：要換成 audio 功率尺度須除以 32768²。`spatial_linear_context = 2` 時為 `NULL`。 |
 | `comfort_noise` | 舒適噪音功率譜。同樣是 int16² 尺度。`spatial_linear_context = 2` 時為 `NULL`。 |
-| `linear_hop` / `formed_hop` | 時域中間結果。 |
+| `linear_hop` / `formed_hop` | 時域中間結果。`formed_hop` 永遠是真實的 formed 線性殘差，與 `error_spec` 配對。 |
 | `res_floor_protect` | 本 hop 是否啟用 double-talk RES floor 保護。它就是近端最近有聲音 latch 的實際決定；自己做後級的消費端應讀這個欄位，不要用 `dt_indicator` 另外推導一套規則（Audio_ALG 的 4ch fuse 目前只讓有貢獻的 lane 參與 `max_dt`／`max_sat`／`all_converged`／`usable_linear`（`McabFrame` 欄位）的彙整，不讀本欄位）。 |
 | `usable_linear` | 本 hop 的可用線性估計判定。`0` 時 `r2` 是保守的非線性估計（遠端功率乘上預設 echo-path 增益），並非由線性回音估計推導，可能遠高於根本不存在的殘留回音。 |
 | `far_power`、`erle_factor`、`dt_indicator`、`divergence`、`saturation_level`、`erl_estimate`、`shadow_dt`、`is_stationary_dt`、`filter_converged`、`filter_once_converged`、`epc_active` | 供外部判斷／診斷用的純量狀態。 |
+
+**渲染底座與 reset serial（獨立的 getter，不是 `AecResContext` 的欄位）**
+
+```c
+AecOutputBase ob;
+ob.struct_size = sizeof ob;                 /* 輸入：太小會被拒絕 */
+if (aec_get_output_base(&aec, &ob) == 0) {
+    /* ob.base_spec[0 .. ob.n_freqs-1]：渲染底座；ob.guard_active：本 hop 守衛是否觸發 */
+}
+uint32_t serial = aec_post_reset_serial(&aec);   /* 不消耗、可重複讀、uint32 回繞 */
+```
+
+- `aec_get_output_base()` 在 `enable_res` 或 `return_res_context` 為 1 時有效。`struct_size` 是**輸入**：先檢查，
+  比 `sizeof(AecOutputBase)` 小就回 `-1` 且**完全不寫**呼叫端的結構；較大的值（較新的呼叫端結構）可接受，只寫已知的前綴，
+  回傳時 `struct_size` 為 `sizeof(AecOutputBase)`。NULL 實例或 `enable_res`、`return_res_context` 皆 0 也回 `-1`，
+  前綴除 `struct_size` 外清零。`base_spec` 指向一塊專用緩衝區（守衛沒觸發時就是
+  `error_spec`），CNG 與其他暫存區不會覆寫它，有效到下一次處理或 reset 呼叫。
+- `aec_post_reset_serial()` 計數「硬 post 鏈 reset」，共兩類來源：
+  1. `aec_reset()`：**獨立的一次呼叫，不在任何處理呼叫之內**；它回傳時 serial 已經 +1，下一次處理呼叫從清空狀態開始。
+  2. 處理呼叫（`aec_process`／`aec_process_context`）**內部**的確認 delay 變更使 filter 重啟：硬位移（Path B，沒有
+     DT-aware soft realign）、沒有 warm transfer 也沒有 DT-aware soft 取得的首次取得（Path A）。這類 reset 發生在
+     該 hop 的處理內部、該 hop 的合成**之前**。
+  每次計數時函式庫都會清自己的 OLA 尾巴並把 CNG 種子設回 `AEC_CNG_SEED`（42）。
+  **不**算的有：bad-relock 還原（soft 還原到 shift 前的 delay 與 tap 快照，OLA 與 CNG 照常延續）、warm-transfer 與
+  soft（DT-aware）取得／realign、`aec_apply_external_realign()`、只有 `AecLinearContext.generation` 變動。
+- **外部合成的協定**：消費端自己保存「上次處理過的 serial」。每次處理呼叫後讀到的值若與它不同，必須在
+  **本 hop 的第一次 CNG 抽樣之前、也在本 hop 的反轉換／OLA push 之前**（`aec_reset()` 之後則是之後處理的第一個 hop），清掉自己的 OLA 尾巴（例如
+  `ac_istft_reset`）並把自己的 CNG 狀態設成 `AEC_CNG_SEED`，然後存下新值。**不可**因此呼叫
+  `aec_reset()`。函式庫不動 NR 與 NN 的狀態，它們要不要跟著 reset 是應用的政策。
 
 > ⚠️ 所有 pointer 欄位都直接指向實例內部的 per-hop 緩衝區，**不是複本**。
 > 不可修改、不可 free，而且必須在**下一次對同一實例的任何處理呼叫之前**讀完或複製走。
@@ -173,13 +202,14 @@ aec_cng_fill(&rng, spec, fused_comfort, g_res, g_nr, 0.31622777f, aec_res_n_bins
 | `aec_res_set_level(r, level, ramp_ms)` | 與 `aec_set_level()` 同語意：far-active 地板用 `ramp_ms` 走（範圍 `[0, 60000]`），dt 地板與 `min_gain_split_floor_enabled` 閂一律立即套用；含 `no_floor` 的切入/切出。拒絕時（NULL、out-of-enum、`ramp_ms` 超界）什麼都不寫。 |
 | `aec_res_split_floor(r, &live, &target)` | 讀 far-active 地板（功率比）：`live` 是現行值，`target` 是正走向的值，後者跨 reset 保留。 |
 | `aec_res_n_bins(r)`／`aec_res_hop_size(r)` | 陣列長度（`fft_size/2 + 1`、`fft_size/2`）。 |
-| `aec_cng_fill(&rng, spec, cn, g_res, g_nr, nr_floor, n)` | 在 bin `1 … n-2` 加舒適噪音：`sqrt(cn/32768²)·sqrt(1-g_res²)·max(g_nr, nr_floor)` 乘上由 `rng` 遞推選出的隨機相位（`rng = (rng·69069+1) & 0x7FFFFFFF`，取高 5 bit 查 32 點 √2·sin 表，虛部取 +8）。`g_nr` 可為 NULL（視為 1）。 |
+| `aec_cng_fill(&rng, spec, cn, g_res, g_nr, nr_floor, n)` | 在 bin `1 … n-2` 加舒適噪音，每個分量加 `ng · (nf · 表值)`，乘積順序固定：`nf = sqrt(max(cn/32768², 0))`、`ng = sqrt(max(1-g_res², 0))`，有 NR 增益時 `ng ← ng · max(g_nr, nr_floor)`，即振幅 `sqrt(cn/32768²)·sqrt(1-g_res²)·max(g_nr, nr_floor)`。相位由 `rng` 遞推：每個 bin 一步、依 bin 由小到大（`rng = (rng·69069+1) & 0x7FFFFFFF`，取高 5 bit 查 32 點 √2·sin 表，虛部取 +8）；bin 0 與 n-1 不加噪音也不抽樣。`g_nr` 可為 NULL（整個因子省略）。種子用 `AEC_CNG_SEED`（42）。 |
 
 `aec_res_process` 做的前處理：近端功率 `|near|²`（`all_converged` 時取 `min(|error|², |near|²)`）乘 32768²；
 參考乘 32768；`all_converged` 讓抑制器離開初始狀態；`max_dt > 0.2` 啟用 double-talk 地板；
 `max_saturation > 0.5` 視為飽和回音。`r2` 同時當作 bounded 與 unbounded 殘留估計。
-`aec_cng_fill` 就是 Audio_ALG 範例（例如 `pipelines/mono_aec_nr_res/main.c` 的 `mono_form()`）每個 hop 呼叫的那個函式，**不同於** `Aec` 內部的批次化填補
-（`inv_psd_scale`＋`sk_fast_sqrt_f32`），兩者的輸出不可互相比對。
+`aec_cng_fill` 是 `Aec` 內部輸出階段與外部合成共用的**唯一**舒適噪音實作：內部以全增益 `G` 當 `g_res`、`g_nr = NULL` 呼叫它，
+所以 `g_nr == NULL` 時公開呼叫與 `aec_process()` 內部的舒適噪音在相同輸入下逐位元相同（同樣的 sqrt、同樣的乘積順序、
+同樣的抽樣排程）。Python 孿生是 `modules/cng.py:cng_fill`。
 
 測試：`make test-aec-res`（設定與 lane 逐位元相等、API 契約、render ×32768 縮放、離開初始狀態、
 飽和後復原限制）、`make test-zero-heap`、`make audit-no-stdio`。
@@ -231,13 +261,16 @@ mic, ref (hop 個 float)
   ▼  aec_process_context(a, mic, ref)          線性 filter + post 區塊；不寫 out
   ▼  aec_get_res_context(a, &ctx)              error_spec / near_spec / far_spec /
   │                                            r2 / comfort_noise / res_gain / 純量判定
+  ▼  aec_get_output_base(a, &ob)               ob.base_spec：渲染底座（守衛已套用）
+  ▼  aec_post_reset_serial(a)                  與自己存的 serial 不同 → 先 ac_istft_reset、
+  │                                            rng = AEC_CNG_SEED，再繼續
   ▼  aec_get_linear_context(a, &lin)           aligned_far_hop、delay_state
   │      （以上指標都借自 AEC 的 per-hop 緩衝，下一次 AEC 處理呼叫前有效）
   ▼  anr_process_gain(nr, ctx.error_spec,      NR 增益：r2 / 32768² 併入噪音底
   │                     r2 / 32768², NULL)     （僅在 ctx.usable_linear 為真時；否則純降噪）
   │                                            ；anr_get_gain() 取得 g_nr
   ▼  g_total[k] = min(g_nr[k], ctx.res_gain[k])
-  ▼  spec[k]    = ctx.error_spec[k] · g_total[k]
+  ▼  spec[k]    = ob.base_spec[k] · g_total[k]       不是 error_spec
   ▼  aec_cng_fill(&rng, spec, ctx.comfort_noise, ctx.res_gain, g_nr,
   │               0.31622777f, n_freqs)        只填被 RES 切掉的 bin，量依 g_nr 縮放
   ▼  ac_istft_push(istft, spec, out)           反 FFT + sqrt-Hann 合成 + OLA → hop 個 sample
@@ -250,8 +283,12 @@ mic, ref (hop 個 float)
 - **增益取最小值，不是相乘**：`g_total = min(G_nr, G_res)`。`G_res`（取 min 之前的值）
   同時決定舒適噪音的量，所以填補只反映 AEC 的抑制，NR 增益再以 `-10 dB`
   （`0.31622777f`）為下限縮放填補量。
-- **`aec_cng_fill` 的亂數狀態 `rng` 由呼叫端持有**，Audio_ALG 範例碼的種子是 `0x9e3779b9`
-  （mono 範例的 `CNG_RNG_SEED`、4ch 的 `MCAB_SAMPLE_CNG_RNG_SEED`）；`aec_reset()` 之外，整合者的 reset 還要同時清 NR 狀態、合成 OLA 與暫存增益，並把 `rng` 設回種子。
+- **渲染 `ob.base_spec`，不是 `ctx.error_spec`**：底座已套用輸出守衛（§8.1）。`anr_process_gain()` 的頻譜輸入
+  用哪一個由整合者明確選擇並在自己的程式裡寫清楚；分析用的 `error_spec` 與渲染用的底座在守衛 hop 上不同。
+- **`aec_cng_fill` 的亂數狀態 `rng` 由呼叫端持有**，起點是 `AEC_CNG_SEED`（42，`aec.h`／`aec_post.h`），與 `aec_process()`
+  內部相同。每個 hop 在第一次 `aec_cng_fill` 與 `ac_istft_push` 之前先比對 `aec_post_reset_serial()`：值變了就
+  `ac_istft_reset()`、`rng = AEC_CNG_SEED`、存下新值（§8.3）；**不要**為此呼叫 `aec_reset()`。NR 狀態、暫存增益要不要一起清，
+  是應用自己的政策，函式庫不動它們。
 - **`aec_set_level()` 對這條鏈有效**：單聲道鏈的 `G_res` 來自 `Aec` 自己的
   post 區塊，所以強度旋鈕直接用 `aec_set_level()`（[§7.1](c_user_manual_zh_TW_03_level.md#71-執行期切換-levelaec_set_level)）；四麥克風線性 AEC + BF 之後的
   `G_res` 來自應用在 4ch mcab flow 之後自己建立的 `AecRes`，才需要對它呼叫 `aec_res_set_level()`（§8.5）。

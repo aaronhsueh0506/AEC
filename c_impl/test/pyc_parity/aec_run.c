@@ -14,8 +14,16 @@
  *                    leaves them NULL). Scalars: far_power erle_factor dt_indicator divergence
  *                    saturation_level erl_estimate filter_converged res_floor_protect usable_linear
  *
+ *   <pre>.base.bin  only with --base (needs --ctx or enable_res): per hop [int32 guard_active][uint32
+ *                    post_reset_serial][rendering base re/im, n_freqs complex float32] (aec_get_output_base,
+ *                    aec_post_reset_serial); the analysis seam above is never guarded
+ *   <pre>.formed.f32 only with --base: per hop the formed hop under error_spec (AecResContext.formed_hop,
+ *                    hop floats, zero-filled when NULL)
+ *   <pre>.dly.txt   only with --base: per hop "current_delay delay_reject_count" (the delay events, including the
+ *                    bad-relock reverts, which grow the reject count)
+ *
  *   usage: aec_run mic.f32 ref.f32 outprefix sr fft level [--obs] [--no-hpf] [--no-res]
- *                  [--no-cng] [--ctx]
+ *                  [--no-cng] [--ctx] [--base]
  *          aec_run --hpf-only in.f32 out.f32 sr [cutoff_hz]
  *   level: mild | balanced | aggressive | no_floor
  *
@@ -23,6 +31,7 @@
  * (`for i in range(0, n - hop, hop)`), i.e. the same number of hops from the same samples. */
 #include "aec.h"
 #include "hpf.h"
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -67,7 +76,7 @@ static int hpf_only(int argc, char **argv) {
 int main(int argc, char **argv) {
     if (argc >= 2 && !strcmp(argv[1], "--hpf-only")) return hpf_only(argc, argv);
     if (argc < 7) {
-        fprintf(stderr, "usage: aec_run mic.f32 ref.f32 outprefix sr fft level [--obs] [--no-hpf] [--no-res] [--no-cng] [--ctx]\n");
+        fprintf(stderr, "usage: aec_run mic.f32 ref.f32 outprefix sr fft level [--obs] [--no-hpf] [--no-res] [--no-cng] [--ctx] [--base]\n");
         return 2;
     }
     long nm, nr;
@@ -84,13 +93,14 @@ int main(int argc, char **argv) {
     AecConfig cfg;
     aec_config_from_level(&cfg, level, sr);
     cfg.fft_size = fft;
-    int want_ctx = 0;
+    int want_ctx = 0, want_base = 0;
     for (int i = 7; i < argc; ++i) {
         if (!strcmp(argv[i], "--obs")) cfg.live_observer_enabled = 1;
         else if (!strcmp(argv[i], "--no-hpf")) cfg.enable_highpass = 0;
         else if (!strcmp(argv[i], "--no-res")) cfg.enable_res = 0;
         else if (!strcmp(argv[i], "--no-cng")) cfg.enable_cng = 0;
         else if (!strcmp(argv[i], "--ctx")) { cfg.return_res_context = 1; want_ctx = 1; }
+        else if (!strcmp(argv[i], "--base")) want_base = 1;
         else { fprintf(stderr, "aec_run: bad flag %s\n", argv[i]); return 2; }
     }
     Aec a;
@@ -102,6 +112,9 @@ int main(int argc, char **argv) {
     FILE *fr = open_out(pre, ".raw.f32", "wb");
     FILE *ft = open_out(pre, ".trace.txt", "w");
     FILE *fc = want_ctx ? open_out(pre, ".ctx.f32", "wb") : NULL;
+    FILE *fb = want_base ? open_out(pre, ".base.bin", "wb") : NULL;
+    FILE *ff = want_base ? open_out(pre, ".formed.f32", "wb") : NULL;
+    FILE *fd = want_base ? open_out(pre, ".dly.txt", "w") : NULL;
     float *out = (float *)malloc((size_t)hop * sizeof(float));
     float *zeros = (float *)calloc((size_t)(hop > 2 * (fft / 2 + 1) ? hop : 2 * (fft / 2 + 1)), sizeof(float));
     long h = 0;
@@ -125,6 +138,20 @@ int main(int argc, char **argv) {
             fwrite(c.r2 ? c.r2 : zeros, 4, (size_t)K, fc);
             fwrite(c.comfort_noise ? c.comfort_noise : zeros, 4, (size_t)K, fc);
         }
+        if (want_base) {
+            AecOutputBase ob;
+            memset(&ob, 0, sizeof ob);
+            ob.struct_size = sizeof ob;
+            if (aec_get_output_base(&a, &ob) != 0) { fprintf(stderr, "aec_run: --base needs enable_res or --ctx\n"); return 2; }
+            const int32_t g = ob.guard_active;
+            const uint32_t sn = aec_post_reset_serial(&a);
+            fwrite(&g, 4, 1, fb); fwrite(&sn, 4, 1, fb);
+            fwrite(ob.base_spec, sizeof(Complex), (size_t)ob.n_freqs, fb);
+            AecResContext bc;
+            aec_get_res_context(&a, &bc);
+            fwrite(bc.formed_hop ? bc.formed_hop : zeros, 4, (size_t)hop, ff);
+            fprintf(fd, "%d %d\n", a.current_delay, a.delay_reject_count);
+        }
         fprintf(ft, "%ld %ld %ld %d %d %d\n", h,
                 a.has_observer ? (long)a.observer_filter.call_counter : -1L,
                 (long)a.main_filter.base.call_counter, a.convergence.converged, ctx_conv,
@@ -132,6 +159,9 @@ int main(int argc, char **argv) {
     }
     fclose(fo); fclose(fr); fclose(ft);
     if (fc) fclose(fc);
+    if (fb) fclose(fb);
+    if (ff) fclose(ff);
+    if (fd) fclose(fd);
     fprintf(stderr, "aec_run: %ld hops hop=%d sr=%d fft=%d level=%s obs=%d hpf=%d res=%d cng=%d ctx=%d\n", h, hop, sr, fft,
             argv[6], cfg.live_observer_enabled, cfg.enable_highpass, cfg.enable_res, cfg.enable_cng, want_ctx);
     aec_destroy(&a);

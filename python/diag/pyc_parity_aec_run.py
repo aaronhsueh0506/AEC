@@ -12,6 +12,14 @@ sample for sample:
                                        evidence for the live-observer injection guard)
     <pre>.ctx.f32 (with --ctx)         per hop: 9 scalars, error_spec, echo_spec, res_gain, r2,
                                        comfort_noise -- same order as the C dump
+    <pre>.base.bin (with --base)       per hop: int32 guard_active, uint32 post_reset_serial, the
+                                       rendering base output_base_spec (n_freqs complex, float32 re/im)
+                                       -- the layout aec_run.c --base writes (aec_get_output_base,
+                                       aec_post_reset_serial); needs --ctx
+    <pre>.formed.f32 (with --base)      per hop: the formed hop under error_spec (hop_size float32;
+                                       ctx.formed_output / AecResContext.formed_hop)
+    <pre>.dly.txt (with --base)         per hop: "current_delay reject_count" (the bad-relock reverts grow
+                                       the reject count) -- same as aec_run.c --base
 
 Mic-path HPF (--hpf)
     fp64  the shipped Python HighPassFilter (float64 coefficients and state). The C library runs the
@@ -35,9 +43,15 @@ The patch lives only in this process; nothing under python/modules is modified.
           as the set of branches the Python reference can legitimately take, and asks whether C
           matches one of them tightly.
 
+    --force-leak H:K:C[,...]  diagnostic: the refined filter's per-bin H_error leakage decision of bin K at
+          hop H is forced to C (1 converged, 0 diverged) by handing that one refresh a copy of the coarse
+          per-bin error with bin K moved just across the refined one. --force-gate H:REL[,...] multiplies
+          the filter noise gate by (1 + REL) during hop H. Both reproduce a documented float32 tie the way
+          the C build decides it (pyc_parity.py T-01); a forced run is never a reference by itself.
+
     usage: pyc_parity_aec_run.py mic.f32 ref.f32 outprefix sr fft preset
-                [--hpf fp64|f32|off] [--obs] [--no-res] [--no-cng] [--ctx] [--guard X]
-                [--perturb SEED [--perturb-eps EPS]]
+                [--hpf fp64|f32|off] [--obs] [--no-res] [--no-cng] [--ctx] [--base] [--guard X]
+                [--perturb SEED [--perturb-eps EPS]] [--force-leak H:K:C,...] [--force-gate H:REL,...]
            pyc_parity_aec_run.py --hpf-only in.f32 out.f32 sr [cutoff_hz]
 """
 import os
@@ -98,6 +112,45 @@ def _hpf_only(argv):
     out.tofile(dst)
 
 
+def _install_forces(aec, flags):
+    """--force-leak / --force-gate (see the module docstring); returns the per-hop hook to call before each hop."""
+    from modules import aec3_scale
+    leak, gate = {}, {}
+    if '--force-leak' in flags:
+        for t in flags[flags.index('--force-leak') + 1].split(','):
+            h, k, c = (int(v) for v in t.split(':'))
+            leak.setdefault(h, []).append((k, c))
+    if '--force-gate' in flags:
+        for t in flags[flags.index('--force-gate') + 1].split(','):
+            h, r = t.split(':')
+            gate[int(h)] = float(r)
+    gate0 = aec3_scale.FILTER_NOISE_GATE_POWER_FLOAT
+    state = {'h': -1}
+    filt = aec.filter
+    refresh = filt._h_error_refresh
+
+    def forced_refresh():
+        saved = filt._e2_coarse_per_bin
+        if state['h'] in leak and saved is not None:
+            e2r = (np.abs(filt.error_spec) ** 2).astype(np.float32)
+            e2c = saved.copy()
+            for k, c in leak[state['h']]:
+                e2c[k] = e2r[k] if c else np.nextafter(e2r[k], np.float32(0))
+            filt._e2_coarse_per_bin = e2c
+        try:
+            refresh()
+        finally:
+            filt._e2_coarse_per_bin = saved
+
+    filt._h_error_refresh = forced_refresh
+
+    def before_hop(h):
+        state['h'] = h
+        aec3_scale.FILTER_NOISE_GATE_POWER_FLOAT = gate0 * (1.0 + gate[h]) if h in gate else gate0
+
+    return before_hop
+
+
 def _run(argv):
     micp, refp, pre, sr, fft, preset = argv[:6]
     sr, fft = int(sr), int(fft)
@@ -121,6 +174,9 @@ def _run(argv):
     if '--no-cng' in flags:
         kw['enable_cng'] = False
     want_ctx = '--ctx' in flags
+    want_base = '--base' in flags
+    if want_base and not want_ctx:
+        raise SystemExit('--base needs --ctx')
     if want_ctx:
         kw['return_res_context'] = True
     if '--guard' in flags:
@@ -130,6 +186,7 @@ def _run(argv):
     cfg = AecConfig.from_preset(preset, **kw)
     np.random.seed(0)
     aec = orch.AEC(cfg)
+    before_hop = _install_forces(aec, flags) if ('--force-leak' in flags or '--force-gate' in flags) else None
 
     mic = np.fromfile(micp, dtype=np.float32)
     ref = np.fromfile(refp, dtype=np.float32)
@@ -139,8 +196,10 @@ def _run(argv):
         mic = (mic.astype(np.float64) * (1.0 + eps * u)).astype(np.float32)
     n = min(len(mic), len(ref))
     hop = cfg.hop_size
-    outs, raws, rows, ctx_rows = [], [], [], []
+    outs, raws, rows, ctx_rows, base_rows, formed_rows, dly_rows = [], [], [], [], [], [], []
     for h, i in enumerate(range(0, n - hop, hop)):
+        if before_hop is not None:
+            before_hop(h)
         r = aec.process(mic[i:i + hop].copy(), ref[i:i + hop].copy())
         ctx_conv = -1
         if isinstance(r, tuple):
@@ -157,6 +216,17 @@ def _run(argv):
             def _f(a):
                 return np.zeros(K, np.float32) if a is None else np.asarray(a, np.float32)
 
+            if want_base:
+                ob = np.asarray(ctx.output_base_spec, np.complex64)
+                serial = int(ctx.post_reset_serial)
+                if serial != aec.get_post_reset_serial():
+                    raise SystemExit('post_reset_serial: context %d != getter %d at hop %d'
+                                     % (serial, aec.get_post_reset_serial(), h))
+                base_rows.append(np.array([int(bool(ctx.guard_active))], np.int32).tobytes()
+                                 + np.array([serial], np.uint32).tobytes()
+                                 + np.stack([ob.real, ob.imag], axis=1).reshape(-1).astype(np.float32).tobytes())
+                formed_rows.append(np.asarray(ctx.formed_output, np.float32))
+                dly_rows.append('%d %d' % (int(aec._current_delay), len(getattr(aec, '_delay_reject_values', ()))))
             usable = ctx.usable_linear
             sc = np.array([ctx.far_power, ctx.erle_factor, ctx.dt_indicator, ctx.divergence,
                            ctx.saturation_level, ctx.erl_estimate, float(bool(ctx.filter_converged)),
@@ -186,6 +256,12 @@ def _run(argv):
         f.write('\n'.join(rows) + '\n')
     if want_ctx:
         np.concatenate(ctx_rows).astype(np.float32).tofile(pre + '.ctx.f32')
+    if want_base:
+        with open(pre + '.base.bin', 'wb') as f:
+            f.write(b''.join(base_rows))
+        np.concatenate(formed_rows).astype(np.float32).tofile(pre + '.formed.f32')
+        with open(pre + '.dly.txt', 'w') as f:
+            f.write('\n'.join(dly_rows) + '\n')
     print('pyc_parity_aec_run: %d hops hop=%d sr=%d fft=%d preset=%s hpf=%s kw=%s'
           % (len(rows), hop, sr, fft, preset, hpf, sorted(kw.items())), file=sys.stderr)
 

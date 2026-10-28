@@ -198,8 +198,8 @@ CFLAGS    += $(FP_POLICY)
 COMMON_FWD = BACKEND=$(BACKEND) SIMD=$(SIMD) WERROR=$(WERROR) CC='$(CC)' CXX='$(CXX)' EXTRA_CFLAGS='$(EXTRA_CFLAGS)' NO_STDIO=$(NO_STDIO) TOOLCHAIN_CHECK=$(TOOLCHAIN_CHECK)
 
 ifeq ($(COMMON_LIB),)
-.PHONY: all bench test test-full test-counter-saturation test-rate-structural test-config-validation test-process-context test-avg-reverb-slots test-linear-context test-res-nearend-gate test-runtime-preset test-delay-num-filters test-duty-census test-external-realign test-cli-delay-flags test-shared-far-spec test-spectral-reuse test-heap-alignment test-shared-fft-handle test-static-aec test-memory-layout test-reset-parity test-zero-heap test-aec-res test-detectors-parity test-detectors-parity-all test-parity-e2e pyc-parity-driver
-all bench test test-full test-counter-saturation test-rate-structural test-config-validation test-process-context test-avg-reverb-slots test-linear-context test-res-nearend-gate test-runtime-preset test-delay-num-filters test-duty-census test-external-realign test-cli-delay-flags test-shared-far-spec test-spectral-reuse test-heap-alignment test-shared-fft-handle test-static-aec test-memory-layout test-reset-parity test-zero-heap test-aec-res test-detectors-parity test-detectors-parity-all test-parity-e2e pyc-parity-driver:
+.PHONY: all bench test test-full test-counter-saturation test-rate-structural test-config-validation test-process-context test-avg-reverb-slots test-linear-context test-guard-unify test-res-nearend-gate test-runtime-preset test-delay-num-filters test-duty-census test-external-realign test-cli-delay-flags test-shared-far-spec test-spectral-reuse test-heap-alignment test-shared-fft-handle test-synthesis-window test-static-aec test-memory-layout test-reset-parity test-zero-heap test-aec-res test-detectors-parity test-detectors-parity-all test-parity-e2e pyc-parity-driver
+all bench test test-full test-counter-saturation test-rate-structural test-config-validation test-process-context test-avg-reverb-slots test-linear-context test-guard-unify test-res-nearend-gate test-runtime-preset test-delay-num-filters test-duty-census test-external-realign test-cli-delay-flags test-shared-far-spec test-spectral-reuse test-heap-alignment test-shared-fft-handle test-synthesis-window test-static-aec test-memory-layout test-reset-parity test-zero-heap test-aec-res test-detectors-parity test-detectors-parity-all test-parity-e2e pyc-parity-driver:
 	+@ac="$$($(MAKE) -s --no-print-directory -C $(COMMON_DIR) $(COMMON_FWD) print-lib-path)"; \
 	 test -n "$$ac" || { echo "FATAL: could not resolve audiolib archive path (COMMON_DIR=$(COMMON_DIR) -- is audiolib present as a sibling of this repo?)" >&2; exit 1; }; \
 	 $(MAKE) --no-print-directory $@ COMMON_LIB="$$ac"
@@ -260,6 +260,13 @@ TEST_CS_TARGET = $(BIN_DIR)/test_counter_saturation
 TEST_LC_SRCS   = $(TEST_DIR)/test_linear_context.c
 TEST_LC_OBJS   = $(patsubst $(TEST_DIR)/%.c,$(OBJ_DIR)/%.o,$(TEST_LC_SRCS))
 TEST_LC_TARGET = $(BIN_DIR)/test_linear_context
+
+# Guard / reset / comfort-noise unification: aec_process() against context + public getters + aec_cng_fill + ac_istft over
+# synthetic streams and the blind-set clips of test/guard_unify_clips.tsv (wav root: ../wav), bit for bit, plus the analysis
+# pairing probe, the guard threshold fixture and the aec_cng_fill reference. Needs the full Aec type.
+TEST_GU_SRCS   = $(TEST_DIR)/test_guard_unify.c
+TEST_GU_OBJS   = $(patsubst $(TEST_DIR)/%.c,$(OBJ_DIR)/%.o,$(TEST_GU_SRCS))
+TEST_GU_TARGET = $(BIN_DIR)/test_guard_unify
 
 # RES double-talk floor: the energy-based near-recent latch, its exported per-hop decision and the stationarity policy
 # (test/test_res_nearend_gate.c). Needs the full Aec type.
@@ -340,6 +347,9 @@ TEST_HAL_OBJ = $(OBJ_DIR)/test_heap_alignment.o
 TEST_SFH_SRCS   = $(TEST_DIR)/test_shared_fft_handle.c
 TEST_SFH_OBJS   = $(patsubst $(TEST_DIR)/%.c,$(OBJ_DIR)/%.o,$(TEST_SFH_SRCS))
 TEST_SFH_TARGET = $(BIN_DIR)/test_shared_fft_handle
+TEST_SSW_SRCS   = $(TEST_DIR)/test_synthesis_window.c
+TEST_SSW_OBJS   = $(patsubst $(TEST_DIR)/%.c,$(OBJ_DIR)/%.o,$(TEST_SSW_SRCS))
+TEST_SSW_TARGET = $(BIN_DIR)/test_synthesis_window
 
 # Heap-vs-caller-pool byte-equality test on a complete real recording.
 TEST_STATIC_SRCS   = $(TEST_DIR)/test_static_aec.c
@@ -607,7 +617,7 @@ $(TEST_NT_TARGET): $(TEST_NT_OBJ) $(OBJ_DIR)/aec_scale.o | _cfg_guard
 # $(TARGET)/$(BENCH_TARGET) relink only then.
 # =============================================================================
 ifneq ($(COMMON_LIB),)
-.PHONY: all bench FORCE test test-full test-counter-saturation test-rate-structural _run-rate-structural test-config-validation test-process-context test-avg-reverb-slots test-linear-context test-res-nearend-gate test-runtime-preset test-delay-num-filters test-duty-census test-external-realign test-cli-delay-flags test-shared-far-spec test-spectral-reuse test-heap-alignment test-shared-fft-handle test-static-aec test-memory-layout test-reset-parity test-zero-heap test-aec-res test-detectors-parity test-detectors-parity-all test-parity-e2e pyc-parity-driver
+.PHONY: all bench FORCE test test-full test-counter-saturation test-rate-structural _run-rate-structural test-config-validation test-process-context test-avg-reverb-slots test-linear-context test-guard-unify test-res-nearend-gate test-runtime-preset test-delay-num-filters test-duty-census test-external-realign test-cli-delay-flags test-shared-far-spec test-spectral-reuse test-heap-alignment test-shared-fft-handle test-synthesis-window test-static-aec test-memory-layout test-reset-parity test-zero-heap test-aec-res test-detectors-parity test-detectors-parity-all test-parity-e2e pyc-parity-driver
 all: $(TARGET)
 bench: $(BENCH_TARGET)
 
@@ -642,6 +652,10 @@ test-aec-res: $(TEST_AR_TARGET)
 # Builds AND runs, same convention as test-counter-saturation above.
 test-linear-context: $(TEST_LC_TARGET)
 	"$(abspath $(TEST_LC_TARGET))"
+
+# Builds AND runs from c_impl/ (the clip list and wav root are relative to it).
+test-guard-unify: $(TEST_GU_TARGET)
+	"$(abspath $(TEST_GU_TARGET))" "$(abspath $(CURDIR)/../wav)" "$(abspath $(TEST_DIR)/guard_unify_clips.tsv)"
 
 # Python<->C parity: checker + driver link rules, and the end-to-end gate recipe.
 $(TEST_PE_TARGET): $(OBJS) $(TEST_PE_OBJS) $(COMMON_LIB) | _cfg_guard
@@ -697,6 +711,10 @@ test-heap-alignment: $(TEST_HAL_TARGET)
 test-shared-fft-handle: $(TEST_SFH_TARGET)
 	"$(abspath $(TEST_SFH_TARGET))"
 
+# Builds AND runs, same convention as test-counter-saturation above.
+test-synthesis-window: $(TEST_SSW_TARGET)
+	"$(abspath $(TEST_SSW_TARGET))"
+
 test-memory-layout: $(OBJS) $(COMMON_LIB) | _cfg_guard
 	$(CC) $(CFLAGS) -c -o "$(OBJ_DIR)/test_memory_layout.o" "$(TEST_DIR)/test_memory_layout.c"
 	$(LINK) $(CFLAGS) -o "$(BIN_DIR)/test_memory_layout" "$(OBJ_DIR)/test_memory_layout.o" $(OBJS) $(COMMON_LIB) $(LDFLAGS)
@@ -744,12 +762,12 @@ test-zero-heap: $(TEST_ZH_TARGET)
 #   `make test-full` adds what is slow or changes rarely: the SIMD-independent targets under SIMD=0 as well, the end-to-end
 #   gate, the full pyc matrix instead of the lean one, the UBSan --use-standard-math variants, the Makefile flag-policy
 #   script and the signal-handling script that tests the UBSan wrappers' traps.
-TEST_SIMD_DEP   = selftest test-process-context test-linear-context test-aec-res test-res-nearend-gate test-runtime-preset \
+TEST_SIMD_DEP   = selftest test-process-context test-linear-context test-guard-unify test-aec-res test-res-nearend-gate test-runtime-preset \
                   test-delay-num-filters test-duty-census test-external-realign test-reset-parity test-delay-reset \
                   test-delay-dominant-selection test-delay-kernels test-delay-matched-neon test-neon-twins \
                   test-rate-structural test-counter-saturation
 TEST_SIMD_INDEP = test-heap-alignment test-memory-layout test-config-validation test-avg-reverb-slots \
-                  test-shared-far-spec test-spectral-reuse test-shared-fft-handle test-static-aec test-zero-heap \
+                  test-shared-far-spec test-spectral-reuse test-shared-fft-handle test-synthesis-window test-static-aec test-zero-heap \
                   test-header-fresh test-header-cpp test-detectors-parity-all test-cli-delay-flags
 TEST_BUILD_GATES = test-no-testing-symbols audit-no-stdio
 CLEAN_ENV       = env -u MAKEFLAGS -u MFLAGS -u MAKELEVEL
@@ -824,6 +842,10 @@ $(TEST_LC_TARGET): $(OBJS) $(TEST_LC_OBJS) $(COMMON_LIB) | _cfg_guard
 	$(LINK) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 	@echo "test_linear_context [$(BACKEND)] -> $@"
 
+$(TEST_GU_TARGET): $(OBJS) $(TEST_GU_OBJS) $(COMMON_LIB) | _cfg_guard
+	$(LINK) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+	@echo "test_guard_unify [$(BACKEND)] -> $@"
+
 $(TEST_RNG_TARGET): $(OBJS) $(TEST_RNG_OBJS) $(COMMON_LIB) | _cfg_guard
 	$(LINK) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 	@echo "test_res_nearend_gate [$(BACKEND)] -> $@"
@@ -863,6 +885,10 @@ $(TEST_HAL_TARGET): $(filter-out $(OBJ_DIR)/aec.o,$(OBJS)) $(TEST_HAL_OBJ) $(COM
 $(TEST_SFH_TARGET): $(OBJS) $(TEST_SFH_OBJS) $(COMMON_LIB) | _cfg_guard
 	$(LINK) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 	@echo "test_shared_fft_handle [$(BACKEND)] -> $@"
+
+$(TEST_SSW_TARGET): $(OBJS) $(TEST_SSW_OBJS) $(COMMON_LIB) | _cfg_guard
+	$(LINK) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+	@echo "test_synthesis_window [$(BACKEND)] -> $@"
 
 $(TEST_DET_TARGET): $(TEST_DET_SRC) $(SRC_DIR)/detectors.c $(SRC_DIR)/aec_scale.c include/detectors.h | _cfg_guard
 	@mkdir -p $(BIN_DIR)
@@ -1296,6 +1322,7 @@ help:
 	@echo "  test-heap-alignment  Check aligned arena allocation and failure cleanup"
 	@echo "  test-shared-fft-handle  Build + run the permanent shared-FFT-handle"
 	@echo "                  regression test (test_shared_fft_handle) -- run from c_impl/"
+	@echo "  test-synthesis-window  Build + run the aec_synthesis_window() accessor test (3 grids, refusals)"
 	@echo "  test-static-aec  Build + run heap-vs-caller-pool byte-equality on a real WAV pair"
 	@echo "                  (override TEST_STATIC_MIC/TEST_STATIC_REF/TEST_STATIC_SR as needed)"
 	@echo "  test-reset-parity  Build + run the permanent aec_reset()-equals-fresh-instance"

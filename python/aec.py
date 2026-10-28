@@ -24,6 +24,7 @@ from modules.epc import (  # noqa: F401
 )
 from modules.residual import ResidualEchoEstimator  # noqa: F401
 from modules.debug_logger import AecDebugLogger  # noqa: F401
+from modules.cng import AEC_CNG_SEED, cng_fill  # noqa: F401
 from modules.orchestrator import AEC, process_wav_files, main  # noqa: F401
 
 

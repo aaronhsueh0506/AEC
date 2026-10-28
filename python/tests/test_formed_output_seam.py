@@ -14,7 +14,10 @@ import numpy as np
 import pytest
 
 from aec import AEC, AecConfig, AecPreset
-from modules.orchestrator import _SEL_CAPTURE, _SEL_REFINED
+from modules.state import AecState as AecStateClass
+from modules.orchestrator import _SEL_REFINED
+
+from guard_scenes import expected_guard, synthetic_scene
 
 
 def _make_config(sample_rate: int, fft_size: int, enable_shadow: bool) -> AecConfig:
@@ -104,9 +107,9 @@ def test_no_output_limiter_output_is_never_peak_scaled() -> None:
         )
         # No limiter gain, no scaling, no smoothing: what process() returns is
         # the linear residual itself, bit for bit. Deliberately NOT compared
-        # against get_formed_output(): the formed seam carries the capture
-        # fallback and the two are different signals by design on any hop
-        # where it fires.
+        # against get_formed_output(): the formed seam is the WOLA-formed signal
+        # (one framing hop behind, refined / coarse selection and crossfade),
+        # a different signal from the delivered linear hop by design.
         np.testing.assert_array_equal(result, aec._last_raw_output)
 
         near_peak = float(np.max(np.abs(near)))
@@ -139,11 +142,10 @@ def test_get_formed_output_requires_flag_and_a_prior_process_call() -> None:
     aec2.get_formed_output()  # now succeeds
 
 
-@pytest.mark.parametrize("usable,expect_capture", [(True, False), (False, True)])
-def test_capture_fallback_requires_an_unusable_filter(
-    monkeypatch: pytest.MonkeyPatch, usable: bool, expect_capture: bool
-) -> None:
-    """Energy alone must not replace a filter the analyzer has accepted."""
+@pytest.mark.parametrize("usable", [True, False])
+def test_selector_never_substitutes_the_capture(monkeypatch: pytest.MonkeyPatch, usable: bool) -> None:
+    """The analysis selection is refined or coarse only: a residual far louder than the capture is kept whatever the
+    quality verdict says (the output-capture guard acts on the rendering base, not here)."""
     cfg = _make_config(16000, 256, enable_shadow=False)
     cfg.return_res_context = True
     aec = AEC(cfg)
@@ -159,4 +161,49 @@ def test_capture_fallback_requires_an_unusable_filter(
     aec._aec3_select_linear_filter_output(
         e_refined_time=err, near_end_block=near, e_coarse_time=err
     )
-    assert (aec._form_last_selection == _SEL_CAPTURE) is expect_capture
+    assert aec._form_last_selection == _SEL_REFINED
+    np.testing.assert_array_equal(aec._form_prev_output_time, err)
+
+
+@pytest.mark.parametrize("enable_res", [False, True])
+@pytest.mark.parametrize("usable", [True, False])
+def test_output_guard_is_a_rendering_base_and_requires_an_unusable_filter(
+    monkeypatch: pytest.MonkeyPatch, usable: bool, enable_res: bool
+) -> None:
+    """Energy alone must not replace the base of a filter the analyzer has accepted, and a fired guard changes the
+    rendering base only: against a twin with the guard disabled, every analysis field (error / echo / near spectra,
+    formed output, gain, comfort noise, R^2) is bit-identical hop for hop."""
+    monkeypatch.setattr(
+        AecStateClass, "usable_linear_estimate", lambda _self: usable
+    )
+
+    def make(guard: bool) -> AEC:
+        cfg = _make_config(16000, 256, enable_shadow=True)
+        cfg.enable_res = enable_res
+        cfg.return_res_context = True
+        cfg.return_formed_output = True
+        cfg.output_capture_when_linear_unusable = guard
+        np.random.seed(0)
+        return AEC(cfg)
+
+    on, off = make(True), make(False)
+    fired = 0
+    for near, far in synthetic_scene("uncorrelated", on.hop_size, 16000, 60):
+        _o1, c_on = on.process(near.copy(), far.copy())
+        _o2, c_off = off.process(near.copy(), far.copy())
+        for name in ("error_spec", "echo_spec", "near_spec", "formed_output", "raw_output", "res_gain",
+                     "comfort_noise", "r2"):
+            np.testing.assert_array_equal(getattr(c_on, name), getattr(c_off, name), err_msg=name)
+        np.testing.assert_array_equal(on.get_formed_output(), off.get_formed_output())
+        assert c_off.guard_active is False
+        np.testing.assert_array_equal(c_off.output_base_spec, c_off.error_spec)
+        assert c_on.guard_active is expected_guard(c_on)
+        if c_on.guard_active:
+            fired += 1
+            np.testing.assert_array_equal(c_on.output_base_spec, c_on.near_spec)
+        else:
+            np.testing.assert_array_equal(c_on.output_base_spec, c_on.error_spec)
+    if usable:
+        assert fired == 0
+    else:
+        assert fired >= 10, "the unusable scene must exercise the guard"

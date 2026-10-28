@@ -182,7 +182,7 @@ int run_aec_seam(int sample_rate)
 <tr><td>mic／ref 前提</td><td>ref 是實際送往喇叭的訊號,與 mic 同取樣率同時鐘;延遲只能是正的(mic 落後 ref)。函式庫不補償 clock drift。</td></tr>
 <tr><td>延遲三態</td><td><code>MATCHED</code>(預設,線上估計)／<code>FIXED</code>(給量測延遲 <code>fixed_delay_samples</code>)／<code>EXTERNAL_ALIGNED</code>(呼叫端保證已對齊);非法組合在建立時被拒絕,不會被修正。表見 <a href="aec_c_api.html">AEC API</a> §4。</td></tr>
 <tr><td>執行緒</td><td>一個實例<b>不是 thread-safe</b>;<code>aec_process*</code>、<code>aec_set_level</code>、<code>aec_reset</code>、<code>aec_apply_external_realign</code>、<code>aec_destroy</code> 都要由呼叫端序列化。不同實例彼此獨立。</td></tr>
-<tr><td><code>aec_reset</code></td><td>清延遲估計、參考環、濾波器、偵測器、輸出 OLA 等執行期狀態,<b>保留設定、記憶體與 <code>aec_set_level</code> 設的目標</b>;會讓 <code>generation</code> +1。每個獨立串流前呼叫;只是外部對齊改變時改用 <code>aec_apply_external_realign</code>(不重啟 OLA,輸出連續)。</td></tr>
+<tr><td><code>aec_reset</code></td><td>清延遲估計、參考環、濾波器、偵測器、輸出 OLA 等執行期狀態,<b>保留設定、記憶體與 <code>aec_set_level</code> 設的目標</b>;會讓 <code>generation</code> 與 <code>aec_post_reset_serial()</code> 各 +1(<code>aec_reset</code> 是獨立的一次呼叫,不在任何處理呼叫之內,回傳時 serial 已是 +1 後的值;函式庫自己清 OLA 並把 CNG 種子設回 <code>AEC_CNG_SEED</code>;函式庫外自行合成的消費端看到 serial 改變就同步清自己的 OLA 與 CNG,不要反過來呼叫 <code>aec_reset</code>)。每個獨立串流前呼叫;只是外部對齊改變時改用 <code>aec_apply_external_realign</code>(不重啟 OLA,輸出連續)。</td></tr>
 <tr><td><code>aec_destroy</code></td><td>heap 實例釋放單一 arena,<b>剛好一次</b>;pool 實例不釋放任何記憶體(只清內部參考)、可重複呼叫(NULL 也安全),池由呼叫端回收。</td></tr>
 <tr><td>零 heap</td><td>pool 路徑從 init 到 destroy 不呼叫 malloc(<code>make test-zero-heap</code>:50 個 init/process/reset/destroy 週期 allocator 呼叫為 0)。heap 路徑只在 <code>aec_create</code> 做<b>一次</b> 16-byte 對齊配置。</td></tr>
 </table></div>
@@ -191,7 +191,12 @@ int run_aec_seam(int sample_rate)
 <h2>5. 接到 NR 與合成(單聲道整鏈)</h2>
 <p>AEC 庫本身不包 NR 或合成。整合者各自初始化 <code>Aec</code>、<code>AnrDenoiser</code>(NR 庫)、<code>AcIstft</code>(audiolib),並自己寫一小段每 hop 的串接;Audio_ALG 的 <code>pipelines/mono_aec_nr_res/main.c</code> 就是這樣(串接函式 <code>mono_form()</code>)。AEC 端以 <code>enable_res = 0</code>、<code>return_res_context = 1</code> 建立,單聲道的 RES 增益是 AEC 自己算的 <code>ctx.res_gain</code>(由 <code>aec_get_res_context()</code> 取得),不需另建 <code>AecRes</code>。</p>
 <pre><code>aec_process_context(aec, mic, ref);          /* 線性 + post 區塊,不寫 out */
-aec_get_res_context(aec, &amp;ctx);              /* AecResContext:error_spec(E)、r2、comfort_noise、res_gain(借用 AEC 的 buffer) */
+aec_get_res_context(aec, &amp;ctx);              /* AecResContext:error_spec(E,分析用)、r2、comfort_noise、res_gain(借用 AEC 的 buffer) */
+AecOutputBase ob = { .struct_size = sizeof ob };
+aec_get_output_base(aec, &amp;ob);                /* ob.base_spec:渲染底座(輸出守衛已套用) */
+if (aec_post_reset_serial(aec) != my_serial) {   /* 硬 post 鏈 reset:在第一次 CNG 抽樣與 ac_istft_push 之前 */
+    ac_istft_reset(istft); rng = AEC_CNG_SEED; my_serial = aec_post_reset_serial(aec);
+}
 const float *extra = NULL;
 if (use_r2 &amp;&amp; ctx.r2 &amp;&amp; ctx.usable_linear) {          /* R2 併入噪音底,僅在 usable_linear 為真時 */
     sk_scale_f32(scratch, ctx.r2, 1.0f / (32768.0f * 32768.0f), n_freqs);   /* r2 是 int16² 尺度 */
@@ -200,7 +205,7 @@ if (use_r2 &amp;&amp; ctx.r2 &amp;&amp; ctx.usable_linear) {          /* R2 併�
 anr_process_gain(nr, ctx.error_spec, extra, NULL);             /* NR 增益 */
 g_nr = anr_get_gain(nr, NULL);
 sk_min_f32(total, g_nr, ctx.res_gain, n_freqs);                /* g = min(g_nr, g_res) */
-sk_capply_gain_f32(spec, ctx.error_spec, total, n_freqs);      /* P = E * g */
+sk_capply_gain_f32(spec, ob.base_spec, total, n_freqs);        /* P = base * g(渲染 base_spec,不是 error_spec) */
 aec_cng_fill(&amp;rng, spec, ctx.comfort_noise, ctx.res_gain, g_nr, 0.31622777f, n_freqs);  /* 開 CNG 時 */
 ac_istft_push(istft, spec, out);                               /* 反 FFT + 合成 + OLA */</code></pre>
 <p class="small">上列 <code>anr_*</code> 屬 NR 庫,<code>sk_*</code>／<code>ac_istft_push</code> 屬 audiolib,只有 <code>aec_*</code> 是 AEC 庫的 API;流程時序見 <a href="aec_sequence.html">aec_sequence</a> §3,各 stage 的介面見 <a href="../../../Audio_ALG/docs/html/integration_example.html">串接範例</a>。</p>

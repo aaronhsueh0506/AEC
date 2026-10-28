@@ -58,10 +58,10 @@ filter bank、降取樣 render ring 與兩個 lag histogram 都是依 init 設�
 
 | 格點 | n=1 | n=2 | n=3 | n=4 | n=5（預設） |
 |---|---:|---:|---:|---:|---:|
-| 8 kHz / 256（legacy） | 244,496 B | 250,224 B | 255,952 B | 261,680 B | 267,408 B |
-| 16 kHz / 256 | 341,504 B | 347,232 B | 352,960 B | 358,688 B | 364,416 B |
-| 16 kHz / 512 | 468,688 B | 474,416 B | 480,144 B | 485,872 B | 491,600 B |
-| 48 kHz / 1024 | 1,133,632 B | 1,139,360 B | 1,145,088 B | 1,150,816 B | 1,156,544 B |
+| 8 kHz / 256（legacy） | 246,080 B | 251,808 B | 257,536 B | 263,264 B | 268,992 B |
+| 16 kHz / 256 | 343,088 B | 348,816 B | 354,544 B | 360,272 B | 366,000 B |
+| 16 kHz / 512 | 471,808 B | 477,536 B | 483,264 B | 488,992 B | 494,720 B |
+| 48 kHz / 1024 | 1,139,824 B | 1,145,552 B | 1,151,280 B | 1,157,008 B | 1,162,736 B |
 
 > **這些絕對值會隨 `Aec` / `AecConfig` 的結構大小整批移動（`sizeof(AecConfig)`
 > 目前是 224 B），而所有 delta 不變**（每個 filter 5,728 B、`FIXED` 的 byte/ms
@@ -81,13 +81,13 @@ histogram 1,536 B ＋ pre-echo histogram 96 B。所以 `n=1` 相對預設 `n=5` 
 
 | `delay_mode` | 記憶池 | 相對 `MATCHED n=5` |
 |---|---:|---:|
-| `MATCHED` n=5（預設） | 364,416 B | — |
-| `MATCHED` n=1 | 341,504 B | −22,912 B |
-| `FIXED`，`fixed_delay_samples = 0` | 199,920 B | −164,496 B |
-| `FIXED`，`fixed_delay_samples = 400`（25 ms） | 201,520 B | −162,896 B |
-| `FIXED`，`fixed_delay_samples = 1600`（100 ms） | 206,320 B | −158,096 B |
-| `FIXED`，`fixed_delay_samples = 8000`（500 ms） | 231,920 B | −132,496 B |
-| `EXTERNAL_ALIGNED` | 199,408 B | −165,008 B |
+| `MATCHED` n=5（預設） | 366,000 B | — |
+| `MATCHED` n=1 | 343,088 B | −22,912 B |
+| `FIXED`，`fixed_delay_samples = 0` | 201,504 B | −164,496 B |
+| `FIXED`，`fixed_delay_samples = 400`（25 ms） | 203,104 B | −162,896 B |
+| `FIXED`，`fixed_delay_samples = 1600`（100 ms） | 207,904 B | −158,096 B |
+| `FIXED`，`fixed_delay_samples = 8000`（500 ms） | 233,504 B | −132,496 B |
+| `EXTERNAL_ALIGNED` | 200,992 B | −165,008 B |
 
 #### 環形緩衝大小公式
 
@@ -123,20 +123,20 @@ histogram 1,536 B ＋ pre-echo histogram 96 B。所以 `n=1` 相對預設 `n=5` 
 
 | 格點 | fixed=0 | 25 ms | 100 ms | 500 ms |
 |---|---:|---:|---:|---:|
-| 16 kHz / 256 | 199,920 B | 201,520 B | 206,320 B | 231,920 B |
-| 16 kHz / 512 | 327,616 B | 329,216 B | 334,016 B | 359,616 B |
-| 48 kHz / 1024 | 730,064 B | 734,864 B | 749,264 B | 826,064 B |
+| 16 kHz / 256 | 201,504 B | 203,104 B | 207,904 B | 233,504 B |
+| 16 kHz / 512 | 330,736 B | 332,336 B | 337,136 B | 362,736 B |
+| 48 kHz / 1024 | 736,256 B | 741,056 B | 755,456 B | 832,256 B |
 
 > **注意**：`fixed_delay_samples` 很大時 `FIXED` 也可能比 `MATCHED n=5` 更
-> 耗記憶體（48 kHz/1024、2500 ms 為 1,210,064 B，高於 `MATCHED n=5` 的
-> 1,156,544 B）——環形緩衝終究要放得下那個延遲。要用大 fixed delay 又要省
+> 耗記憶體（48 kHz/1024、2500 ms 為 1,216,256 B，高於 `MATCHED n=5` 的
+> 1,162,736 B）——環形緩衝終究要放得下那個延遲。要用大 fixed delay 又要省
 > 記憶體，正確作法是讓呼叫端自己補償掉大延遲後改用 `EXTERNAL_ALIGNED`。
 
-另外一個明顯的開關（16 kHz/256，相對 364,416 B）：
+另外一個明顯的開關（16 kHz/256，相對 366,000 B）：
 
 | 設定 | 記憶池 | 差異 |
 |---|---:|---:|
-| `enable_shadow = 0` | 321,536 B | −42,880 B |
+| `enable_shadow = 0` | 323,120 B | −42,880 B |
 
 `enable_res` 與 `enable_cng` **不影響**記憶池大小（相關緩衝區一律配置）。
 
@@ -154,6 +154,10 @@ aec_reset(&aec);    /* 或 aec_reset(aec) */
 清掉所有執行期狀態（延遲估計、filter、double-talk、收斂狀態），但**保留設定與記憶體
 配置**。處理下一段**獨立**串流（例如批次處理下一個檔案）前一定要呼叫，否則前一段的
 狀態會汙染下一段。
+
+`aec_reset()` 是一次「硬 post 鏈 reset」：函式庫清掉自己的 OLA 尾巴、把舒適噪音種子設回 `AEC_CNG_SEED`（42），
+並讓 `aec_post_reset_serial()` 加 1；`aec_reset()` 是獨立的一次呼叫，不在任何處理呼叫之內，它回傳時 serial 已經是 +1 後的值。自己在函式庫外合成的整合者靠這個 serial 同步清自己的 OLA 與 CNG 狀態（見
+[§8.3](c_user_manual_zh_TW_04_seam_troubleshooting.md#83-aecrescontext-欄位)），不要反過來呼叫 `aec_reset()`。
 
 ### 什麼不能改
 

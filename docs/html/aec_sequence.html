@@ -89,14 +89,18 @@ pre code{background:none;padding:0}
  |                                                |                                       |                             |
  |- aec_process_context(mic, ref) ---------------&gt;|                                       |                             | 同 §2,但不 memcpy 到 out
  |- aec_get_res_context(&amp;ctx) -------------------&gt;|                                       |                             |
- |&lt; error_spec / near_spec / r2 / cn / res_gain --|                                       |                             |
+ |&lt; error_spec / near_spec / r2 / cn / res_gain --|                                       |                             | (分析用:error_spec 永不被守衛改動)
+ |- aec_get_output_base(&amp;ob) --------------------&gt;|                                       |                             |
+ |&lt; ob.base_spec / ob.guard_active -----------------|                                       |                             | 渲染底座:守衛已套用(沒觸發時就是 error_spec)
+ |- aec_post_reset_serial() -----------------------&gt;|                                       |                             |
+ |&lt; serial (與自己存的不同 -&gt; ac_istft_reset、rng = AEC_CNG_SEED;在本 hop 的 CNG 抽樣與 ac_istft_push 之前,不可呼叫 aec_reset)
  |- aec_get_linear_context(&amp;lin) ----------------&gt;|                                       |                             |
  |&lt; aligned_far_hop / delay_state / generation ---|                                       |                             |
  | (以上指標借自 AEC 的 per-hop buffer,下一次 process/reset 前有效)
  |- E, R2, CN, g_res --------------------------------------------------------------------&gt;|                             |
  |                                                |                                       | NR 增益 g_nr(r2 / 32768^2 併入噪音底)
  |&lt; g_nr ---------------------------------------------------------------------------------|                             |
- | g = min(g_nr, g_res);P = E * g;aec_cng_fill(&amp;rng, P, cn, g_res, g_nr, floor, n)
+ | g = min(g_nr, g_res);P = ob.base_spec * g(不是 error_spec);aec_cng_fill(&amp;rng, P, cn, g_res, g_nr, floor, n)
  |- ac_istft_push(P) --------------------------------------------------------------------------------------------------&gt;|
  |&lt; out[hop] -----------------------------------------------------------------------------------------------------------|</pre>
 <p class="small">單聲道實際串接見 Audio_ALG <code>pipelines/mono_aec_nr_res/main.c</code>。AEC 端必須 <code>enable_res = 0</code> 且 <code>return_res_context = 1</code>。<code>aec_process</code>、<code>aec_process_context</code>、<code>aec_process_context_shared_far_from</code> 推進相同的內部 state,可在同一實例上交錯。單聲道的 RES 增益(<code>res_gain</code>)由 post 區塊在 AEC 的呼叫內算出,不另建 <code>AecRes</code>;純 AEC 的範例可以直接呼叫 <code>aec_process()</code>,RES 與最後的合成都在同一個呼叫內完成。</p>
@@ -150,7 +154,8 @@ pre code{background:none;padding:0}
  | beamform / 融合 E, Y, R2, N2 -&gt; AecResInput
  |- aec_res_process(res, &amp;in) ---------------------------------------------------------------------------------&gt;|
  |&lt; g_res[n_bins] ----------------------------------------------------------------------------------------------| NULL = 輸入不完整
- | g = min(g_nr, g_res);spec = E * g;aec_cng_fill(...)
+ | g = min(g_nr, g_res);spec = B * g;aec_cng_fill(...)   B = mcab_fuse 輸出的渲染底座 McabFrame.b(各 lane 渲染底座的加權和;沒有 lane 守衛觸發時就是 E)
+ | McabFrame.post_reset_serial 與自己存的不同 -&gt; ac_istft_reset、rng = AEC_CNG_SEED,在 aec_cng_fill 與 ac_istft_push 之前(不可呼叫 aec_reset)
  |- aec_res_set_level(res, level, ramp_ms) ------------------------------------------------------------------&gt;| hop 之間
  |- aec_res_reset(res) ----------------------------------------------------------------------------------------&gt;| 串流邊界;保留地板目標</pre>
 <p class="small">Audio_ALG 的 4ch 流程層 <code>mcab</code> 只管共用 delay、四條由應用注入的 <code>Aec</code> lane 與 <code>mcab_fuse()</code>(<code>g_res_ctx = NULL</code>),<b>不含 RES</b>,也不含波束成形;RES 由應用在 mcab 之後用 <code>AecRes</code> 自己建立、每 hop 在 fuse 之後呼叫(<code>aec_res_process()</code>,輸入由 <code>mcab_sample_res_input()</code> 組出)。上圖是直接驅動各 lane 的寫法;mcab 加應用的完整呼叫序列(mcab／AecRes／NR／ISTFT 四條生命線)見 <a href="aec_res.html">aec_res</a> §2.3,流程的時序見 <a href="../../../Audio_ALG/docs/html/pipeline_4ch.html">pipeline_4ch</a>。</p>

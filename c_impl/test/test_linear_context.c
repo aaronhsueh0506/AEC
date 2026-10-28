@@ -24,11 +24,11 @@
  * report far_hop_aligned=1 unconditionally; serve the ring read one hop early or late; remove the ref_ring_filled clamp;
  * seed FIXED's current_delay from anything but cfg.fixed_delay_samples; run the ring write/read under the estimator gate
  * instead of the ring gate; report EXTERNAL_ALIGNED as UNLOCKED/-1; drop the `+ hop` from aec_ref_ring_samples()'s FIXED
- * arm; give EXTERNAL_ALIGNED a ring; drop the capture candidate from linear_filter_select().
+ * arm; give EXTERNAL_ALIGNED a ring; bring a capture candidate back into linear_filter_select() (the far-active/no-echo
+ * and analysis-seam scenarios go red).
  *
- * The direct selector scenario separately proves the gate stands down once the analyzer calls the filter usable. A
- * C/Python parity gate cannot cover this: two ports with the same missing predicate would agree while both were wrong.
- * The end-to-end far-active/no-echo scenario proves the same selector protects the public seam.
+ * The end-to-end far-active/no-echo scenario proves that the rendering base (not the analysis seam) is bounded at the
+ * capture while the estimate is unusable.
  *
  * Build (standalone, from c_impl/):
  *   make -C ../../audiolib/common lib
@@ -750,7 +750,9 @@ static void scenario_ring_filled_saturates(void) {
  * the capture gives the matched filter no peak to lock, so the delay never becomes solid and the
  * filtering-quality analyzer never calls the linear estimate usable; meanwhile the adaptive filter
  * fits far-shaped noise onto the near speech and subtracts something that was never there. The
- * formed seam must not carry more energy than the capture it came from. */
+ * analysis seam (formed_hop / error_spec) is the real residual and is NOT bounded; the rendering base
+ * (aec_get_output_base) must not carry more windowed energy than the capture spectrum on any hop whose
+ * usable verdict is false, and the guard must actually fire in this scenario. */
 static void scenario_far_active_no_echo(int silent_mic, const char *label) {
     AecConfig cfg;
     Aec a;
@@ -758,6 +760,7 @@ static void scenario_far_active_no_echo(int silent_mic, const char *label) {
     const int HOPS = 900;
     float *mic, *far;
     double e_out = 0.0, e_mic = 0.0, worst = 0.0;
+    long guard_hops = 0, unusable_hops = 0;
 
     g_rng_state = 0x11EC5EEDu;
     aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, 16000);
@@ -769,100 +772,51 @@ static void scenario_far_active_no_echo(int silent_mic, const char *label) {
     far = (float *)malloc((size_t)hop * sizeof(float));
 
     for (h = 0; h < HOPS; ++h) {
-        AecLinearContext ctx;
+        AecResContext ctx;
+        AecOutputBase ob;
         double eo = 0.0, em = 0.0;
-        float out_scratch[4096];
         for (i = 0; i < hop; ++i) {
             /* Loud reference, quiet near, and NO path between them. */
             far[i] = rng_uniform(0.6f);
             mic[i] = silent_mic ? 0.0f : rng_uniform(0.05f);
         }
-        aec_process(&a, mic, far, out_scratch);
-        aec_get_linear_context(&a, &ctx);
-        for (i = 0; i < hop; ++i) {
-            double o = ctx.formed_linear_hop[i], m = mic[i];
-            eo += o * o; em += m * m;
+        aec_process_context(&a, mic, far);
+        aec_get_res_context(&a, &ctx);
+        memset(&ob, 0, sizeof ob);
+        ob.struct_size = sizeof ob;
+        if (aec_get_output_base(&a, &ob) != 0) { CHECK(0, "output base"); break; }
+        if (ob.guard_active) guard_hops++;
+        if (ctx.usable_linear) continue;
+        unusable_hops++;
+        for (i = 0; i < ob.n_freqs; ++i) {
+            eo += (double)ob.base_spec[i].r * ob.base_spec[i].r
+                + (double)ob.base_spec[i].i * ob.base_spec[i].i;
+            em += (double)ctx.near_spec[i].r * ctx.near_spec[i].r
+                + (double)ctx.near_spec[i].i * ctx.near_spec[i].i;
         }
         e_out += eo; e_mic += em;
         if (h > 8 && em > 1e-12 && eo / em > worst) worst = eo / em;
     }
 
+    CHECK(unusable_hops > 100, "far-active/no-echo: the estimate stays unusable");
+    if (!silent_mic)
+        CHECK(guard_hops > 0, "far-active/no-echo: the output guard fires");
     if (silent_mic) {
-        /* Nothing to preserve: the seam must stay at digital silence rather
-         * than synthesizing the reference into it. */
+        /* Nothing to preserve: the rendering base must stay at digital silence rather
+         * than carrying the filter's synthesized reference. */
         CHECK(e_out < 1e-9,
-              "far-active/no-echo, silent mic: seam stays silent");
+              "far-active/no-echo, silent mic: rendering base stays silent");
     } else {
-        CHECK(e_out <= e_mic * 1.02,
-              "far-active/no-echo: seam carries no more energy than capture");
-        CHECK(worst <= 4.0,
-              "far-active/no-echo: no hop exceeds capture by more than 6 dB");
+        CHECK(e_out <= e_mic * 1.0000001,
+              "far-active/no-echo: rendering base carries no more energy than capture");
+        CHECK(worst <= 1.0000001,
+              "far-active/no-echo: no unusable hop's base exceeds the capture spectrum");
     }
-    printf("  [%s] out/mic = %.3f, worst hop = %.2f dB\n", label,
+    printf("  [%s] base/capture = %.3f, worst hop = %.2f dB, guard hops %ld of %ld unusable\n", label,
            e_mic > 0.0 ? e_out / e_mic : e_out,
-           worst > 0.0 ? 10.0 * log10(worst) : 0.0);
+           worst > 0.0 ? 10.0 * log10(worst) : 0.0, guard_hops, unusable_hops);
 
     free(mic); free(far);
-    aec_destroy(&a);
-}
-
-/* Isolate the admission predicate from analyzer dynamics. The residual has
- * more energy than capture in both calls. Only the explicit unusable verdict
- * may admit capture; removing that term must make the first assertion fail. */
-static void scenario_capture_fallback_requires_unusable(void) {
-    AecConfig cfg;
-    Aec a = {0};
-    int i, k;
-    int create_rc;
-    float *near, *err;
-    Complex *esw, *echo, *out_esw, *out_echo;
-
-    aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, 16000);
-    cfg.enable_res = 0;
-    cfg.return_res_context = 1;
-    create_rc = aec_create(&a, &cfg);
-    CHECK(create_rc == 0, "capture gate: create");
-    if (create_rc != 0) return;
-
-    near = (float *)calloc((size_t)a.hop_size, sizeof(float));
-    err = (float *)calloc((size_t)a.hop_size, sizeof(float));
-    esw = (Complex *)calloc((size_t)a.n_freqs, sizeof(Complex));
-    echo = (Complex *)calloc((size_t)a.n_freqs, sizeof(Complex));
-    out_esw = (Complex *)calloc((size_t)a.n_freqs, sizeof(Complex));
-    out_echo = (Complex *)calloc((size_t)a.n_freqs, sizeof(Complex));
-    CHECK(near && err && esw && echo && out_esw && out_echo,
-          "capture gate: scratch allocation");
-    if (!near || !err || !esw || !echo || !out_esw || !out_echo) goto done;
-
-    for (i = 0; i < a.hop_size; ++i) {
-        near[i] = 0.01f;
-        err[i] = 0.10f;
-    }
-    for (k = 0; k < a.n_freqs; ++k) {
-        esw[k].r = esw[k].i = 0.0f;
-        echo[k].r = echo[k].i = 0.0f;
-    }
-
-    linear_filter_select_reset(&a.a3_lfs);
-    linear_filter_select(&a.a3_lfs, err, near, err, esw, echo,
-                         a.main_filter.base.sqrt_hann, a.post_fft,
-                         /*linear_unusable=*/0,
-                         /*capture_fallback_enabled=*/1,
-                         out_esw, out_echo);
-    CHECK(a.a3_lfs.form_last_selection != LFS_SEL_CAPTURE,
-          "capture gate: usable filter keeps the selected residual");
-
-    linear_filter_select_reset(&a.a3_lfs);
-    linear_filter_select(&a.a3_lfs, err, near, err, esw, echo,
-                         a.main_filter.base.sqrt_hann, a.post_fft,
-                         /*linear_unusable=*/1,
-                         /*capture_fallback_enabled=*/1,
-                         out_esw, out_echo);
-    CHECK(a.a3_lfs.form_last_selection == LFS_SEL_CAPTURE,
-          "capture gate: unusable over-output falls back to capture");
-
-done:
-    free(near); free(err); free(esw); free(echo); free(out_esw); free(out_echo);
     aec_destroy(&a);
 }
 
@@ -884,7 +838,6 @@ int main(void) {
     scenario_external_has_no_delay_state();
     scenario_unfilled_ring_reads_unlocked();
     scenario_ring_filled_saturates();
-    scenario_capture_fallback_requires_unusable();
     scenario_far_active_no_echo(/*silent_mic=*/0, "near speech");
     scenario_far_active_no_echo(/*silent_mic=*/1, "silent mic");
     printf("\n%d passed, %d failed\n", g_pass, g_fail);

@@ -54,7 +54,7 @@ int res_one_hop(const AecConfig *cfg, const AecResInput *in, uint32_t *rng,
 
     const float *g_res = aec_res_process(res, in);    /* n_bins gains in [0, 1], owned by res */
     if (g_res) {
-        /* spec = error_spec * min(g_nr, g_res) is applied by the caller, then: */
+        /* spec = base_spec * min(g_nr, g_res) is applied by the caller (base_spec: aec_get_output_base()), then: */
         aec_cng_fill(rng, spec, in-&gt;comfort_noise, g_res, g_nr, 0.31622777f, aec_res_n_bins(res));
     }
     (void)aec_res_set_level(res, AEC_LEVEL_AGGRESSIVE, 100.0f);   /* between hops */
@@ -86,7 +86,7 @@ int res_one_hop(const AecConfig *cfg, const AecResInput *in, uint32_t *rng,
      |   ===== 每個 hop =====                              |
      |-- aec_res_process(res, &amp;AecResInput) -----------&gt;|  近端功率 x 32768^2、ref x 32768 -&gt; suppression_gain_get_gain
      |&lt;-- g_res[n_bins] (NULL: r/in 或任一輸入陣列為 NULL) -|  回傳指標歸 res 所有,到下一次對 res 的呼叫前有效
-     | g = min(g_nr, g_res);  spec = E * g                  |
+     | g = min(g_nr, g_res);  spec = B * g   (B = 渲染底座，見 §2.3)  |
      |-- aec_cng_fill(&amp;rng, spec, cn, g_res, g_nr, floor, n) -&gt;(純函式,不經 res;rng 由呼叫端持有;任一必要指標 NULL 或 n &lt; 3 則不動)
      |   ===== hop 之間 / 串流邊界 =====                     |
      |-- aec_res_set_level(res, level, ramp_ms) ---------&gt;|  0 / -1(NULL、enum 外、ramp 不在 [0, 60000]:什麼都不寫)
@@ -163,7 +163,8 @@ Application                        mcab flow + beam helper     AecRes (libaec) N
  |&lt;-- g_res[n_bins] --------------------------------------------|               |               |
  |-- mcab_sample_anr_gain(nr, &amp;frame, scratch, 1) -------------------------------&gt;|               |   R2 併入噪音底(usable_linear 為真才併)
  |&lt;-- g_nr[n_bins] -------------------------------------------------------------|               |
- |                                  g = min(g_nr, g_res);  P = E * g;  有 CN 時 aec_cng_fill(&amp;rng, P, CN, g_res, g_nr, ...)
+ |                                  frame.post_reset_serial 與自己存的不同 -&gt; ac_istft_reset、rng = AEC_CNG_SEED(在本 hop 的 aec_cng_fill 與 ac_istft_push 之前;不可呼叫 aec_reset)
+ |                                  g = min(g_nr, g_res);  P = B * g(B = frame.b：各 lane 渲染底座的加權和，沒有 lane 守衛觸發時就是 E);  有 CN 時 aec_cng_fill(&amp;rng, P, CN, g_res, g_nr, ...)
  |-- ac_istft_push(P) -------------------------------------------------------------------------&gt;|
  |&lt;-- out[hop] ---------------------------------------------------------------------------------|
  ==== 任一階段拒絕,或輸出含非有限值 ====
@@ -222,15 +223,15 @@ t              各 lane 線性 AEC 完成
 <tr><td>設定 <code>SuppressionGainConfig</code>(含 far-active 地板目標)</td><td>一個結構</td><td><code>AecRes</code></td><td>保留;<code>aec_res_set_level</code> 會更新它</td></tr>
 <tr><td>ramp 進度(live 地板)</td><td>2 個 float</td><td><code>AecRes</code></td><td>丟棄,live = target</td></tr>
 <tr><td>近端功率／縮放後參考暫存</td><td>n_bins + hop_size floats</td><td><code>AecRes</code></td><td>每 hop 覆寫</td></tr>
-<tr><td><code>aec_cng_fill</code> 的亂數狀態 <code>rng</code></td><td>uint32_t</td><td><b>呼叫端</b></td><td>由呼叫端決定(Audio_ALG 範例碼的種子是 <code>0x9e3779b9</code>,即 4ch 的 <code>MCAB_SAMPLE_CNG_RNG_SEED</code>、mono 範例的 <code>CNG_RNG_SEED</code>)</td></tr>
+<tr><td><code>aec_cng_fill</code> 的亂數狀態 <code>rng</code></td><td>uint32_t</td><td><b>呼叫端</b></td><td>由呼叫端持有,起點是 <code>AEC_CNG_SEED</code>(42,與 <code>aec_process()</code> 內部相同);<code>aec_post_reset_serial()</code> 改變時於該 hop 第一次抽樣前設回</td></tr>
 </table></div>
 <p class="small">記憶體(balanced):16k/256 = 7,904 B、16k/512 = 14,048 B、48k/1024 = 29,408 B、8k/256 = 7,392 B(<code>aec_res_get_mem_size()</code> 實測;不隨 BACKEND／SIMD 改變,但會隨 <code>AecRes</code> 結構大小改變,請以函式回傳值為準)。</p>
 
 <h2>7. 延遲與 warm-up</h2>
 <p>無演算法延遲(同 hop 內回傳)。實例以 <code>initial_state = 1</code> 起始:初始階段是否啟用 DominantNearend 觸發與低頻平滑,由設定中的 <code>dne_use_during_initial_phase</code>／<code>lf_smoothing_during_initial_phase</code> 決定;第一次 <code>all_converged</code> 為真的 hop 離開初始狀態,之後不會回去,直到 <code>aec_res_reset()</code>。設定來自 <code>AecConfig</code> 的共同建構函式,其中這兩個旗標固定為 1,所以經由本介面,初始狀態對增益沒有影響;離開初始狀態的判斷與狀態仍保留,供旗標被關閉的設定使用。</p>
 
-<h2>8. 與 Aec 內部舒適噪音的差異</h2>
-<div class="note"><code>aec_cng_fill</code> 與 <code>Aec</code> 自己的舒適噪音(<code>aec_post.c</code>)<b>同配方、不同算式</b>:同一個亂數遞推與查表,但本函式用 libm 的 <code>sqrtf</code>／除法,就是 Audio_ALG 範例(例如 <code>pipelines/mono_aec_nr_res/main.c</code> 的 <code>mono_form()</code>)每個 hop 呼叫的那個函式;<code>Aec</code> 內部則是批次化的 <code>inv_psd_scale</code>＋<code>sk_fast_sqrt_f32</code>。兩者不要混用在要求位元一致的比對中。</div>
+<h2>8. 與 Aec 內部舒適噪音的關係</h2>
+<div class="note"><code>aec_cng_fill</code> 是 <code>Aec</code> 內部輸出階段(<code>aec_post_apply_output()</code>)與外部合成共用的<b>唯一</b>舒適噪音實作:每個分量加 <code>ng · (nf · 表值)</code>,<code>nf = sqrt(max(cn/32768², 0))</code>、<code>ng = sqrt(max(1−g_res², 0))</code>(有 <code>g_nr</code> 時再乘 <code>max(g_nr, nr_floor)</code>),每個 bin 一步 LCG、依 bin 由小到大、bin 0 與 n−1 不抽樣。<code>g_nr == NULL</code> 時,公開呼叫與 <code>aec_process()</code> 內部的舒適噪音在相同輸入下逐位元相同(內部以全增益當 <code>g_res</code>)。</div>
 
 <h2>9. 相關檔案與測試</h2>
 <ul class="small">

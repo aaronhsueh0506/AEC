@@ -66,11 +66,21 @@ int aec_res_set_level(AecRes* r, AecLevel level, float ramp_ms);
  * pointer may be NULL. Returns 0, or -1 if r is NULL. */
 int aec_res_split_floor(const AecRes* r, float* live, float* target);
 
-/* Comfort-noise fill for the bins the suppressor cut. For k = 1 .. n-2 adds to spec[k] sqrt(cn[k] /
- * 32768^2) * sqrt(1 - g_res[k]^2) * max(g_nr[k], nr_floor) (negatives count as 0) times a random
- * phase from one LCG step per bin on *rng indexing a 32-entry sqrt(2)*sin table. g_nr may be NULL
- * (treated as 1). cn, g_res, spec and rng are required; nothing is touched if any is NULL or n < 3.
- * n is the number of bins of the spectrum. */
+/* Comfort-noise fill for the bins the suppressor cut. For k = 1 .. n-2 adds to spec[k]
+ *   amplitude * (sqrt(2) * sin table entry)
+ * with amplitude = sqrt(cn[k] / 32768^2) * sqrt(1 - g_res[k]^2) * max(g_nr[k], nr_floor), evaluated as
+ * (sqrt(1 - g_res^2) * max(g_nr, nr_floor)) * (sqrt(cn / 32768^2) * table entry) (negative
+ * radicands count as 0; the g_nr factor is omitted entirely when g_nr is NULL). The phase is one LCG step
+ * per bin on *rng (seed = (seed * 69069 + 1) & 0x7FFFFFFF, table index = seed >> 26 for the real part and
+ * (index + 8) & 31 for the imaginary part), drawn in bin order for bins 1 .. n-2 only; bins 0 and n-1 get
+ * no noise and draw nothing.
+ * The library's own output stage (aec_process() with enable_res and enable_cng) calls this function on
+ * the gain-weighted base with g_res = its RES gain and g_nr = NULL, so with g_nr == NULL the result is
+ * bit-identical to the internal comfort noise on the same inputs (same square roots, same product order
+ * sqrt(1 - g^2) * (sqrt(cn / 32768^2) * table entry), same draw schedule). The seed of a fresh instance and after every
+ * hard post-chain reset is AEC_CNG_SEED (aec.h); see aec_post_reset_serial().
+ * cn, g_res, spec and rng are required; nothing is touched if any is NULL or n < 3. n is the number of
+ * bins of the spectrum. NaN inputs are not supported. */
 void aec_cng_fill(uint32_t* rng, Complex* spec, const float* cn,
                   const float* g_res, const float* g_nr, float nr_floor, int n);
 

@@ -7,24 +7,22 @@ AEC3-aligned suppression chain.
 
 Its first step is the **FORM** stage, `_aec3_select_linear_filter_output`,
 mirrored by `linear_filter_select()` in `c_impl/src/linear_filter_output.c`.
-It picks one of **three** time-domain candidates — coarse (shadow), refined,
-and the capture itself (`_SEL_COARSE` / `_SEL_REFINED` / `_SEL_CAPTURE`;
-`LFS_SEL_*` in C) — carries any change across the 30-sample AEC3
-`SignalTransition` crossfade, and publishes the formed hop and its matching
-WOLA spectrum as a pair, so `E(k)` entering the rest of the chain is the
-FORMED output, not necessarily what the refined filter produced.
+It picks one of **two** time-domain candidates — coarse (shadow) and refined
+(`_SEL_COARSE` / `_SEL_REFINED`; `LFS_SEL_*` in C) — carries any change across
+the 30-sample AEC3 `SignalTransition` crossfade, and publishes the formed hop
+and its matching WOLA spectrum as a pair, so `E(k)` entering the rest of the
+chain is the FORMED output, not necessarily what the refined filter produced.
 
-The capture candidate is admitted only when all four hold:
-`output_capture_when_linear_unusable` is set (default ON), the
-FilteringQualityAnalyzer has not declared the linear estimate usable (the
-verdict as of the PREVIOUS hop — AecState updates later in `_aec3_post`), the
-selected residual carries more hop energy than the capture, and the instance
-is in **context-only** mode (`enable_res=False` with
-`return_res_context=True`). Under `enable_res` the chain's own E2 output-base
-switch still owns that rule and the emitted audio is unchanged; running both
-would let E2's frequency-domain hard switch overwrite the crossfade FORM just
-started. Because the 30-sample transition stays active, the capture candidate
-is a steady-state fallback, not a strict per-sample bound.
+The formed output is always the real selected linear residual, in every API
+mode (full, context-only, no-gain, linear-only): the capture is never a
+candidate, and AecState, ERLE, R², the error PSD and the echo PSD always see
+the selected residual. `error_spec` is the STFT of
+`[previous formed hop | current formed hop]`, so a unity IFFT with overlap-add
+reproduces the previous formed hop one framing hop late, on every hop — hops
+where the output guard fires included. These fields are the **analysis seam**:
+`formed_hop` / `formed_output`, `error_spec`, `echo_spec` and
+`near_spec = error_spec + echo_spec`. The output guard never alters them; it
+only chooses the **rendering base** ([§3.8](#38-output-guard-rendering-base-and-post-reset-serial)).
 
 The chain itself:
 
@@ -186,6 +184,28 @@ When `enable_cng = True` (preset default), `_aec3_post` adds per-bin shaped
 noise scaled by `sqrt(1 - G²)` to mask the suppressed spectrum. State:
 per-bin noise PSD EMA + smoothed cn gain (init in `AEC.__init__`).
 
+The numeric core is one function in each language: C `aec_cng_fill()`
+(`aec_res.c`, called by the post chain's own output stage and public for
+external synthesizers) and Python `modules/cng.py` (`cng_fill`, which
+`_post_add_comfort_noise` shares through `cng_draw_indices` /
+`cng_noise_terms`). For bins `1 .. n-2` (DC and Nyquist get no noise and draw
+nothing) it adds, per component,
+
+```
+ng * (nf * lut)      ng = sqrt(max(1 - g_res², 0)) [* max(g_nr, nr_floor) with an NR gain]
+                     nf = sqrt(max(cn / 32768², 0))
+                     lut[i] = sqrt(2) * sin(2π i / 32)
+```
+
+in this product order, float32 throughout. The phase is one LCG step per bin in
+ascending bin order (`rng = (rng * 69069 + 1) & 0x7FFFFFFF`, `ix = rng >> 26`;
+real part `lut[ix]`, imaginary part `lut[(ix + 8) & 31]`). The generator starts
+at `AEC_CNG_SEED` (42) after construction and after every hard post-chain reset.
+With `g_nr == NULL` the public helper is bit-identical to the in-chain noise on
+the same inputs; the in-chain stage passes the total gain it applied as
+`g_res`. With an NR gain the amplitude is
+`sqrt(cn / 32768²) * sqrt(1 - g_res²) * max(g_nr, nr_floor)`.
+
 ### 3.6 OLA synthesis
 
 sqrt-Hann analysis × sqrt-Hann synthesis = Hann, sums to 1 across 50 %
@@ -199,6 +219,65 @@ is emitted straight from the refined filter; `eval_aec_challenge.py` writes
 that render as `_ours_nores.wav` next to the production render. The gate at
 `_aec3_post` block-open uses
 `self.config.enable_res or self.config.return_res_context`.
+
+### 3.8 Output guard, rendering base and post reset serial
+
+**Two different things.** The analysis seam (`formed_hop`, `error_spec`,
+`echo_spec`, `near_spec`, [§3](#3-aec3-post-filter-_aec3_post)) is the pairable
+linear residual that the estimators, an AIAEC front end and any model that
+needs a reconstructable waveform read. The **rendering base** is the spectrum
+that is multiplied by the gain and synthesized into audio. They differ only on
+hops where the guard fires, and the rendering base is not claimed to pair with
+`formed_hop`.
+
+**The guard.** It is evaluated exactly once per hop, in every mode (full,
+context-only, no-gain, linear-only), after this hop's usable-linear verdict is
+final and before any context or early exit. With
+`output_capture_when_linear_unusable` set (default ON), the verdict false and
+`sum(|E|²) > sum(|Y|²)` (strict `>` over the windowed spectra, `E = error_spec`,
+`Y = error_spec + echo_spec`), the base is `Y` and `guard_active` is set;
+otherwise the base is `E`. Both energies are float32 magnitudes reduced with the
+same float32 pairwise sum in C (`aec_post_eval_output_guard`) and Python
+(`_guard_energy`), so identical spectra give the identical decision. C and Python compute the STFT separately, and their
+upstream spectra differ by about 1e-7 relative. The C-versus-Python contract is therefore: the decision matches on every
+hop except inside a tie band of 1e-6 relative energy margin, `|Σ|E|² − Σ|Y|²| / Σ|E|²`, on hops that are unusable on both
+sides (a usable-verdict difference is never a tie). The band is 3.3 times the largest measured near-threshold margin
+disagreement (3.3e-7 at 48 kHz/1024; 3.0e-7 at 16 kHz/256) and 4 times the largest margin at any observed mismatch
+(2.48e-7); hops inside the band are counted and printed per parity cell, any mismatch outside it fails. The fixed
+near-threshold fixtures (identical inputs) keep exact equality. The same rounding can also fall on a per-bin decision inside
+the adaptive filter (the refined filter's H_error leakage compare `e2_refined[k] <= e2_coarse[k]`, or the noise gate
+`X2[k] >= gate`); the one-bin difference then spreads to the analysis seam. Such a cell is registered as T-01 in
+`c_impl/test/pyc_parity/pyc_parity.py` and is INFO only while the guard, serial and delay gates stay green as run and the
+Python run with the registered decisions forced the way C takes them is green on every gate. `res_gain` is compared by its
+relative L2 weighted by each bin's near-end power `|E + echo|²` (at most 1e-4); its per-bin maximum is printed only.
+`echo_spec` is not altered by the guard. The guard can fire for the whole of a
+clip whose estimate is never declared usable; it is not confined to the start of
+a stream.
+
+**Consumers.** Full mode renders `base * gain`, then CNG, IFFT, synthesis window
+and OLA. The context API publishes the base (`AecResContext.output_base_spec`
+and `guard_active` in Python; `aec_get_output_base()` returning an
+`AecOutputBase` in C) and a consumer that renders itself multiplies
+`output_base_spec * gain(s)` — never `error_spec`. The C base aliases a
+dedicated buffer that CNG and other scratch never touch, valid until the next
+processing or reset call.
+
+**Reset serial.** A hard post-chain reset clears the library's OLA tail and
+reseeds its CNG to `AEC_CNG_SEED`. It has two sources. `aec_reset` is a separate
+call, not part of any processing call (the serial already reads +1 when it
+returns). A confirmed delay change that restarts the filter (hard shift, first
+acquisition without warm transfer or soft recovery) happens inside the hop's
+processing and before that hop's synthesis. Soft or warm realignments, the
+bad-relock revert (a soft revert: no serial bump, OLA tail and CNG keep running)
+and `aec_apply_external_realign` do not count. A non-consuming, wrapping `uint32` counter publishes it: C
+`aec_post_reset_serial()`, Python `AEC.get_post_reset_serial()` and
+`AecResContext.post_reset_serial` (0 on a fresh instance; it keeps counting
+across `reset()`). An external synthesizer keeps its own last-handled serial;
+when the value read after a processing call differs, it must, before its first
+CNG draw and before the IFFT/OLA push of that same hop, clear its OLA tail and
+reseed its CNG to `AEC_CNG_SEED`, then store the new serial. It never resets the
+AEC in response. The library touches neither NR nor NN state; following the
+reset there is the application's policy.
 
 ---
 

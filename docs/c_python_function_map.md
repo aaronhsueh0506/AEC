@@ -37,24 +37,24 @@
 <!-- stats:begin -->
 | key | 數值 | 說明 |
 |---|---|---|
-| `c_src_total` | 409 | `src/*.c` 的 C 函式總數（唯一 (檔, 函式名)） |
-| `c_src_mirror` | 232 | 關係為 mirror |
+| `c_src_total` | 414 | `src/*.c` 的 C 函式總數（唯一 (檔, 函式名)） |
+| `c_src_mirror` | 236 | 關係為 mirror |
 | `c_src_partial` | 101 | 關係為 partial |
-| `c_src_c_only` | 76 | 關係為 C-only（含 3 個 `aec_testing_*` 測試鉤子） |
+| `c_src_c_only` | 77 | 關係為 C-only（含 3 個 `aec_testing_*` 測試鉤子） |
 | `c_src_unknown` | 0 | 關係為 未能判斷 |
 | `c_hdr_total` | 6 | header 內 static inline 函式總數（規則 2；共用 SIMD 核心不列入） |
 | `c_hdr_c_only` | 5 | 其中 C-only |
 | `c_hdr_mapped` | 1 | 其中 mirror 或 partial |
-| `c_total` | 415 | C 函式合計（src 加 header） |
-| `c_mapped` | 334 | 已對應（mirror 加 partial）合計 |
-| `c_c_only` | 81 | C-only 合計 |
+| `c_total` | 420 | C 函式合計（src 加 header） |
+| `c_mapped` | 338 | 已對應（mirror 加 partial）合計 |
+| `c_c_only` | 82 | C-only 合計 |
 | `c_unknown` | 0 | 未能判斷 合計 |
 | `inferred` | 25 | 關係說明以「推定：」開頭的列（已含在上列 mirror／partial 內） |
-| `py_total` | 570 | Python 符號總數（規則 4） |
-| `py_mapped` | 322 | 被 §1／§2 至少一列引用的 Python 符號 |
+| `py_total` | 575 | Python 符號總數（規則 4） |
+| `py_mapped` | 328 | 被 §1／§2 至少一列引用的 Python 符號 |
 | `py_only_struct` | 60 | §3 Python-only：C 以資料結構、列舉或常數承載 |
 | `py_only_field` | 59 | §3 Python-only：C 以結構欄位或回傳值直接取得 |
-| `py_only_none` | 129 | §3 Python-only：C 無此機制 |
+| `py_only_none` | 128 | §3 Python-only：C 無此機制 |
 | `py_unknown` | 0 | §3 未能判斷 |
 <!-- stats:end -->
 
@@ -110,6 +110,7 @@
 | `src/aec.c:aec_reset_filter_derived_state` | `modules/orchestrator.py:AEC._reset_filter_derived_state` | mirror | — | — |
 | `src/aec.c:aec_delay_value_rejected` | `modules/orchestrator.py:AEC._track_delay_shift#_delay_reject_values` | partial（C 的 reject list 固定 8 格，Python 為無上限 list） | D-03 | — |
 | `src/aec.c:aec_apply_delay_shift_hard_reset` | `modules/orchestrator.py:AEC._apply_delay_shift_hard_reset` | mirror | — | — |
+| `src/aec.c:aec_apply_delay_shift_soft_revert` | `modules/orchestrator.py:AEC._apply_delay_shift_soft_revert` | mirror（bad-relock 還原：回到 shift 前的 delay，還原 main 的 W 與 `H_error_per_bin`、shadow 的 W，不走硬 reset 鏈，所以 `aec_post_reset_serial()` 不動、OLA 與 CNG 照常延續；退後（target < bad）清遠端歷史，前進則保留；windowed-ERLE 累積、main／shadow 誤差 EMA 與待決 delay 清除。C 在 2026-10-28 才移植，C 預設路徑的輸出因此在有還原的 hop 之後改為與 Python 相同） | — | `ctest:test_guard_unify.c`<br>`pytest:test_guard_unify.py` |
 | `src/aec.c:aec_reset_filter_for_realign` | `modules/orchestrator.py:AEC._reset_filter_for_realign` | mirror | — | `ctest:test_external_realign.c` |
 | `src/aec.c:get_simple_mu_scale` | `modules/orchestrator.py:AEC._get_simple_mu_scale` | mirror | — | — |
 | `src/aec.c:advance_erl_and_dt` | `modules/orchestrator.py:AEC._compute_residual_steering#_erl_estimate`<br>`modules/orchestrator.py:AEC._update_linear_only_steering` | partial（process 內兩處呼叫點共用的 ERL 追蹤加能量 DT 更新） | — | — |
@@ -184,6 +185,9 @@
 | `src/aec.c:aec_process_context` | `modules/orchestrator.py:AEC.process` | partial（只跑 core 的 context-only 入口，等同 Python 的 `return_res_context` 路徑） | T-05 | `ctest:test_process_context.c` |
 | `src/aec.c:aec_process_context_shared_far_from` | — | C-only（同 hop 的遠端頻譜與精確 magnitude² 成對共用；各 lane 保留自身歷史） | D-12 | `ctest:test_shared_far_spec.c`<br>`ctest:test_spectral_reuse.c` |
 | `src/aec.c:aec_get_res_context` | `modules/orchestrator.py:AEC._build_res_context#AecResContext`<br>`modules/orchestrator.py:AEC._post_stash_context` | partial（Python 在 process 內建構 AecResContext，欄位集合兩邊不同） | D-05 | `ctest:test_process_context.c` |
+| `src/aec.c:aec_get_output_base` | `modules/orchestrator.py:AEC._build_res_context#output_base_spec`<br>`modules/orchestrator.py:AEC._post_stash_context#_res_output_base` | partial（渲染底座與 `guard_active`；Python 把兩者放進 `AecResContext.output_base_spec`／`guard_active`，C 另設 getter 與 `struct_size` 檢查，欄位集合兩邊不同；底座與 `formed_hop` 不配對） | D-05 | `ctest:test_guard_unify.c`<br>`pytest:test_guard_unify.py` |
+| `src/aec.c:aec_post_reset_serial` | `modules/orchestrator.py:AEC.get_post_reset_serial` | mirror（硬 post 鏈 reset 的不消耗計數器，uint32 回繞；Python 另在 `AecResContext.post_reset_serial` 帶同一個值） | — | `ctest:test_guard_unify.c`<br>`pytest:test_guard_unify.py` |
+| `src/aec.c:aec_synthesis_window` | — | C-only（公開存取器：回傳函式庫自己做 OLA 前乘的合成窗與其長度，供外部合成器以 `ac_istft` 借用；Python 側的窗在 `modules/` 內部，沒有對應入口） | — | `ctest:test_synthesis_window.c` |
 | `src/aec.c:aec_delay_confidence` | — | C-only（跨 delay 模式的統一信心值；MATCHED 值來自 `delay_aec_confidence`） | D-12 | `ctest:test_duty_census.c` |
 | `src/aec.c:aec_debug_status` | — | C-only（AecDebugStatus 唯讀狀態查詢） | D-12 | `ctest:test_duty_census.c` |
 | `src/aec.c:aec_get_linear_context` | — | C-only（AecLinearContext 線性 AEC 接縫檢視） | D-12 | `ctest:test_linear_context.c` |
@@ -203,14 +207,15 @@
 | `src/aec_post.c:aec_post_compute_x2_reverb` | `modules/orchestrator.py:AEC._post_render_reverb#x2_reverb_for_erle` | partial（`_aec3_post` stage 3） | — | — |
 | `src/aec_post.c:aec_post_compute_coherence` | `modules/orchestrator.py:AEC._post_update_state#_coh_erle_sye` | partial（`_aec3_post` stage 4：Γ²(Ŷ,Y) EMA 與 ERLE coherence gate） | — | — |
 | `src/aec_post.c:aec_post_compute_comfort_noise` | `modules/orchestrator.py:AEC._post_comfort_noise#_aec3_cng` | partial（`_aec3_post` stage 5：CNG N2 追蹤） | — | — |
-| `src/aec_post.c:aec_post_apply_output` | `modules/orchestrator.py:AEC._post_add_comfort_noise#comfort_noise`<br>`modules/orchestrator.py:AEC._post_output_spectrum`<br>`modules/orchestrator.py:AEC._post_synthesize` | partial（`_aec3_post` stage 6：選輸出、套增益、注入 CNG、irfft、OLA） | — | — |
+| `src/aec_post.c:aec_post_apply_output` | `modules/orchestrator.py:AEC._post_add_comfort_noise#cng_noise_terms`<br>`modules/orchestrator.py:AEC._post_synthesize` | partial（`_aec3_post` stage 6：對渲染底座套增益、注入 CNG、irfft、OLA；底座已由 `aec_post_eval_output_guard` 在每 hop 決定，這裡不再選；CNG 走 `aec_cng_fill`） | — | `ctest:test_guard_unify.c` |
+| `src/aec_post.c:aec_post_eval_output_guard` | `modules/orchestrator.py:AEC._post_output_base`<br>`modules/orchestrator.py:AEC._guard_energy` | mirror（輸出守衛，每 hop 在 usable 判定確定後、任何 context 提前離開之前求值一次；`sum(abs(E)²)` 與 `sum(abs(Y)²)` 同為 float32 pairwise 歸約、嚴格 `>`；相同頻譜得到相同決定；C 對 Python 的對拍允許雙方都 unusable 且相對能量差在 1e-6 tie band 內的 hop 不一致並逐 cell 計數，band 外不一致即失敗） | — | `ctest:test_guard_unify.c`<br>`pytest:test_guard_unify.py` |
 | `src/aec_post.c:sum_sq_f32_pairwise` | — | C-only（`np.sum(x**2)` 的 float32 pairwise 等價） | — | — |
 | `src/aec_post.c:aec_post_run_observer_step` | `modules/orchestrator.py:AEC._post_observer_residual#_observer_corrob_margin` | partial（live observer 注入步驟；C 缺 `live_observer_inject_dt_energy_max` 守衛） | S-02；D-15 | — |
 | `src/aec_post.c:aec_post_run` | `modules/orchestrator.py:AEC._aec3_post`<br>`modules/orchestrator.py:AEC._post_estimate_residual`<br>`modules/orchestrator.py:AEC._post_external_delay`<br>`modules/orchestrator.py:AEC._post_filter_bridge`<br>`modules/orchestrator.py:AEC._post_filter_taps`<br>`modules/orchestrator.py:AEC._post_nearend_power`<br>`modules/orchestrator.py:AEC._post_pending_changes`<br>`modules/orchestrator.py:AEC._post_stationary_residual`<br>`modules/orchestrator.py:AEC._post_suppression_gain` | partial（完整 `_aec3_post` 編排；C 版不含 Python-only 研究旋鈕） | S-22；T-03 | `e2e:parity_aec_e2e` |
 
 ### 1.3 `aec_res.c`　aec_res.c（獨立 RES 增益模組，供 4ch 後波束 lane 使用）
 
-依據：本檔是 `SuppressionGain` 的獨立包裝，供 `Audio_ALG` 的 4ch 線性 AEC + BF 之後的 RES 使用；範圍內（`AEC/python`）沒有對應的 Python 類別。Python 孿生在 `Audio_ALG/pipelines/4ch_aec_bf_nr_res/pipeline.py` 的 `PostBeamResidualSuppressor`（範圍外，不在本表驗證；落差見 S-26）。`aec_cng_fill` 的孿生是 `Audio_ALG/pipelines/common/cng_aec3.py`（範圍外）。
+依據：本檔是 `SuppressionGain` 的獨立包裝，供 `Audio_ALG` 的 4ch 線性 AEC + BF 之後的 RES 使用；範圍內（`AEC/python`）沒有對應的 Python 類別。Python 孿生在 `Audio_ALG/pipelines/4ch_aec_bf_nr_res/pipeline.py` 的 `PostBeamResidualSuppressor`（範圍外，不在本表驗證；落差見 S-26）。`aec_cng_fill` 的 Python 孿生是範圍內的 `modules/cng.py:cng_fill`（見該列）；`Audio_ALG/pipelines/common/cng_aec3.py` 是範圍外的另一份應用端副本，不在本表驗證。
 
 | C 檔:函式 | Python 檔:符號 | 關係 | 已知落差 | 對拍工具／測試 |
 |---|---|---|---| --- |
@@ -225,7 +230,7 @@
 | `src/aec_res.c:aec_res_process` | — | C-only（範圍內無 Python 對應；內部呼叫 `suppression_gain_get_gain`） | — | `ctest:test_aec_res.c` |
 | `src/aec_res.c:aec_res_set_level` | — | C-only（範圍內無 Python 對應） | S-26；D-04 | `ctest:test_aec_res.c` |
 | `src/aec_res.c:aec_res_split_floor` | — | C-only（範圍內無 Python 對應） | — | `ctest:test_aec_res.c` |
-| `src/aec_res.c:aec_cng_fill` | `modules/orchestrator.py:AEC._post_add_comfort_noise#_aec3_cng_seed` | partial（與 `_aec3_post` 內的 CNG 注入同一組 LCG 與 sin 表；孿生另在 Audio_ALG/pipelines/common/cng_aec3.py） | — | `ctest:test_aec_res.c` |
+| `src/aec_res.c:aec_cng_fill` | `modules/cng.py:cng_fill`<br>`modules/cng.py:cng_draw_indices`<br>`modules/cng.py:cng_noise_terms`<br>`modules/orchestrator.py:AEC._post_add_comfort_noise#cng_draw_indices` | mirror（單一數值核心：`aec_post_apply_output` 內部 CNG 與公開 helper 共用同一份 sqrt、乘積順序與逐 bin 抽樣排程；Python 的 `_post_add_comfort_noise` 與 `cng_fill` 共用 `cng_draw_indices`／`cng_noise_terms`；種子 `AEC_CNG_SEED` 兩邊同為 42）| — | `ctest:test_aec_res.c`<br>`ctest:test_guard_unify.c`<br>`pytest:test_guard_unify.py` |
 
 ### 1.4 `aec_debug.c`　aec_debug.c（除錯記錄與逐 hop trace）
 
@@ -779,7 +784,6 @@ PBF/Kalman H-error refresh、subband ERLE accumulation/release、render peak cou
 | — | `modules/filters.py:PBFDAF.zero_filter_partitions` | Python-only（C 無此機制；局部清零指定分區；C 的 PBFDAF 只有整體 `pbfdaf_reset_taps`） | — | — |
 | `struct:Aec` | `modules/orchestrator.py:AEC` | Python-only（C 以資料結構、列舉或常數承載；方法已對照到 `aec_*`） | — | — |
 | — | `modules/orchestrator.py:AEC._filter_converged`、`modules/orchestrator.py:AEC._filter_once_converged`、`modules/orchestrator.py:AEC._divergence_indicator`、`modules/orchestrator.py:AEC._shadow_advantage`、`modules/orchestrator.py:AEC.epc_active`、`modules/orchestrator.py:AEC.epc_hangover_count`、`modules/orchestrator.py:AEC._epv_gain_fast`、`modules/orchestrator.py:AEC._epv_gain_slow` | Python-only（C 以結構欄位或回傳值直接取得；orchestrator 對偵測器欄位的薄包裝 getter，C 直接讀結構欄位） | — | — |
-| — | `modules/orchestrator.py:AEC._apply_delay_shift_soft_revert` | Python-only（C 無此機制；bad-relock 的 tap 還原；C 只鏡射 hard reset 分支） | D-15 | — |
 | — | `modules/orchestrator.py:AEC._init_trace_state`、`modules/orchestrator.py:AEC._update_energy_diagnostics`、`modules/orchestrator.py:AEC._update_filter_state_diagnostics`、`modules/orchestrator.py:AEC._update_frequency_diagnostics`、`modules/orchestrator.py:AEC._update_state_diagnostics`、`modules/orchestrator.py:AEC._update_trajectory_diagnostics` | Python-only（C 無此機制；Python 的診斷狀態建立與逐 hop 追蹤） | D-12 | — |
 | — | `modules/orchestrator.py:AEC.get_diagnostics`、`modules/orchestrator.py:AEC.get_filter_state`、`modules/orchestrator.py:AEC.get_stats`、`modules/orchestrator.py:AEC.GetStats`、`modules/orchestrator.py:AEC.get_erle`、`modules/orchestrator.py:AEC.get_formed_output` | Python-only（C 無此機制；Python 的診斷與取值 API；C 對應的是 `aec_debug_status`／`aec_get_res_context`，欄位集合不同） | D-05；D-12 | — |
 | — | `modules/orchestrator.py:AEC.dump_p53_trace`、`modules/orchestrator.py:AEC.enable_res_audit`、`modules/orchestrator.py:AEC.get_res_audit` | Python-only（C 無此機制；Python-only 的研究／稽核介面） | D-12 | — |
@@ -876,7 +880,7 @@ PBF/Kalman H-error refresh、subband ERLE accumulation/release、render peak cou
 | D-11 | C 的 `AecConfig.n_partitions` 可覆寫，Python 為唯讀 property |
 | D-12 | C-only API（`aec_process_context_shared_far_from`、`spatial_linear_context`、靜態記憶體、debug status）；Python-only：`get_res_audit`、`dump_p53_trace`、`get_diagnostics` |
 | D-13 | CLI／API 兩側獨有項（C `aec_wav` 與 Python `aec.py` 的旗標不同） |
-| D-15 | live observer lane 尚未鏡射 soft-realign warm IR-shift、RSA narrowband mu mask、bad-relock tap 快照還原；兩邊一致的缺口，不是移植落差 |
+| D-15 | live observer lane 尚未鏡射 soft-realign warm IR-shift、RSA narrowband mu mask；bad-relock 還原（`aec_apply_delay_shift_soft_revert`／`_apply_delay_shift_soft_revert`）只還原 main 與 shadow 的 tap，兩邊都不還原 observer 的 tap；兩邊一致的缺口，不是移植落差 |
 | S-02 | live observer 注入守衛 `live_observer_inject_dt_energy_max`（Python 預設 0.5）C 沒有；開 observer 時實測會改輸出 |
 | S-04 | HPF cutoff 範圍驗證（`0 < cutoff < 0.45·sr`）只有 C 檢查，Python 不檢查 |
 | S-08 | CLI 預設運作點不同（Python `aec.py` 與 C `aec_wav`，兩邊都不給旗標時） |

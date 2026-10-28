@@ -194,8 +194,9 @@ class AecConfig:
     # rectangular one.
     cng_n2_windowed_psd: bool = False
 
-    # Output base: when the linear filter is unusable and frame |E|^2 > |Y|^2, apply the gain to the windowed
-    # capture Y instead of the residual E.
+    # Output-capture guard (rendering base only, never the analysis seam): when the linear filter is unusable this
+    # hop and frame |E|^2 > |Y|^2, apply the gain to the windowed capture Y instead of the residual E. Decided once
+    # per hop for every API mode; the context exposes it as output_base_spec / guard_active.
     output_capture_when_linear_unusable: bool = True
 
     # Reject a late first delay acquisition while the linear filter already cancels (> 2.5 dB windowed ERLE)

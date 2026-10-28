@@ -22,6 +22,9 @@ Known gaps are registered in EXPECTED_RED (audit S-xx). A scenario listed there 
 tolerance without failing the run, but ONLY if its "shape" evidence is still present (e.g. S-02:
 Python's injection guard still blocks at least one hop in the scene). An expected-red scenario that
 turns green fails the run ("remove the marker"), and so does one that is red without its shape evidence.
+The same registry holds INFO-only observations that are not audit S-ids (N-01, N-02, T-01); T-01 marks a cell whose red
+comes from a registered float32 tie in a per-bin filter decision and is INFO only while its forced-decision proof holds
+(see eval_scenario).
 
 Bistable scenes. The adaptive loop contains hard decisions (single-bin e2_main <= e2_shadow compares,
 threshold latches). A relative nudge of 6e-8 (one float32 ulp) on the Python input picks a different but
@@ -45,6 +48,23 @@ Resolution (measured 2026-10-20 by planting constant changes in scratch copies; 
   Not every cell is informative: INCONCLUSIVE_CHAOTIC (Layer 2) and INFO(...) rows never gate, and the observer cells on the
   rec.16k256 input carry an S-01 effect (8e-3) smaller than that input's own chaos distance (2.9e-2), so their audio numbers
   do not quantify S-01 (the marker rests on the call_counter evidence; preecho/dtb cells quantify it).
+
+Guard seam cells (section G of build_scenarios; --base on both drivers). C and Python dump, per hop, the output guard's decision
+(guard_active), the hard post-chain reset counter (post_reset_serial), the rendering base spectrum (output_base_spec /
+aec_get_output_base), the formed hop and the delay state (current delay, bad-relock reject count), next to the analysis seam already
+compared (error_spec, echo_spec). Gates: guard_active identical on every hop outside the tie band GUARD_TIE_BAND (spec section 8.2;
+derivation at the constant: a mismatch is excused only when both sides' relative energy margin |sum|E|^2 - sum|Y|^2| / sum|E|^2 is
+<= 1e-6 on a hop unusable on both sides; tie-band hops and in-band mismatches are counted and printed per cell); post_reset_serial
+identical on every hop; current delay identical on every hop and the bad-relock reverts at the same hops (the guard.revert.* cells
+also require at least one revert in each language); base_spec (all hops, and the hops where either side's guard fired) within
+CTX_spec_rel_l2; the ctx fields within their CTX constants (res_gain by its near-end-power-weighted rel L2, CTX_gain_wrel_l2;
+its max_abs is printed only); formed_hop within L1_raw_max_abs; the audio within the Layer-1/2 constants. The hard seam gates
+(guard_active outside the band, post_reset_serial, delay events / reverts) have no marker anywhere. Five cells carry T-01 (a
+registered float32 tie in the refined filter's per-bin leakage compare or the filter noise gate): they are INFO only while the
+hard seam gates are green as run AND the Python run with the registered decisions forced the way C takes them (driver
+--force-leak / --force-gate) is green on every audio, context and guard-seam gate; an unforced green cell FAILs (remove the
+marker). The inputs are blind-set clips (untracked datasets, wav/download_blind_test.py): a missing clip is a setup
+FAILURE, not a skip; they run in --full / --only only.
 
 Suites: the default is the lean suite (10 scenes, one per mechanism a planted regression is known to move); --full runs
 every scenario; --quick is an older, narrower subset; --only SUBSTR selects from the full set.
@@ -89,7 +109,13 @@ TOL = {
     # context seam (aec_get_res_context), Layer 1 only
     'CTX_scalar_rel': 2.0e-5,        # tightened 50x (was 1.0e-3); worst GREEN 2.265e-6 (erle_factor), margin 8.8x
     'CTX_spec_rel_l2': 1.0e-5,       # tightened 100x (was 1.0e-3); worst GREEN 5.28e-7 (echo_spec), margin 18.9x
-    'CTX_gain_max_abs': 1.0e-3,      # unchanged; worst GREEN 4.380e-4 (res_gain), margin 2.28x
+    'CTX_gain_max_abs': 1.0e-3,      # printed only (no longer gates, see CTX_gain_wrel_l2): a per-bin, per-hop maximum is set by the
+                                     # quietest bins, where float32 FFT rounding is ~1e-3 of the bin itself 75-85 dB below the hop
+                                     # peak and the max-gain ratchet multiplies an earlier hop's difference by sqrt(inc) (x2 at
+                                     # 16k/256, x4 at 16k/512); GREEN cells reach 9.96e-4 (guard.hard_reset.16k512.lean)
+    'CTX_gain_wrel_l2': 1.0e-4,      # res_gain error weighted by the near-end power |E + echo|^2 of each bin (what the gain
+                                     # multiplies): worst C-vs-Python 1.52e-5 (IUp2.16k256 vs its 1-ulp branch; 1.01e-5 unperturbed,
+                                     # rOza.16k256), margin 6.6x; a planted 0.1 % enr_suppress change reads 1.29e-3..3.02e-3 (13x over)
 }
 MAX_PY_VARIANTS = 3           # unperturbed + one-ulp-perturbed seeds 1 and 2
 L2_PROBE_EPS = 1e-4           # relative mic nudge used to ask 'is this scene chaotic at approximation scale?'
@@ -109,6 +135,14 @@ EXPECTED_RED_INFO = {
             'drives C off the Python branch (-36..-40 dB). Both C builds agree with each other and no one-ulp Python nudge reproduces it, '
             'but Python itself flips at 1e-5 relative: float32-FFT noise on a low-frequency-rich unfiltered mic selects another branch. '
             'The same input with the HPF on, and recdc at 8k/16k256/48k, are tight. Root cause not investigated',
+    'T-01': 'INFO only (not an audit S-id): a registered float32 tie -- a refined-filter per-bin H_error leakage compare '
+            '(e2_refined[k] <= e2_coarse[k]) or the filter noise gate (X2[k] >= gate) whose two operands differ by less than their '
+            'C-vs-Python rounding difference at that bin -- is decided one way by C and the other by Python, and the adaptive '
+            'state carries the one-bin difference to the analysis seam (and, with RES on, the audio). Never a free pass: the cell '
+            'FAILs unless the hard seam gates (guard_active outside the tie band, post_reset_serial, delay events / reverts) are '
+            'green as run AND Python re-run with exactly the registered decision(s) forced the way C takes them (driver '
+            '--force-leak / --force-gate) matches C on every Layer-1, context and guard-seam gate; it also FAILs once the '
+            'unforced cell is green (remove the marker). Cells, decisions and margins: CHANGELOG.md, 2026-10-28, C-versus-Python parity contract',
     'N-02': 'INFO only (not an audit S-id, never gates): preecho.48k1024.bal.obs_noguard LAYER 1 (std-math C vs Python) has a ~2.9e-3 '
             'max_abs residual at hop ~1790, 9.8x TOL_L1 -- the shipping SIMD=1 build does not hit it and tracks Python to <=1.4e-5 '
             'over this entire scene, so the same residual also shows up as a ship-vs-std Layer 2 reading (hence INCONCLUSIVE_CHAOTIC '
@@ -128,6 +162,35 @@ EXPECTED_RED_INFO = {
 REC_MIC = 'wav/aec_record/aec_record_mic_10s.wav'
 REC_REF = 'wav/aec_record/aec_record_ref_10s.wav'
 SYN_SECONDS = {'echo': 12, 'speechdt': 20, 'dtb': 20, 'preecho': 20}
+_BLIND16 = 'wav/aec_challenge_blind/doubletalk/'
+_BLIND16_FS = 'wav/aec_challenge_blind/farend_singletalk/'
+_BLIND48 = 'wav/aec_challenge_blind_icassp2023/farend_singletalk/'
+
+
+def _clip(folder, stem, sr):
+    return (folder + stem + '_mic.wav', folder + stem + '_lpb.wav', sr)
+
+
+# Blind-set clips that exercise the output guard (picked from the 1900-run scan in test/guard_unify_clips.tsv's note): input key is
+# the clip stem; value = (mic wav, far-end wav, sample rate), paths relative to the aec root.
+CLIPS = {
+    # never usable, guard fires on ~55 % of hops
+    'sRCs6SKo6kC0xire475q0A_doubletalk': _clip(_BLIND16, 'sRCs6SKo6kC0xire475q0A_doubletalk', 16000),
+    # never usable, guard fires on ~55 % of hops (16 kHz / 512 grid)
+    'V0JqgjlrB0Ke9y91r0rxNw_doubletalk_with_movement': _clip(_BLIND16, 'V0JqgjlrB0Ke9y91r0rxNw_doubletalk_with_movement', 16000),
+    # hard post-chain resets (delay-change filter restarts) and firing after the first usable verdict
+    'X7Ua9txMj0aws848JPEbOg_doubletalk_with_movement': _clip(_BLIND16, 'X7Ua9txMj0aws848JPEbOg_doubletalk_with_movement', 16000),
+    # 48 kHz, never usable, guard fires on ~70 % of hops
+    '6V90tmuaRkG0luLY5iAwTw_farend-singletalk': _clip(_BLIND48, '6V90tmuaRkG0luLY5iAwTw_farend-singletalk', 48000),
+    # 48 kHz, hard post-chain resets and firing after the first usable verdict
+    '16970455-e9f7-42ec-b668-3ab3f79ff1de_farend-singletalk': _clip(_BLIND48, '16970455-e9f7-42ec-b668-3ab3f79ff1de_farend-singletalk', 48000),
+    # bad-relock soft revert on both 16 kHz grids (round7/relock/RELOCK.md section 3b): far-end single talk, moving / static
+    'Y91uE2tRg0SUB2a9XjT30w_farend_singletalk_with_movement': _clip(_BLIND16_FS, 'Y91uE2tRg0SUB2a9XjT30w_farend_singletalk_with_movement', 16000),
+    'IUp2c0A4yEyttmLfJ3t0Xw_farend_singletalk': _clip(_BLIND16_FS, 'IUp2c0A4yEyttmLfJ3t0Xw_farend_singletalk', 16000),
+    # bad-relock revert, double talk (static): the two clips whose post-revert C-vs-Python difference was the largest
+    'rOzaUzFu0kKDiJa1qQVoOg_doubletalk': _clip(_BLIND16, 'rOzaUzFu0kKDiJa1qQVoOg_doubletalk', 16000),
+    'waxU019BVEacr7vK6v00mQ_doubletalk': _clip(_BLIND16, 'waxU019BVEacr7vK6v00mQ_doubletalk', 16000),
+}
 GRIDS = {            # tag -> (sr, fft)
     '8k256': (8000, 256),
     '16k256': (16000, 256),
@@ -137,6 +200,8 @@ GRIDS = {            # tag -> (sr, fft)
 
 
 def input_id(kind, sr):
+    if kind in CLIPS:
+        return kind
     return '%s%d' % (kind, sr // 1000)
 
 
@@ -162,6 +227,16 @@ def build_input(kind, sr, aec_root):
             mic = mic - np.mean(mic)
             ref = ref - np.mean(ref)
         return np.ascontiguousarray(mic, dtype=np.float32), np.ascontiguousarray(ref, dtype=np.float32)
+    if kind in CLIPS:
+        import soundfile as sf
+        mic_rel, ref_rel, csr = CLIPS[kind]
+        chans = []
+        for rel in (mic_rel, ref_rel):
+            x, xs = sf.read(os.path.join(aec_root, rel), dtype='float32')
+            assert xs == csr == sr, '%s: sample rate %s, expected %s (scenario %s)' % (rel, xs, csr, sr)
+            chans.append(x[:, 0] if x.ndim > 1 else x)
+        n = min(len(chans[0]), len(chans[1]))        # the clips' far-end is shorter than the mic by a few seconds
+        return np.ascontiguousarray(chans[0][:n]), np.ascontiguousarray(chans[1][:n])
     return scenes.make(kind, sr, SYN_SECONDS[kind])
 
 
@@ -182,7 +257,8 @@ def sha256_file(p):
 # ----------------------------------------------------------------------------------------------
 class Scn(object):
     def __init__(self, sid, kind, grid, preset='balanced', hpf='f32', obs=False, guard_off=False, res=True,
-                 ctx=False, cng=True, red=(), quick=False, lean=False, info='', v0_only=False):
+                 ctx=False, cng=True, red=(), quick=False, lean=False, info='', v0_only=False, base=False, reverts=0,
+                 ties=()):
         self.id = sid
         self.kind = kind
         self.grid = grid
@@ -200,6 +276,10 @@ class Scn(object):
         self.quick = quick
         self.lean = lean             # member of the default suite (see build_scenarios)
         self.info = info             # observation, never a gate (e.g. a chaos-fragile finding that is not an audit S-id)
+        self.base = base             # guard seam cell: both drivers also dump guard_active, post_reset_serial, rendering base, formed hop
+        self.reverts = reverts       # guard seam cell: minimum bad-relock reverts BOTH languages must reach (0 = no demand)
+        self.ties = tuple(ties)      # T-01: Python driver flags forcing the registered tie decision(s) the way C takes them
+        assert not base or ctx, 'a guard seam cell needs the context'
 
     @property
     def inp(self):
@@ -217,6 +297,8 @@ class Scn(object):
             f.append('--no-cng')
         if self.ctx:
             f.append('--ctx')
+        if self.base:
+            f.append('--base')
         return f
 
     def py_flags(self):
@@ -231,6 +313,8 @@ class Scn(object):
             f.append('--no-cng')
         if self.ctx:
             f.append('--ctx')
+        if self.base:
+            f.append('--base')
         return f
 
 
@@ -314,6 +398,44 @@ def build_scenarios():
     # one dtb scene (where the floor matters most) plus one on the other FFT family.
     add(Scn('dtb.16k256.nofloor', 'dtb', '16k256', 'no_floor'))
     add(Scn('dtb.48k1024.nofloor', 'dtb', '48k1024', 'no_floor'))
+    # G. output-guard / reset seam on blind-set clips (see the module docstring). Lean context (enable_res off, return_res_context
+    # on) is the API the guard exists for; the two '.full' cells run the same clip with the internal RES on, so the guarded render
+    # reaches the final audio that the Layer-1 output gates compare. These need the untracked blind datasets, so they are --full only.
+    for sid, clip, g, res in (
+            ('guard.never_usable.16k256.lean', 'sRCs6SKo6kC0xire475q0A_doubletalk', '16k256', False),
+            ('guard.never_usable.16k256.full', 'sRCs6SKo6kC0xire475q0A_doubletalk', '16k256', True),
+            ('guard.never_usable.16k512.lean', 'V0JqgjlrB0Ke9y91r0rxNw_doubletalk_with_movement', '16k512', False),
+            ('guard.hard_reset.16k256.lean', 'X7Ua9txMj0aws848JPEbOg_doubletalk_with_movement', '16k256', False),
+            ('guard.hard_reset.16k512.lean', 'X7Ua9txMj0aws848JPEbOg_doubletalk_with_movement', '16k512', False),
+            ('guard.never_usable.48k1024.lean', '6V90tmuaRkG0luLY5iAwTw_farend-singletalk', '48k1024', False),
+            ('guard.hard_reset.48k1024.lean', '16970455-e9f7-42ec-b668-3ab3f79ff1de_farend-singletalk', '48k1024', False),
+            ('guard.hard_reset.48k1024.full', '16970455-e9f7-42ec-b668-3ab3f79ff1de_farend-singletalk', '48k1024', True)):
+        add(Scn(sid, clip, g, ctx=True, res=res, base=True))
+    # bad-relock soft revert (C aec_apply_delay_shift_soft_revert = Python _apply_delay_shift_soft_revert): full mode (RES on, so
+    # the post-revert render reaches the audio gates), every clip must revert at least once in BOTH languages at the same hop.
+    # Five guard cells carry a registered float32 tie (T-01; CHANGELOG.md, 2026-10-28, C-versus-Python parity contract).
+    # rOza.16k512: 74 hops after the revert (hop 543) bin 148's partition-summed render power X2 = 0.01869662292 (Python) / 0.0186966192 (C) straddles the filter noise
+    # gate 0.018696621 (margins +-1.0e-7), so the strict 'X2 >= gate' updates that bin in Python and not in C; with that decision
+    # forced, the next one is the leakage compare at hop 2099 bin 122 (margins +2.0e-7 / -2.0e-6), and with both forced C and
+    # Python agree to 3.9e-7. The revert itself matches (same hop, same delays, same serial).
+    for stem, short in (('Y91uE2tRg0SUB2a9XjT30w_farend_singletalk_with_movement', 'Y91u'),
+                        ('IUp2c0A4yEyttmLfJ3t0Xw_farend_singletalk', 'IUp2'),
+                        ('rOzaUzFu0kKDiJa1qQVoOg_doubletalk', 'rOza'),
+                        ('waxU019BVEacr7vK6v00mQ_doubletalk', 'waxU')):
+        for g in ('16k256', '16k512'):
+            add(Scn('guard.revert.%s.%s.full' % (short, g), stem, g, ctx=True, res=True, base=True, reverts=1))
+    # T-01 ties, as (driver flags) per cell: each is the FIRST decision C and Python take differently, then the next one on the
+    # forced trajectory, until none is left (found with C and Python per-hop decision traces)
+    ties = {
+        'guard.never_usable.16k512.lean': ('--force-leak', '2327:248:0'),
+        'guard.never_usable.48k1024.lean': ('--force-leak', '843:311:1,1091:114:0,1137:382:1,1669:403:1'),
+        'guard.revert.IUp2.16k256.full': ('--force-leak', '1110:74:0'),
+        'guard.revert.rOza.16k512.full': ('--force-gate', '543:2e-7', '--force-leak', '2099:122:1'),
+        'guard.revert.waxU.16k512.full': ('--force-leak', '659:180:1'),
+    }
+    for scn in S:
+        if scn.id in ties:
+            scn.ties = ties[scn.id]
     return S
 
 
@@ -429,6 +551,8 @@ class Runner(object):
         flags = scn.py_flags()
         if tag == 'py_noguard_twin':
             flags = flags + ['--guard', '1e9']
+        if tag == 'py_ties':
+            flags = flags + list(scn.ties)
         cmd = [sys.executable, self.pyscript, mic, ref, pre, str(scn.sr), str(scn.fft), scn.preset] + flags
         if seed:
             cmd += ['--perturb', str(seed)]
@@ -444,6 +568,10 @@ def load_run(pre):
     r['trace'] = read_trace(pre + '.trace.txt')
     if os.path.exists(pre + '.ctx.f32'):
         r['ctx'] = load_f32(pre + '.ctx.f32')
+    if os.path.exists(pre + '.base.bin'):
+        r['base_raw'] = np.fromfile(pre + '.base.bin', dtype=np.uint8)
+        r['formed'] = load_f32(pre + '.formed.f32')
+        r['dly'] = np.loadtxt(pre + '.dly.txt', dtype=np.int64, ndmin=2)
     return r
 
 
@@ -539,6 +667,12 @@ def ctx_compare(c, p, K):
         a, b = blk(K)
         out[nm] = {'max_abs': r6(float(np.max(np.abs(a - b)))),
                    'rel_l2': r6(float(np.linalg.norm(a - b) / (np.linalg.norm(b) + 1e-30)))}
+    # res_gain weighted by the Python side's near-end power |error_spec + echo_spec|^2 per (hop, bin)
+    pe = P[:, 9:9 + 2 * K].reshape(nh, K, 2)
+    po = P[:, 9 + 2 * K:9 + 4 * K].reshape(nh, K, 2)
+    w = (pe[..., 0] + po[..., 0]) ** 2 + (pe[..., 1] + po[..., 1]) ** 2
+    ga, gb = C[:, 9 + 4 * K:9 + 5 * K], P[:, 9 + 4 * K:9 + 5 * K]
+    out['res_gain']['wrel_l2'] = r6(float(np.sqrt(np.sum((ga - gb) ** 2 * w) / max(float(np.sum(gb ** 2 * w)), 1e-30))))
     return out
 
 
@@ -556,12 +690,145 @@ def ctx_ok(cc):
     for nm in ('error_spec', 'echo_spec'):
         if cc[nm]['rel_l2'] > TOL['CTX_spec_rel_l2']:
             bad.append(nm)
-    if cc['res_gain']['max_abs'] > TOL['CTX_gain_max_abs']:
+    if cc['res_gain']['wrel_l2'] > TOL['CTX_gain_wrel_l2']:
         bad.append('res_gain')
     for nm in ('r2', 'comfort_noise'):
         if cc[nm]['rel_l2'] > TOL['CTX_spec_rel_l2']:
             bad.append(nm)
     return bad
+
+
+def base_records(raw, K):
+    """<pre>.base.bin -> (guard_active int32[n], post_reset_serial uint32[n], base_spec complex64[n, K]).
+    Per hop: int32 guard_active, uint32 post_reset_serial, K complex float32 (re, im)."""
+    dt = np.dtype([('g', '<i4'), ('s', '<u4'), ('b', '<f4', (K, 2))])
+    assert len(raw) % dt.itemsize == 0, 'base dump is not a whole number of hops'
+    a = raw.view(dt)
+    b = (a['b'][..., 0] + 1j * a['b'][..., 1]).astype(np.complex64)
+    return a['g'].copy(), a['s'].copy(), b
+
+
+def ctx_spectra(ctx, K):
+    """ctx dump -> (error_spec, echo_spec, usable_linear) per hop, complex128 / int."""
+    rec = 9 + 7 * K
+    nh = len(ctx) // rec
+    x = ctx[:nh * rec].reshape(nh, rec).astype(np.float64)
+    e = x[:, 9:9 + 2 * K].reshape(nh, K, 2)
+    o = x[:, 9 + 2 * K:9 + 4 * K].reshape(nh, K, 2)
+    return e[..., 0] + 1j * e[..., 1], o[..., 0] + 1j * o[..., 1], x[:, 8]
+
+
+# Guard decision tie band (GUARD_UNIFY_SPEC.md section 8.2). The per-hop rule is a strict '>' between two float32 energy sums,
+# sum|E|^2 > sum|Y|^2 (Y = E + echo), and the two languages' upstream spectra legitimately differ by ~1e-7 relative, so a hop whose
+# relative margin m = (sum|E|^2 - sum|Y|^2) / sum|E|^2 is that close to 0 can be decided either way. Measured 2026-10-29 on the
+# guard cells (16 cells, each side's own dumped float32 spectra, margin in float64), restricted to hops unusable on both sides:
+#   * near the threshold (|m| <= 1e-5 on either side) the C-vs-Python margin disagreement |m_c - m_py| has median 2.6e-8..3.4e-8
+#     and maximum 3.0e-7 (never_usable.16k256), 1.9e-7 (never_usable.16k512), 3.3e-7 at 48k/1024 (|m| <= 1e-4 there);
+#   * every guard mismatch observed (81 + 27 hops on the two 16 kHz never-usable clips) has max(|m_c|, |m_py|) <= 2.48e-7;
+#   * on top of that each side rounds its float32 pairwise energy sums (< (log2 K + 1) float32 ulps ~ 6e-7 relative for K = 513,
+#     worst case; the dumped-spectra margin does not see it).
+# GUARD_TIE_BAND = 1e-6 is 3.3x the largest measured near-threshold disagreement and 4x the largest margin at a mismatch, and
+# above the worst-case reduction rounding. A guard_active mismatch is excused ONLY when both sides' |m| are inside the band and the
+# hop is unusable on both sides (a usable-verdict difference is never a tie); every other mismatch fails the cell. Hops inside the
+# band (unusable on both sides, 0 < max|m| <= band) are counted and printed per cell. The fixed near-threshold fixtures (identical
+# inputs, test_guard_unify.c / test_guard_unify.py) keep exact equality; this band applies only to the C-vs-Python cells.
+GUARD_TIE_BAND = 1e-6
+
+
+def guard_margin(E, O):
+    """(sum|E|^2 - sum|E+O|^2) / sum|E|^2 per hop in float64: > 0 means the strict guard rule fires (when unusable)."""
+    eE = np.sum(np.abs(E) ** 2, axis=1)
+    eY = np.sum(np.abs(E + O) ** 2, axis=1)
+    return (eE - eY) / np.maximum(eE, 1e-30)
+
+
+def guard_compare(c, p, K, hop, min_reverts=0):
+    """Guard-seam comparison of a C run and a Python run (dicts from load_run, both with --ctx --base)."""
+    cg, cs, cb = base_records(c['base_raw'], K)
+    pg, ps, pb = base_records(p['base_raw'], K)
+    n = min(len(cg), len(pg))
+    out = {'hops': int(n), 'hops_c': int(len(cg)), 'hops_py': int(len(pg)),
+           'guard_hops_c': int(cg[:n].sum()), 'guard_hops_py': int(pg[:n].sum())}
+    gm = np.nonzero(cg[:n] != pg[:n])[0]
+    sm = np.nonzero(cs[:n] != ps[:n])[0]
+    out['guard_mismatch_hops'] = int(len(gm))
+    out['first_guard_mismatch_hop'] = int(gm[0]) if len(gm) else None
+    out['serial_mismatch_hops'] = int(len(sm))
+    out['first_serial_mismatch_hop'] = int(sm[0]) if len(sm) else None
+    out['serial_final_c'] = int(cs[n - 1]) if n else None
+    out['serial_final_py'] = int(ps[n - 1]) if n else None
+    out['serial_changes_c'] = int(np.sum(cs[1:n] != cs[:n - 1]))
+    out['serial_changes_py'] = int(np.sum(ps[1:n] != ps[:n - 1]))
+    if len(sm):
+        h = int(sm[0])
+        out['first_serial_mismatch'] = {'hop': h, 'c': int(cs[h]), 'py': int(ps[h])}
+    # delay events: current delay on every hop and the bad-relock reverts (hops where the reject count grows)
+    cd, pd = c['dly'][:n], p['dly'][:n]
+    dm = np.nonzero(cd[:, 0] != pd[:, 0])[0]
+    out['delay_mismatch_hops'] = int(len(dm))
+    out['first_delay_mismatch'] = ({'hop': int(dm[0]), 'c': int(cd[dm[0], 0]), 'py': int(pd[dm[0], 0])} if len(dm) else None)
+    out['delay_changes_c'] = int(np.sum(cd[1:, 0] != cd[:-1, 0]))
+    out['revert_hops_c'] = [int(h) for h in np.nonzero(np.diff(cd[:, 1]) > 0)[0] + 1]
+    out['revert_hops_py'] = [int(h) for h in np.nonzero(np.diff(pd[:, 1]) > 0)[0] + 1]
+    # why do the decisions differ? energy margin (float64, from each side's OWN dumped analysis spectra) at the mismatching hops,
+    # and how often the margin is below float32 rounding scale at all (a quarter of the never-usable hops).
+    Ec, Oc, uc = ctx_spectra(c['ctx'], K)
+    Ep, Op, up = ctx_spectra(p['ctx'], K)
+    mc, mp = guard_margin(Ec[:n], Oc[:n]), guard_margin(Ep[:n], Op[:n])
+    unusable = (uc[:n] == 0) & (up[:n] == 0)
+    out['unusable_hops'] = int(unusable.sum())
+    amax = np.maximum(np.abs(mc), np.abs(mp))
+    in_band = unusable & (amax > 0.0) & (amax <= GUARD_TIE_BAND)
+    out['tie_band'] = GUARD_TIE_BAND
+    out['tie_band_hops'] = int(in_band.sum())
+    gm_in = gm[in_band[gm]] if len(gm) else gm
+    gm_out = gm[~in_band[gm]] if len(gm) else gm
+    out['guard_mismatch_in_band_hops'] = int(len(gm_in))
+    out['guard_mismatch_outside_band_hops'] = int(len(gm_out))
+    if len(gm_out):
+        h = int(gm_out[0])
+        out['first_guard_mismatch_outside_band'] = {'hop': h, 'c_guard': int(cg[h]), 'py_guard': int(pg[h]), 'usable_c': int(uc[h]),
+                                                    'usable_py': int(up[h]), 'margin_c': r6(float(mc[h])),
+                                                    'margin_py': r6(float(mp[h]))}
+    if len(gm):
+        h = int(gm[0])
+        out['guard_mismatch_margin_max_abs_c'] = r6(float(np.max(np.abs(mc[gm]))))
+        out['guard_mismatch_margin_max_abs_py'] = r6(float(np.max(np.abs(mp[gm]))))
+        ec, ep = float(np.sum(np.abs(Ec[h]) ** 2)), float(np.sum(np.abs(Ep[h]) ** 2))
+        out['first_guard_mismatch'] = {'hop': h, 'c_guard': int(cg[h]), 'py_guard': int(pg[h]), 'usable_c': int(uc[h]),
+                                       'usable_py': int(up[h]), 'margin_c': r6(float(mc[h])), 'margin_py': r6(float(mp[h])),
+                                       'error_energy_rel_diff_c_vs_py': r6(abs(ec - ep) / max(ep, 1e-30))}
+    # where the analysis seam drifts (information): per-hop relative error of error_spec, C vs Python
+    ph = np.linalg.norm(Ec[:n] - Ep[:n], axis=1) / (np.linalg.norm(Ep[:n], axis=1) + 1e-30)
+    over = np.nonzero(ph > TOL['CTX_spec_rel_l2'])[0]
+    out['error_spec_per_hop_rel_l2'] = {'median': r6(float(np.median(ph))), 'p99': r6(float(np.percentile(ph, 99))),
+                                        'max': r6(float(np.max(ph))), 'hops_over_ctx_tol': int(len(over)),
+                                        'first_hop_over_ctx_tol': int(over[0]) if len(over) else None}
+    # rendering base and formed hop
+    def rel(a, b):
+        return float(np.linalg.norm((a - b).astype(np.complex128)) / (np.linalg.norm(b.astype(np.complex128)) + 1e-30))
+    out['base_spec_rel_l2'] = r6(rel(cb[:n], pb[:n]))
+    either = (cg[:n] == 1) | (pg[:n] == 1)
+    out['base_spec_rel_l2_guard_hops'] = r6(rel(cb[:n][either], pb[:n][either])) if either.any() else None
+    nf = min(len(c['formed']), len(p['formed'])) // hop
+    out['formed_hop_max_abs'] = r6(float(np.max(np.abs(c['formed'][:nf * hop].astype(np.float64) - p['formed'][:nf * hop])))) if nf else None
+    bad = []
+    if out['guard_mismatch_outside_band_hops'] or out['hops_c'] != out['hops_py']:
+        bad.append('guard_active')
+    if out['serial_mismatch_hops']:
+        bad.append('post_reset_serial')
+    if out['delay_mismatch_hops'] or out['revert_hops_c'] != out['revert_hops_py']:
+        bad.append('delay_events')
+    if len(out['revert_hops_py']) < min_reverts:
+        bad.append('revert_not_reached(%d<%d)' % (len(out['revert_hops_py']), min_reverts))
+    if out['base_spec_rel_l2'] > TOL['CTX_spec_rel_l2']:
+        bad.append('base_spec')
+    if out['base_spec_rel_l2_guard_hops'] is not None and out['base_spec_rel_l2_guard_hops'] > TOL['CTX_spec_rel_l2']:
+        bad.append('base_spec(guard hops)')
+    if worse(out['formed_hop_max_abs'], TOL['L1_raw_max_abs']):
+        bad.append('formed_hop')
+    out['fields_over_tolerance'] = bad
+    return out
 
 
 # ----------------------------------------------------------------------------------------------
@@ -640,6 +907,12 @@ def eval_scenario(R, scn):
         cc = ctx_compare(cstd['ctx'], py_best['ctx'], K)
         res['context'] = cc
         ev['ctx_fields_over_tolerance'] = ctx_ok(cc)
+    guard_bad = []
+    if scn.base:
+        gc = guard_compare(cstd, py_best, scn.fft // 2 + 1, scn.fft // 2, scn.reverts)
+        res['guard'] = gc
+        guard_bad = gc['fields_over_tolerance']
+        ev['guard_fields_over_tolerance'] = guard_bad
     res['evidence'] = ev
 
     # ---- verdict ----
@@ -656,7 +929,13 @@ def eval_scenario(R, scn):
             shape_failures.append('S-05 shape lost (filter_converged mismatch is gone or no longer the one-hop-late rising edge): remove S-05 from the marker')
     audio_expected_red = 'S-02' in scn.red
     if not scn.red:
-        status = 'PASS' if (audio_green and not ctx_bad) else 'FAIL (layer 1 red, no marker)'
+        if audio_green and not ctx_bad and not guard_bad:
+            status = 'PASS'
+        elif audio_green and not ctx_bad:
+            status = 'FAIL (guard seam: %s)' % ','.join(guard_bad)
+        else:
+            status = 'FAIL (layer 1 red, no marker)' + ('; ctx: %s' % ','.join(ctx_bad) if audio_green and ctx_bad else '') + \
+                ('; guard seam: %s' % ','.join(guard_bad) if guard_bad else '')
     elif audio_expected_red:
         if audio_green:
             status = 'FAIL UNEXPECTED_GREEN(%s): remove the marker' % ','.join(scn.red)
@@ -671,6 +950,26 @@ def eval_scenario(R, scn):
             status = 'FAIL ' + '; '.join(shape_failures)
         else:
             status = 'EXPECTED_RED(S-05)'
+    if scn.ties:
+        # T-01: the hard seam gates must hold as run; every other gate must hold once the registered decisions are forced.
+        K = scn.fft // 2 + 1
+        forced = load_run(R.py_run(scn, 0, tag='py_ties'))
+        fm = cell(cstd, forced)
+        fbad = ctx_ok(ctx_compare(cstd['ctx'], forced['ctx'], K))
+        fg = guard_compare(cstd, forced, K, scn.fft // 2, scn.reverts)['fields_over_tolerance']
+        hard_bad = [f for f in guard_bad if not (f.startswith('base_spec') or f == 'formed_hop')]
+        forced_ok = l1_ok(fm) and not fbad and not fg
+        ev['t01'] = {'forced_out_max_abs': fm['out']['max_abs'], 'forced_ctx_over': fbad, 'forced_guard_over': fg,
+                     'hard_seam_over_as_run': hard_bad, 'forced_ok': bool(forced_ok)}
+        if status == 'PASS':
+            status = 'FAIL UNEXPECTED_GREEN(T-01): remove the marker'
+        elif hard_bad or not forced_ok:
+            status = ('FAIL T-01 shape lost (hard seam gates as run: %s; with the registered decisions forced: audio %s, ctx %s, '
+                      'guard seam %s): treat as a real regression' % (hard_bad or 'green', 'green' if l1_ok(fm) else 'red',
+                                                                      fbad or 'green', fg or 'green'))
+        else:
+            status = 'INFO(T-01): layer 1 %s; registered tie forced -> every gate green (out max_abs %s)' % (
+                'within tolerance' if audio_green else 'over tolerance', fm['out']['max_abs'])
     if res['layer2']['status'] == 'RED':
         status = 'FAIL layer 2 red' if status == 'PASS' else 'FAIL layer 2 red; layer 1: ' + status
     if scn.info:
@@ -702,7 +1001,7 @@ def eval_scenario(R, scn):
                           % (ev.get('obs_cc_mismatch_hops'), l1['out']['max_abs'], n02_dist))
     res['status'] = status
     res['py_variants_run'] = len(variants) + (1 if l2['status'] in ('RED', 'INCONCLUSIVE_CHAOTIC') else 0) + \
-        (1 if 'py_guard_effect_out_max_abs' in ev else 0)
+        (1 if 'py_guard_effect_out_max_abs' in ev else 0) + (1 if scn.ties else 0)
     res['output_sha256'] = {
         'py_v0_out': sha256_bytes(variants[0]['out'].tobytes()),
         'c_std_out': sha256_bytes(cstd['out'].tobytes()),
@@ -792,11 +1091,12 @@ def prepare_inputs(a, scn_list):
                 pins[k.strip()] = h
     need = sorted(set((s.kind, s.sr) for s in scn_list) | set(('rec', sr) for sr in (8000, 16000, 48000)))
     infos, bad = {}, []
-    # source wavs
-    for rel in (REC_MIC, REC_REF):
+    # source wavs (the recording and, for the guard cells, the blind-set clips)
+    clip_wavs = sorted(set(rel for s in scn_list if s.kind in CLIPS for rel in CLIPS[s.kind][:2]))
+    for rel in (REC_MIC, REC_REF) + tuple(clip_wavs):
         p = os.path.join(a.aec_root, rel)
         if not os.path.exists(p):
-            bad.append('MISSING source wav %s' % rel)
+            bad.append('MISSING source wav %s%s' % (rel, ' (blind-set dataset: see wav/download_blind_test.py)' if rel in clip_wavs else ''))
             continue
         h = sha256_file(p)
         infos['wav/' + rel] = h
@@ -824,10 +1124,11 @@ def prepare_inputs(a, scn_list):
             f.write('# Pins for the Python<->C parity harness inputs (test/pyc_parity/pyc_parity.py).\n'
                     '# wav:<path>  sha256 of a tracked source wav (path relative to the aec root).\n'
                     '# f32:<input>_<mic|ref>  sha256 of the float32 array the generator produces\n'
-                    '#   (rec8/rec48 = scipy resample_poly of the 16 kHz recording; echo/speechdt/dtb = seeded scenes.py).\n'
+                    '#   (rec8/rec48 = scipy resample_poly of the 16 kHz recording; echo/speechdt/dtb = seeded scenes.py;\n'
+                    '#   <clip stem> = mic/far-end of a blind-set clip, truncated to the shorter channel).\n'
                     '# A mismatch means the audio changed (numpy/scipy drift or an edit): the baseline moved, so the run refuses.\n'
                     '# Regenerate (maintainers only): pyc_parity_aec.sh --write-pins\n')
-            for rel in (REC_MIC, REC_REF):
+            for rel in (REC_MIC, REC_REF) + tuple(clip_wavs):
                 f.write('%s  wav:%s\n' % (infos['wav/' + rel], rel))
             for k in sorted(gen):
                 f.write('%s  %s\n' % (gen[k], k))
@@ -871,7 +1172,7 @@ def print_table(results, statics, hpfc):
         bits = []
         for k in ('obs_cc_mismatch_hops', 'py_guard_blocked_hops', 'py_guard_effect_out_max_abs', 'ctx_conv_mismatch_hops',
                   'ctx_conv_rising_edges', 'ctx_conv_late_rising_mismatches', 'n01_python_branches_agree',
-                  'n01_c_builds_agree'):
+                  'n01_c_builds_agree', 't01'):
             if k in ev:
                 bits.append('%s=%s' % (k, ev[k]))
         if 'python_self_distance_1ulp_out_max_abs' in r:
@@ -881,6 +1182,38 @@ def print_table(results, statics, hpfc):
                 bits.append('py_self_dist@%s=%s' % (k.split('_at_')[1].split('_')[0], l2[k]))
         if bits:
             print('%-31s     %s' % ('', '  '.join(bits)))
+        g = r.get('guard')
+        if g:
+            print('%-31s     guard seam: hops=%d guard_hops c/py=%d/%d guard_mismatch=%d (first %s; inside tie band %d, OUTSIDE %d) '
+                  'tie-band hops=%d (|m|<=%g) serial_mismatch=%d (first %s; changes c/py=%d/%d) base_rel_l2=%s (guard hops %s) '
+                  'formed_max_abs=%s' % (
+                      '', g['hops'], g['guard_hops_c'], g['guard_hops_py'], g['guard_mismatch_hops'], g['first_guard_mismatch_hop'],
+                      g['guard_mismatch_in_band_hops'], g['guard_mismatch_outside_band_hops'], g['tie_band_hops'], g['tie_band'],
+                      g['serial_mismatch_hops'], g['first_serial_mismatch_hop'], g['serial_changes_c'], g['serial_changes_py'],
+                      g['base_spec_rel_l2'], g['base_spec_rel_l2_guard_hops'], g['formed_hop_max_abs']))
+            if 'first_guard_mismatch_outside_band' in g:
+                print('%-31s     first guard mismatch OUTSIDE the tie band: %s' % ('', g['first_guard_mismatch_outside_band']))
+            print('%-31s     delay events: changes c=%d, mismatching hops %d (first %s), reverts at hops c=%s py=%s' % (
+                '', g['delay_changes_c'], g['delay_mismatch_hops'], g['first_delay_mismatch'], g['revert_hops_c'],
+                g['revert_hops_py']))
+            if 'first_guard_mismatch' in g:
+                m = g['first_guard_mismatch']
+                print('%-31s     first guard divergence: hop %d c=%d py=%d usable c/py=%d/%d; energy margin (E-Y)/E c=%s py=%s '
+                      '(max over all divergent hops |c|=%s |py|=%s; error-energy C-vs-Py rel diff there %s); unusable hops: %d' % (
+                          '', m['hop'], m['c_guard'], m['py_guard'], m['usable_c'], m['usable_py'], m['margin_c'], m['margin_py'],
+                          g['guard_mismatch_margin_max_abs_c'], g['guard_mismatch_margin_max_abs_py'],
+                          m['error_energy_rel_diff_c_vs_py'], g['unusable_hops']))
+            e = g['error_spec_per_hop_rel_l2']
+            print('%-31s     error_spec per-hop rel_l2 C-vs-Py: median %s p99 %s max %s; hops over CTX_spec_rel_l2: %d (first %s)' % (
+                '', e['median'], e['p99'], e['max'], e['hops_over_ctx_tol'], e['first_hop_over_ctx_tol']))
+            if 'first_serial_mismatch' in g:
+                m = g['first_serial_mismatch']
+                print('%-31s     first serial divergence: hop %d c=%d py=%d' % ('', m['hop'], m['c'], m['py']))
+        cx = r.get('context')
+        if cx:
+            print('%-31s     ctx: res_gain wrel_l2=%s (gate CTX_gain_wrel_l2 %g) max_abs=%s (printed only); over tolerance: %s' % (
+                '', cx['res_gain']['wrel_l2'], TOL['CTX_gain_wrel_l2'], cx['res_gain']['max_abs'],
+                ','.join(ev.get('ctx_fields_over_tolerance', [])) or 'none'))
     for s in statics:
         print()
         print('%s: %s' % (s['id'], s['status']))

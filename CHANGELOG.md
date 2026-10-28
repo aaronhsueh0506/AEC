@@ -42,6 +42,207 @@ when verdict requires it.
 
 ---
 
+## [Unreleased] — 2026-10-28 — output guard unified across API modes
+
+The output guard (`output_capture_when_linear_unusable`, always on in the shipped levels), the comfort-noise generator
+and the post-chain reset now behave the same through `aec_process()`, `aec_process_context()` and the lean
+`spatial_linear_context` modes, in C and in Python. One algorithm; splitting the API no longer changes state or results.
+The same entry ports Python's bad-relock soft revert to C, a deliberate C behaviour change on the default path (below).
+
+### Changed (behaviour)
+- **Context-only configs no longer substitute the capture into the analysis path.** With `enable_res = 0` and
+  `return_res_context = 1` the FORM step used to admit the capture as a third candidate when the previous hop's usable
+  verdict was false and the selected residual carried more hop energy than the capture. That candidate
+  (`_SEL_CAPTURE` / `LFS_SEL_CAPTURE`), its 30-sample crossfade and its previous-hop verdict are gone.
+  `formed_hop` / `formed_output`, `error_spec`, `echo_spec` and `near_spec` are the real selected linear residual in every
+  mode, and AecState, ERLE, R2 and the error and echo PSDs always see it. `error_spec` is the STFT of
+  `[previous formed hop | current formed hop]` on every hop, guard hops included, so a unity IFFT with overlap-add
+  reproduces the previous formed hop one framing hop late. `AecLinearContext.formed_linear_hop` follows.
+- **The guard now only selects the rendering base, once per hop, in every mode.** It is evaluated after this hop's
+  usable verdict is final and before any context or linear-only exit: with the guard enabled, the verdict false and
+  `sum(|E|^2) > sum(|Y|^2)` (strict, windowed spectra, `Y = E + echo`, the same float32 pairwise reduction in C and
+  Python), the base is `Y` and `guard_active` is set; otherwise it is `E`. Full mode renders `base * gain` as before.
+  Identical spectra give the identical decision in both languages. The two STFTs are computed separately and their
+  upstream spectra differ by about 1e-7 relative, so the C-versus-Python contract is a tie band, not bit equality (see
+  "C-versus-Python parity contract" below).
+- **Rendering base exposed.** C: `aec_get_output_base(const Aec*, AecOutputBase*)` with
+  `AecOutputBase { struct_size, n_freqs, guard_active, base_spec }` (`struct_size` is an input and is validated before
+  anything is written: a value below `sizeof(AecOutputBase)` returns -1 and leaves the caller's struct untouched, a larger
+  value, e.g. from a newer caller, is accepted and only the known prefix is written, with `struct_size` coming back as
+  `sizeof(AecOutputBase)`; `base_spec` aliases a dedicated buffer that comfort noise and other scratch never touch, valid until the next
+  processing or reset call). Python: `AecResContext.output_base_spec` and `guard_active`. Consumers render
+  `output_base_spec * gain`, never `error_spec`. The base does not pair with `formed_hop`. `AecResContext` itself gained no
+  field in C.
+- **Comfort noise: one seed, one numeric core.** `AEC_CNG_SEED` (42) is exported (`aec_post.h`, `modules/cng.py`) and is
+  the seed after construction and after every hard post-chain reset. `aec_cng_fill()` is now the only implementation:
+  the output stage of `aec_process()` calls it with its total gain as `g_res` and `g_nr = NULL`, so the public helper is
+  bit-identical to the in-chain noise on the same inputs. The amplitude is
+  `(sqrt(1 - g_res^2) * max(g_nr, nr_floor)) * (sqrt(cn / 32768^2) * table entry)` per component, one LCG draw per bin
+  `1 .. n-2` in ascending order. The previous public helper evaluated `n_amp * gain * nr * table` with libm `sqrtf` and a
+  division, so its results can differ from the old ones in float rounding. Python gains `modules/cng.py` (`cng_fill`,
+  `cng_draw_indices`, `cng_noise_terms`) shared with the in-chain noise.
+- **Reset serial.** C `uint32_t aec_post_reset_serial(const Aec*)`, Python `AEC.get_post_reset_serial()` and
+  `AecResContext.post_reset_serial`: a non-consuming, wrapping counter of hard post-chain resets. There are two sources.
+  `aec_reset()` is a separate call, not part of any processing call: the serial already reads +1 when it returns, and the
+  next processing call starts from the cleared state. Inside a processing call only a confirmed delay change that restarts
+  the filter counts (the hard branch of a first acquisition, or of a confirmed shift), done before that hop's synthesis.
+  Each counted reset clears the library's OLA tail and reseeds its CNG to `AEC_CNG_SEED`. Warm-transfer and soft
+  realignments, the bad-relock revert (soft, see below: OLA tail and CNG keep running),
+  `aec_apply_external_realign` and `AecLinearContext.generation` changes do not count. An application that synthesizes
+  outside the library keeps its own last-handled serial; when the value after a processing call (or after `aec_reset()`)
+  differs it clears its OLA tail and reseeds its CNG before its first CNG draw and before the inverse-transform push of the
+  hop it renders from that call (after `aec_reset()`: the first hop processed afterwards), and never resets the AEC in
+  response.
+  The library touches neither NR nor NN state; following the reset there is the application's policy.
+- **Synthesis window accessor.** C `int aec_synthesis_window(const Aec*, const float** window, int* length)` returns the
+  window the library applies before overlap-add (block_size entries, valid for the instance lifetime). An external
+  synthesizer borrows it through `AcStftConfig.window` for its `AcIstft`; the audiolib default sqrt-Hann differs from it in
+  the last float bit, so bit-exact full-vs-split needs this table. The pointer is read-only and owned by the instance;
+  `*window` and `*length` are written only on success (-1 for a NULL instance, window or length). No behaviour change.
+  `make test-synthesis-window`.
+- **Bad-relock revert is now a soft revert in C (deliberate C behaviour change on the default path).** After a
+  confirmed delay shift the judge compares windowed ERLE 100 hops later; a relock more than 1 dB worse than the pre-shift
+  value is reverted and its delay remembered as rejected. Python has done this as `_apply_delay_shift_soft_revert` since
+  `9e1bea4` (2026-10-18), restoring the pre-shift taps without the hard-reset chain; C was last synchronised at `fb84a2c`
+  (both used the hard-reset chain then) and kept the hard reset, so C and Python separated at every revert. C now has
+  `aec_apply_delay_shift_soft_revert()`: it restores the pre-shift delay, the main W and `H_error_per_bin` (a new
+  `n_freqs` float snapshot taken at the shift) and the shadow W, clears the far history only when the revert retards the
+  alignment, and resets the windowed-ERLE accumulators, the main/shadow error EMAs and the pending delay. It does not run
+  the hard-reset chain, so `aec_post_reset_serial()` does not move and the OLA tail and CNG keep running; the delay
+  generation still bumps, so seam consumers see the change. **Effect on C output:** it differs from the previous C
+  output only on clips that reach the revert, from the revert hop on, and there C moves onto Python's output: 16 of 800
+  blind clips at 16 kHz/256 (17 events) and 15 of 800 at 16 kHz/512 (16 events), none in the near-end-only set (round-7
+  scan of the 115e10c tree), and 11 of 300 at 48 kHz/1024 (counted by the port step; not re-scanned in this documentation
+  pass). The delay-event stream (every acquisition, shift and revert, same hop, same value) is unchanged on all 800
+  clips at both 16 kHz grids; without a revert the output is bit-identical to the previous C. Before the port, after a
+  revert the two languages differed by -28 to +2 dB of the output level, with peaks up to full scale; afterwards they
+  stay at the pre-event float32 level on 30 of 31 measured clip-grid cells. Python is unchanged.
+
+### Unchanged
+- **Full-mode `aec_process()` output is bit-identical to 115e10c** in C, with one deliberate exception: the output hash
+  over every clip of the blind sets matched at 16 kHz/256 (800 clips), 16 kHz/512 (800) and 48 kHz/1024 (300), 0 differing
+  clips each, measured before the bad-relock soft-revert port above. The port changes the output of the clips that reach
+  a revert (counts above) and nothing else. The Python full-mode output matches 115e10c on the 60-cell subset checked
+  (0 differing cells); Python is untouched by the port, and the behaviour hash recorded under Compatibility (`9963b6d7...`) was re-computed on the final tree.
+- Split rendering (`aec_process_context()` + `aec_get_res_context()` + `aec_get_output_base()` + `aec_cng_fill()` +
+  audiolib `ac_istft_push()` with the library's synthesis window, NR/NN off) is bit-identical to `aec_process()` in the same
+  build (`make test-guard-unify`: synthetic streams covering init, never usable, unusable to usable, a moving echo path with
+  delay changes and hard resets, guard switching on and off, `aec_apply_external_realign`, `aec_reset` and replay, plus the
+  blind-set clips of `guard_unify_clips.tsv`, never-usable clips included; the revert scenarios check that a revert leaves
+  the serial unchanged and does not reseed the full-mode CNG, and that a renderer that clears and reseeds on the revert
+  hop would produce different audio). The real-clip part reports SKIP loudly when the gitignored corpus is absent; the
+  synthetic scenarios always run.
+
+### Guard statistics
+- 97.72 % of the guard-firing hops at 16 kHz/512 (64,096 hops over 800 clips) occur before the first usable verdict
+  (97.43 % of 118,078 at 16 kHz/256, 99.46 % of 137,397 at 48 kHz/1024). Some clips never get a usable verdict (228 of
+  800, 233 of 800 and 88 of 300 clips at the three grids) and the guard fires on 72, 74 and 69 of them, so firing is not
+  confined to the first seconds. Tests, training data and quality checks must include never-usable clips.
+
+### Compatibility
+- **Static pool grows** by one `n_freqs` Complex slice (the dedicated rendering-base buffer), one `n_freqs` float slice (the
+  main-filter `H_error` snapshot of the bad-relock soft revert) and the 16-byte-aligned growth of the `Aec` struct
+  (`sizeof(Aec)` 6336 to 6352 bytes). Final `aec_get_mem_size()` at the balanced level, default delay mode (NE10, LP64),
+  against 115e10c:
+
+  | grid | shadow on, before | shadow on, now | shadow off, before | shadow off, now |
+  |---|---:|---:|---:|---:|
+  | 16 kHz/256 | 364,416 | 366,000 (+1,584) | 321,536 | 323,120 (+1,584) |
+  | 16 kHz/512 | 491,600 | 494,720 (+3,120) | 430,912 | 434,032 (+3,120) |
+  | 48 kHz/1024 | 1,156,544 | 1,162,736 (+6,192) | 1,002,608 | 1,008,800 (+6,192) |
+
+  The growth is `align16(K * 8) + align16(K * 4) + 16` with `K = fft_size / 2 + 1` (1,040 + 528 + 16, 2,064 + 1,040 + 16,
+  4,112 + 2,064 + 16). Re-query `aec_get_mem_size()` and re-init; a pool sized for the previous build is refused by
+  `aec_init`. `test_memory_layout.c` pins `sizeof(Aec)` and the six pool sizes above as literals (skipped on a non-LP64
+  ABI) in addition to the structural check against the recorded 115e10c sizes. `docs/c_user_manual_zh_TW_01_lifecycle.md`
+  (all pool tables), `docs/html/aec.html`, `aec_c_api.html`, `aec_params.html`, `STATIC_MEMORY.md` and the
+  `--print-mem-size` example carry the new values, measured once on the final tree with the same API (`aec_get_mem_size`).
+  The `AecRes` pool and the live-observer increments are unchanged (7,904 / 14,048 / 29,408 B and +38,768 / +58,656 /
+  +141,648 B at the three grids).
+- Internal headers: `linear_filter_select()` lost its `linear_unusable` and `capture_fallback_enabled` parameters and
+  `LFS_SEL_CAPTURE` is removed; `aec_post_apply_output()` takes the rendering base instead of the error, echo, magnitudes
+  and verdict; `aec_post_init()` lost `sqrt2_sin_lut`; `AecPostAbs` lost `abs_ybase`; `AecPost` gained `reset_serial` and
+  `output_guard_active`; `AecPostRunScratch` gained `output_base`; `aec_post_eval_output_guard()` is new.
+- **Python behaviour hash** (`aec_python_behavior_hash()`, AIAEC): `9fa7a2de...` to `9963b6d7...`. This is an
+  output-changing change and is not registered as a byte-equivalent migration. **AIAEC consequence:** the AIAEC front end
+  reads the analysis seam, which in context-only configs was previously the capture on guard hops and is now the real
+  residual, so `linear_error` changes. The corpus is regenerated and the model retrained by the owner; checkpoints and the
+  released inference-only pointer built at the previous hash are retired or kept as a legacy front end, never silently
+  re-pointed. Three AIAEC guards go red at the new hash:
+  `test_released_checkpoint_exception_is_separate_and_targets_this_build`,
+  `test_released_checkpoint_exception_is_inference_only_and_warns` and
+  `test_inference_loads_the_released_pre_constraint_checkpoint_with_warning`. The analysis residual may exceed the capture on
+  a guard hop; the final audio is protected by the rendering guard.
+- Required change in consumers that render audio from the context (mono, DFN and ULCNet lanes, 4ch lanes, board samples):
+  render `output_base_spec * gain` instead of `error_spec * gain`, handle the reset serial, and seed their comfort noise
+  with `AEC_CNG_SEED`. Each consumer states which spectrum feeds its NR estimator. Defaults are unchanged (the library
+  CNG default is not touched; CNG in board samples stays a separate `--cng` configuration).
+- **Breaking behaviour for existing consumers.** A frequency-domain consumer that still renders `error_spec` instead of the
+  rendering base silently loses the guard: on guard hops its output carries the residual that is louder than the capture
+  (nothing fails at compile or run time). Time-domain seam consumers (`formed_hop` / `formed_output`,
+  `AecLinearContext.formed_linear_hop`) are the analysis residual on every hop and have no rendering base, so they are
+  unguarded by construction. A consumer that plays or re-synthesizes them gets no output guard.
+- **Bad-relock revert and the serial.** A consumer written against the earlier C, where a revert bumped
+  `aec_post_reset_serial()` and cleared the library's OLA tail, no longer sees either on a revert; its own OLA and CNG
+  handling needs no change as long as it follows the serial.
+
+### Added
+- `c_impl/test/test_guard_unify.c` (`make test-guard-unify`, in the SIMD-dependent group) with
+  `c_impl/test/guard_unify_clips.tsv`; `python/tests/test_guard_unify.py` with `python/tests/guard_scenes.py` (ports of the C
+  relock and soft-realign streams; the serial must move +1 on hard events and 0 on every other delay event, a revert must not
+  reseed the CNG, and a renderer that reseeds on the revert hop must produce different audio); a guard threshold fixture at
+  equal energy and plus or minus one ulp in both languages; absolute pins of `sizeof(Aec)` and the six pool sizes in
+  `test_memory_layout.c`.
+- `c_impl/test/pyc_parity`: 16 guard cells (8 guard cells plus 8 `guard.revert.{Y91u,IUp2,rOza,waxU}.{16k256,16k512}.full`
+  cells on blind clips that revert), per-hop current delay dumped by both drivers (`<pre>.dly.txt`), exact gates for the
+  delay, the revert hops and a minimum number of reverts. `inputs.sha256` gained the four revert clips; no existing hash
+  changed.
+- `docs/c_python_function_map.md`: rows for `aec_get_output_base`, `aec_post_reset_serial`, `aec_post_eval_output_guard`,
+  `aec_synthesis_window`, the `modules/cng.py` helpers, `AEC._post_output_base`, `AEC._guard_energy` and
+  `AEC.get_post_reset_serial`, and `aec_apply_delay_shift_soft_revert` <-> `AEC._apply_delay_shift_soft_revert` as a
+  `mirror` row (the earlier "Python-only" row and its D-15 citation, which belongs to the live-observer lane, are gone;
+  D-15 now says only the observer taps are not restored by the revert, in either language); the stale
+  `AEC._post_output_spectrum` row is removed. The sequence and RES flow diagrams (`aec_sequence.html`, `aec_res.html`) now
+  render from `output_base_spec * gain` and include the serial step.
+
+### C-versus-Python parity contract (pyc parity, guard cells)
+- **Tie band.** C and Python output-guard decisions must match on every hop except inside a tie band of 1e-6 relative
+  energy margin, `|Σ|E|² − Σ|Y|²| / Σ|E|²`, on hops that are unusable on both sides (a usable-verdict difference is never a
+  tie). The band is 3.3 times the largest measured near-threshold C-versus-Python margin disagreement (3.3e-7 at
+  48 kHz/1024; 3.0e-7 at 16 kHz/256) and 4 times the largest margin at any observed mismatch (2.48e-7). Hops inside the
+  band are counted and printed per cell; any mismatch outside the band fails the cell. The fixed near-threshold fixtures
+  (identical inputs) keep exact equality.
+- **Result on the 16 guard cells** (`--full`): no guard mismatch outside the band (81, 81 and 27 hops inside the band on the
+  two 16 kHz never-usable clips, 0 elsewhere); `post_reset_serial` identical on every hop (hard-reset cells 4/4, 4/4 and 3/3
+  C/Python changes; the earlier 5/4, 5/4 and 5/3 divergence is gone after the soft-revert port); current delay identical on
+  every hop; bad-relock reverts at the same hop in both languages on all 12 revert-bearing cells.
+- **Green:** `never_usable.16k256` lean and full; `hard_reset` 16k256, 16k512 and 48k1024 lean and full (these include reverts
+  at hops 553, 327 and 858 + 1038); `revert.IUp2.16k512`; and, under the `res_gain` gate below, `revert.Y91u` (both grids),
+  `revert.rOza.16k256` and `revert.waxU.16k256`. **INFO(T-01)**: `never_usable.16k512`, `never_usable.48k1024`,
+  `revert.IUp2.16k256`, `revert.rOza.16k512` and `revert.waxU.16k512`. No cell fails a hard seam gate as run.
+- **Registered float32 ties (T-01, INFO only).** In those five cells one or a few per-bin hard decisions inside the
+  adaptive filter sit within the C-versus-Python rounding difference of their own operands: the refined filter's H_error
+  leakage compare `e2_refined[k] <= e2_coarse[k]` (all five), and in `revert.rOza.16k512` also the filter noise gate
+  `X2[k] >= gate` (hop 543 bin 148, margins about ±1e-7). C takes one side and Python the other, and the one-bin
+  difference spreads through the adaptive state to the analysis seam and the audio. Each cell registers the decision(s)
+  as hop:bin:side; the Python parity driver gained diagnostic `--force-leak H:K:C[,...]` and `--force-gate H:REL[,...]`
+  options to take them the way C does. The cell is INFO only when (1) the hard seam gates (guard_active outside the tie band,
+  post_reset_serial, delay events and reverts) are green as run, and (2) the Python run with the registered decisions forced
+  is green on every audio, context and guard-seam gate. It fails if either stops holding, and it fails once the unforced cell
+  is green (remove the marker). Forced runs: out max_abs 1.6e-7, 5.2e-8, 2.8e-7, 3.9e-7 and 1.06e-6. If the registered
+side in `never_usable.16k512` is flipped to Python's own choice, the cell fails ("T-01 shape lost"). The marker sits in
+  the `pyc_parity.py` registry next to N-01 and N-02; no expected-red entry was added or enlarged.
+- **`res_gain` context gate.** `res_gain` is now gated by its relative L2 weighted by each bin's near-end power
+  `|E + echo|²` (`CTX_gain_wrel_l2` = 1e-4). Its per-bin, per-hop maximum (`CTX_gain_max_abs`, 1e-3) is printed only. That
+  maximum is set by the quietest bins (75 to 85 dB below the hop peak, where float32 rounding is about 1e-3 of the bin) and
+  by the max-gain ratchet, which multiplies an earlier hop's difference by 2 or 4 in amplitude. Green cells already reach
+  9.96e-4 (`hard_reset.16k512.lean`). The weighted figure is at most 1.52e-5 (`revert.IUp2.16k256`) across the 16 guard
+  cells. The exceptions are `revert.rOza.16k512` (9.6e-2) and `revert.waxU.16k512` (2.0e-4): unforced, both run on the
+  other side of their registered tie, and both are green once the tie is forced. A planted 0.1 % change of the suppression threshold
+  `enr_suppress` reads 3.0e-3 on `revert.Y91u.16k256`, and that cell fails.
+- **Whole `--full` run: RESULT PASS**: 48 pass, 11 info (N-01 x2, D-01 x3, N-02, T-01 x5), 3 expected-red (S-02 x3),
+  0 fail, 62 scenarios.
+
 ## [Unreleased] — 2026-10-28 — C strength setting renamed from preset to level
 
 ### Changed

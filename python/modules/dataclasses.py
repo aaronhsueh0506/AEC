@@ -87,6 +87,15 @@ class AecResContext:
     res_floor_protect: bool = False
     # This frame's usable-linear-estimate verdict; None when there is none (e.g. a context fused from several lanes).
     usable_linear: Optional[bool] = None
+    # Rendering base (copy of the output-capture guard's choice): error_spec, or error_spec + echo_spec (= near_spec)
+    # on a hop where the guard fires. Render S(f) = output_base_spec * gain (+ CNG). It is NOT paired with
+    # formed_output / error_spec (STFT / unity-WOLA pairing holds for the analysis seam only), and the guard never
+    # replaces error_spec, echo_spec, near_spec or formed_output.
+    output_base_spec: Optional[np.ndarray] = None   # (n_freqs,) complex64
+    # True when this hop's rendering base is the capture Y (guard fired: usable verdict false and sum|E|^2 > sum|Y|^2).
+    guard_active: bool = False
+    # Hard post-chain reset counter (uint32, wraps) as of this hop; see AEC.get_post_reset_serial().
+    post_reset_serial: int = 0
 
 
 @dataclass

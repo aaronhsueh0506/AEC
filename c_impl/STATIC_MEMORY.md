@@ -87,8 +87,8 @@ prints these):
 
 | FFT / hop | Pool size |
 |---:|---:|
-| 256 / 128 | 364,416 B |
-| 512 / 256 | 491,600 B |
+| 256 / 128 | 366,000 B |
+| 512 / 256 | 494,720 B |
 
 These figures depend on the struct sizes of `Aec`/`AecConfig`; re-run
 `aec_get_mem_size()` (or `make test-delay-num-filters`) rather than carrying

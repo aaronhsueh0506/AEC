@@ -7,6 +7,7 @@
 #include "utility/fast_math.h"
 #include "utility/simd_aec.h"
 #include "aec_scale.h"
+#include "aec_res.h"
 
 #define PSD_SCALE (32768.0 * 32768.0)   /* int16 max^2 */
 
@@ -38,7 +39,7 @@ void aec_post_config_defaults(AecPostConfig *cfg) {
 
 void aec_post_init(AecPost *p, const AecPostConfig *cfg,
                    FftHandle *fft,
-                   const float *synth_window, const float *sqrt2_sin_lut,
+                   const float *synth_window,
                    float *avg_reverb_storage,
                    float *y2_smoothed, float *n2, float *n2_initial,
                    float *coh_sye_re, float *coh_sye_im,
@@ -59,7 +60,6 @@ void aec_post_init(AecPost *p, const AecPostConfig *cfg,
               / (32768.0f * 32768.0f);
     p->fft = fft;
     p->synth_window = synth_window;
-    p->sqrt2_sin_lut = sqrt2_sin_lut;
     reverb_model_init(&p->avg_reverb, avg_reverb_storage, cfg->n_bins);
     p->y2_smoothed = y2_smoothed;
     p->n2 = n2;
@@ -81,6 +81,7 @@ void aec_post_init(AecPost *p, const AecPostConfig *cfg,
     p->e_out_spec = e_out_spec;
     p->e_out_full = e_out_full;
     aec_post_reset(p);
+    p->reset_serial = 0u;
 }
 
 void aec_post_reset(AecPost *p) {
@@ -92,7 +93,9 @@ void aec_post_reset(AecPost *p) {
     p->trace.aec_converged = 0;
     p->trace.far_active = 0;
     p->trace.gain_mean = 0.0f;
-    p->cng_seed = 42u;
+    p->cng_seed = AEC_CNG_SEED;
+    p->output_guard_active = 0;
+    p->reset_serial += 1u;
     p->noise_initialized = 0;
     p->n2_counter = 0;
     for (k = 0; k < nb; ++k) {
@@ -208,10 +211,7 @@ void aec_post_compute_comfort_noise(AecPost *p, int saturated_capture) {
 }
 
 void aec_post_apply_output(AecPost *p,
-                           const Complex *error_spec,
-                           const Complex *echo_spec_sel,
-                           const AecPostAbs *mag,
-                           int usable_linear,
+                           const Complex *output_base,
                            const float *gain,
                            float *out) {
     const AecPostConfig *c = &p->cfg;
@@ -220,53 +220,12 @@ void aec_post_apply_output(AecPost *p,
     int hop = c->hop_size;
     int k;
 
-    /* Switch to y_base = error_spec + sel_echo when output_capture_when_linear_unusable, the linear
-     * estimate is unusable and |E| > |Y|. */
-    {
-        const Complex *out_base = error_spec;
-        if (c->output_capture_when_linear_unusable && !usable_linear) {
-            float *se2 = p->nf;
-            float se, sy;
-            sk_sq_scale_f32(mag->abs_error, 1.0f, se2, nb);
-            se = sk_pairwise_sum_f32(se2, (size_t)nb);
-            sk_sq_scale_f32(mag->abs_ybase, 1.0f, se2, nb);
-            sy = sk_pairwise_sum_f32(se2, (size_t)nb);
-            if (se > sy) {
-                sk_cadd_f32(p->e_out_spec, error_spec, echo_spec_sel, nb);
-                out_base = p->e_out_spec;
-            }
-        }
-        sk_capply_gain_f32(p->e_out_spec, out_base, gain, nb);
-    }
+    sk_capply_gain_f32(p->e_out_spec, output_base, gain, nb);
 
-    if (c->enable_cng) {
-        int n_random = nb - 2;
-        uint32_t seed = p->cng_seed;
-        static const float inv_psd_scale = 1.0f / (float)PSD_SCALE;
-        sk_scale_f32(p->nf + 1, p->comfort_noise + 1, inv_psd_scale, n_random);
-        sk_clip_f32(p->nf + 1, 0.0f, (float)INFINITY, n_random);
-        sk_fast_sqrt_f32(p->nf + 1, p->nf + 1, n_random);
-        for (k = 0; k < n_random; ++k) {
-            uint32_t ix;
-            int re_idx, im_idx, bin = k + 1;
-            float ng, cn_re, cn_im;
-            seed = (seed * 69069u + 1u) & 0x7FFFFFFFu;
-            ix = seed >> 26;
-            re_idx = (int)ix;
-            im_idx = (int)((ix + 8u) & 31u);
-            cn_re = p->nf[bin] * p->sqrt2_sin_lut[re_idx];
-            cn_im = p->nf[bin] * p->sqrt2_sin_lut[im_idx];
-            {
-                float g2 = gain[bin] * gain[bin];
-                float t = 1.0f - g2;
-                if (t < 0.0f) t = 0.0f;
-                ng = fast_sqrt(t);
-            }
-            p->e_out_spec[bin].r += ng * cn_re;
-            p->e_out_spec[bin].i += ng * cn_im;
-        }
-        p->cng_seed = seed;
-    }
+    /* aec_cng_fill() is the single comfort-noise implementation (an external synthesizer calls the
+     * same function); the output stage weights the noise with the total gain it just applied. */
+    if (c->enable_cng)
+        aec_cng_fill(&p->cng_seed, p->e_out_spec, p->comfort_noise, gain, NULL, 0.0f, nb);
 
     fft_inverse(p->fft, p->e_out_spec, p->e_out_full);
 
@@ -334,6 +293,30 @@ static void aec_post_run_observer_step(AecPost *p,
     }
 }
 
+/* Output guard, evaluated once per hop after this hop's usable verdict is final (in every API mode):
+ * when output_capture_when_linear_unusable is set, the linear estimate is unusable and the windowed
+ * residual carries more energy than the windowed capture (sum|E|^2 > sum|Y|^2, strictly, from the
+ * float32 magnitudes with the pairwise reduction), the rendering base is the capture spectrum
+ * Y = E + echo, written to sc->output_base. Otherwise the base is the residual E (sc->sel_esw).
+ * The analysis spectra (sel_esw, sel_echo, ybase) and the formed hop are never altered. */
+void aec_post_eval_output_guard(AecPost *p, AecPostRunScratch *sc, int usable) {
+    const AecPostConfig *c = &p->cfg;
+    int nb = c->n_bins;
+    float *sq = p->nf;
+    float se, sy;
+    p->output_guard_active = 0;
+    if (!c->output_capture_when_linear_unusable || usable) return;
+    sk_cabs_np_f32(sc->ybase, sc->abs_ybase, nb);
+    sk_sq_scale_f32(sc->abs_error, 1.0f, sq, nb);
+    se = sk_pairwise_sum_f32(sq, (size_t)nb);
+    sk_sq_scale_f32(sc->abs_ybase, 1.0f, sq, nb);
+    sy = sk_pairwise_sum_f32(sq, (size_t)nb);
+    if (se > sy) {
+        sk_cadd_f32(sc->output_base, sc->sel_esw, sc->sel_echo, nb);
+        p->output_guard_active = 1;
+    }
+}
+
 int aec_post_run(AecPost *p,
                  const AecPostRunIn *in,
                  const AecPostRunObj *obj,
@@ -350,8 +333,11 @@ int aec_post_run(AecPost *p,
     int k;
     AecPostAbs mag;
     int saturated_capture = (in->saturation_level > 0.5f);
+    int output_usable;
     int pgc = in->pending_gain_change;
     int pdc = in->pending_delay_change;
+
+    p->output_guard_active = 0;
 
     /* Form the linear output on the post-filter WOLA grid. error_spec_windowed is an internal
      * estimator quantity and cannot pair with the synthesis window, so FormLinearFilterOutput
@@ -364,14 +350,6 @@ int aec_post_run(AecPost *p,
                              : in->raw_output,
                          in->error_spec_windowed, in->echo_spec,
                          in->sqrt_hann, obj->fft,
-                         /* AecState is updated later in this run, so this is the previous hop's
-                          * verdict. */
-                         !aec_state_usable_linear_estimate(obj->state),
-                         /* Only where the post chain's own over-output guard cannot reach; under
-                          * enable_res the output
-                          * capture step still owns the rule. */
-                         c->output_capture_when_linear_unusable
-                             && in->context_only,
                          sc->sel_esw, sc->sel_echo);
 
     /* near_spec_win = error_spec_windowed + echo_spec (original); y_base = sel_esw + sel_echo
@@ -385,17 +363,12 @@ int aec_post_run(AecPost *p,
     sk_cabs_np_f32(sc->sel_esw, sc->abs_error, nb);
     sk_cabs_np_f32(in->echo_spec, sc->abs_echo_coh, nb);
     sk_cabs_np_f32(sc->nsw_e1, sc->abs_nsw_e1, nb);
-    /* |y_base| is only used by the output-capture guard, which context_only never reaches; NULL
-     * marks it uncomputed. abs_nsw_e1 is always computed (aec_post_compute_psds() needs it). */
-    if (!in->context_only)
-        sk_cabs_np_f32(sc->ybase, sc->abs_ybase, nb);
     mag.abs_near = sc->abs_near;
     mag.abs_far = sc->abs_far;
     mag.abs_sel_echo = sc->abs_sel_echo;
     mag.abs_error = sc->abs_error;
     mag.abs_echo_coh = sc->abs_echo_coh;
     mag.abs_nsw_e1 = sc->abs_nsw_e1;
-    mag.abs_ybase = in->context_only ? NULL : sc->abs_ybase;
 
     aec_post_compute_psds(p, &mag);
 
@@ -510,6 +483,11 @@ int aec_post_run(AecPost *p,
             if (aec_state_transition_triggered(obj->state))
                 suppression_gain_set_initial_state(obj->sg, 0);
 
+            /* Rendering base: the output guard on this hop's final usable verdict, before any context
+             * or linear-only exit, so every API mode publishes the same decision. */
+            output_usable = aec_state_usable_linear_estimate(obj->state);
+            aec_post_eval_output_guard(p, sc, output_usable);
+
             /* Linear-only context: the remaining stages only produce R^2, comfort noise and G_res
              * and advance the state that only they read, so stop here; the linear filter and
              * formed output are unaffected. */
@@ -532,8 +510,7 @@ int aec_post_run(AecPost *p,
                     float filter_q =
                         aec_state_get_inst_linear_quality_estimate(
                             obj->state, &fq_valid);
-                    int usable =
-                        aec_state_usable_linear_estimate(obj->state);
+                    int usable = output_usable;
 
                     /* DT-gated min-gain floor lift (read when the gain is computed below). The
                      * energy-based near-recent latch decides it; the result is exported via
@@ -652,9 +629,10 @@ int aec_post_run(AecPost *p,
                                     memcpy(out, in->raw_output,
                                            (size_t)hop * sizeof(float));
                                 } else {
-                                    aec_post_apply_output(p, sc->sel_esw,
-                                                          sc->sel_echo, &mag,
-                                                          usable, gain, out);
+                                    aec_post_apply_output(p,
+                                        p->output_guard_active ? sc->output_base
+                                                               : sc->sel_esw,
+                                        gain, out);
                                 }
                             }
                         }

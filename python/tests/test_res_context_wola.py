@@ -107,3 +107,92 @@ def test_res_context_filter_converged_tracks_this_hop_not_last() -> None:
     assert saw_rising_edge, (
         "scene never converged -- strengthen the echo coupling so this test "
         "actually exercises the S-05 rising edge")
+
+
+# ----------------------------------------------------------------------------------------------------------
+# The output-capture guard must never leak into the analysis seam. Every hop is checked, including hops where
+# the guard fires: STFT pairing of error_spec with [previous formed hop | formed hop], unity IFFT/WOLA
+# reconstruction of the previous formed hop, near_spec = error_spec + echo_spec. The rendering base is a separate
+# field (output_base_spec) and follows the guard rule, which is decided here independently from the context.
+
+from guard_scenes import GRIDS, clip_scene, expected_guard, sqrt_hann, synthetic_scene  # noqa: E402
+
+
+def _guard_config(sample_rate, fft_size, enable_shadow, enable_res=False, enable_cng=False, bare=True):
+    config = AecConfig.from_preset(AecPreset.BALANCED, sample_rate=sample_rate, frame_size=fft_size)
+    config.enable_shadow = enable_shadow
+    config.enable_res = enable_res
+    config.return_res_context = True
+    config.enable_cng = enable_cng
+    if bare:
+        config.enable_delay_est = False
+        config.enable_highpass = False
+        config.enable_saturation = False
+    return config
+
+
+def _check_analysis_seam_and_base(aec, hops, fft_size):
+    """Assert the analysis-seam contract and the base rule on every hop; return (fired, usable_hops)."""
+    hop = aec.hop_size
+    window = sqrt_hann(fft_size)
+    previous = np.zeros(hop, dtype=np.float32)
+    ola = np.zeros(fft_size, dtype=np.float32)
+    fired = usable_hops = 0
+    serial = aec.get_post_reset_serial()
+    for near, far in hops:
+        _out, ctx = aec.process(near, far)
+        if ctx.post_reset_serial != serial:     # a hard post-chain reset restarts the formed-hop sequence
+            serial = ctx.post_reset_serial
+            previous = np.zeros(hop, dtype=np.float32)
+            ola[:] = 0.0
+        formed = np.asarray(ctx.formed_output, dtype=np.float32)
+        expected = np.fft.rfft(np.concatenate((previous, formed)) * window, n=fft_size).astype(np.complex64)
+        np.testing.assert_allclose(ctx.error_spec, expected, rtol=0, atol=1e-6)
+        np.testing.assert_allclose(ctx.near_spec, ctx.error_spec + ctx.echo_spec, rtol=0, atol=1e-6)
+        frame = np.fft.irfft(ctx.error_spec, n=fft_size).astype(np.float32)
+        ola += frame * window
+        np.testing.assert_allclose(ola[:hop], previous, rtol=0, atol=1e-6)
+        ola[:-hop] = ola[hop:]
+        ola[-hop:] = 0.0
+        previous = formed.copy()
+
+        # Rendering base: independent decision from the context fields.
+        want = expected_guard(ctx)
+        assert ctx.guard_active is want
+        reference = ctx.near_spec if want else ctx.error_spec
+        np.testing.assert_array_equal(ctx.output_base_spec, reference)
+        assert ctx.output_base_spec.dtype == np.complex64 and ctx.output_base_spec.shape == ctx.error_spec.shape
+        fired += int(want)
+        usable_hops += int(bool(ctx.usable_linear))
+    return fired, usable_hops
+
+
+@pytest.mark.parametrize("sample_rate,fft_size", GRIDS)
+@pytest.mark.parametrize("enable_shadow", [False, True])
+@pytest.mark.parametrize("scene", ["uncorrelated", "burst", "farend_clip", "nearend_clip"])
+def test_analysis_seam_pairs_on_every_hop_while_the_guard_fires(sample_rate, fft_size, enable_shadow, scene):
+    aec = AEC(_guard_config(sample_rate, fft_size, enable_shadow))
+    hop = aec.hop_size
+    if scene.endswith("_clip"):
+        hops = clip_scene(scene.split("_")[0], sample_rate, hop, 200)
+    else:
+        hops = synthetic_scene(scene, hop, sample_rate, 160)
+    fired, usable_hops = _check_analysis_seam_and_base(aec, hops, fft_size)
+    # The scene has to exercise the guard, otherwise the pairing above proves nothing about guard hops.
+    assert fired >= 3, "scene %s never fires the guard (%d hops)" % (scene, fired)
+    if scene in ("uncorrelated", "nearend_clip"):
+        assert usable_hops == 0, "a never-usable scene must stay unusable"
+    if scene == "burst":
+        assert fired < len(hops), "burst scene must also contain hops without a guard"
+
+
+@pytest.mark.parametrize("sample_rate,fft_size", GRIDS)
+def test_analysis_seam_pairs_when_the_guard_switches_and_filter_becomes_usable(sample_rate, fft_size):
+    """Cold start fires the guard, then the filter becomes usable (guard off): the pairing holds across the
+    switch and across the unusable -> usable transition."""
+    aec = AEC(_guard_config(sample_rate, fft_size, enable_shadow=True, enable_res=True, bare=False))
+    hop = aec.hop_size
+    hops = clip_scene("farend", sample_rate, hop, 420)
+    fired, usable_hops = _check_analysis_seam_and_base(aec, hops, fft_size)
+    assert fired >= 5
+    assert 0 < usable_hops < len(hops)

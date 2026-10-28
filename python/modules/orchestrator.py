@@ -20,6 +20,9 @@ from .detectors import (
 from .epc import EchoPathChangeDetector, PathChangeRegimeHandler
 from .config import AecConfig, ref_ring_samples, resolve_signal_grid
 from .debug_logger import AecDebugLogger
+from .cng import (
+    AEC_CNG_SEED, SQRT2_SIN_LUT, cng_draw_indices, cng_noise_terms,
+)
 
 # The four simple-mu values form one state machine and are not retimed per grid.
 _SIMPLE_MU_HOLDOFF_HOPS = 20
@@ -32,7 +35,7 @@ _DELAY_SHIFT_JUDGMENT_HOPS = 100
 
 
 # Linear-filter output candidates, in the order the crossfade indexes them.
-_SEL_COARSE, _SEL_REFINED, _SEL_CAPTURE = 0, 1, 2
+_SEL_COARSE, _SEL_REFINED = 0, 1
 
 
 class AEC:
@@ -168,6 +171,8 @@ class AEC:
 
     def __init__(self, config: Optional[AecConfig] = None):
         self.config = config or AecConfig()
+        # Count of hard post-chain resets (see get_post_reset_serial); persists across reset().
+        self._post_reset_serial = 0
 
         self._init_config()
 
@@ -449,6 +454,9 @@ class AEC:
         are recreated; the other trackers are reset in place."""
         if self._aec3_state is None:
             return  # AEC3 chain wasn't initialised (no filter)
+        # Hard post-chain reset event (OLA tail cleared, CNG reseeded to AEC_CNG_SEED). Soft / warm realignments
+        # never come through here. Wraps like a uint32 counter.
+        self._post_reset_serial = (self._post_reset_serial + 1) & 0xFFFFFFFF
         from .state import AecState as _Aec3State, AecStateConfig as _Aec3StateConfig
         from .residual import ResidualEchoEstimator, SuppressionGain
         n_bins = self._aec3_n_bins
@@ -500,7 +508,7 @@ class AEC:
         self._aec3_n2.fill(1.0e6)
         self._aec3_n2_initial.fill(0.0)
         self._aec3_n2_counter = 0
-        self._aec3_cng_seed = 42
+        self._aec3_cng_seed = AEC_CNG_SEED
         self._aec3_noise_initialized = False
         if not preserve_render_side:
             # Render-side context: cleared on full reset, kept on filter-derived recovery.
@@ -779,6 +787,23 @@ class AEC:
         """Return the latest per-frame diagnostic dict."""
         return self._diag.copy()
 
+    def get_post_reset_serial(self) -> int:
+        """Non-consuming, repeatably readable count (uint32, wraps) of hard post-chain resets.
+
+        A reset clears the library's overlap-add tail and reseeds its comfort noise to ``AEC_CNG_SEED``. Two sources:
+        ``reset()``, a separate call between hops (the serial already reads +1 when it returns, and the next hop's
+        context carries that value), and the hard delay-recovery chain inside ``process()`` (hard first delay
+        acquisition, hard delay shift), which runs before that hop's synthesis. An application that renders the
+        context seam itself keeps its own last-handled serial: when ``AecResContext.post_reset_serial`` (or this
+        getter) differs, it clears its OLA tail and reseeds its CNG to ``AEC_CNG_SEED`` BEFORE the first CNG draw and
+        BEFORE the IFFT/OLA push of that hop, then records the new value. It must not reset the AEC in response.
+        Soft / warm realignments do not count: ``apply_external_realign``, DT-aware soft acquisition and soft shift,
+        warm IR transfer, and the bad-relock revert (a soft revert to the pre-shift delay and taps that leaves the OLA
+        tail and CNG running). The value is 0 on a fresh instance and keeps counting across ``reset()``. NR and NN
+        state are not touched by the library; following the reset there is application policy.
+        """
+        return int(self._post_reset_serial)
+
     def get_formed_output(self) -> np.ndarray:
         """Return the selected, crossfaded, WOLA-formed linear output; requires ``return_formed_output=True`` and one processed hop."""
         if not self.config.return_formed_output:
@@ -901,7 +926,7 @@ class AEC:
         self, *, e_refined_time: np.ndarray, near_end_block: np.ndarray,
         e_coarse_time: Optional[np.ndarray] = None,
     ) -> tuple:
-        """Select the linear-filter output (refined, coarse or the raw capture) and form the WOLA spectra for RES and SuppressionGain.
+        """Select the linear-filter output (refined or coarse) and form the WOLA spectra for RES and SuppressionGain.
 
         Coarse is chosen when cleaner (e2_coarse < 0.9 e2_refined with enough capture and echo energy) or when the refined
         filter has diverged; the formed output crossfades over 30 samples on a change. Without a shadow filter
@@ -932,20 +957,10 @@ class AEC:
         cond_refined_diverged = e2_coarse < e2_refined and y2 < e2_refined
         use_refined = not (cond_coarse_cleaner or cond_refined_diverged)
         self._refined_filter_output_last_selected = bool(use_refined)
-        # Form the output with a 30-sample transition between the previous and current selection.
-        # Capture is the third candidate: when the quality analyzer has not declared the linear estimate
-        # usable and its residual exceeds the capture, the capture is used (the verdict is as of the previous hop).
-        e2_selected = e2_refined if use_refined else e2_coarse
+        # Form the output with a 30-sample transition between the previous and current selection. The selection is
+        # analysis only: the output-capture guard acts on the rendering base (see _post_output_base), never here.
         _selection = _SEL_REFINED if use_refined else _SEL_COARSE
-        # Only where the post-stage over-output guard cannot reach (with enable_res that guard owns the rule).
-        _capture_gate = (self.config.output_capture_when_linear_unusable
-                         and not self.config.enable_res
-                         and self.config.return_res_context)
-        if (_capture_gate
-                and not self._aec3_state.usable_linear_estimate()
-                and e2_selected > y2):
-            _selection = _SEL_CAPTURE
-        _candidate = (e_coarse_time, e_refined_time, near_end_block)
+        _candidate = (e_coarse_time, e_refined_time)
         from_time = _candidate[self._form_last_selection]
         to_time = _candidate[_selection]
         _form_transition_active = (self._form_last_selection != _selection)
@@ -1001,23 +1016,31 @@ class AEC:
         r2, r2_unb, _filter_converged_enough, _effective_usable_linear = self._post_estimate_residual(far_psd, near_psd, echo_psd)
         r2, r2_unb, _stationary_mask = self._post_stationary_residual(r2, r2_unb, _filter_converged_enough)
 
+        # Output-capture guard: decided once per hop, here, from this hop's final usable verdict and before any
+        # context exit, so full and split rendering share one result. It selects the rendering base only; the
+        # analysis spectra (error_spec / echo_spec) and the formed hop are never replaced.
+        _output_base, _guard_active = self._post_output_base(
+            error_spec, _sel_echo_spec, _effective_usable_linear)
+
         r2 = self._post_observer_residual(near_end, error_spec, _sel_echo_spec, _PSD_SCALE, _stationary_mask, r2)
 
         nearend_pwr = self._post_nearend_power(error_psd, near_psd)
         comfort_noise = self._post_comfort_noise(near_psd, _near_psd_win)
         gain = self._post_suppression_gain(nearend_pwr, r2, r2_unb, comfort_noise, render_block_scaled, _stationary_mask)
 
-        # Frequency-domain seam for an external post-NR residual suppressor: stash the WOLA error / echo
-        # spectra, gain and comfort noise so the caller can apply S(f) = error_spec * G_nr * res_gain (+ CNG).
+        # Frequency-domain seam for an external post-NR residual suppressor: stash the analysis WOLA error / echo
+        # spectra, the rendering base, gain and comfort noise so the caller can render
+        # S(f) = output_base_spec * G_nr * res_gain (+ CNG).
         if self.config.return_res_context:
-            self._post_stash_context(error_spec, _sel_echo_spec, gain, comfort_noise, r2)
+            self._post_stash_context(error_spec, _sel_echo_spec, gain, comfort_noise, r2,
+                                     _output_base, _guard_active)
             # With internal RES off, emit the linear residual so the external stage owns suppression.
             if not self.config.enable_res:
                 return raw_output.astype(np.float32)
 
-        e_out_spec = self._post_output_spectrum(error_spec, _sel_echo_spec, _effective_usable_linear, gain)
+        e_out_spec = _output_base * gain.astype(error_spec.dtype, copy=False)
 
-        e_out_spec = self._post_add_comfort_noise(e_out_spec, n_bins, _PSD_SCALE, comfort_noise, gain)
+        e_out_spec = self._post_add_comfort_noise(e_out_spec, n_bins, comfort_noise, gain)
 
         return self._post_synthesize(e_out_spec)
 
@@ -1257,7 +1280,7 @@ class AEC:
         self._aec3_noise_floor_int16sq = float(
             _cn_floor_factor * (10.0 ** ((90.30899869919436 + _dbfs) * 0.1))
         )
-        self._aec3_cng_seed = 42
+        self._aec3_cng_seed = AEC_CNG_SEED
         self._aec3_noise_initialized = False
         # Rescaled constants (at hop 160 / 16 kHz): Y2 alpha 0.1 -> 0.232, N2 track-down freshness 0.9 -> 0.997,
         # N2 slow-up 1.0002 -> 1.0005, N2_initial alpha 0.001 -> 0.0025, N2 update onset 50 blocks -> 20 hops,
@@ -1269,11 +1292,8 @@ class AEC:
         self._aec3_cng_n2_initial_alpha = float(_ema_to_hop(0.001, _hop, _sr))
         self._aec3_cng_n2_update_onset_hops = int(_blocks_to_hops(50, _hop, _sr))
         self._aec3_cng_n2_initial_duration_hops = int(_blocks_to_hops(1000, _hop, _sr))
-        # sqrt(2) * sin(2 pi i / 32) table: the sqrt(2) compensates the overlap-add power loss of uncorrelated CN frames.
-        _lut_idx = np.arange(32, dtype=np.float64)
-        self._aec3_sqrt2_sin_lut = (
-            np.sqrt(2.0) * np.sin(2.0 * np.pi * _lut_idx / 32.0)
-        ).astype(np.float32)
+        # sqrt(2) * sin(2 pi i / 32) table (modules/cng.py): the sqrt(2) compensates the overlap-add power loss of uncorrelated CN frames.
+        self._aec3_sqrt2_sin_lut = SQRT2_SIN_LUT.copy()
         pass
         return _hop
 
@@ -2316,6 +2336,10 @@ class AEC:
             usable_linear=bool(
                 self._aec3_state is not None
                 and self._aec3_state.usable_linear_estimate()),
+            # Rendering base (the output guard's choice, set in _aec3_post) and the hard-reset counter.
+            output_base_spec=getattr(self, '_res_output_base', None),
+            guard_active=bool(getattr(self, '_res_guard_active', False)),
+            post_reset_serial=int(self._post_reset_serial),
         )
         return _res_context
 
@@ -3235,12 +3259,17 @@ class AEC:
         )
         return gain
 
-    def _post_stash_context(self, error_spec, _sel_echo_spec, gain, comfort_noise, r2):
+    def _post_stash_context(self, error_spec, _sel_echo_spec, gain, comfort_noise, r2,
+                            output_base, guard_active):
+        # Analysis seam: error_spec / echo_spec / near_spec / formed_output pair with the formed hop and are never
+        # touched by the output guard. output_base_spec is the rendering base (the guard's choice).
         self._res_error_spec = error_spec.astype(np.complex64, copy=True)
         self._res_echo_spec = _sel_echo_spec.astype(np.complex64, copy=True)
         self._res_near_spec = (
             error_spec + _sel_echo_spec
         ).astype(np.complex64, copy=True)
+        self._res_output_base = output_base.astype(np.complex64, copy=True)
+        self._res_guard_active = bool(guard_active)
         self._res_formed_output = np.asarray(
             self._form_prev_output_time, dtype=np.float32
         ).copy()
@@ -3249,52 +3278,39 @@ class AEC:
         # Residual-echo PSD R^2 (int16^2-scaled, like comfort_noise), so an external NR can fold echo into its noise floor.
         self._res_r2 = np.asarray(r2, dtype=np.float32).copy()
 
-    def _post_output_spectrum(self, error_spec, _sel_echo_spec, _effective_usable_linear, gain):
-        # When the linear filter is unusable the base can switch to the windowed capture Y = error_spec + _sel_echo_spec.
-        _out_base = error_spec
-        if (getattr(self.config, "output_capture_when_linear_unusable", False)
+    @staticmethod
+    def _guard_energy(spec) -> np.float32:
+        """sum |spec|^2 as one float32 numpy pairwise reduction of float32 squared magnitudes (the C
+        sk_cabs_np_f32 / sk_sq_scale_f32 / sk_pairwise_sum_f32 chain), so the strict ``>`` below is decided
+        identically in both languages."""
+        mag = np.abs(spec)
+        return np.sum(mag * mag, dtype=np.float32)
+
+    def _post_output_base(self, error_spec, _sel_echo_spec, _effective_usable_linear):
+        """The output-capture guard. Returns ``(base, active)``.
+
+        When the linear filter is unusable this hop and the windowed residual is louder than the windowed capture
+        (``sum|E|^2 > sum|Y|^2``, strict, Y = E + echo), the rendering base is Y instead of E. Otherwise E.
+        """
+        if (self.config.output_capture_when_linear_unusable
                 and not _effective_usable_linear):
-            _y_base = (error_spec + _sel_echo_spec).astype(error_spec.dtype,
-                                                           copy=False)
-            # Fall back to the capture Y only when the residual is worse than the mic (diverged over-output, |E| > |Y|),
-            # per frame; this bounds a rare diverged frame.
-            if (float(np.sum(np.abs(error_spec) ** 2))
-                    > float(np.sum(np.abs(_y_base) ** 2))):
-                _out_base = _y_base
-        e_out_spec = _out_base * gain.astype(error_spec.dtype, copy=False)
-        return e_out_spec
+            _y_base = (error_spec + _sel_echo_spec).astype(error_spec.dtype, copy=False)
+            if self._guard_energy(error_spec) > self._guard_energy(_y_base):
+                return _y_base, True
+        return error_spec, False
 
-    def _post_add_comfort_noise(self, e_out_spec, n_bins, _PSD_SCALE, comfort_noise, gain):
-        # Comfort-noise injection: noise_gain[k] = sqrt(1 - G[k]^2); CN_re/im[k] = sqrt(N2[k]) * sqrt(2) sin(idx);
-        # E[k] += noise_gain[k] * CN[k]; DC and Nyquist bins are zero. At 16 kHz there is only the lowest band, so the
-        # upper-band 0.4 scaling does not apply.
+    def _post_add_comfort_noise(self, e_out_spec, n_bins, comfort_noise, gain):
+        # Comfort-noise injection (numeric core in modules/cng.py, shared with the public cng_fill helper):
+        # E[k] += sqrt(1 - G[k]^2) * (sqrt(N2[k] / PSD_SCALE) * sqrt(2) sin(idx)); DC and Nyquist bins are zero.
+        # At 16 kHz there is only the lowest band, so the upper-band 0.4 scaling does not apply.
         if self.config.enable_cng:
-            _n_random = n_bins - 2
-            _seed = int(self._aec3_cng_seed)
-            _re_idx = np.empty(_n_random, dtype=np.int32)
-            _im_idx = np.empty(_n_random, dtype=np.int32)
-            for _k in range(_n_random):
-                _seed = (_seed * 69069 + 1) & 0x7FFFFFFF
-                _ix = _seed >> 26   # top 5 bits, 0..31
-                _re_idx[_k] = _ix
-                _im_idx[_k] = (_ix + 8) & 31
-            self._aec3_cng_seed = _seed
-
-            # N2 is int16^2; divide by _PSD_SCALE before the sqrt to match e_out_spec.
-            _N_float = np.sqrt(
-                np.maximum(comfort_noise / _PSD_SCALE, 0.0)
-            ).astype(np.float32)
-            _cn_re = np.zeros(n_bins, dtype=np.float32)
-            _cn_im = np.zeros(n_bins, dtype=np.float32)
-            _cn_re[1:-1] = _N_float[1:-1] * self._aec3_sqrt2_sin_lut[_re_idx]
-            _cn_im[1:-1] = _N_float[1:-1] * self._aec3_sqrt2_sin_lut[_im_idx]
-
-            _noise_gain = np.sqrt(
-                np.maximum(1.0 - gain.astype(np.float32) ** 2, 0.0)
-            ).astype(np.float32)
-
-            _cng_spec = (_noise_gain * (_cn_re + 1j * _cn_im)).astype(np.complex64)
-            e_out_spec = e_out_spec + _cng_spec
+            self._aec3_cng_seed, _re_idx, _im_idx = cng_draw_indices(
+                self._aec3_cng_seed, n_bins - 2)
+            _ng, _cn_re, _cn_im = cng_noise_terms(
+                comfort_noise, gain, n_bins, _re_idx, _im_idx)
+            e_out_spec = np.array(e_out_spec, dtype=np.complex64, copy=True)
+            e_out_spec.real[1:n_bins - 1] += _ng * _cn_re
+            e_out_spec.imag[1:n_bins - 1] += _ng * _cn_im
         return e_out_spec
 
     def _post_synthesize(self, e_out_spec):

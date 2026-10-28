@@ -227,6 +227,7 @@ typedef struct Aec {
     int    delay_shift_judgment_hops_left;
     Complex* delay_shift_judgment_pre_W;
     Complex* delay_shift_judgment_pre_shadow_W;
+    float*   delay_shift_judgment_pre_H_error;   /* main filter H_error_per_bin [n_freqs] */
     int    delay_reject_values[AEC_DELAY_REJECT_CAP];
     int    delay_reject_count;
     unsigned int delay_generation;
@@ -462,7 +463,9 @@ typedef struct AecResContext {
     const Complex* far_spec;
     const Complex* near_spec;
     /* Frequency-domain seam for an external post-NR suppressor; valid when
-     * enable_res or return_res_context is set, else NULL. error_spec is the
+     * enable_res or return_res_context is set, else NULL. These are the ANALYSIS
+     * spectra: the output guard never alters them (the rendering base is
+     * aec_get_output_base()). error_spec is the
      * formed linear E(f) (50% overlap, periodic sqrt-Hann STFT, audio scale);
      * echo_spec the matching echo estimate; near_spec = error_spec +
      * echo_spec. res_gain is G_res(f) in [0, 1]. r2 (residual-echo PSD) and
@@ -491,6 +494,92 @@ typedef struct AecResContext {
 } AecResContext;
 
 void aec_get_res_context(const Aec* a, AecResContext* ctx);
+
+/* Rendering base of the last processed hop (valid when enable_res or return_res_context is set; any
+ * spatial_linear_context mode, any enable_res/return_res_context combination).
+ *
+ * AecResContext.error_spec / echo_spec / near_spec / formed_hop are the ANALYSIS seam: the selected linear
+ * residual (refined or coarse) and its matched echo estimate. They are never altered by the output guard
+ * (cfg output_capture_when_linear_unusable, always on in the shipped levels), and error_spec is the STFT of
+ * [previous formed hop | current formed hop], so a unity inverse transform with overlap-add reproduces the
+ * previous formed hop.
+ *
+ * The RENDERING base is what an external synthesizer must multiply by its gain(s), add comfort noise to,
+ * inverse-transform and overlap-add, exactly as aec_process() does internally. It is evaluated once per hop,
+ * after this hop's usable_linear verdict is final and before any context exit, identically in every mode:
+ * guard_active == 1 when the linear estimate is unusable and sum|error_spec|^2 > sum|error_spec + echo_spec|^2
+ * (strict, windowed spectra, float32 pairwise reduction); then base_spec = error_spec + echo_spec (the
+ * capture spectrum, equal to near_spec), otherwise base_spec = error_spec. base_spec does NOT pair with
+ * formed_hop (nor with the previous/next formed hop): on a guard hop it is a spectral switch to the capture
+ * and unity synthesis of it does not reproduce any formed hop. Use formed_hop / error_spec for analysis and
+ * base_spec only for rendering.
+ *
+ * Caveats for consumers:
+ *   - Time-domain seam consumers (AecResContext.formed_hop, AecLinearContext.formed_linear_hop) are NOT
+ *     guarded: those streams are the analysis residual on every hop, guard hops included, and there is no
+ *     time-domain rendering base. A consumer that plays or re-synthesizes them gets no output guard.
+ *   - A frequency-domain consumer that still renders error_spec (instead of base_spec) loses the guard:
+ *     on guard hops its output carries the residual louder than the capture. This is a breaking change
+ *     for renderers written against error_spec before aec_get_output_base() existed.
+ *
+ * struct_size is an input: the caller's declared size of *out (normally sizeof(AecOutputBase)). It is
+ * read first, and nothing is written when it is smaller than sizeof(AecOutputBase) (-1). A larger value
+ * (a newer caller struct) is accepted; only the sizeof(AecOutputBase) prefix is written, and on return
+ * struct_size holds sizeof(AecOutputBase). base_spec has n_freqs entries and aliases a dedicated internal
+ * buffer (or error_spec when the guard is off); it is valid until the next processing or reset call on
+ * the instance and is not touched by comfort noise or any other internal scratch. Returns 0, or -1 for
+ * a NULL out or a short struct_size (nothing written), or for a NULL instance or an instance with
+ * neither enable_res nor return_res_context (the prefix is zeroed apart from struct_size). */
+typedef struct AecOutputBase {
+    size_t         struct_size;   /* in: sizeof(AecOutputBase) */
+    int            n_freqs;
+    int            guard_active;  /* this hop's output guard fired */
+    const Complex* base_spec;     /* rendering base, n_freqs entries */
+} AecOutputBase;
+
+int aec_get_output_base(const Aec* a, AecOutputBase* out);
+
+/* AEC_CNG_SEED (aec_post.h, 42u) is the comfort-noise seed after construction and after every hard
+ * post-chain reset, and the seed aec_cng_fill() callers must (re)start from. */
+
+/* Counter of hard post-chain resets (wrapping uint32_t, 0 on a freshly created instance), read without
+ * consuming it. It advances by one on each of:
+ *   - aec_reset(): a separate call, not part of any processing call; the serial already reads +1 when
+ *     aec_reset() returns, and the next processing call starts from the cleared state.
+ *   - a hard reset inside a processing call (aec_process / aec_process_context), done before that hop's
+ *     synthesis: the hard branch of a first delay acquisition (Path A: no warm tap transfer and no
+ *     DT-aware soft acquisition) and the hard branch of a confirmed delay shift (Path B: no DT-aware soft
+ *     realign).
+ * It never moves on the bad-relock revert (a soft revert to the pre-shift delay and its tap snapshot), on
+ * warm tap transfers or DT-aware soft acquisitions / realignments, on aec_apply_external_realign(), or
+ * when only AecLinearContext.generation changes. At each counted reset the library clears its own OLA
+ * tail and reseeds its CNG to AEC_CNG_SEED.
+ * An application that synthesizes outside the library keeps its own last-handled serial; when the value
+ * after a processing call (or after aec_reset()) differs from it, the application must, BEFORE its first
+ * CNG draw and BEFORE the inverse-transform/overlap-add push of the hop it renders from that processing
+ * call (the hop just processed; after aec_reset(), the first hop processed afterwards), clear its OLA
+ * tail (e.g. ac_istft_reset) and reseed its comfort-noise state to AEC_CNG_SEED, then store the new
+ * serial. It must not reset the AEC in response, and NR/NN state is not touched by the library:
+ * following the reset there is application policy. Returns 0 for NULL. */
+uint32_t aec_post_reset_serial(const Aec* a);
+
+/* The synthesis window the library itself applies before overlap-add: a block_size table (block_size ==
+ * fft_size, the AecConfig grid the instance was created with). An external synthesizer that must reproduce
+ * aec_process() bit for bit has to use this table, not the audiolib default sqrt-Hann: the two differ in the
+ * last float bit.
+ *
+ * With audiolib (audio_stft.h):
+ *     const float* w; int n;
+ *     AcStftConfig sc;
+ *     aec_synthesis_window(aec, &w, &n);              // n == the fft_size of the AcIstft below
+ *     ac_stft_config_default(&sc, n);
+ *     sc.window = w;                                  // borrowed table; AcIstft carves none
+ *     size_t sz = ac_istft_get_mem_size(&sc);         // then ac_istft_init(mem, sz, &sc) as usual
+ * The AcIstft is configured with fft_size = the returned length. The pointer is read-only, owned by the
+ * library, and valid for the lifetime of the instance (it does not change across processing or reset calls);
+ * the AcIstft borrows it, so it must not outlive the Aec. *window and *length are set only on success.
+ * Returns 0, or -1 for a NULL instance, window or length (outputs untouched). */
+int aec_synthesis_window(const Aec* a, const float** window, int* length);
 
 /* Linear-AEC / NN post-filter seam: read-only view for an external post-filter.
  *   - aligned_far_hop aliases a->far_hop, valid until the next process/reset call.

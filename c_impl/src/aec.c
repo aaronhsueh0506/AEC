@@ -447,7 +447,8 @@ static int aec_delay_value_rejected(const Aec* a, int candidate) {
 }
 
 /* Commits target_delay as the ring-read alignment and runs the delay-shift
- * recovery chain (Path B hard reset, bad-relock revert). */
+ * recovery chain for a new, unverified delay (Path B hard reset). A bad-relock
+ * revert uses aec_apply_delay_shift_soft_revert(). */
 static void aec_apply_delay_shift_hard_reset(Aec* a, int target_delay) {
     a->current_delay = target_delay;
     aec_reset_filter_derived_state(a);
@@ -458,6 +459,38 @@ static void aec_apply_delay_shift_hard_reset(Aec* a, int target_delay) {
     filter_convergence_mark_diverged(&a->convergence);
     pbfdkf_handle_echo_path_change(&a->main_filter, 1, 0);
     a->pending_delay_change = AEC_DA_NEW_DETECTED;
+}
+
+/* Bad-relock revert to target_delay (the pre-shift delay) with the tap / H_error
+ * snapshot taken at the shift, without the hard-reset chain: the post chain
+ * (OLA, CNG, AecState, suppressor), EPC, convergence and Kalman Q state are kept,
+ * so aec_post_reset_serial() does not move. A retard (target < bad) clears the
+ * far history, an advance keeps it (the pbfdaf_warm_shift_ir sign rule). The
+ * windowed-ERLE accumulators, the main / shadow error EMAs and any pending delay
+ * are cleared. */
+static void aec_apply_delay_shift_soft_revert(Aec* a, int target_delay,
+                                              int bad_delay) {
+    size_t w_elems = (size_t)a->n_partitions * (size_t)a->n_freqs;
+    a->current_delay = target_delay;
+    memcpy(a->main_filter.base.W, a->delay_shift_judgment_pre_W,
+           w_elems * sizeof(Complex));
+    a->main_filter.base.w_dirty = 1;
+    memcpy(a->main_filter.H_error_per_bin, a->delay_shift_judgment_pre_H_error,
+           (size_t)a->n_freqs * sizeof(float));
+    if (a->has_shadow && a->delay_shift_judgment_pre_shadow_W != NULL) {
+        memcpy(a->shadow_filter.W, a->delay_shift_judgment_pre_shadow_W,
+               w_elems * sizeof(Complex));
+        a->shadow_filter.w_dirty = 1;
+    }
+    if (target_delay - bad_delay < 0) {
+        pbfdaf_clear_far_history(&a->main_filter.base);
+        if (a->has_shadow) pbfdaf_clear_far_history(&a->shadow_filter);
+    }
+    a->erle_window_near = 1e-10f;
+    a->erle_window_err = 1e-10f;
+    a->main_err_smooth = 0.0f;
+    a->shadow_err_smooth = 0.0f;
+    a->has_pending = 0; a->pending_delay = -1; a->pending_delay_ttl = 0;
 }
 
 /* Filter-only restart for a far realign (aec_apply_external_realign): clears
@@ -849,10 +882,11 @@ size_t aec_get_mem_size(const AecConfig* cfg_in) {
         t = ck_field_size_reps(t, Kz, sizeof(float), 2);    /* a3_sc diff/cap magnitude^2 */
     }
     /* Pre-shift W snapshots for the bad-relock revert (shadow's only when
-     * enable_shadow). */
+     * enable_shadow) and the main filter's H_error snapshot. */
     t = ck_field_size(t, ck_mul_size((size_t)np, Kz), sizeof(Complex));
     if (cfg->enable_shadow)
         t = ck_field_size(t, ck_mul_size((size_t)np, Kz), sizeof(Complex));
+    t = ck_field_size(t, Kz, sizeof(float));            /* pre-shift main H_error snapshot */
     t = ck_field_size(t, (size_t)((hop + 7) / 8), sizeof(float));
     t = ck_field_size_reps(t, Kz, sizeof(float), 6);   /* avg_rev y2s n2 n2i sye_re sye_im */
     t = ck_field_size_reps(t, Kz, sizeof(float), 2);   /* syy see */
@@ -891,7 +925,7 @@ size_t aec_get_mem_size(const AecConfig* cfg_in) {
     t = ck_field_size(t, Kz, sizeof(Complex));         /* lfs sel_esw */
     t = ck_field_size_reps(t, (size_t)hop, sizeof(float), 3); /* scr_sq scr_sref scr_scoa */
     t = ck_field_size(t, (size_t)fft, sizeof(float));  /* scr_tin */
-    t = ck_field_size_reps(t, Kz, sizeof(Complex), 4); /* sel_esw sel_echo nsw_e1 ybase */
+    t = ck_field_size_reps(t, Kz, sizeof(Complex), 5); /* sel_esw sel_echo nsw_e1 ybase output_base */
     t = ck_field_size_reps(t, Kz, sizeof(float), 9);   /* abs_near..x2_past */
     t = ck_field_size(t, ck_mul_size((size_t)np, Kz), sizeof(float)); /* w_mag2 */
     t = ck_field_size(t, (size_t)hop, sizeof(float));  /* render_block_scaled */
@@ -1168,6 +1202,8 @@ static uint8_t* aec_carve_filters(Aec* a, uint8_t* ptr, const AecConfig* cfg,
         } else {
             a->delay_shift_judgment_pre_shadow_W = NULL;
         }
+        a->delay_shift_judgment_pre_H_error = (float*)ptr;
+        ptr += ALIGN16((size_t)K * sizeof(float));
     }
     a->delay_shift_judgment_active = 0;
     a->delay_shift_judgment_pre_delay = -1;
@@ -1253,7 +1289,7 @@ static uint8_t* aec_carve_post_backing(Aec* a, uint8_t* ptr, const AecConfig* cf
         float        *eout_full = (float*)ptr; ptr += ALIGN16((size_t)fft * sizeof(float));
         memset(syy, 0, K * sizeof(float)); memset(see, 0, K * sizeof(float));
         aec_post_init(&a->post, &pcfg, a->post_fft,
-                      rd->synth_window, AECB_SQRT2_SIN_LUT, avg_rev,
+                      rd->synth_window, avg_rev,
                       y2s, n2, n2i, sye_re, sye_im, syy, see, ola,
                       np_, fp_, ep_, erp_, cpe, x2r, cgm, cn, nf_,
                       eout, eout_full);
@@ -1360,6 +1396,7 @@ static uint8_t* aec_carve_post_scratch(Aec* a, uint8_t* ptr, const AecConfig* cf
         AecPostRunScratch* sc = &a->a3_sc;
         sc->sel_esw  = P_CSLICE(0); sc->sel_echo = P_CSLICE(0);
         sc->nsw_e1   = P_CSLICE(0); sc->ybase    = P_CSLICE(0);
+        sc->output_base = P_CSLICE(0);
         sc->abs_near     = P_FSLICE(0); sc->abs_far      = P_FSLICE(0);
         sc->abs_sel_echo = P_FSLICE(0); sc->abs_error    = P_FSLICE(0);
         sc->abs_echo_coh = P_FSLICE(0); sc->abs_nsw_e1   = P_FSLICE(0);
@@ -1853,21 +1890,10 @@ static void aec_judge_delay_shift(Aec* a) {
             if (has_estimate && cur_erle
                     < a->delay_shift_judgment_pre_erle - 1.0f) {
                 int bad_delay = a->current_delay;
-                size_t w_elems = (size_t)a->n_partitions * (size_t)a->n_freqs;
-                /* Run the reset chain first (it wipes W), then restore the snapshot. */
-                aec_apply_delay_shift_hard_reset(
-                    a, a->delay_shift_judgment_pre_delay);
+                aec_apply_delay_shift_soft_revert(
+                    a, a->delay_shift_judgment_pre_delay, bad_delay);
                 /* The ring read offset moved back; seam consumers must see CHANGED. */
                 aec_bump_delay_generation(a);
-                memcpy(a->main_filter.base.W,
-                       a->delay_shift_judgment_pre_W,
-                       w_elems * sizeof(Complex));
-                if (a->has_shadow
-                        && a->delay_shift_judgment_pre_shadow_W != NULL) {
-                    memcpy(a->shadow_filter.W,
-                           a->delay_shift_judgment_pre_shadow_W,
-                           w_elems * sizeof(Complex));
-                }
                 if (a->delay_reject_count < AEC_DELAY_REJECT_CAP) {
                     a->delay_reject_values[a->delay_reject_count++] = bad_delay;
                 }
@@ -1933,8 +1959,9 @@ static void aec_track_delay_shift(Aec* a, int new_delay, int eligible) {
             && !aec_delay_value_rejected(a, new_delay)) {
         if (a->has_pending && abs(new_delay - a->pending_delay) < 16) {
             int old_current_delay = a->current_delay;
-            /* Snapshot the taps so a confirmed-bad relock can restore them;
-             * pre_erle is the reading just before the shift. */
+            /* Snapshot the taps and the main H_error (a statistic of the taps)
+             * so a confirmed-bad relock can restore them; pre_erle is the
+             * reading just before the shift. */
             float pre_shift_erle = a->last_erle_windowed;
             size_t w_elems = (size_t)a->n_partitions * (size_t)a->n_freqs;
             memcpy(a->delay_shift_judgment_pre_W, a->main_filter.base.W,
@@ -1942,6 +1969,9 @@ static void aec_track_delay_shift(Aec* a, int new_delay, int eligible) {
             if (a->has_shadow)
                 memcpy(a->delay_shift_judgment_pre_shadow_W,
                        a->shadow_filter.W, w_elems * sizeof(Complex));
+            memcpy(a->delay_shift_judgment_pre_H_error,
+                   a->main_filter.H_error_per_bin,
+                   (size_t)a->n_freqs * sizeof(float));
             a->current_delay = new_delay;
             aec_bump_delay_generation(a);
             a->has_pending = 0; a->pending_delay = -1; a->pending_delay_ttl = 0;
@@ -2825,6 +2855,30 @@ void aec_get_res_context(const Aec* a, AecResContext* ctx) {
     ctx->filter_converged = a->convergence.converged;
     ctx->filter_once_converged = a->convergence.once_converged;
     ctx->epc_active = a->epc.active;
+}
+
+int aec_get_output_base(const Aec* a, AecOutputBase* out) {
+    /* The caller's declared size is validated before anything is written: a short struct is left
+     * untouched, a larger one gets only the known prefix. */
+    if (!out || out->struct_size < sizeof(*out)) return -1;
+    memset(out, 0, sizeof(*out));
+    out->struct_size = sizeof(*out);
+    if (!a || (!a->cfg.enable_res && !a->cfg.return_res_context)) return -1;
+    out->n_freqs = a->n_freqs;
+    out->guard_active = a->post.output_guard_active;
+    out->base_spec = out->guard_active ? a->a3_sc.output_base : a->a3_sc.sel_esw;
+    return 0;
+}
+
+uint32_t aec_post_reset_serial(const Aec* a) {
+    return a ? a->post.reset_serial : 0u;
+}
+
+int aec_synthesis_window(const Aec* a, const float** window, int* length) {
+    if (!a || !window || !length || !a->post.synth_window) return -1;
+    *window = a->post.synth_window;
+    *length = a->block_size;
+    return 0;
 }
 
 /* Alignment confidence shared by AecDebugStatus and AecLinearContext: MATCHED

@@ -32,8 +32,6 @@ void linear_filter_select(LinearFilterSelect *s,
                           const Complex *echo_spec,
                           const float *sqrt_hann,
                           FftHandle *fft,
-                          int linear_unusable,
-                          int capture_fallback_enabled,
                           Complex *out_sel_esw,
                           Complex *out_sel_echo) {
     int hop = s->hop, blk = s->block_size, fft_size = s->fft_size, K = s->n_freqs;
@@ -70,17 +68,9 @@ void linear_filter_select(LinearFilterSelect *s,
 
         s->refined_last_selected = use_refined;
 
-        /* Capture is the third candidate: when the linear estimate is unusable and the residual has
-         * more energy than the capture, the filter is adding signal, so the capture is passed
-         * through. This is the time-domain hop test, separate from the post chain's windowed
-         * over-output guard. */
-        float e2_selected = use_refined ? e2_refined : e2_coarse;
         int selection = use_refined ? LFS_SEL_REFINED : LFS_SEL_COARSE;
-        if (capture_fallback_enabled && linear_unusable && e2_selected > y2)
-            selection = LFS_SEL_CAPTURE;
 
-        const float *candidate[3] = { e_coarse_time, e_refined_time,
-                                      near_end };
+        const float *candidate[2] = { e_coarse_time, e_refined_time };
         const float *from_time = candidate[s->form_last_selection];
         const float *to_time   = candidate[selection];
         int transition_active = (s->form_last_selection != selection);
