@@ -14,7 +14,8 @@ describes, e.g. `git log --all --diff-filter=D -- docs/f2_4_verdict.md` to find
 the deleting commit, then `git show <sha>^:docs/f2_4_verdict.md`. Treat every
 `docs/*.md` path in an entry below `[4.0.0]` as a git-history reference, not a
 live file. The `[4.0.0]` entry itself cites no `docs/` path — its evidence is
-checked in under `eval/ab_evidence/` and `docs/timing_constant_inventory.md`.
+`docs/timing_constant_inventory.md` and the A/B sets that were under `eval/ab_evidence/`
+(archived outside the repository since 2026-10-28; in git history through `6cf6785`).
 List the retired ones with (this reports the two example paths above as well,
 since they are themselves retired documents):
 
@@ -40,6 +41,23 @@ Bench standard for every entry below: 800-case AEC Challenge corpus,
 when verdict requires it.
 
 ---
+
+## [Unreleased] — 2026-10-28 — A/B evidence and simple-mu research tools archived out of the tree
+
+### Removed
+- `eval/ab_evidence/` (the 2026-08-06 adaptation-retiming, 2026-08-07 alpha-power, alpha-r and simple-mu sets; 87
+  tracked files plus the untracked `simple-mu/listen/` clips), `eval/simple_mu_branch_census.py`,
+  `eval/simple_mu_case_probe.py`, `eval/simple_mu_interaction_matrix.py` and their only test,
+  `python/tests/test_simple_mu_eval_tools.py` (moved together: the test imports the three tools). They are archived
+  outside the repository (see the cleanup record) and stay in git history through `6cf6785`. The archive is not
+  runnable as is: the tools resolve imports from their original location.
+- `.gitattributes`: it only held the `-whitespace` exceptions for the three archived `source.diff` captures.
+
+### Changed
+- `docs/timing_constant_inventory.json` / `.md`: the seven `eval/ab_evidence/<set>/` citations name the commit that
+  added the set and the last commit that tracks it; the `.md` is regenerated. No verdict or count changes (80
+  candidates, 25 open). `eval/ab_compare.py`, `eval/ab_report.py`, the A/B runners and the 90-case manifest stay.
+  No library code or output change; `aec_python_behavior_hash()` is unchanged (9fa7a2de...).
 
 ## [Unreleased] — 2026-10-27 — Config factories no longer overflow on an unsupported sample rate; timing-constant inventory cited by symbol
 
