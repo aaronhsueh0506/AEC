@@ -539,6 +539,15 @@ typedef struct AecOutputBase {
 
 int aec_get_output_base(const Aec* a, AecOutputBase* out);
 
+/* Output-guard API version (1: aec_get_output_base, aec_post_reset_serial, aec_synthesis_window, aec_cng_fill
+ * with AEC_CNG_SEED). An application that renders AecResContext spectra itself must make this macro part of
+ * its build, e.g. #if !defined(AEC_OUTPUT_GUARD_API_VERSION) || AEC_OUTPUT_GUARD_API_VERSION < 1 / #error / #endif,
+ * and must render aec_get_output_base() instead of error_spec, handle aec_post_reset_serial(), borrow
+ * aec_synthesis_window() and draw comfort noise with aec_cng_fill() from AEC_CNG_SEED. Nothing else in the API
+ * reveals that an old renderer of error_spec has lost the guard; the migration steps are in
+ * docs/sdk_migration_output_guard.md. */
+#define AEC_OUTPUT_GUARD_API_VERSION 1
+
 /* AEC_CNG_SEED (aec_post.h, 42u) is the comfort-noise seed after construction and after every hard
  * post-chain reset, and the seed aec_cng_fill() callers must (re)start from. */
 

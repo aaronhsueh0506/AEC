@@ -247,9 +247,15 @@ disagreement (3.3e-7 at 48 kHz/1024; 3.0e-7 at 16 kHz/256) and 4 times the large
 near-threshold fixtures (identical inputs) keep exact equality. The same rounding can also fall on a per-bin decision inside
 the adaptive filter (the refined filter's H_error leakage compare `e2_refined[k] <= e2_coarse[k]`, or the noise gate
 `X2[k] >= gate`); the one-bin difference then spreads to the analysis seam. Such a cell is registered as T-01 in
-`c_impl/test/pyc_parity/pyc_parity.py` and is INFO only while the guard, serial and delay gates stay green as run and the
-Python run with the registered decisions forced the way C takes them is green on every gate. `res_gain` is compared by its
-relative L2 weighted by each bin's near-end power `|E + echo|²` (at most 1e-4); its per-bin maximum is printed only.
+`c_impl/test/pyc_parity/pyc_parity.py`. T-01 is a known numeric divergence, not an equivalence: as run, the raw C and
+Python outputs of such a cell can exceed the audio tolerance (`revert.rOza.16k512`: max_abs about 0.0527), and only the
+forced-decision experiment shows that the difference is the registered tie. The cell is INFO only while the guard, serial
+and delay gates stay green as run and the Python run with the registered decisions forced the way C takes them is green
+on every gate. `res_gain` is held by three gates: its relative L2 weighted by each bin's near-end power `|E + echo|²` (at
+most 1e-4), its largest difference over the bins within 20 dB of the hop's peak near-end power (at most 3e-3), and, on
+the cells that dump the rendering base, the rendered product `output_base_spec * res_gain` per hop (relative L2 at most
+3e-3 on every hop within 60 dB of the loudest); its all-bin maximum is printed only. Every compared dump must be
+non-empty, of equal length on both sides and finite, or the cell fails.
 `echo_spec` is not altered by the guard. The guard can fire for the whole of a
 clip whose estimate is never declared usable; it is not confined to the start of
 a stream.

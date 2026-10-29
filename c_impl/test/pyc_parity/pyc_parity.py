@@ -57,8 +57,10 @@ derivation at the constant: a mismatch is excused only when both sides' relative
 <= 1e-6 on a hop unusable on both sides; tie-band hops and in-band mismatches are counted and printed per cell); post_reset_serial
 identical on every hop; current delay identical on every hop and the bad-relock reverts at the same hops (the guard.revert.* cells
 also require at least one revert in each language); base_spec (all hops, and the hops where either side's guard fired) within
-CTX_spec_rel_l2; the ctx fields within their CTX constants (res_gain by its near-end-power-weighted rel L2, CTX_gain_wrel_l2;
-its max_abs is printed only); formed_hop within L1_raw_max_abs; the audio within the Layer-1/2 constants. The hard seam gates
+CTX_spec_rel_l2; the ctx fields within their CTX constants (res_gain three ways: its near-end-power-weighted rel L2,
+CTX_gain_wrel_l2; its max_abs over the loud bins, CTX_gain_loud_max_abs; and the rendered product base * res_gain per hop,
+CTX_render_hop_rel_l2; its all-bin max_abs is printed only); formed_hop within L1_raw_max_abs; the audio within the Layer-1/2
+constants. The hard seam gates
 (guard_active outside the band, post_reset_serial, delay events / reverts) have no marker anywhere. Five cells carry T-01 (a
 registered float32 tie in the refined filter's per-bin leakage compare or the filter noise gate): they are INFO only while the
 hard seam gates are green as run AND the Python run with the registered decisions forced the way C takes them (driver
@@ -68,6 +70,11 @@ FAILURE, not a skip; they run in --full / --only only.
 
 Suites: the default is the lean suite (10 scenes, one per mechanism a planted regression is known to move); --full runs
 every scenario; --quick is an older, narrower subset; --only SUBSTR selects from the full set.
+
+Dumps are checked before anything is measured (checked_pair): every compared array must be non-empty, of the same length as its
+counterpart and finite on both sides (out, raw, trace hops, ctx records, base records, formed hop, delay rows). A violation FAILs
+the cell whatever its marker (INFO, T-01, expected-red); there is no deliberate trim, both drivers run the same hop loop. Gates are
+written so that a NaN reading fails (worse(): 'not (x <= tol)').
 
 Exit: 0 all as expected; 1 a cell failed; 2 setup error.
 """
@@ -116,7 +123,21 @@ TOL = {
     'CTX_gain_wrel_l2': 1.0e-4,      # res_gain error weighted by the near-end power |E + echo|^2 of each bin (what the gain
                                      # multiplies): worst C-vs-Python 1.52e-5 (IUp2.16k256 vs its 1-ulp branch; 1.01e-5 unperturbed,
                                      # rOza.16k256), margin 6.6x; a planted 0.1 % enr_suppress change reads 1.29e-3..3.02e-3 (13x over)
+    # Two res_gain gates beside the weighted L2, which is a whole-cell aggregate and so dilutes an error confined to a few hops or
+    # bins. Measured 2026-10-29 on the 16 guard cells and the 3 other context cells (C std vs the Python run each cell is judged
+    # against, and the forced run of every T-01 cell); a planted +0.1 % enr_suppress (Python, Y91u/waxU 16k256 full and
+    # hard_reset.16k256.lean) reads 18x..83x over each:
+    'CTX_gain_loud_max_abs': 3.0e-3, # max |dgain| over the bins within LOUD_BIN_DB of the hop's peak near-end power |E + echo|^2:
+                                     # worst 1.17e-3 (revert.rOza.16k256; the ratchet reaches loud bins too), margin 2.6x; planted
+                                     # 0.055..0.25
+    'CTX_render_hop_rel_l2': 3.0e-3, # what an application renders, rendering base * res_gain (guard seam cells only: the others do
+                                     # not dump the base): max over hops within RENDER_HOP_FLOOR_DB of the cell's loudest product hop
+                                     # of ||Pc - Pp|| / ||Pp||; worst 1.06e-3 (revert.waxU.16k256), margin 2.8x (p99 <= 5.6e-5 and
+                                     # whole-cell <= 1.0e-5, printed); planted 0.066..0.16
 }
+LOUD_BIN_DB = 20.0             # loud bin: near-end power >= hop peak - 20 dB (10 dB and 30 dB give the same worst cell)
+RENDER_HOP_FLOOR_DB = 60.0     # hops more than 60 dB below the loudest product hop are left out (near silence; 40/80 dB change
+                               # the worst green reading by < 1 %)
 MAX_PY_VARIANTS = 3           # unperturbed + one-ulp-perturbed seeds 1 and 2
 L2_PROBE_EPS = 1e-4           # relative mic nudge used to ask 'is this scene chaotic at approximation scale?'
 L2_PROBE_SEED = 11
@@ -443,11 +464,12 @@ def build_scenarios():
 # Metrics
 # ----------------------------------------------------------------------------------------------
 def r6(x):
+    """Round for the report. A non-finite value stays non-finite (never None), so a gate written as worse() fails on it."""
     if x is None:
         return None
     x = float(x)
     if not math.isfinite(x):
-        return None
+        return x
     return float('%.6g' % x)
 
 
@@ -455,32 +477,57 @@ def load_f32(path):
     return np.fromfile(path, dtype=np.float32)
 
 
-def cmp_metrics(test, ref):
-    """test, ref: float32 arrays. Metrics of d = test - ref (float64)."""
-    n = min(len(test), len(ref))
-    a = test[:n].astype(np.float64)
-    b = ref[:n].astype(np.float64)
+class DumpError(Exception):
+    """A dump that cannot be compared: empty, non-finite, or of a different length than its counterpart. Fails the cell."""
+
+
+def checked_pair(name, test, ref):
+    """Every C-vs-Python (or build-vs-build) comparison goes through here first: both arrays non-empty, of equal length and
+    finite on both sides. Both drivers run the same hop loop (range(0, n - hop, hop)) over the same samples, so there is no
+    deliberate trim anywhere and any length difference is a FAIL, never a truncation to the shorter one."""
+    test, ref = np.asarray(test), np.asarray(ref)
+    if test.size == 0 or ref.size == 0:
+        raise DumpError('%s: empty (test %d, ref %d values)' % (name, test.size, ref.size))
+    if test.shape != ref.shape:
+        raise DumpError('%s: length differs (test %s, ref %s)' % (name, test.shape, ref.shape))
+    for side, x in (('test', test), ('ref', ref)):
+        if np.issubdtype(x.dtype, np.inexact):
+            bad = ~np.isfinite(x)
+            if bad.any():
+                i = int(np.flatnonzero(bad)[0])
+                raise DumpError('%s: %d non-finite value(s) on the %s side (first at flat index %d: %s)'
+                                % (name, int(bad.sum()), side, i, np.ravel(x)[i]))
+    return test, ref
+
+
+def cmp_metrics(test, ref, name='audio'):
+    """test, ref: float32 arrays (checked by checked_pair). Metrics of d = test - ref (float64)."""
+    test, ref = checked_pair(name, test, ref)
+    n = len(test)
+    a = test.astype(np.float64)
+    b = ref.astype(np.float64)
     d = a - b
     ad = np.abs(d)
-    rms_d = math.sqrt(float(np.mean(d * d))) if n else 0.0
-    rms_b = math.sqrt(float(np.mean(b * b))) if n else 0.0
-    exact = bool(np.array_equal(test[:n], ref[:n])) and len(test) == len(ref)
+    rms_d = math.sqrt(float(np.mean(d * d)))
+    rms_b = math.sqrt(float(np.mean(b * b)))
+    exact = bool(np.array_equal(test, ref))
     if rms_d == 0.0:
         rms_db = None            # bit identical: no finite dB figure
     else:
         rms_db = 20.0 * math.log10(rms_d / (rms_b + 1e-30))
     return {
         'n': int(n),
-        'max_abs': r6(float(np.max(ad)) if n else 0.0),
-        'p999': r6(float(np.percentile(ad, 99.9)) if n else 0.0),
+        'max_abs': r6(float(np.max(ad))),
+        'p999': r6(float(np.percentile(ad, 99.9))),
         'rms_db': r6(rms_db),
         'bitexact': exact,
-        'len_equal': len(test) == len(ref),
+        'len_equal': True,
     }
 
 
 def worse(x, tol):
-    return x is not None and x > tol
+    """Gate: True unless x is a number <= tol. None means 'no figure' (e.g. no guard hop in the cell); NaN fails."""
+    return x is not None and not (x <= tol)
 
 
 # ----------------------------------------------------------------------------------------------
@@ -576,26 +623,30 @@ def load_run(pre):
 
 
 def cell(c_run_data, ref_run_data):
-    return {'out': cmp_metrics(c_run_data['out'], ref_run_data['out']),
-            'raw': cmp_metrics(c_run_data['raw'], ref_run_data['raw'])}
+    nt, nr = len(c_run_data['trace']), len(ref_run_data['trace'])
+    if nt == 0 or nt != nr:
+        raise DumpError('trace: %d hops (test) vs %d hops (ref)' % (nt, nr))
+    return {'out': cmp_metrics(c_run_data['out'], ref_run_data['out'], 'out'),
+            'raw': cmp_metrics(c_run_data['raw'], ref_run_data['raw'], 'raw')}
 
 
 def l1_ok(m):
     return (not worse(m['out']['max_abs'], TOL['L1_out_max_abs'])
             and not worse(m['raw']['max_abs'], TOL['L1_raw_max_abs'])
-            and not (m['out']['rms_db'] is not None and m['out']['rms_db'] > TOL['L1_out_rms_db'])
+            and not worse(m['out']['rms_db'], TOL['L1_out_rms_db'])
             and m['out']['len_equal'] and m['raw']['len_equal'])
 
 
 def l2_ok(m):
     return (not worse(m['out']['max_abs'], TOL['L2_out_max_abs'])
             and not worse(m['raw']['max_abs'], TOL['L2_raw_max_abs'])
-            and not (m['out']['rms_db'] is not None and m['out']['rms_db'] > TOL['L2_out_rms_db'])
+            and not worse(m['out']['rms_db'], TOL['L2_out_rms_db'])
             and m['out']['len_equal'] and m['raw']['len_equal'])
 
 
 def score(m):
-    return m['out']['max_abs'] if m['out']['max_abs'] is not None else 0.0
+    x = m['out']['max_abs']
+    return x if x is not None and math.isfinite(x) else math.inf
 
 
 # ----------------------------------------------------------------------------------------------
@@ -638,16 +689,45 @@ def s05_evidence(c_tr, p_tr):
             'ctx_conv_shape_is_late_rising': bool(mism) and len(late_rising) == len(mism)}
 
 
-def ctx_compare(c, p, K):
-    """C and Python ctx dumps (per hop: 9 scalars, error_spec 2K, echo_spec 2K, res_gain K, r2 K, cn K)."""
-    rec = 9 + 4 * K + 3 * K
-    nh = min(len(c), len(p)) // rec
-    C = c[:nh * rec].reshape(nh, rec).astype(np.float64)
-    P = p[:nh * rec].reshape(nh, rec).astype(np.float64)
-    names = ['far_power', 'erle_factor', 'dt_indicator', 'divergence', 'saturation_level', 'erl_estimate',
-             'filter_converged', 'res_floor_protect', 'usable_linear']
+CTX_SCALARS = ('far_power', 'erle_factor', 'dt_indicator', 'divergence', 'saturation_level', 'erl_estimate',
+               'filter_converged', 'res_floor_protect', 'usable_linear')
+
+
+def ctx_records(ctx, K, name):
+    """ctx dump -> float64 [hops, 9 + 7K] (per hop: 9 scalars, error_spec 2K, echo_spec 2K, res_gain K, r2 K, cn K)."""
+    rec = 9 + 7 * K
+    if len(ctx) == 0 or len(ctx) % rec:
+        raise DumpError('%s: %d floats is not a whole, non-zero number of %d-float context records' % (name, len(ctx), rec))
+    return ctx.reshape(-1, rec).astype(np.float64)
+
+
+def loud_bin_gain_max_abs(ga, gb, w, x_db):
+    """max |ga - gb| over the bins whose near-end power w is within x_db of that hop's peak w (hops with a zero peak skipped)."""
+    peak = np.max(w, axis=1, keepdims=True)
+    loud = (w >= peak * 10.0 ** (-x_db / 10.0)) & (peak > 0.0)
+    return float(np.max(np.abs(ga - gb)[loud])) if loud.any() else 0.0, int(loud.sum())
+
+
+def render_product_rel(ga, gb, bc, bp, floor_db):
+    """The spectrum an application renders, base * gain, C vs Python: per-hop rel L2 ||Pc - Pp|| / ||Pp|| over the hops whose
+    product power is within floor_db of the cell's loudest product hop, and the whole-cell rel L2 (all hops)."""
+    pc, pp = bc * ga, bp * gb
+    e = np.sum(np.abs(pc - pp) ** 2, axis=1)
+    q = np.sum(np.abs(pp) ** 2, axis=1)
+    keep = q >= np.max(q) * 10.0 ** (-floor_db / 10.0)
+    per_hop = np.sqrt(e[keep] / np.maximum(q[keep], 1e-30))
+    return {'per_hop_max': float(np.max(per_hop)), 'per_hop_p99': float(np.percentile(per_hop, 99)),
+            'per_hop_median': float(np.median(per_hop)), 'hops_gated': int(keep.sum()), 'hops': int(len(q)),
+            'whole_rel_l2': float(np.sqrt(np.sum(e) / max(float(np.sum(q)), 1e-30)))}
+
+
+def ctx_compare(c, p, K, base_c=None, base_p=None):
+    """C and Python ctx dumps (per hop: 9 scalars, error_spec 2K, echo_spec 2K, res_gain K, r2 K, cn K); with base_c/base_p (the
+    rendering base, complex [hops, K], guard seam cells) also the rendered product base * res_gain."""
+    C, P = checked_pair('ctx', ctx_records(c, K, 'ctx (test)'), ctx_records(p, K, 'ctx (ref)'))
+    nh = len(C)
     out = {'hops': int(nh), 'scalars': {}}
-    for i, nm in enumerate(names):
+    for i, nm in enumerate(CTX_SCALARS):
         d = np.abs(C[:, i] - P[:, i])
         scale = max(float(np.max(np.abs(P[:, i]))), 1e-30)
         out['scalars'][nm] = {'max_abs': r6(float(np.max(d))), 'rel_to_max': r6(float(np.max(d)) / scale),
@@ -673,6 +753,15 @@ def ctx_compare(c, p, K):
     w = (pe[..., 0] + po[..., 0]) ** 2 + (pe[..., 1] + po[..., 1]) ** 2
     ga, gb = C[:, 9 + 4 * K:9 + 5 * K], P[:, 9 + 4 * K:9 + 5 * K]
     out['res_gain']['wrel_l2'] = r6(float(np.sqrt(np.sum((ga - gb) ** 2 * w) / max(float(np.sum(gb ** 2 * w)), 1e-30))))
+    lm, nl = loud_bin_gain_max_abs(ga, gb, w, LOUD_BIN_DB)
+    out['res_gain']['loud_max_abs'] = r6(lm)
+    out['res_gain']['loud_bins'] = nl
+    if base_c is not None:
+        bc, bp = checked_pair('base_spec (render product)', base_c, base_p)
+        if len(bc) != nh:
+            raise DumpError('base_spec: %d hops, context %d hops' % (len(bc), nh))
+        rp = render_product_rel(ga, gb, bc.astype(np.complex128), bp.astype(np.complex128), RENDER_HOP_FLOOR_DB)
+        out['res_gain']['render'] = {k: (r6(v) if isinstance(v, float) else v) for k, v in rp.items()}
     return out
 
 
@@ -685,15 +774,20 @@ def ctx_ok(cc):
             # held to the same any-mismatch-fails rule, not skipped.
             if v['mismatch_hops'] > 0:
                 bad.append(nm)
-        elif v['rel_to_max'] is not None and v['rel_to_max'] > TOL['CTX_scalar_rel']:
+        elif worse(v['rel_to_max'], TOL['CTX_scalar_rel']):
             bad.append(nm)
     for nm in ('error_spec', 'echo_spec'):
-        if cc[nm]['rel_l2'] > TOL['CTX_spec_rel_l2']:
+        if worse(cc[nm]['rel_l2'], TOL['CTX_spec_rel_l2']):
             bad.append(nm)
-    if cc['res_gain']['wrel_l2'] > TOL['CTX_gain_wrel_l2']:
+    g = cc['res_gain']
+    if worse(g['wrel_l2'], TOL['CTX_gain_wrel_l2']):
         bad.append('res_gain')
+    if worse(g['loud_max_abs'], TOL['CTX_gain_loud_max_abs']):
+        bad.append('res_gain(loud bins)')
+    if 'render' in g and worse(g['render']['per_hop_max'], TOL['CTX_render_hop_rel_l2']):
+        bad.append('res_gain(render product)')
     for nm in ('r2', 'comfort_noise'):
-        if cc[nm]['rel_l2'] > TOL['CTX_spec_rel_l2']:
+        if worse(cc[nm]['rel_l2'], TOL['CTX_spec_rel_l2']):
             bad.append(nm)
     return bad
 
@@ -702,7 +796,8 @@ def base_records(raw, K):
     """<pre>.base.bin -> (guard_active int32[n], post_reset_serial uint32[n], base_spec complex64[n, K]).
     Per hop: int32 guard_active, uint32 post_reset_serial, K complex float32 (re, im)."""
     dt = np.dtype([('g', '<i4'), ('s', '<u4'), ('b', '<f4', (K, 2))])
-    assert len(raw) % dt.itemsize == 0, 'base dump is not a whole number of hops'
+    if len(raw) == 0 or len(raw) % dt.itemsize:
+        raise DumpError('base dump: %d bytes is not a whole, non-zero number of %d-byte hop records' % (len(raw), dt.itemsize))
     a = raw.view(dt)
     b = (a['b'][..., 0] + 1j * a['b'][..., 1]).astype(np.complex64)
     return a['g'].copy(), a['s'].copy(), b
@@ -710,9 +805,8 @@ def base_records(raw, K):
 
 def ctx_spectra(ctx, K):
     """ctx dump -> (error_spec, echo_spec, usable_linear) per hop, complex128 / int."""
-    rec = 9 + 7 * K
-    nh = len(ctx) // rec
-    x = ctx[:nh * rec].reshape(nh, rec).astype(np.float64)
+    x = ctx_records(ctx, K, 'ctx')
+    nh = len(x)
     e = x[:, 9:9 + 2 * K].reshape(nh, K, 2)
     o = x[:, 9 + 2 * K:9 + 4 * K].reshape(nh, K, 2)
     return e[..., 0] + 1j * e[..., 1], o[..., 0] + 1j * o[..., 1], x[:, 8]
@@ -746,7 +840,16 @@ def guard_compare(c, p, K, hop, min_reverts=0):
     """Guard-seam comparison of a C run and a Python run (dicts from load_run, both with --ctx --base)."""
     cg, cs, cb = base_records(c['base_raw'], K)
     pg, ps, pb = base_records(p['base_raw'], K)
-    n = min(len(cg), len(pg))
+    checked_pair('guard_active', cg, pg)
+    checked_pair('post_reset_serial', cs, ps)
+    checked_pair('base_spec', cb, pb)
+    checked_pair('delay events', c['dly'], p['dly'])
+    checked_pair('formed_hop', c['formed'], p['formed'])
+    for side, r, g in (('test', c, cg), ('ref', p, pg)):
+        if len(r['dly']) != len(g) or len(r['formed']) != len(g) * hop or len(r['ctx']) != len(g) * (9 + 7 * K):
+            raise DumpError('%s side: base %d hops, dly %d rows, formed %d samples (hop %d), ctx %d floats' % (
+                side, len(g), len(r['dly']), len(r['formed']), hop, len(r['ctx'])))
+    n = len(cg)
     out = {'hops': int(n), 'hops_c': int(len(cg)), 'hops_py': int(len(pg)),
            'guard_hops_c': int(cg[:n].sum()), 'guard_hops_py': int(pg[:n].sum())}
     gm = np.nonzero(cg[:n] != pg[:n])[0]
@@ -810,8 +913,7 @@ def guard_compare(c, p, K, hop, min_reverts=0):
     out['base_spec_rel_l2'] = r6(rel(cb[:n], pb[:n]))
     either = (cg[:n] == 1) | (pg[:n] == 1)
     out['base_spec_rel_l2_guard_hops'] = r6(rel(cb[:n][either], pb[:n][either])) if either.any() else None
-    nf = min(len(c['formed']), len(p['formed'])) // hop
-    out['formed_hop_max_abs'] = r6(float(np.max(np.abs(c['formed'][:nf * hop].astype(np.float64) - p['formed'][:nf * hop])))) if nf else None
+    out['formed_hop_max_abs'] = r6(float(np.max(np.abs(c['formed'].astype(np.float64) - p['formed']))))
     bad = []
     if out['guard_mismatch_outside_band_hops'] or out['hops_c'] != out['hops_py']:
         bad.append('guard_active')
@@ -821,9 +923,9 @@ def guard_compare(c, p, K, hop, min_reverts=0):
         bad.append('delay_events')
     if len(out['revert_hops_py']) < min_reverts:
         bad.append('revert_not_reached(%d<%d)' % (len(out['revert_hops_py']), min_reverts))
-    if out['base_spec_rel_l2'] > TOL['CTX_spec_rel_l2']:
+    if worse(out['base_spec_rel_l2'], TOL['CTX_spec_rel_l2']):
         bad.append('base_spec')
-    if out['base_spec_rel_l2_guard_hops'] is not None and out['base_spec_rel_l2_guard_hops'] > TOL['CTX_spec_rel_l2']:
+    if worse(out['base_spec_rel_l2_guard_hops'], TOL['CTX_spec_rel_l2']):
         bad.append('base_spec(guard hops)')
     if worse(out['formed_hop_max_abs'], TOL['L1_raw_max_abs']):
         bad.append('formed_hop')
@@ -834,7 +936,22 @@ def guard_compare(c, p, K, hop, min_reverts=0):
 # ----------------------------------------------------------------------------------------------
 # One scenario
 # ----------------------------------------------------------------------------------------------
+def render_bases(scn, c, p, K):
+    """(C, Python) rendering base for the render-product res_gain gate: only the guard seam cells dump it."""
+    if not scn.base:
+        return None, None
+    return base_records(c['base_raw'], K)[2], base_records(p['base_raw'], K)[2]
+
+
 def eval_scenario(R, scn):
+    try:
+        return _eval_scenario(R, scn)
+    except DumpError as e:
+        return {'id': scn.id, 'hpf': scn.hpf, 'expected_red': list(scn.red), 'py_variants_run': 1,
+                'status': 'FAIL (invalid dump, nothing compared: %s)' % e}
+
+
+def _eval_scenario(R, scn):
     res = {'id': scn.id, 'config': {
         'input': scn.inp, 'sr': scn.sr, 'fft': scn.fft, 'preset': scn.preset, 'observer': scn.obs,
         'py_guard_disabled': scn.guard_off, 'enable_res': scn.res, 'enable_cng': scn.cng, 'context': scn.ctx},
@@ -904,7 +1021,7 @@ def eval_scenario(R, scn):
     if scn.ctx:
         ev.update(s05_evidence(c_tr, p_tr))
         K = scn.fft // 2 + 1
-        cc = ctx_compare(cstd['ctx'], py_best['ctx'], K)
+        cc = ctx_compare(cstd['ctx'], py_best['ctx'], K, *render_bases(scn, cstd, py_best, K))
         res['context'] = cc
         ev['ctx_fields_over_tolerance'] = ctx_ok(cc)
     guard_bad = []
@@ -933,9 +1050,10 @@ def eval_scenario(R, scn):
             status = 'PASS'
         elif audio_green and not ctx_bad:
             status = 'FAIL (guard seam: %s)' % ','.join(guard_bad)
+        elif audio_green:
+            status = 'FAIL (ctx: %s)' % ','.join(ctx_bad) + ('; guard seam: %s' % ','.join(guard_bad) if guard_bad else '')
         else:
-            status = 'FAIL (layer 1 red, no marker)' + ('; ctx: %s' % ','.join(ctx_bad) if audio_green and ctx_bad else '') + \
-                ('; guard seam: %s' % ','.join(guard_bad) if guard_bad else '')
+            status = 'FAIL (layer 1 red, no marker)' + ('; guard seam: %s' % ','.join(guard_bad) if guard_bad else '')
     elif audio_expected_red:
         if audio_green:
             status = 'FAIL UNEXPECTED_GREEN(%s): remove the marker' % ','.join(scn.red)
@@ -955,7 +1073,7 @@ def eval_scenario(R, scn):
         K = scn.fft // 2 + 1
         forced = load_run(R.py_run(scn, 0, tag='py_ties'))
         fm = cell(cstd, forced)
-        fbad = ctx_ok(ctx_compare(cstd['ctx'], forced['ctx'], K))
+        fbad = ctx_ok(ctx_compare(cstd['ctx'], forced['ctx'], K, *render_bases(scn, cstd, forced, K)))
         fg = guard_compare(cstd, forced, K, scn.fft // 2, scn.reverts)['fields_over_tolerance']
         hard_bad = [f for f in guard_bad if not (f.startswith('base_spec') or f == 'formed_hop')]
         forced_ok = l1_ok(fm) and not fbad and not fg
@@ -1026,7 +1144,12 @@ def hpf_fidelity(R, a):
         run([a.std_bin, '--hpf-only', mic, cs, str(sr)])
         run([a.ship_bin, '--hpf-only', mic, csh, str(sr)])
         P, C, S = load_f32(py), load_f32(cs), load_f32(csh)
-        m = cmp_metrics(P, C)
+        try:
+            m = cmp_metrics(P, C, 'hpf')
+        except DumpError as e:
+            cells.append({'id': 'hpf_fidelity.%dk' % (sr // 1000), 'sr': sr, 'py_f32_emulation_vs_c_std': {'max_abs': None, 'bitexact': False},
+                          'c_ship_vs_c_std_bitexact': False, 'status': 'FAIL (invalid dump: %s)' % e})
+            continue
         cells.append({'id': 'hpf_fidelity.%dk' % (sr // 1000), 'sr': sr, 'cutoff_hz': 80.0,
                       'py_f32_emulation_vs_c_std': {'max_abs': m['max_abs'], 'bitexact': m['bitexact']},
                       'c_ship_vs_c_std_bitexact': bool(np.array_equal(C, S)),
@@ -1160,6 +1283,9 @@ def print_table(results, statics, hpfc):
     hdr = '%-31s %-3s %-5s %-4s %9s %9s %7s %9s %5s %6s  %s'
     print(hdr % ('scenario', 'L', 'hpf', 'pyV', 'out_max', 'out_p99.9', 'rms_dB', 'raw_max', 'bit', 'margin', 'status'))
     for r in results:
+        if 'layer1' not in r:
+            print('%-31s %s' % (r['id'], r['status']))
+            continue
         hp = r['hpf']
         l1, l2 = r['layer1'], r['layer2']
         print(hdr % (r['id'], 'L1', hp, l1['py_variant'].split()[0], fmt(l1['out']['max_abs']), fmt(l1['out']['p999']),
@@ -1211,9 +1337,15 @@ def print_table(results, statics, hpfc):
                 print('%-31s     first serial divergence: hop %d c=%d py=%d' % ('', m['hop'], m['c'], m['py']))
         cx = r.get('context')
         if cx:
-            print('%-31s     ctx: res_gain wrel_l2=%s (gate CTX_gain_wrel_l2 %g) max_abs=%s (printed only); over tolerance: %s' % (
-                '', cx['res_gain']['wrel_l2'], TOL['CTX_gain_wrel_l2'], cx['res_gain']['max_abs'],
-                ','.join(ev.get('ctx_fields_over_tolerance', [])) or 'none'))
+            g = cx['res_gain']
+            rp = g.get('render')
+            print('%-31s     ctx: res_gain wrel_l2=%s (gate CTX_gain_wrel_l2 %g) loud-bin max_abs=%s (gate %g, %d bins within %g dB '
+                  'of the hop peak) render product per-hop rel_l2 max=%s p99=%s (gate %g, %s of %s hops within %g dB; whole %s) '
+                  'max_abs=%s (printed only); over tolerance: %s' % (
+                      '', g['wrel_l2'], TOL['CTX_gain_wrel_l2'], g['loud_max_abs'], TOL['CTX_gain_loud_max_abs'], g['loud_bins'],
+                      LOUD_BIN_DB, rp['per_hop_max'] if rp else 'n/a', rp['per_hop_p99'] if rp else 'n/a',
+                      TOL['CTX_render_hop_rel_l2'], rp['hops_gated'] if rp else '-', rp['hops'] if rp else '-', RENDER_HOP_FLOOR_DB,
+                      rp['whole_rel_l2'] if rp else 'n/a', g['max_abs'], ','.join(ev.get('ctx_fields_over_tolerance', [])) or 'none'))
     for s in statics:
         print()
         print('%s: %s' % (s['id'], s['status']))
@@ -1285,8 +1417,8 @@ def main():
         'expected_red': sum(1 for r in results if r['status'].startswith('EXPECTED_RED')),
         'info': sum(1 for r in results if r['status'].startswith('INFO')),
         'fail': len(fails),
-        'layer2_inconclusive_chaotic': sum(1 for r in results if r['layer2']['status'] == 'INCONCLUSIVE_CHAOTIC'),
-        'layer2_red': sum(1 for r in results if r['layer2']['status'] == 'RED'),
+        'layer2_inconclusive_chaotic': sum(1 for r in results if r.get('layer2', {}).get('status') == 'INCONCLUSIVE_CHAOTIC'),
+        'layer2_red': sum(1 for r in results if r.get('layer2', {}).get('status') == 'RED'),
         'python_variant_runs_beyond_v0': sum(r['py_variants_run'] - 1 for r in results),
         'failed_ids': fails,
     }

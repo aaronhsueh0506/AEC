@@ -57,7 +57,11 @@ The same entry ports Python's bad-relock soft revert to C, a deliberate C behavi
   `formed_hop` / `formed_output`, `error_spec`, `echo_spec` and `near_spec` are the real selected linear residual in every
   mode, and AecState, ERLE, R2 and the error and echo PSDs always see it. `error_spec` is the STFT of
   `[previous formed hop | current formed hop]` on every hop, guard hops included, so a unity IFFT with overlap-add
-  reproduces the previous formed hop one framing hop late. `AecLinearContext.formed_linear_hop` follows.
+  reproduces the previous formed hop one framing hop late. `AecLinearContext.formed_linear_hop` follows. Because the
+  adaptive state now sees the residual where it used to see the capture, a context-only output that differs on such a hop
+  can keep differing on the hops after it; the change is not confined to the hop where the substitution used to fire.
+  The same holds for the guard, the reset serial and the soft revert below: a difference that starts at an event can
+  persist after it (the adaptive state, the OLA tail and the comfort-noise sequence carry it forward).
 - **The guard now only selects the rendering base, once per hop, in every mode.** It is evaluated after this hop's
   usable verdict is final and before any context or linear-only exit: with the guard enabled, the verdict false and
   `sum(|E|^2) > sum(|Y|^2)` (strict, windowed spectra, `Y = E + echo`, the same float32 pairwise reduction in C and
@@ -80,7 +84,10 @@ The same entry ports Python's bad-relock soft revert to C, a deliberate C behavi
   `(sqrt(1 - g_res^2) * max(g_nr, nr_floor)) * (sqrt(cn / 32768^2) * table entry)` per component, one LCG draw per bin
   `1 .. n-2` in ascending order. The previous public helper evaluated `n_amp * gain * nr * table` with libm `sqrtf` and a
   division, so its results can differ from the old ones in float rounding. Python gains `modules/cng.py` (`cng_fill`,
-  `cng_draw_indices`, `cng_noise_terms`) shared with the in-chain noise.
+  `cng_draw_indices`, `cng_noise_terms`) shared with the in-chain noise. The seed itself is not new for the library: the
+  in-chain comfort noise of the full AEC already started from 42 in both languages, so full-mode output does not move
+  because of the seed. Only external consumers that seeded their own comfort noise with the previous `0x9e3779b9` see a
+  different noise sequence, and only on hops where that noise is actually added.
 - **Reset serial.** C `uint32_t aec_post_reset_serial(const Aec*)`, Python `AEC.get_post_reset_serial()` and
   `AecResContext.post_reset_serial`: a non-consuming, wrapping counter of hard post-chain resets. There are two sources.
   `aec_reset()` is a separate call, not part of any processing call: the serial already reads +1 when it returns, and the
@@ -113,7 +120,8 @@ The same entry ports Python's bad-relock soft revert to C, a deliberate C behavi
   output only on clips that reach the revert, from the revert hop on, and there C moves onto Python's output: 16 of 800
   blind clips at 16 kHz/256 (17 events) and 15 of 800 at 16 kHz/512 (16 events), none in the near-end-only set (round-7
   scan of the 115e10c tree), and 11 of 300 at 48 kHz/1024 (counted by the port step; not re-scanned in this documentation
-  pass). The delay-event stream (every acquisition, shift and revert, same hop, same value) is unchanged on all 800
+  pass). These are counts on these blind sets, not a fixed fraction of clips or of relocks: how many clips revert
+  depends on the material. The delay-event stream (every acquisition, shift and revert, same hop, same value) is unchanged on all 800
   clips at both 16 kHz grids; without a revert the output is bit-identical to the previous C. Before the port, after a
   revert the two languages differed by -28 to +2 dB of the output level, with peaks up to full scale; afterwards they
   stay at the pre-event float32 level on 30 of 31 measured clip-grid cells. Python is unchanged.
@@ -181,7 +189,8 @@ The same entry ports Python's bad-relock soft revert to C, a deliberate C behavi
   rendering base silently loses the guard: on guard hops its output carries the residual that is louder than the capture
   (nothing fails at compile or run time). Time-domain seam consumers (`formed_hop` / `formed_output`,
   `AecLinearContext.formed_linear_hop`) are the analysis residual on every hop and have no rendering base, so they are
-  unguarded by construction. A consumer that plays or re-synthesizes them gets no output guard.
+  unguarded by construction. A consumer that plays or re-synthesizes them gets no output guard. Migration steps for SDK
+  applications: `docs/sdk_migration_output_guard.md`.
 - **Bad-relock revert and the serial.** A consumer written against the earlier C, where a revert bumped
   `aec_post_reset_serial()` and cleared the library's OLA tail, no longer sees either on a revert; its own OLA and CNG
   handling needs no change as long as it follows the serial.
@@ -220,7 +229,13 @@ The same entry ports Python's bad-relock soft revert to C, a deliberate C behavi
   at hops 553, 327 and 858 + 1038); `revert.IUp2.16k512`; and, under the `res_gain` gate below, `revert.Y91u` (both grids),
   `revert.rOza.16k256` and `revert.waxU.16k256`. **INFO(T-01)**: `never_usable.16k512`, `never_usable.48k1024`,
   `revert.IUp2.16k256`, `revert.rOza.16k512` and `revert.waxU.16k512`. No cell fails a hard seam gate as run.
-- **Registered float32 ties (T-01, INFO only).** In those five cells one or a few per-bin hard decisions inside the
+- **Registered float32 ties (T-01, INFO only): a known numeric divergence, not an equivalence.** As run, C and Python do
+  not agree in these cells: the analysis-seam context (ERLE factor, error or echo spectrum) is over tolerance in all five
+  and `res_gain` in two (`revert.rOza.16k512`, `revert.waxU.16k512`), and the raw outputs can exceed
+  the Layer-1 audio tolerance (`revert.rOza.16k512`: out max_abs about 0.0527, 176 times the 3e-4 tolerance, `res_gain` up
+  to 0.96 apart; the other four stay under the audio tolerance, 1.0e-6 to 2.2e-4). That the difference comes from the
+  registered float32 tie is shown only by the forced-decision experiment below; nothing shows that the unforced C and
+  Python outputs are the same. In those five cells one or a few per-bin hard decisions inside the
   adaptive filter sit within the C-versus-Python rounding difference of their own operands: the refined filter's H_error
   leakage compare `e2_refined[k] <= e2_coarse[k]` (all five), and in `revert.rOza.16k512` also the filter noise gate
   `X2[k] >= gate` (hop 543 bin 148, margins about ±1e-7). C takes one side and Python the other, and the one-bin
@@ -232,14 +247,36 @@ The same entry ports Python's bad-relock soft revert to C, a deliberate C behavi
   is green (remove the marker). Forced runs: out max_abs 1.6e-7, 5.2e-8, 2.8e-7, 3.9e-7 and 1.06e-6. If the registered
 side in `never_usable.16k512` is flipped to Python's own choice, the cell fails ("T-01 shape lost"). The marker sits in
   the `pyc_parity.py` registry next to N-01 and N-02; no expected-red entry was added or enlarged.
-- **`res_gain` context gate.** `res_gain` is now gated by its relative L2 weighted by each bin's near-end power
-  `|E + echo|²` (`CTX_gain_wrel_l2` = 1e-4). Its per-bin, per-hop maximum (`CTX_gain_max_abs`, 1e-3) is printed only. That
-  maximum is set by the quietest bins (75 to 85 dB below the hop peak, where float32 rounding is about 1e-3 of the bin) and
-  by the max-gain ratchet, which multiplies an earlier hop's difference by 2 or 4 in amplitude. Green cells already reach
-  9.96e-4 (`hard_reset.16k512.lean`). The weighted figure is at most 1.52e-5 (`revert.IUp2.16k256`) across the 16 guard
-  cells. The exceptions are `revert.rOza.16k512` (9.6e-2) and `revert.waxU.16k512` (2.0e-4): unforced, both run on the
-  other side of their registered tie, and both are green once the tie is forced. A planted 0.1 % change of the suppression threshold
-  `enr_suppress` reads 3.0e-3 on `revert.Y91u.16k256`, and that cell fails.
+- **`res_gain` context gates (a new acceptance contract, not the old one tightened).** The earlier gate was the per-bin,
+  per-hop maximum `CTX_gain_max_abs` (1e-3); it is now printed only. That maximum is reached in the quietest bins (75 to
+  85 dB below the hop peak, where float32 rounding is about 1e-3 of the bin) and, through the max-gain ratchet, which
+  multiplies an earlier hop's difference by 2 or 4 in amplitude, in loud bins too. Green cells already reach 9.96e-4
+  (`hard_reset.16k512.lean`). `res_gain` is now held by three gates, all in `pyc_parity.py`:
+  - relative L2 weighted by each bin's near-end power `|E + echo|²` (`CTX_gain_wrel_l2` = 1e-4). At most 1.52e-5
+    (`revert.IUp2.16k256`, against its 1-ulp branch) across the 16 guard cells. It is a whole-cell figure, so on its own it
+    dilutes an error confined to a few hops or bins;
+  - max |C − Python| over the bins within 20 dB of the hop's peak near-end power (`CTX_gain_loud_max_abs` = 3e-3), every
+    context cell. Worst green 1.17e-3 (`revert.rOza.16k256`), margin 2.6 times;
+  - the spectrum an application renders, `output_base_spec * res_gain`: per hop `‖Pc − Pp‖ / ‖Pp‖`, maximum over the hops
+    within 60 dB of the cell's loudest product hop (`CTX_render_hop_rel_l2` = 3e-3). Only the 16 guard cells dump the
+    base, so the 3 other context cells have the first two gates only. Worst green 1.06e-3 (`revert.waxU.16k256`), margin
+    2.8 times; per-hop p99 at most 5.6e-5 and whole-cell at most 1.0e-5 (printed).
+
+  The forced runs of the five T-01 cells read at most 5.3e-4 (loud bins) and 1.9e-4 (render product). Unforced,
+  `revert.rOza.16k512` (9.6e-2 weighted) and `revert.waxU.16k512` (2.0e-4) run on the other side of their registered tie and
+  are over all three gates; both are green once the tie is forced. A planted +0.1 % change of the suppression threshold
+  `enr_suppress` (Python side) fails all three gates on `revert.Y91u.16k256`, `revert.waxU.16k256` and
+  `hard_reset.16k256.lean`: weighted 3.0e-3, 1.3e-3, 7.4e-4; loud bins 0.055, 0.25, 0.058; render product 0.16, 0.12, 0.066.
+  An error the weighted figure dilutes still fails: on `hard_reset.16k256.lean` a 1 % change of one loud bin on one hop
+  (weighted 6.1e-5, green) fails the loud-bin gate (0.010) and the render-product gate (5.2e-3), and a 0.5 % change of every
+  bin on one hop (weighted 2.1e-6, loud bins 6.7e-4, both green) fails the render-product gate (5.0e-3).
+- **Dumps are validated before any metric.** Every compared array (audio, linear output, trace hops, context records, base
+  records, formed hop, delay rows) must be non-empty, the same length as its counterpart and finite on both sides; a
+  violation fails the cell whatever its marker (INFO, T-01, expected red). Before this, NaN, +Inf or -Inf in the C output
+  passed a cell, INFO cells included (the max-abs reading became "no figure" and `x > tol` is false for NaN), and a NaN in
+  `res_gain` or the base aborted the run; an empty or short output already failed through the length flag. Proven on kept dumps: NaN, +Inf and -Inf in the C output, an empty and a one-hop-short output, NaN
+  in one `res_gain` entry and NaN in one base bin each fail `hard_reset.16k256.lean` and the T-01 cell
+  `never_usable.16k512.lean`. Both drivers run the same hop loop, so no trim is allowed.
 - **Whole `--full` run: RESULT PASS**: 48 pass, 11 info (N-01 x2, D-01 x3, N-02, T-01 x5), 3 expected-red (S-02 x3),
   0 fail, 62 scenarios.
 

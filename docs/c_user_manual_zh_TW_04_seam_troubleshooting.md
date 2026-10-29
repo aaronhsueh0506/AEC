@@ -37,7 +37,7 @@ while (app_read_hop(mic, ref, hop)) {
 > - **渲染底座**：`aec_get_output_base()`（§8.3）。輸出守衛在**每個 hop、每個模式**求值一次，時點在
 >   本 hop 的 usable 判定確定之後、任何 context 提前離開之前。規則（`output_capture_when_linear_unusable`，
 >   預設開啟）：本 hop 線性估計不可用，且 `sum(|error_spec|²) > sum(|error_spec + echo_spec|²)`
->   （嚴格大於、加窗頻譜、float32 pairwise 歸約，C 與 Python 的歸約相同，所以相同頻譜得到相同決定；兩邊各自算 STFT，上游頻譜約差 1e-7 相對值，所以 C 對 Python 的契約是：除了雙方都 unusable 且相對能量差 `|Σ|E|²−Σ|Y|²|/Σ|E|²` 落在 1e-6 tie band 內的 hop，每個 hop 的決定都一致；band 內的 hop 在對拍的每個 cell 逐一計數並印出，band 外的不一致即失敗，固定的近門檻 fixture 要求完全相等；同樣的捨入也可能落在自適應濾波器的逐 bin 判定上（refined 濾波器 H_error leakage 比較 `e2_refined[k] <= e2_coarse[k]`，或噪聲門 `X2[k] >= gate`），這類 cell 在 `pyc_parity.py` 登記為 T-01，只有在守衛、serial、delay 閘門照跑全綠，且 Python 依 C 的方向強制登記的判定後每個閘門都綠時才是 INFO；`res_gain` 以各 bin 近端功率 `|E + echo|²` 加權的相對 L2 比較（上限 1e-4），逐 bin 最大差只印出），底座就是擷取訊號
+>   （嚴格大於、加窗頻譜、float32 pairwise 歸約，C 與 Python 的歸約相同，所以相同頻譜得到相同決定；兩邊各自算 STFT，上游頻譜約差 1e-7 相對值，所以 C 對 Python 的契約是：除了雙方都 unusable 且相對能量差 `|Σ|E|²−Σ|Y|²|/Σ|E|²` 落在 1e-6 tie band 內的 hop，每個 hop 的決定都一致；band 內的 hop 在對拍的每個 cell 逐一計數並印出，band 外的不一致即失敗，固定的近門檻 fixture 要求完全相等；同樣的捨入也可能落在自適應濾波器的逐 bin 判定上（refined 濾波器 H_error leakage 比較 `e2_refined[k] <= e2_coarse[k]`，或噪聲門 `X2[k] >= gate`），這類 cell 在 `pyc_parity.py` 登記為 T-01。T-01 是已知的數值分岔，不是等價：照跑時 C 與 Python 的原始輸出可以超過音訊容許值（`revert.rOza.16k512` 最大差約 0.0527），只有強制判定的實驗能說明差異來自登記的平手；只有在守衛、serial、delay 閘門照跑全綠，且 Python 依 C 的方向強制登記的判定後每個閘門都綠時才是 INFO；`res_gain` 有三道閘門：以各 bin 近端功率 `|E + echo|²` 加權的相對 L2（上限 1e-4）、距該 hop 近端功率峰值 20 dB 內各 bin 的最大差（上限 3e-3），以及在有輸出底座的 cell 上，應用實際渲染的 `output_base_spec * res_gain` 逐 hop 相對 L2（距最響 hop 60 dB 內的每個 hop，上限 3e-3），全部 bin 的最大差只印出；每一份比較的資料都必須非空、兩邊等長且是有限值，否則該 cell 失敗），底座就是擷取訊號
 >   `error_spec + echo_spec`（`guard_active = 1`），否則底座是 `error_spec`。自己合成音訊的消費端要渲染
 >   **`output_base_spec × 增益`**，不是 `error_spec × 增益`；全模式的 `aec_process()` 內部就是這麼算，
 >   所以拆開的路徑與一體的路徑得到同樣的音訊。底座**不**與 `formed_hop` 配對：守衛 hop 上它是頻域的
@@ -45,6 +45,9 @@ while (app_read_hop(mic, ref, hop)) {
 >
 > 守衛只在線性估計不可用時才可能觸發，因此多半發生在第一個 usable 判定之前，但從未變成 usable 的片段
 > 會一直觸發，不只在開頭幾秒。
+>
+> 既有 SDK 應用若還在渲染 `error_spec`，編譯與執行都不會報錯，但會失去守衛；遷移步驟、前後程式碼與驗收測試見
+> [`sdk_migration_output_guard.md`](sdk_migration_output_guard.md)，並以 `AEC_OUTPUT_GUARD_API_VERSION`（`aec.h`）在建置期檢查。
 
 > **三個處理進入點可以自由混用。**
 >
@@ -364,6 +367,7 @@ mic, ref (hop 個 float)
 | 長時間後回音逐漸變差 | mic/ref clock drift | 改用共同時鐘，或在上游做 drift 補償。函式庫不處理。 |
 | 批次處理第二個檔案結果異常 | 沿用了前一個檔案的狀態 | 每個獨立串流前呼叫 `aec_reset()` |
 | 輸出有突波／發散 | 削波、`ref` 送錯、延遲劇烈變化 | 維持 `enable_saturation`、`enable_shadow` 開啟；檢查輸入是否已削波 |
+| 自己渲染 context 頻譜的舊程式，升級 SDK 後守衛 hop 偏大聲或 `aec_reset()` 後有舊尾巴 | 還在渲染 `error_spec`、沒處理 `aec_post_reset_serial()`、視窗或 CNG 種子與函式庫不同 | 照 [`sdk_migration_output_guard.md`](sdk_migration_output_guard.md) 的清單遷移，並跑其中的逐位元驗收 |
 | 噪音底聽起來不自然、會抽動 | CNG 疊了兩層 | 下游若已有噪音處理，設 `enable_cng = 0` |
 | 建立實例一直失敗 | 設定被驗證拒絕 | 對照 [§6](c_user_manual_zh_TW_02_config.md#6-aecconfig-完整參考) 的允許範圍；特別注意 `sample_rate`/`fft_size` 必須成對合法，以及 `spatial_linear_context` 的組合限制 |
 | `SIMD=0` 與 `SIMD=1` 的輸出不同 | NEON kernel 與純量 kernel 的加總順序、融合乘加不同 | 這是預期行為。同一組建置旗標下 heap 與記憶池路徑才保證逐位元相同。 |
