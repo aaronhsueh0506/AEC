@@ -5,15 +5,15 @@
  * a per-block re-zeroing comparison would not. The two-lane decimator and 48 kHz resampler kernels are checked against their
  * single-channel references the same way.
  *
- * On builds without the NEON body (non-aarch64, or SIMD_KERNELS_FORCE_SCALAR) the argmax half compares the scalar walk
+ * On builds without the NEON body (SK_HAVE_NEON == 0: no NEON/FMA target, or SIMD_KERNELS_FORCE_SCALAR) the argmax half compares the scalar walk
  * against itself, and the two pair sweeps compare the single-call fallback (the only body that build has) against the generic
  * walks; they still run, and say so, so one `make test-delay-kernels` invocation is valid everywhere. The coefficient-equality
  * helper (da_decimator_same_coefficients) exists only in the NEON body, so the decimator pair sweep checks its verdict per
  * variant only there. The matched-core sweep checks the shipped core against separate update and dot passes, including
- * first-only, last-only and no-update gates; its kernels have their own gate (DA_MF_NEON), so it also runs the NEON body on
- * 32-bit ARM with fused FMA, and test_delay_matched_neon holds their bit-exact contract.
+ * first-only, last-only and no-update gates; test_delay_matched_neon holds the kernels' bit-exact contract.
  * Includes the SHIPPED translation unit so the sweeps exercise real source. */
 #include "src/delay_aec.c"
+#include "utility/simd_test_mode.h"
 
 #include <stdio.h>
 
@@ -430,6 +430,7 @@ static int run_matched_core_sweep(void) {
 
 int main(void) {
     int rc = 0;
+    SK_MATCH_SCALAR_TO_VECTOR_MODE();
     if (!SWEEP_HAS_NEON_BODY)
         printf("note: scalar build -- argmax sweep degenerates to an identity check;"
                " the decimator and 48 kHz pair sweeps check the single-call fallback"

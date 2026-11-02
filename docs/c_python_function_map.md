@@ -37,17 +37,17 @@
 <!-- stats:begin -->
 | key | 數值 | 說明 |
 |---|---|---|
-| `c_src_total` | 414 | `src/*.c` 的 C 函式總數（唯一 (檔, 函式名)） |
+| `c_src_total` | 413 | `src/*.c` 的 C 函式總數（唯一 (檔, 函式名)） |
 | `c_src_mirror` | 236 | 關係為 mirror |
 | `c_src_partial` | 101 | 關係為 partial |
-| `c_src_c_only` | 77 | 關係為 C-only（含 3 個 `aec_testing_*` 測試鉤子） |
+| `c_src_c_only` | 76 | 關係為 C-only（含 3 個 `aec_testing_*` 測試鉤子） |
 | `c_src_unknown` | 0 | 關係為 未能判斷 |
 | `c_hdr_total` | 6 | header 內 static inline 函式總數（規則 2；共用 SIMD 核心不列入） |
 | `c_hdr_c_only` | 5 | 其中 C-only |
 | `c_hdr_mapped` | 1 | 其中 mirror 或 partial |
-| `c_total` | 420 | C 函式合計（src 加 header） |
+| `c_total` | 419 | C 函式合計（src 加 header） |
 | `c_mapped` | 338 | 已對應（mirror 加 partial）合計 |
-| `c_c_only` | 82 | C-only 合計 |
+| `c_c_only` | 81 | C-only 合計 |
 | `c_unknown` | 0 | 未能判斷 合計 |
 | `inferred` | 25 | 關係說明以「推定：」開頭的列（已含在上列 mirror／partial 內） |
 | `py_total` | 575 | Python 符號總數（規則 4） |
@@ -344,7 +344,6 @@
 | C 檔:函式 | Python 檔:符號 | 關係 | 已知落差 | 對拍工具／測試 |
 |---|---|---|---| --- |
 | `src/delay_aec.c:delay_aec_dot` | `modules/delay/matched_filter.py:matched_filter_core` | partial（推定：`np.dot` 的 float32 累加等價，用於 error_sum_anchor） | D-03 | `ctest:test_delay_reset.c` |
-| `src/delay_aec.c:da_vaddv_f32` | — | C-only（NEON 四通道水平加總；僅在 NEON 建置存在，純量建置沒有對應函式） | — | `ctest:test_delay_matched_neon.c` |
 | `src/delay_aec.c:da_dot_f32` | `modules/delay/matched_filter.py:matched_filter_core` | partial（推定：`h·x` 的 NEON／純量核心；NEON／純量雙胞，算一個函式） | D-03 | — |
 | `src/delay_aec.c:da_nlms_update_f32` | `modules/delay/matched_filter.py:matched_filter_core` | partial（推定：`h += alpha*x` 的 NEON／純量核心；NEON／純量雙胞，算一個函式） | D-03 | — |
 | `src/delay_aec.c:da_nlms_update_next_dot_f32` | — | C-only（NEON 融合目前 tap 更新與下一個 dot；保留四組累加器、FMA 與 reduction tree） | D-03 | `ctest:test_delay_kernels.c` |

@@ -26,31 +26,12 @@ static float delay_aec_dot(const float *a, const float *b, int n) {
 
 /* Matched-filter arithmetic: both 512-tap dot products accumulate in float32 and x2_sum slides
  * across the 16 sub-block iterations (x2 += new^2 - old^2) instead of being re-summed. The NEON
- * kernels (dot, NLMS update, fused update + next dot) use fused multiply-add on AArch64 and on
- * 32-bit ARM cores with VFPv4 NEON, with the same accumulator layout and reduction tree; cores
- * without fused FMA keep the scalar path, and DA_DISABLE_ARM32_NEON forces it. Only these three
- * kernels use DA_MF_NEON; the others key on SK_HAVE_NEON. */
+ * kernels (dot, NLMS update, fused update + next dot) use fused multiply-add on every target that
+ * qualifies for SK_HAVE_NEON, with the same accumulator layout and reduction tree; other cores keep
+ * the scalar path (SIMD_KERNELS_FORCE_SCALAR forces it everywhere). */
 #if SK_HAVE_NEON
-#define DA_MF_NEON 1
-#define DA_VADDV_F32(v) vaddvq_f32(v)
-#elif defined(__arm__) && defined(__ARM_NEON) && defined(__ARM_FEATURE_FMA) && \
-      !defined(SIMD_KERNELS_FORCE_SCALAR) && !defined(DA_DISABLE_ARM32_NEON)
-#include <arm_neon.h>
-#define DA_MF_NEON 1
-#define DA_MF_NEON_ARM32 1
-/* AArch32 has no across-lane add; two vpadd steps add the lanes in AArch64's order. */
-static inline float da_vaddv_f32(float32x4_t v) {
-    float32x2_t p = vpadd_f32(vget_low_f32(v), vget_high_f32(v));
-    return vget_lane_f32(vpadd_f32(p, p), 0);
-}
-#define DA_VADDV_F32(v) da_vaddv_f32(v)
-#else
-#define DA_MF_NEON 0
-#endif
 
-#if DA_MF_NEON
-
-#if defined(DA_MF_NEON_ARM32) && defined(__GNUC__) && !defined(__clang__)
+#if defined(__GNUC__) && !defined(__clang__)
 /* gcc's constant-propagated clone of the dot warns about the dead scalar tail loop; the tail
  * cannot run for the shipped sizes. */
 #pragma GCC diagnostic push
@@ -70,7 +51,7 @@ static float da_dot_f32(const float *a, const float *b, int n) {
     }
     {
         float32x4_t acc = vaddq_f32(vaddq_f32(acc0, acc1), vaddq_f32(acc2, acc3));
-        float s = DA_VADDV_F32(acc);
+        float s = vaddvq_f32(acc);
         for (; i < n; ++i) s += a[i] * b[i];
         return s;
     }
@@ -115,9 +96,9 @@ static float da_nlms_update_next_dot_f32(float *h, const float *x,
         acc2 = vfmaq_f32(acc2, h2, vld1q_f32(next_x + i + 8));
         acc3 = vfmaq_f32(acc3, h3, vld1q_f32(next_x + i + 12));
     }
-    return DA_VADDV_F32(vaddq_f32(vaddq_f32(acc0, acc1), vaddq_f32(acc2, acc3)));
+    return vaddvq_f32(vaddq_f32(vaddq_f32(acc0, acc1), vaddq_f32(acc2, acc3)));
 }
-#if defined(DA_MF_NEON_ARM32) && defined(__GNUC__) && !defined(__clang__)
+#if defined(__GNUC__) && !defined(__clang__)
 #pragma GCC diagnostic pop
 #endif
 #else
@@ -558,7 +539,7 @@ static int da_matched_filter_core(const DaRing *ring, int alignment_shift_back,
      * initialised once for i = 0. */
     float x2_slide = da_dot_f32(span + (DA_SUB_BLOCK_SIZE - 1),
                                 span + (DA_SUB_BLOCK_SIZE - 1), DA_FILTER_SIZE);
-#if DA_MF_NEON
+#if SK_HAVE_NEON
     float next_dot = da_dot_f32(h, span + (DA_SUB_BLOCK_SIZE - 1), DA_FILTER_SIZE);
 #endif
     for (i = 0; i < DA_SUB_BLOCK_SIZE; ++i) {
@@ -571,7 +552,7 @@ static int da_matched_filter_core(const DaRing *ring, int alignment_shift_back,
             x2_slide += in_v * in_v - out_v * out_v;
         }
         x2_sum = x2_slide;
-#if DA_MF_NEON
+#if SK_HAVE_NEON
         s = next_dot;
 #else
         s = da_dot_f32(h, x_window, DA_FILTER_SIZE);
@@ -582,7 +563,7 @@ static int da_matched_filter_core(const DaRing *ring, int alignment_shift_back,
         if (x2_sum > x2_sum_threshold && !saturation) {
             /* alpha = smoothing * e / x2_sum in float32; h += alpha * x. */
             float alpha_f = smoothing * e / x2_sum;
-#if DA_MF_NEON
+#if SK_HAVE_NEON
             if (i + 1 < DA_SUB_BLOCK_SIZE) {
                 next_dot = da_nlms_update_next_dot_f32(h, x_window, x_window - 1, alpha_f);
             } else {
@@ -592,7 +573,7 @@ static int da_matched_filter_core(const DaRing *ring, int alignment_shift_back,
             da_nlms_update_f32(h, x_window, alpha_f, DA_FILTER_SIZE);
 #endif
             filters_updated = 1;
-#if DA_MF_NEON
+#if SK_HAVE_NEON
         } else if (i + 1 < DA_SUB_BLOCK_SIZE) {
             next_dot = da_dot_f32(h, x_window - 1, DA_FILTER_SIZE);
 #endif

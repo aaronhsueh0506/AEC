@@ -45,9 +45,12 @@ guarded AArch64 `sqrtf` in `fast_math.h` lower to a single `FSQRT` with no
 errno-checking libm fallback.
 
 The compiler target selects the architecture path; no source change is needed
-for ARM32 or ARM64. Shared handwritten DSP NEON kernels require AArch64, so
-ARM32 uses their C fallback even when the shared FFT can use ARM32 NEON.
-`SIMD=0` forces those fallbacks and does not select the ABI. Pass a matching
+for ARM32 or ARM64. Shared handwritten DSP NEON kernels run on AArch64 and on
+32-bit ARM with NEON plus fused FMA (`-mcpu=cortex-a32/a53/a55/a73`,
+`-mfpu=neon-vfpv4`, `-mfpu=neon-fp-armv8`); `SK_HAVE_NEON` in
+`utility/simd_kernels.h` is the one gate. 32-bit ARM without FMA keeps the C
+fallback even when the shared FFT can use ARM32 NEON.
+`SIMD=0` forces the fallbacks and does not select the ABI. Pass a matching
 CC/CXX/AR/RANLIB toolchain, and obtain static pool sizes from the target build
 rather than copying ARM64 sizes. Heap construction requests a 16-byte arena on
 both ABIs.
@@ -58,11 +61,10 @@ ARMv8 cores), not plain `-mfpu=neon`: without hardware FMA every explicit
 `aec_post.c`) turns into a libm call. Results are bit-identical, only slower.
 ARMv7 Advanced SIMD flushes subnormals to zero and returns the default NaN, so
 `SIMD=1` and `SIMD=0` can differ on ARM32 for subnormal or NaN-payload values;
-only the NE10 NEON FFT and, on cores with fused FMA (`-mfpu=neon-vfpv4`), the
-delay matched-filter kernels (`make test-delay-matched-neon`;
-`-DDA_DISABLE_ARM32_NEON` forces scalar) are affected. On such cores the
-matched filter is bit-identical to AArch64 NEON for finite, non-subnormal
-inputs; cores without fused FMA keep the scalar path.
+NEON kernels equal their scalar twins there for finite, non-subnormal inputs.
+The tests that compare the two call `SK_MATCH_SCALAR_TO_VECTOR_MODE()` first.
+The delay matched-filter kernels (`make test-delay-matched-neon`) are bit-identical to AArch64 NEON for
+finite, non-subnormal inputs; cores without fused FMA keep the scalar path.
 
 ### FP-contraction policy
 

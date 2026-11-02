@@ -1114,9 +1114,10 @@ static void test_getter_contract(void) {
     aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, 16000);
     cfg.enable_res = 0; cfg.return_res_context = 1;
     if (aec_create(&a, &cfg) != 0) { CHECK(0, "getter: create"); return; }
-    {   /* a caller struct declared smaller than AecOutputBase (an older 16-byte layout, and one byte short) sits in a
-         * canary-filled buffer: refused, and not one byte written, the declared struct included */
-        static const size_t short_sizes[2] = { 16u, sizeof(AecOutputBase) - 1u };
+    {   /* a caller struct declared smaller than AecOutputBase (an older two-size_t layout, 16 bytes on LP64 and 8 on
+         * 32-bit targets, and one byte short) sits in a canary-filled buffer: refused, and not one byte written, the
+         * declared struct included */
+        static const size_t short_sizes[2] = { 2u * sizeof(size_t), sizeof(AecOutputBase) - 1u };
         unsigned char buf[sizeof(AecOutputBase) + 64], ref[sizeof(AecOutputBase) + 64];
         int t;
         for (t = 0; t < 2; ++t) {

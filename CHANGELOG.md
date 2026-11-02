@@ -42,6 +42,18 @@ when verdict requires it.
 
 ---
 
+
+## [Unreleased] — 2026-11-02 — Delay matched filter and tests follow the shared 32-bit ARM NEON gate
+
+### Changed
+- `delay_aec.c`: the matched-filter NEON body is keyed on `SK_HAVE_NEON` (AArch64, and 32-bit ARM with NEON plus fused FMA) instead of
+  a private 32-bit special case; the across-lane add is the shared `vaddvq_f32`, so `da_vaddv_f32` is gone. The private `DA_MF_NEON` and
+  `DA_DISABLE_ARM32_NEON` switches are removed: `SIMD=0` / `SIMD_KERNELS_FORCE_SCALAR` is the one scalar switch. Output is unchanged on AArch64; on 32-bit ARM it is bit-identical for finite, non-subnormal inputs (the vector
+  unit flushes subnormals).
+- Tests that compare a NEON kernel with its scalar twin (`simd_selftest_aec`, `test_neon_twins`, `test_delay_kernels`) call
+  `SK_MATCH_SCALAR_TO_VECTOR_MODE()` first; `test_guard_unify` no longer assumes `sizeof(size_t) == 8` in its short-struct case;
+  `test_delay_matched_neon` names the 32-bit ARM body correctly.
+
 ## [Unreleased] — 2026-10-28 — output guard unified across API modes
 
 The output guard (`output_capture_when_linear_unusable`, always on in the shipped levels), the comfort-noise generator

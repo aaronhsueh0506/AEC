@@ -13,10 +13,11 @@
  *      for bit, at the call shape render_signal_analyzer.c uses.
  *
  * The shipped translation units are included so the real source text runs.
- * When the NEON body is not compiled in (non-aarch64 or
- * SIMD_KERNELS_FORCE_SCALAR) the twins coincide: the checks still run and the
+ * When the NEON body is not compiled in (SK_HAVE_NEON == 0: no
+ * NEON/FMA target, or SIMD_KERNELS_FORCE_SCALAR) the twins coincide: the checks still run and the
  * summary says so. */
 #include "src/render_signal_analyzer.c"
+#include "utility/simd_test_mode.h"
 #include "src/subband_erle.c"
 
 #include <stdio.h>
@@ -255,6 +256,7 @@ static void t2(void) {
 
 int main(void) {
     long c0;
+    SK_MATCH_SCALAR_TO_VECTOR_MODE();
     printf("test_neon_twins: NEON body %s\n", HAS_NEON_BODY ? "compiled in" : "absent (twins coincide)");
     t1_t3();
     c0 = g_cases;

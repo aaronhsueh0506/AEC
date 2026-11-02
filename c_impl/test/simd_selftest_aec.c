@@ -5,6 +5,7 @@
  * produce a nonzero exit. Generic kernels have their own audiolib self-test.
  */
 #include "utility/simd_aec.h"
+#include "utility/simd_test_mode.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -3500,6 +3501,7 @@ static void test_inline_aec_blocks(void) {
 /* ═══════════════════════════════════ main ══════════════════════════════════ */
 
 int main(void) {
+    SK_MATCH_SCALAR_TO_VECTOR_MODE();
     init_special_pool();
     init_nan_pool();
     init_special_int_pool();

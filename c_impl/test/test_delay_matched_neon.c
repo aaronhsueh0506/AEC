@@ -10,8 +10,7 @@
  *     against each other; --dump writes the raw results so two binaries
  *     (e.g. an armhf one under qemu and a native aarch64 one) can be compared
  *     with cmp.
- *   - every other build (host scalar, SIMD=0, 32-bit ARM without FMA, or
- *     DA_DISABLE_ARM32_NEON): the scalar kernels must equal the scalar model.
+ *   - every other build (host scalar, SIMD=0, or 32-bit ARM without FMA): the scalar kernels must equal the scalar model.
  *     The test compiles and passes there; it just exercises the scalar path.
  *
  * Bit-exactness is asserted only for finite inputs with NORMAL intermediates.
@@ -93,7 +92,7 @@ static int same_or_both_nan(float a, float b) {
 
 /* ---------------------------------------------------------- C models */
 
-#if DA_MF_NEON
+#if SK_HAVE_NEON
 
 __attribute__((noinline)) static float model_dot(const float *a, const float *b, int n) {
     float acc[16] = {0};
@@ -143,8 +142,8 @@ __attribute__((noinline)) static void model_update(float *h, const float *x, flo
 
 /* ----------------------------------------------- horizontal add equivalence */
 
-#if DA_MF_NEON
-static float hadd_macro(const float l[4]) { return DA_VADDV_F32(vld1q_f32(l)); }
+#if SK_HAVE_NEON
+static float hadd_macro(const float l[4]) { return vaddvq_f32(vld1q_f32(l)); }
 static float hadd_c_tree(const float l[4]) { return (l[0] + l[1]) + (l[2] + l[3]); }
 /* The two-step vpadd sequence written out; on AArch64 this is the same
  * dataflow as faddp + faddp. */
@@ -231,7 +230,7 @@ static void run_kernel_sweep(void) {
         model_update(h2, a + off, alpha, n);
         EXPECT(memcmp(h1, h2, sizeof h1) == 0, "nlms update n=%d off=%d", n, off);
 
-#if DA_MF_NEON
+#if SK_HAVE_NEON
         if (n == DA_FILTER_SIZE) {                /* fused kernel is 512-tap only */
             float f, ref;
             memcpy(h1, h0, sizeof h0); memcpy(h2, h0, sizeof h0);
@@ -363,7 +362,7 @@ static void dump_kernel_corpus(void) {
         memcpy(h1, h0, sizeof h0);
         da_nlms_update_f32(h1, a + (t & 1), alpha, (t % 3) ? 512 : 500);
         dump_f(h1, LEN);
-#if DA_MF_NEON
+#if SK_HAVE_NEON
         memcpy(h1, h0, sizeof h0);
         d = da_nlms_update_next_dot_f32(h1, a, b + (t & 1), alpha);
         dump_f(&d, 1); dump_f(h1, DA_FILTER_SIZE);
@@ -430,9 +429,7 @@ int main(int argc, char **argv) {
     int e16, e48;
     printf("test_delay_matched_neon: matched-filter NEON body = %s\n",
 #if SK_HAVE_NEON
-           "AArch64 NEON"
-#elif DA_MF_NEON
-           "32-bit ARM NEON (fused FMA)"
+           SK_NEON_BACKEND_NAME
 #else
            "none (scalar kernels)"
 #endif
