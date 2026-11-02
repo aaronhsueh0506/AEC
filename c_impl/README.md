@@ -149,7 +149,7 @@ caller-pool path (`aec_get_mem_size`/`aec_init`), and differs from numpy's fp64
   under `SIMD=1`. The complete default tier is therefore `make test SIMD=1`
   plus `make test SIMD=0`.
 - `make test-full` — the default tier plus what is slow or rarely changes: the
-  full parity matrix (`make test-pyc-parity PYC_ARGS=--full`, 46 scenes), the
+  full parity matrix (`make test-pyc-parity PYC_ARGS=--full`, 62 scenes), the
   end-to-end gate `make test-parity-e2e`, the SIMD-independent targets under
   `SIMD=0` too, the UBSan `--use-standard-math` variants,
   `test/run_fp_flag_policy_test.sh` (negative cases of the Makefile flag policy)

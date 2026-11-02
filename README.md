@@ -288,9 +288,9 @@ This reads back a value the post chain already computed for its own gate — it 
 lighter path that skips that chain. `AecConfig` raises `ValueError` at construction if
 `return_formed_output` is set while both `enable_res` and `return_res_context` are false.
 
-Note this is the *selected and crossfaded* linear output, not the raw main-filter output — and in
-context-only mode (`enable_res=False`, `return_res_context=True`) the selection can be the capture
-itself on a hop the filtering-quality analyzer has not cleared, see §3 of
+Note this is the *selected and crossfaded* linear output, not the raw main-filter output. It is the real
+selected linear residual in every API mode (the capture is never a candidate of the analysis path; it can only
+become the rendering base, `output_base_spec` / `aec_get_output_base()`), see §3 of
 [docs/aec_methods_02_post_filter.md](docs/aec_methods_02_post_filter.md#3-aec3-post-filter-_aec3_post). Byte-identical to `context.formed_output` in every
 supported configuration; see `python/tests/test_formed_output_seam.py`.
 

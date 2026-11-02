@@ -35,7 +35,7 @@ pre code{background:none;padding:0}
 <ul>
 <li>設定來自與 lane 相同的建構函式(<code>aec_build_sg_config</code>),所以由同一個 <code>AecConfig</code> 建出的 <code>AecRes</code> 與 lane 內的抑制器設定逐位元相同。</li>
 <li>Static memory:呼叫端給一塊 16-byte 對齊的記憶體;process／reset／set_level 不配置記憶體、不用 stdio、無全域狀態。</li>
-<li>只有 <code>sample_rate</code>、<code>fft_size</code>、<code>min_gain_floor_far_active_db</code>、<code>min_gain_floor_dt_db</code> 與 <code>min_gain_split_floor_enabled</code>(<code>aec.c:995-1000</code>,讓 NO_FLOOR 在建構時就生效)會影響抑制器;其餘 <code>AecConfig</code> 欄位僅參與驗證(傳入的 <code>cfg</code> 必須通過完整驗證,否則 <code>aec_res_get_mem_size</code> 回 0)。</li>
+<li>只有 <code>sample_rate</code>、<code>fft_size</code>、<code>min_gain_floor_far_active_db</code>、<code>min_gain_floor_dt_db</code> 與 <code>min_gain_split_floor_enabled</code>(<code>aec.c:1028-1034</code>,讓 NO_FLOOR 在建構時就生效)會影響抑制器;其餘 <code>AecConfig</code> 欄位僅參與驗證(傳入的 <code>cfg</code> 必須通過完整驗證,否則 <code>aec_res_get_mem_size</code> 回 0)。</li>
 </ul>
 
 <h2>2. API 用法</h2>
@@ -69,7 +69,7 @@ int res_one_hop(const AecConfig *cfg, const AecResInput *in, uint32_t *rng,
 <tr><td><code>aec_res_init(mem, bytes, cfg)</code></td><td>在 <code>mem</code> 內建立實例;不需 destroy</td><td>NULL = 記憶體 NULL／未對齊／過小，或 cfg 無效</td></tr>
 <tr><td><code>aec_res_reset(r)</code></td><td>清除抑制器全部狀態;<b>保留</b>目前的 far-active 地板目標(含 <code>set_level</code> 改過的)</td><td>void;NULL 安全</td></tr>
 <tr><td><code>aec_res_process(r, in)</code></td><td>一個 hop。回傳的指標由 <code>r</code> 擁有,到下一次對 <code>r</code> 的呼叫前有效</td><td>NULL = r／in 為 NULL 或任一輸入陣列為 NULL</td></tr>
-<tr><td><code>aec_res_set_level(r, level, ramp_ms)</code></td><td>與 <code>aec_set_level()</code> 同語意:改 far-active 地板(<code>ramp_ms==0</code> 於下一 hop 生效,上限 60 s)與 DT 地板(aggressive 才跟其他兩個不同;無 ramp,立即套用)</td><td>0／−1(NULL、非法 level、ramp 超範圍;−1 時什麼都不寫)</td></tr>
+<tr><td><code>aec_res_set_level(r, level, ramp_ms)</code></td><td>與 <code>aec_set_level()</code> 同語意:改 far-active 地板(<code>ramp_ms==0</code> 於下一 hop 生效,上限 60 s)與 DT 地板(DT 地板值只有 aggressive 與 mild／balanced 不同;NO_FLOOR 改為關閉 split floor、兩個 dB 值惰性;無 ramp,立即套用)</td><td>0／−1(NULL、非法 level、ramp 超範圍;−1 時什麼都不寫)</td></tr>
 <tr><td><code>aec_res_split_floor(r, &amp;live, &amp;target)</code></td><td>far-active 地板的功率比:<code>live</code> = 現行值,<code>target</code> = 正在走向的值</td><td>0／−1(r 為 NULL)</td></tr>
 <tr><td><code>aec_res_n_bins(r)</code>、<code>aec_res_hop_size(r)</code></td><td>陣列長度</td><td>0 = NULL</td></tr>
 <tr><td><code>aec_cng_fill(&amp;rng, spec, cn, g_res, g_nr, nr_floor, n)</code></td><td>在 bin 1…n−2 加上舒適噪音,見 §3</td><td>void;任一必要指標為 NULL 或 n&lt;3 則什麼都不動</td></tr>
@@ -97,10 +97,10 @@ int res_one_hop(const AecConfig *cfg, const AecResInput *in, uint32_t *rng,
 <h2>2.2 外部／內部</h2>
 <div class="tblwrap"><table>
 <tr><th>類別</th><th>內容</th><th>出處</th></tr>
-<tr><td><b>外部(可調)</b></td><td>強度只有 <code>aec_res_set_level(res, level, ramp_ms)</code>(level 四選一;ramp [0, 60000] ms);建立時由 <code>AecConfig</code> 的 <code>sample_rate</code>、<code>fft_size</code> 與 level 決定的三個 floor 欄位帶入</td><td><code>aec_res.h:62</code>;<code>aec.c:995-1000</code></td></tr>
+<tr><td><b>外部(可調)</b></td><td>強度只有 <code>aec_res_set_level(res, level, ramp_ms)</code>(level 四選一;ramp [0, 60000] ms);建立時由 <code>AecConfig</code> 的 <code>sample_rate</code>、<code>fft_size</code> 與 level 決定的三個 floor 欄位帶入</td><td><code>aec_res.h:62</code>;<code>aec.c:1028-1034</code></td></tr>
 <tr><td><b>外部(輸入旗標)</b></td><td><code>AecResInput</code> 的 <code>all_converged</code>、<code>max_dt</code>(&gt; 0.2 啟用 DT 地板)、<code>max_saturation</code>(&gt; 0.5 視為飽和回音)、<code>clock_drift</code>:由整合者從各 lane 的判定彙整</td><td><code>aec_res.h:24-34</code></td></tr>
 <tr><td><b>內部(不開放)</b></td><td><code>SuppressionGainConfig</code> 48 欄與 tuning 表(由 <code>aec_build_sg_config</code> 依格點查表)、DominantNearend、ratchet、audibility 門檻;<code>aec_config_build.h</code> 為庫內部</td><td><code>suppression_gain.h:16-78</code>;<code>aec_config_build.h</code></td></tr>
-<tr><td>公開函式</td><td><code>aec_res_get_mem_size</code>、<code>aec_res_init</code>、<code>aec_res_process</code>、<code>aec_res_reset</code>、<code>aec_res_set_level</code>、<code>aec_res_split_floor</code>、<code>aec_res_n_bins</code>、<code>aec_res_hop_size</code>、<code>aec_cng_fill</code></td><td><code>aec_res.h:38-74</code></td></tr>
+<tr><td>公開函式</td><td><code>aec_res_get_mem_size</code>、<code>aec_res_init</code>、<code>aec_res_process</code>、<code>aec_res_reset</code>、<code>aec_res_set_level</code>、<code>aec_res_split_floor</code>、<code>aec_res_n_bins</code>、<code>aec_res_hop_size</code>、<code>aec_cng_fill</code></td><td><code>aec_res.h:38-85</code></td></tr>
 </table></div>
 
 <h2>2.3 4ch 應用:在 mcab flow 之後建立並使用 RES</h2>

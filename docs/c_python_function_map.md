@@ -903,6 +903,6 @@ PBF/Kalman H-error refresh、subband ERLE accumulation/release、render peak cou
 |---|---|
 | `live:<make target>` | `c_impl/Makefile` 內存在的 target，會即時由 Python 重產 golden 再比對 C。目前唯一的常設 Python↔C 模組級閘門是 `test-detectors-parity-all`（四個格點，取樣率／hop：8k/128、16k/128、16k/256、48k/512），涵蓋 `RenderActivityDetector`、`FilterConvergenceAnalyzer`、`DoubleTalkAnalyzer`（C 端沒有 `FilterPlateauDetector`）。 |
 | `e2e:parity_aec_e2e` | `c_impl/test/parity_aec_e2e.c` 加 `python/diag/gen_aec_e2e_golden.py`：端到端對拍，由 `make test-parity-e2e` 建置並執行（16／48 kHz 通過，8 kHz 列為預期紅燈，見 S-19）；覆蓋限制見 T-02。 |
-| `manual:<檔名>` | `c_impl/test/` 下沒有接任何 Makefile target 的 harness。`parity_saturation.c` 需要外部 dump 的 `sat.bin`、repo 內沒有產生器。 |
+| `manual:<檔名>` | `c_impl/test/`（含 `test/modules/`）下沒有接任何 Makefile target 的 harness。`test/modules/parity_saturation.c` 需要外部 dump 的 `sat.bin`、repo 內沒有產生器。 |
 | `ctest:<檔名>` | `c_impl/test/`（含 `test/modules/`）下的 C 測試。多數是 C 自洽的回歸或結構測試，不是 Python 數值對拍；`test_delay_*`、`test_external_realign`、`test_runtime_preset`、`test_res_nearend_gate`、`test_reset_parity` 與同名（或對應）的 pytest 用同一組場景。 |
 | `pytest:<檔名>` | `python/tests/` 下的 Python 測試。`test_signal_grid.py` 會讀 `c_impl/src/aec.c` 的文字比對格點表（`AEC_GRID_TABLE`），`test_preset_arg.py` 讀 `aec.h` 內 `AEC_PRESET_*` 舊名那四行的整數值；其餘只測 Python 行為。 |

@@ -120,7 +120,7 @@ The DT-deg-vs-echo trade is a single-channel DSP Pareto wall; the strength
 axis exposes it.
 
 Everything else uses `AecConfig` dataclass defaults; the AEC3 chain has
-its own tuning embedded in `AecStateConfig` / `SuppressionGainConfig`
+its own tuning embedded in `AecStateConfig` / `SuppressorConfig`
 (`modules/state/aec_state.py`, `modules/residual/suppression_gain.py`).
 
 ### Determinism

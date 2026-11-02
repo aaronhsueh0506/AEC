@@ -321,7 +321,7 @@ side in `never_usable.16k512` is flipped to Python's own choice, the cell fails 
 - Link-incompatible for prebuilt objects: the old function names are gone, so recompile and relink callers.
   Struct layouts, enum values and `aec_get_mem_size` are unchanged, so no pool size or layout version moves.
 - Python unchanged; stale `preset` wording about the C names remains in Python comments at
-  `c_impl/test/pyc_parity/pyc_parity.py:310`, `python/preset_arg.py:1-3,10`, `python/diag/gen_aec_balanced_config_h.py:14`
+  `c_impl/test/pyc_parity/pyc_parity.py:415`, `python/preset_arg.py:1-3,10`, `python/diag/gen_aec_balanced_config_h.py:14`
   and `python/tests/test_preset_arg.py:1,36`.
 
 ## [Unreleased] — 2026-10-28 — A/B evidence and simple-mu research tools archived out of the tree
