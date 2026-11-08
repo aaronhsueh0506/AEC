@@ -3,7 +3,7 @@
 給**自己用 `AecResContext` 頻譜做渲染（合成時域輸出）**的既有 SDK 應用。只呼叫 `aec_process()` 並直接取
 `out` 的應用不受影響，不必看本文。
 
-相關文件：`c_user_manual_zh_TW_04_seam_troubleshooting.md` §8.1（分析 seam 與渲染底座）、§8.3
+相關文件：`reference/integration.md` §8.1（分析 seam 與渲染底座）、§8.3
 （`aec_get_output_base()`／`aec_post_reset_serial()` 的完整語意）、§8.7（單聲道整鏈）；
 公開宣告在 `c_impl/include/aec.h`（`AEC_OUTPUT_GUARD_API_VERSION`、`aec_get_output_base`、
 `aec_post_reset_serial`、`aec_synthesis_window`）與 `c_impl/include/aec_res.h`（`aec_cng_fill`）。

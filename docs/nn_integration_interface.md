@@ -1,10 +1,6 @@
-# NN integration interface (residual / NR / joint) — doc-only spec
-The freq-domain seam for swapping any post-linear stage with a learned model
+# Linear AEC outputs for downstream models
 
-> Scope: this documents the **existing** interface that lets a neural model replace the residual-echo
-> suppressor, the noise reduction, or both, **without touching the linear AEC or the front/back transform**.
-> No NN is shipped; the DSP stages remain the default and fallback. Companion pipeline design:
-> `Audio_ALG/docs/freq_domain_pipeline_design.md`.
+The linear AEC exposes time-domain and frequency-domain views of the same hop. Match the downstream model to the instance grid and use the reset notification when keeping external state.
 
 ## The shared grid (fixed per instance)
 All stages in one instance share a no-padding grid: **frame=FFT, hop=frame/2,
@@ -43,7 +39,7 @@ different names: `raw_output` is `linear_hop`, `formed_output` is `formed_hop`; 
 `comfort_noise`, `res_floor_protect` and `usable_linear` have the same names. `output_base_spec` / `guard_active` are the separate C getter `aec_get_output_base()` (`AecOutputBase`) and `post_reset_serial` is `aec_post_reset_serial()`; neither is a field of the C `AecResContext`. The C call sequence is
 `cfg.enable_res = 0; cfg.return_res_context = 1;` at construction, then per hop
 `aec_process_context()` followed by `aec_get_res_context()` (pointers valid until the next process or
-reset call). A compile-checked example is on `docs/html/aec_usage.html`.
+reset call). See the [C integration example](html/reference/aec_usage.html).
 
 ### Analysis seam vs rendering base
 
@@ -197,38 +193,8 @@ asks of itself, via the read-only `aec_linear_is_cancelling(const Aec*)` (`aec.h
 it returns 0 when the ERLE machinery has not run, i.e. absence of evidence,
 never a claim that the filter is broken.
 
-## The three swap points (freq-in → freq-out blocks)
-Each is a pure function on the shared grid; the network replaces the DSP function, nothing else.
+## Connecting a model
 
-### 1. NN-residual (replace the AEC3 post-filter `SuppressionGain`)
-- **in:** `E(f)` post-NR (or pre-NR) + `{Ŷ(f), X(f), erle_factor, dt_indicator, far_power, divergence}`
-- **out:** real gain `G_res(f) ∈ [0,1]` (apply `S(f)=G_res·E(f)`) **or** the enhanced complex `S(f)`.
-- DSP baseline it replaces: AEC3 `GainToNoAudibleEcho` (ENR/EMR), `suppression_gain.py`.
+A model that accepts a time-domain residual can consume the floating-point formed hop directly. The C field is `AecResContext.formed_hop`. A caller using an aligned far signal can obtain its hop and alignment generation from `aec_get_linear_context()`. Follow the model's contract for far input: Align-ULCNet's PCM stream in Audio_ALG takes the formed error and **raw** far input.
 
-### 2. NN-NR (replace `denoise_spectrum`)
-- **in:** `E(f)` (+ optional running noise estimate)
-- **out:** real gain `G_nr(f) ∈ [0,1]` **or** enhanced spectrum.
-- DSP baseline it replaces: NR `MmseLsaDenoiser.denoise_spectrum()` (every NR denoiser already exposes this
-  freq-in/freq-out entry — the model drops in at the same call site).
-
-### 3. NN-residual+NR (replace NR+RES jointly with one mask)
-- **in:** `E(f)` + full `AecResContext`
-- **out:** final `S(f)` (one network does denoise + residual-echo suppression in a single complex/real mask).
-- This is the highest-leverage seam: a single model consumes the linear AEC's freq context and emits the
-  finished near-end spectrum; the chain becomes `[window+FFT] → AEC-linear → NN → [IFFT+OLA]`.
-
-## Wiring contract (how a model is enabled)
-1. Run AEC with `return_res_context=True` → stream of `(E(f), ctx)`.
-2. Route `E(f)` (+ ctx fields) through the chosen NN block instead of the DSP function.
-3. Apply the returned gain/spectrum in the frequency domain.
-4. One `irFFT + sqrt-Hann OLA` at the very end (shared back-end).
-- The linear AEC, the front-end window+FFT, and the back-end IFFT+OLA are **unchanged** across all three
-  swaps. The model needs to honor its selected `sample_rate/fft/hop/n_freqs` contract and return a same-shaped
-  gain or spectrum. The DSP path stays as the deterministic fallback (and the A/B reference).
-
-## Why this is safe for a DSP-first release
-- The interface is already present (`return_res_context`, `AecResContext`, `denoise_spectrum`, `run_res`)
-  and exercised by `Audio_ALG/pipelines/mono_aec_nr_res/pipeline.py`. Shipping the DSP stages does not commit to any
-  model; it guarantees the seam exists so an NN arc can start without re-architecting the front end.
-- Training-data generation is free: the DSP stages produce `(input features = AecResContext, target = clean
-  near-end)` pairs on the 800-case corpus and any field recording, at the exact grid the model will run on.
+A frequency-domain model can read `error_spec` for analysis. When rendering the guarded signal, obtain the base from `aec_get_output_base()`, apply the required gains, add comfort noise once if configured, then synthesize. Keep independent OLA and model state per stream and handle changes to `aec_post_reset_serial()` before synthesizing that hop. See the [output-guard integration guide](sdk_migration_output_guard.md).

@@ -1,65 +1,7 @@
-# AEC C 使用手冊（繁體中文）
+# AEC C 使用手冊
 
-> **版本：5.0.0rc1**（對應 `python/aec.py` 的 `__version__`，本手冊唯一的版本標示）
->
-> 本手冊是給**函式庫使用者**看的整合說明：什麼時候呼叫哪個函式、參數怎麼設。
-> 演算法內部設計請看 [`aec_methods.md`](aec_methods.md)。
->
-> HTML 版（含可編譯範例與時序圖）：[呼叫使用](html/aec_usage.html)、
-> [流程時序圖](html/aec_sequence.html)、[外部參數與公開函式](html/aec_params.html)、
-> [內部參數](html/aec_params_internal.html)。
+[文件首頁](html/index.html) · [生命週期與錯誤碼](reference/lifecycle.md) · [設定](reference/configuration.md) · [Level](reference/levels.md) · [後級串接與故障排查](reference/integration.md) · [WAV 工具](reference/wav_cli.md)
 
-- [AEC C 使用手冊（繁體中文）](#aec-c-使用手冊繁體中文) <!-- split-toc -->
-  - [你需要 include 的 header](#你需要-include-的-header) <!-- split-toc -->
-  - [1. 這個函式庫是什麼／不是什麼](#1-這個函式庫是什麼不是什麼) <!-- split-toc -->
-    - [支援的取樣率與訊號格點](#支援的取樣率與訊號格點) <!-- split-toc -->
-    - [硬性限制](#硬性限制) <!-- split-toc -->
-  - [2. Quick start](#2-quick-start) <!-- split-toc -->
-    - [建置](#建置) <!-- split-toc -->
-    - [連結](#連結) <!-- split-toc -->
-    - [最小可用範例](#最小可用範例) <!-- split-toc -->
-  - [3. 資料契約](#3-資料契約) <!-- split-toc -->
-    - [Sample 格式與尺度](#sample-格式與尺度) <!-- split-toc -->
-    - [Frame 與 hop](#frame-與-hop) <!-- split-toc -->
-    - [延遲契約](#延遲契約) <!-- split-toc -->
-    - [演算法延遲（實測）](#演算法延遲實測) <!-- split-toc -->
-  - [4. 生命週期](c_user_manual_zh_TW_01_lifecycle.md#4-生命週期) <!-- split-toc -->
-    - [A. Heap 路徑（`aec_create`）](c_user_manual_zh_TW_01_lifecycle.md#a-heap-路徑aec_create) <!-- split-toc -->
-    - [B. 呼叫端自備記憶池（`aec_get_mem_size` + `aec_init`）](c_user_manual_zh_TW_01_lifecycle.md#b-呼叫端自備記憶池aec_get_mem_size--aec_init) <!-- split-toc -->
-    - [記憶池大小（實測，balanced level，其餘為預設值）](c_user_manual_zh_TW_01_lifecycle.md#記憶池大小實測balanced-level其餘為預設值) <!-- split-toc -->
-    - [`aec_reset`](c_user_manual_zh_TW_01_lifecycle.md#aec_reset) <!-- split-toc -->
-    - [什麼不能改](c_user_manual_zh_TW_01_lifecycle.md#什麼不能改) <!-- split-toc -->
-  - [5. 錯誤語意表](c_user_manual_zh_TW_01_lifecycle.md#5-錯誤語意表) <!-- split-toc -->
-  - [6. `AecConfig` 完整參考](c_user_manual_zh_TW_02_config.md#6-aecconfig-完整參考) <!-- split-toc -->
-    - [6.1 訊號格點（建立後不可更改）](c_user_manual_zh_TW_02_config.md#61-訊號格點建立後不可更改) <!-- split-toc -->
-    - [6.2 模組開關（全部只接受 0 或 1）](c_user_manual_zh_TW_02_config.md#62-模組開關全部只接受-0-或-1) <!-- split-toc -->
-    - [6.3 抑制強度](c_user_manual_zh_TW_02_config.md#63-抑制強度) <!-- split-toc -->
-    - [6.4 延遲估計](c_user_manual_zh_TW_02_config.md#64-延遲估計) <!-- split-toc -->
-    - [6.5 以 10 ms 為單位撰寫的時間欄位 ⚠️](c_user_manual_zh_TW_02_config.md#65-以-10-ms-為單位撰寫的時間欄位-) <!-- split-toc -->
-    - [6.6 其餘可設定欄位](c_user_manual_zh_TW_02_config.md#66-其餘可設定欄位) <!-- split-toc -->
-    - [6.6b 逐階段耗時（`aec_get_last_timing`）](c_user_manual_zh_TW_02_config.md#66b-逐階段耗時aec_get_last_timing) <!-- split-toc -->
-    - [6.6c Live observer（實驗性）](c_user_manual_zh_TW_02_config.md#66c-live-observer實驗性) <!-- split-toc -->
-    - [6.7 靜態記憶體拆解（`aec_get_mem_breakdown`）](c_user_manual_zh_TW_02_config.md#67-靜態記憶體拆解aec_get_mem_breakdown) <!-- split-toc -->
-  - [7. Level 選擇](c_user_manual_zh_TW_03_level.md#7-level-選擇) <!-- split-toc -->
-    - [7.1 執行期切換 level（`aec_set_level`）](c_user_manual_zh_TW_03_level.md#71-執行期切換-levelaec_set_level) <!-- split-toc -->
-  - [8. 進階整合 seam](c_user_manual_zh_TW_04_seam_troubleshooting.md#8-進階整合-seam) <!-- split-toc -->
-    - [8.1 Context-only 處理路徑](c_user_manual_zh_TW_04_seam_troubleshooting.md#81-context-only-處理路徑) <!-- split-toc -->
-    - [8.2 多實例共用遠端 FFT](c_user_manual_zh_TW_04_seam_troubleshooting.md#82-多實例共用遠端-fft) <!-- split-toc -->
-    - [8.3 `AecResContext` 欄位](c_user_manual_zh_TW_04_seam_troubleshooting.md#83-aecrescontext-欄位) <!-- split-toc -->
-    - [8.4 Duty-cycle engagement census](c_user_manual_zh_TW_04_seam_troubleshooting.md#84-duty-cycle-engagement-census) <!-- split-toc -->
-    - [8.5 獨立的 RES 級（`aec_res.h`）](c_user_manual_zh_TW_04_seam_troubleshooting.md#85-獨立的-res-級aec_resh) <!-- split-toc -->
-    - [8.6 線性對齊 context（`aec_get_linear_context`）](c_user_manual_zh_TW_04_seam_troubleshooting.md#86-線性對齊-contextaec_get_linear_context) <!-- split-toc -->
-    - [8.7 單聲道整鏈：AEC → NR → RES 增益融合 → 合成](c_user_manual_zh_TW_04_seam_troubleshooting.md#87-單聲道整鏈aec--nr--res-增益融合--合成) <!-- split-toc -->
-  - [9. 常見問題排除](c_user_manual_zh_TW_04_seam_troubleshooting.md#9-常見問題排除) <!-- split-toc -->
-    - [9.1 回音殘留太多](c_user_manual_zh_TW_04_seam_troubleshooting.md#91-回音殘留太多) <!-- split-toc -->
-    - [9.2 Double-talk 時近端被壓掉](c_user_manual_zh_TW_04_seam_troubleshooting.md#92-double-talk-時近端被壓掉) <!-- split-toc -->
-    - [9.3 啟動時收斂太慢／前一秒回音明顯](c_user_manual_zh_TW_04_seam_troubleshooting.md#93-啟動時收斂太慢前一秒回音明顯) <!-- split-toc -->
-    - [9.4 裝置移動時回音突然變大](c_user_manual_zh_TW_04_seam_troubleshooting.md#94-裝置移動時回音突然變大) <!-- split-toc -->
-    - [9.5 其他](c_user_manual_zh_TW_04_seam_troubleshooting.md#95-其他) <!-- split-toc -->
-  - [附錄 A：`aec_wav` 命令列工具](c_user_manual_zh_TW_05_appendix.md#附錄-aaec_wav-命令列工具) <!-- split-toc -->
-    - [`--print-mem-size` 輸出](c_user_manual_zh_TW_05_appendix.md#--print-mem-size-輸出) <!-- split-toc -->
-    - [Duty census 診斷輸出](c_user_manual_zh_TW_05_appendix.md#duty-census-診斷輸出) <!-- split-toc -->
-  - [回報問題](c_user_manual_zh_TW_05_appendix.md#回報問題) <!-- split-toc -->
 ## 你需要 include 的 header
 
 ```c
@@ -68,11 +10,11 @@
 
 只要自己用 `aec_process()` 取得時域輸出，就只需要 `aec.h`。另有一個 header 屬於
 **對外公開、範圍較窄的介面**，在自己組合頻域後處理鏈時需要（單聲道整鏈；以及直接驅動多通道核心、
-在 beamformer 之後自備 `AecRes` 的呼叫端——Audio_ALG 的 4ch mcab flow 不含 RES，由應用在 mcab 之後自己建立，見 [§8.5](c_user_manual_zh_TW_04_seam_troubleshooting.md#85-獨立的-res-級aec_resh)）：
+在 beamformer 之後自備 `AecRes` 的呼叫端——Audio_ALG 的 4ch mcab flow 不含 RES，由應用在 mcab 之後自己建立，見 [§8.5](reference/integration.md#85-獨立的-res-級aec_resh)）：
 
 | Header | 何時需要 |
 |---|---|
-| `aec_res.h` | `aec_cng_fill()` 舒適噪音填補（單聲道、多通道兩種串接都用）；以及對 beamformer 之後的融合頻譜算 RES 增益的 `AecRes`（[§8.5](c_user_manual_zh_TW_04_seam_troubleshooting.md#85-獨立的-res-級aec_resh)、[§8.6](c_user_manual_zh_TW_04_seam_troubleshooting.md#86-線性對齊-contextaec_get_linear_context)） |
+| `aec_res.h` | `aec_cng_fill()` 舒適噪音填補（單聲道、多通道兩種串接都用）；以及對 beamformer 之後的融合頻譜算 RES 增益的 `AecRes`（[§8.5](reference/integration.md#85-獨立的-res-級aec_resh)、[§8.6](reference/integration.md#86-線性對齊-contextaec_get_linear_context)） |
 
 `suppression_gain.h` 與 `aec_balanced_config.h` 是內部 header。Audio_ALG 的範例與多通道 flow（mcab）
 只 include `aec.h` 與 `aec_res.h`，不直接 include 這兩個。
@@ -336,4 +278,3 @@ max 923 ms、約 5% 超出 509 ms）與板端/離線的建議做法（系統延�
 這一個 hop（16 kHz／256 為 128 個樣本、8 ms），否則會聽成額外的回音。
 
 ---
-

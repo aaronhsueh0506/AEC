@@ -1,8 +1,9 @@
-> [索引](c_user_manual_zh_TW.md) · 上一部分：[c_user_manual_zh_TW_04_seam_troubleshooting.md](c_user_manual_zh_TW_04_seam_troubleshooting.md) <!-- split-nav -->
+[C 使用手冊](../c_user_manual_zh_TW.md)
+
 ## 附錄 A：`aec_wav` 命令列工具
 
 `aec_wav` 是**示範與驗證工具**，不是交付的函式庫介面。它的旗標與 C API 沒有一對一
-關係，正式整合請用 [§2](c_user_manual_zh_TW.md#2-quick-start) – [§8](c_user_manual_zh_TW_04_seam_troubleshooting.md#8-進階整合-seam) 的 API。
+關係，正式整合請用 [§2](../c_user_manual_zh_TW.md#2-quick-start) – [§8](integration.md#8-進階整合-seam) 的 API。
 
 ```bash
 make -C c_impl                                     # 建置（產出 aec_wav）
@@ -26,7 +27,7 @@ BIN="$(make -s -C c_impl print-bin-dir)"
 | `--delay-mode {matched\|fixed\|external}` | 覆寫 `cfg.delay_mode`（預設 `matched`）；`external` 對應 C API 的 `AEC_DELAY_EXTERNAL_ALIGNED` |
 | `--delay-num-filters <n>` | 覆寫 `cfg.delay_num_filters`（僅 `matched` 合法，1–5，預設 5） |
 | `--fixed-delay <samples>` | 覆寫 `cfg.fixed_delay_samples`（僅 `fixed` 合法，native-rate sample，≥0） |
-| `--delay-est-period <s>` | 覆寫 `cfg.delay_est_period_s`（秒；matched filter duty-cycle 週期，診斷用，範圍見 [§6.4](c_user_manual_zh_TW_02_config.md#64-延遲估計)） |
+| `--delay-est-period <s>` | 覆寫 `cfg.delay_est_period_s`（秒；matched filter duty-cycle 週期，診斷用，範圍見 [§6.4](configuration.md#64-延遲估計)） |
 | `--print-mem-size` | 印出 resolved grid／mode／n 與 static-pool byte 拆解後**直接退出**，不開音檔輸出、不跑任何一個 hop（見下方「`--print-mem-size` 輸出」） |
 | `--debug-level <0..3>` | 設定 debug 等級 0–3（全域等級會被存下，但目前沒有任何程式碼讀它，所以不會多印任何東西；要看逐 hop 內部量請用 `--debug-trace` 或 `--debug`） |
 | `--debug-log <path>` | 將 debug log 導向檔案（預設 stderr） |
@@ -39,7 +40,7 @@ BIN="$(make -s -C c_impl print-bin-dir)"
 
 > `--delay-mode`／`--delay-num-filters`／`--fixed-delay` 三個旗標的值**未經
 > CLI 驗證就直接寫入 `AecConfig`**——`aec_validate_config()` 是唯一的範圍與
-> mode／欄位相容性權威（[§6](c_user_manual_zh_TW_02_config.md#6-aecconfig-完整參考)），CLI 不做第二次檢查也不做 clamp。組合非法
+> mode／欄位相容性權威（[§6](configuration.md#6-aecconfig-完整參考)），CLI 不做第二次檢查也不做 clamp。組合非法
 > 時（例如 `--fixed-delay` 給負值、`--delay-mode fixed` 沒給 `--fixed-delay`、
 > `--delay-mode external` 卻改了 `--delay-num-filters`）`aec_create()` 會
 > fail-fast 印出訊息後以離開碼 4 結束，不會被靜默忽略或改成別的設定。
@@ -47,7 +48,7 @@ BIN="$(make -s -C c_impl print-bin-dir)"
 ### `--print-mem-size` 輸出
 
 不開音檔、不 `aec_create()` 一個真正的實例，只呼叫 `aec_get_mem_breakdown()`
-（[§6.7](c_user_manual_zh_TW_02_config.md#67-靜態記憶體拆解aec_get_mem_breakdown)）後印一行到 **stdout**（其餘旗標一律印到 stderr）：
+（[§6.7](configuration.md#67-靜態記憶體拆解aec_get_mem_breakdown)）後印一行到 **stdout**（其餘旗標一律印到 stderr）：
 
 ```text
 mem: sr=16000 fft=256 hop=128 mode=matched n=5 fixed_delay_samples=-1 total_bytes=366000 estimator_bytes=33936 ring_bytes=131072
@@ -56,7 +57,7 @@ mem: sr=16000 fft=256 hop=128 mode=matched n=5 fixed_delay_samples=-1 total_byte
 欄位依序：resolved 後的 `sample_rate`／`fft_size`／`hop_size`、`delay_mode`、
 `delay_num_filters`、`fixed_delay_samples`、`aec_get_mem_size()` 回傳的總
 byte 數、`delay_aec_get_mem_size()` 回傳的 estimator byte 數（非 `matched`
-時為 0）、對齊環形緩衝的 byte 數（`external` 時為 0）。三個 byte 欄位與 [§4](c_user_manual_zh_TW_01_lifecycle.md#4-生命週期)
+時為 0）、對齊環形緩衝的 byte 數（`external` 時為 0）。三個 byte 欄位與 [§4](lifecycle.md#4-生命週期)
 表格是同一個 `aec_get_mem_breakdown()` 呼叫算出來的，數字對不上就是文件
 過期，以實際輸出為準。組合非法時走與 `aec_create()` 相同的 fail-fast 路徑
 （離開碼 4），不會印出任何 `mem:` 行。
@@ -69,7 +70,7 @@ byte 數、`delay_aec_get_mem_size()` 回傳的 estimator byte 數（非 `matche
 
 正常處理完（非 `--print-mem-size`）結尾，`aec_wav` 會在既有的 `Processed ...`
 摘要行之後多印一行 matched-filter duty-cycle **實測**（非估計）engagement
-（`delay_estimator_productization_plan_zh_TW.md` 的選型量測要用；見 [§8.4](c_user_manual_zh_TW_04_seam_troubleshooting.md#84-duty-cycle-engagement-census)）：
+（`delay_selection.md` 的選型量測要用；見 [§8.4](integration.md#84-duty-cycle-engagement-census)）：
 
 ```text
 duty: matched_filter_ran=379/1250 hops (30.32% engagement, 69.68% saved)
@@ -82,7 +83,7 @@ duty: matched_filter_ran=379/1250 hops (30.32% engagement, 69.68% saved)
 duty: matched_filter_ran=0/0 hops (n/a -- no matched-filter estimator in delay_mode=fixed)
 ```
 
-診斷用途，不影響音訊路徑（見 [§8.4](c_user_manual_zh_TW_04_seam_troubleshooting.md#84-duty-cycle-engagement-census)）。
+診斷用途，不影響音訊路徑（見 [§8.4](integration.md#84-duty-cycle-engagement-census)）。
 
 輸入 / 輸出：
 
@@ -108,4 +109,3 @@ duty: matched_filter_ran=0/0 hops (n/a -- no matched-filter estimator in delay_m
 請附上：mic/ref 測試片段、完整的呼叫方式（CLI 命令或 `AecConfig` 設定）、
 sample rate 與 level、使用的 BACKEND，以及問題發生前後至少一秒的
 `--debug-trace <path>` CSV。
-> [索引](c_user_manual_zh_TW.md) · 上一部分：[c_user_manual_zh_TW_04_seam_troubleshooting.md](c_user_manual_zh_TW_04_seam_troubleshooting.md) <!-- split-nav -->

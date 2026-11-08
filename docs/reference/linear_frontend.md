@@ -1,4 +1,5 @@
-[Index](aec_methods.md) | Previous: [Index](aec_methods.md) | Next: [Part 2: AEC3 post-filter](aec_methods_02_post_filter.md) <!-- split-nav -->
+[Algorithm reference](../aec_methods.md)
+
 ## 2. Front-end blocks
 
 ### 2.1 HPF (high-pass filter)
@@ -42,7 +43,7 @@ alias so external callers (`from aec import DelayEstimator`) work.
 
 The reference ring holds `max_delay_ms` (1024 ms by default) of skew; the
 matched filter's own reliable reach is about 509 ms (see
-[`delay_estimator_design_zh_TW.md`](delay_estimator_design_zh_TW.md)). The
+[`delay_estimator_design_zh_TW.md`](../delay_estimator_design_zh_TW.md)). The
 estimate feeds the refined filter through a delay-line on the reference.
 
 #### Pre-echo detection (matched-filter accumulated-error)
@@ -85,11 +86,11 @@ right move at a true far-only path change, but its aggressive re-convergence
 tail overfits near-end speech that arrives shortly after, and the online
 (no-pre-align) pipeline pays this penalty that offline GCC pre-align never does.
 When `dt_aware_recovery_soft=True` and near-end was seen recently
-(`_ne_recent_frames > 0`, the held gate described in [§3.4](aec_methods_02_post_filter.md#34-suppressiongain)), those triggers drop
+(`_ne_recent_frames > 0`, the held gate described in [§3.4](postfilter.md#34-suppressiongain)), those triggers drop
 the full reset and instead **realign softly** — keep the converged filter,
 re-adapt at normal step size. Far-end single-talk never arms the gate, so its
 recoveries stay aggressive and FS echo depth is preserved. This is the partner
-mechanism to the DT-gated RES floor ([§3.4](aec_methods_02_post_filter.md#34-suppressiongain)).
+mechanism to the DT-gated RES floor ([§3.4](postfilter.md#34-suppressiongain)).
 
 ### 2.4 PBFDKF refined filter
 
@@ -142,5 +143,3 @@ mirrors AEC3's `render_signal_analyzer.cc`. Two outputs:
    the filter.
 
 ---
-
-[Index](aec_methods.md) | Previous: [Index](aec_methods.md) | Next: [Part 2: AEC3 post-filter](aec_methods_02_post_filter.md) <!-- split-nav -->

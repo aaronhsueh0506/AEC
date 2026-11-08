@@ -136,7 +136,7 @@ test/docs_smoke.sh
 
 `aec_get_mem_breakdown(&cfg, &out)` splits the same total into `estimator_bytes` and
 `ring_bytes` (`aec_wav --print-mem-size` prints it). Call order, sequence diagrams and the
-parameter tables are on [the HTML pages](../docs/html/aec_usage.html).
+parameter tables are on [the HTML pages](../docs/html/reference/aec_usage.html).
 
 Heap-vs-pool equality is checked by `make test-static-aec`.
 `make test-zero-heap` runs the allocator-hook acceptance test for the complete

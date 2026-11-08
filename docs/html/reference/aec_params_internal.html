@@ -27,7 +27,7 @@ pre code{background:none;padding:0}
 </style>
 </head>
 <body>
-<nav><a href="../../../Audio_ALG/docs/html/index.html">index</a><a href="aec.html">aec</a><a href="aec_usage.html">呼叫使用</a><a href="aec_sequence.html">時序圖</a><a href="aec_params.html">外部參數</a><b class="cur">內部參數</b><a href="aec_c_api.html">AEC API</a><a href="aec_c_api_params.html">參數效果</a><a href="aec_res.html">RES 級</a><a href="aec_detail.html">細節</a><a href="../../../NR/docs/html/nr.html">nr</a><a href="../../../NR/docs/html/nr_c_api_params.html">NR 參數</a><a href="../../../audiolib/common/docs/html/audio_common.html">audiolib</a><a href="../../../audiolib/common/docs/html/audio_common_params.html">audiolib 參數</a><a href="../../../audiolib/docs/html/spatial_chain.html">空間鏈</a><a href="../../../Audio_ALG/docs/html/integration_example.html">串接範例</a></nav>
+<nav aria-label="文件導覽"><a href="../index.html">AEC 文件首頁</a></nav>
 
 <h1>AEC 內部參數 — 可以調,但不建議開放</h1>
 
@@ -74,13 +74,6 @@ pre code{background:none;padding:0}
 
 <h2>4. 建置期旗標(內部)</h2>
 <p class="small"><code>SIMD</code>(<code>0</code> → <code>-DSIMD_KERNELS_FORCE_SCALAR</code>)、<code>NO_STDIO</code>、<code>PROFILE</code>(<code>-DAEC_STAGE_TIMING=1</code>)、<code>WERROR</code>、<code>EXTRA_CFLAGS</code>、<code>AEC_TESTING</code>(<b>絕不可出貨</b>);<code>-ffp-contract=off -fno-math-errno</code> 由 Makefile 強制,不是選項。說明見 <a href="aec_c_api.html">AEC API</a> §11 與 <code>AEC/c_impl/README.md</code>。</p>
-
-<h2>相關檔案與測試</h2>
-<ul class="small">
-<li><code>AEC/c_impl/include/aec.h</code>、<code>src/aec.c</code>(預設值 <code>aec.c:46-115</code>、驗證 <code>aec.c:236-347</code>、使用行如上表)</li>
-<li>測試:<code>make test-rate-structural</code>(時間欄位在各格點涵蓋約同樣的 wall-clock 時長)、<code>make test-config-validation</code>、<code>python3 -m pytest python/tests/test_timing_inventory.py</code></li>
-<li>外部參數:<a href="aec_params.html">aec_params</a>;各欄位調了會怎樣:<a href="aec_c_api_params.html">參數效果</a></li>
-</ul>
 
 </body>
 </html>

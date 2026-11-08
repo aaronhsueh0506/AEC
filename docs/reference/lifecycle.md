@@ -1,4 +1,5 @@
-> [索引](c_user_manual_zh_TW.md) · 下一部分：[c_user_manual_zh_TW_02_config.md](c_user_manual_zh_TW_02_config.md) <!-- split-nav -->
+[C 使用手冊](../c_user_manual_zh_TW.md)
+
 ## 4. 生命週期
 
 兩條路徑二選一。輸出**逐位元相同**（同一 BACKEND 下；`make test-static-aec` 驗證）。
@@ -69,7 +70,7 @@ filter bank、降取樣 render ring 與兩個 lag histogram 都是依 init 設�
 > `aec_get_mem_size()` 並重新 init**。
 >
 > 本節的絕對值由 `make test-delay-num-filters` 與 `aec_wav --print-mem-size` 量得；
-> §4 的表格與[附錄 A](c_user_manual_zh_TW_05_appendix.md#附錄-aaec_wav-命令列工具) `--print-mem-size` 的範例輸出都等於同一次量測的結果。
+> §4 的表格與[附錄 A](wav_cli.md#附錄-aaec_wav-命令列工具) `--print-mem-size` 的範例輸出都等於同一次量測的結果。
 
 每少一個 matched filter 固定省 **5,728 B**（每一格點都一樣）：coefficients
 2,048 B ＋ accumulated error 512 B ＋ render ring 1,536 B ＋ highest-peak
@@ -157,7 +158,7 @@ aec_reset(&aec);    /* 或 aec_reset(aec) */
 
 `aec_reset()` 是一次「硬 post 鏈 reset」：函式庫清掉自己的 OLA 尾巴、把舒適噪音種子設回 `AEC_CNG_SEED`（42），
 並讓 `aec_post_reset_serial()` 加 1；`aec_reset()` 是獨立的一次呼叫，不在任何處理呼叫之內，它回傳時 serial 已經是 +1 後的值。自己在函式庫外合成的整合者靠這個 serial 同步清自己的 OLA 與 CNG 狀態（見
-[§8.3](c_user_manual_zh_TW_04_seam_troubleshooting.md#83-aecrescontext-欄位)），不要反過來呼叫 `aec_reset()`。
+[§8.3](integration.md#83-aecrescontext-欄位)），不要反過來呼叫 `aec_reset()`。
 
 ### 什麼不能改
 
@@ -201,8 +202,6 @@ aec_reset(&aec);    /* 或 aec_reset(aec) */
    再拿去配置記憶體。
 
 設定驗證在 `aec_create` / `aec_init` / `aec_get_mem_size` 三者內部都會先執行，
-任一欄位超出 [§6](c_user_manual_zh_TW_02_config.md#6-aecconfig-完整參考) 的允許範圍就整組拒絕。
+任一欄位超出 [§6](configuration.md#6-aecconfig-完整參考) 的允許範圍就整組拒絕。
 
 ---
-
-> [索引](c_user_manual_zh_TW.md) · 下一部分：[c_user_manual_zh_TW_02_config.md](c_user_manual_zh_TW_02_config.md) <!-- split-nav -->

@@ -25,13 +25,13 @@ pre code{background:none;padding:0}
 </style>
 </head>
 <body>
-<nav><a href="../../../Audio_ALG/docs/html/index.html">index</a><a href="aec.html">aec</a><a href="aec_usage.html">呼叫使用</a><a href="aec_sequence.html">時序圖</a><a href="aec_params.html">外部參數</a><a href="aec_params_internal.html">內部參數</a><a href="aec_c_api.html">AEC API</a><a href="aec_c_api_params.html">參數效果</a><b class="cur">RES 級</b><a href="aec_detail.html">細節</a><a href="../../../NR/docs/html/nr.html">nr</a><a href="../../../NR/docs/html/nr_c_api_params.html">NR 參數</a><a href="../../../audiolib/common/docs/html/audio_common.html">audiolib</a><a href="../../../audiolib/common/docs/html/audio_common_params.html">audiolib 參數</a><a href="../../../audiolib/docs/html/spatial_chain.html">空間鏈</a><a href="../../../Audio_ALG/docs/html/integration_example.html">串接範例</a></nav>
+<nav aria-label="文件導覽"><a href="../index.html">AEC 文件首頁</a></nav>
 
 <h1>AEC RES 級 — <code>aec_res.h</code></h1>
 
 <h2>1. 概要</h2>
 <p><code>Aec</code> 內部的 post chain 會算出一組逐 bin 的殘留回音抑制增益 G<sub>res</sub>(f)。多 lane 的整合(例如 4ch:四條線性 AEC → beamform／融合 → 一個共用的 RES)需要的是「對<b>融合後</b>的頻譜算一次 G<sub>res</sub>」,而不是每條 lane 各算一次。<code>aec_res.h</code> 把同一個抑制器獨立出來,並附上與它搭配的舒適噪音填補 <code>aec_cng_fill()</code>。</p>
-<p>誰持有 RES:單聲道的 RES 就在 <code>Aec</code> 裡面(增益是 <code>ctx.res_gain</code>,強度用 <code>aec_set_level()</code>,由 <code>aec_get_res_context()</code> 取得),不需要另建 <code>AecRes</code>;單聲道是唯一的例外。Audio_ALG 的 4ch 流程層 <code>mcab</code>(<code>pipelines/4ch_aec_bf_nr_res/mcab.h</code>)<b>不是 library</b>:四條 <code>Aec</code> lane 與(MATCHED 時)共用的 <code>DelayAec</code> 由應用自己建立、以指標交給 mcab;mcab 只擁有 flow 狀態,並以 <code>mcab_fuse()</code> 把呼叫端波束成形權重投影出的 E、R²、CN 組成 <code>McabFrame</code>(<code>g_res_ctx = NULL</code>)。波束成形不在 mcab 內(sample 層 helper <code>mcab_sample_beam.h</code> 提供 SRP-PHAT＋BF 的接法),mcab <b>不持有、不建立、也不執行 RES</b>。4ch 應用要 RES,就在自己的 init 裡用本頁的函式建一個 <code>AecRes</code>(設定來自 <code>aec_config_from_level(level, sample_rate)</code>,<code>fft_size</code> 取 flow 的格點),每 hop 在 fuse 之後以 <code>mcab_sample_res_input(&amp;frame, &amp;in)</code>(<code>pipelines/4ch_aec_bf_nr_res/mcab_sample_post.h</code>)組出 <code>AecResInput</code>,再呼叫 <code>aec_res_process(res, &amp;in)</code>,強度用 <code>aec_res_set_level()</code>,串流邊界用 <code>aec_res_reset()</code>;做法見 §2.3。範例:<code>4ch_aec_bf_nr_res/mcab_static.c</code>、<code>mcab_raw.c</code>、<code>mcab_external_static.c</code>,以及 <code>pipelines/dfn/4ch_aec_bf_dfn_res/main.c</code>;<code>pipelines/ulcnet/4ch_alignulcnet</code> 以 <code>cfg.enable_post = 0</code> 跑 flow、不接 RES。</p>
+<p>誰持有 RES:單聲道的 RES 就在 <code>Aec</code> 裡面(增益是 <code>ctx.res_gain</code>,強度用 <code>aec_set_level()</code>,由 <code>aec_get_res_context()</code> 取得),不需要另建 <code>AecRes</code>;單聲道是唯一的例外。Audio_ALG 的 4ch 流程層 <code>mcab</code>(<code>pipelines/4ch_aec_bf_nr_res/mcab.h</code>)提供四聲道 AEC 前端：四條 <code>Aec</code> lane 與(MATCHED 時)共用的 <code>DelayAec</code> 由應用自己建立、以指標交給 mcab;mcab 只擁有 flow 狀態,並以 <code>mcab_fuse()</code> 把呼叫端波束成形權重投影出的 E、R²、CN 組成 <code>McabFrame</code>(<code>g_res_ctx = NULL</code>)。波束成形不在 mcab 內(sample 層 helper <code>mcab_sample_beam.h</code> 提供 SRP-PHAT＋BF 的接法),mcab <b>不持有、不建立、也不執行 RES</b>。4ch 應用要 RES,就在自己的 init 裡用本頁的函式建一個 <code>AecRes</code>(設定來自 <code>aec_config_from_level(level, sample_rate)</code>,<code>fft_size</code> 取 flow 的格點),每 hop 在 fuse 之後以 <code>mcab_sample_res_input(&amp;frame, &amp;in)</code>(<code>pipelines/4ch_aec_bf_nr_res/mcab_sample_post.h</code>)組出 <code>AecResInput</code>,再呼叫 <code>aec_res_process(res, &amp;in)</code>,強度用 <code>aec_res_set_level()</code>,串流邊界用 <code>aec_res_reset()</code>;做法見 §2.3。範例:<code>4ch_aec_bf_nr_res/mcab_static.c</code>、<code>mcab_raw.c</code>、<code>mcab_external_static.c</code>,以及 <code>pipelines/dfn/4ch_aec_bf_dfn_res/main.c</code>;<code>pipelines/ulcnet/4ch_alignulcnet</code> 以 <code>cfg.enable_post = 0</code> 跑 flow、不接 RES。</p>
 <ul>
 <li>設定來自與 lane 相同的建構函式(<code>aec_build_sg_config</code>),所以由同一個 <code>AecConfig</code> 建出的 <code>AecRes</code> 與 lane 內的抑制器設定逐位元相同。</li>
 <li>Static memory:呼叫端給一塊 16-byte 對齊的記憶體;process／reset／set_level 不配置記憶體、不用 stdio、無全域狀態。</li>
@@ -173,7 +173,7 @@ Application                        mcab flow + beam helper     AecRes (libaec) N
  ==== hop 之間 ====
  |-- aec_res_set_level(res, level, ramp_ms) -----------------&gt;|               |               |   強度;回 0 或 -1(-1 時什麼都沒寫)
 </pre>
-<p class="small">flow 的庫內時序見 <a href="../../../Audio_ALG/docs/html/pipeline_4ch.html">pipeline_4ch</a>;本頁的 RES 與上圖的 NR、CNG、合成都屬於應用。</p>
+<p class="small">flow 的庫內時序見 pipeline_4ch;本頁的 RES 與上圖的 NR、CNG、合成都屬於應用。</p>
 
 <h2>3. Block diagram</h2>
 <pre>aec_res_process(r, in)
@@ -233,14 +233,5 @@ t              各 lane 線性 AEC 完成
 <h2>8. 與 Aec 內部舒適噪音的關係</h2>
 <div class="note"><code>aec_cng_fill</code> 是 <code>Aec</code> 內部輸出階段(<code>aec_post_apply_output()</code>)與外部合成共用的<b>唯一</b>舒適噪音實作:每個分量加 <code>ng · (nf · 表值)</code>,<code>nf = sqrt(max(cn/32768², 0))</code>、<code>ng = sqrt(max(1−g_res², 0))</code>(有 <code>g_nr</code> 時再乘 <code>max(g_nr, nr_floor)</code>),每個 bin 一步 LCG、依 bin 由小到大、bin 0 與 n−1 不抽樣。<code>g_nr == NULL</code> 時,公開呼叫與 <code>aec_process()</code> 內部的舒適噪音在相同輸入下逐位元相同(內部以全增益當 <code>g_res</code>)。</div>
 
-<h2>9. 相關檔案與測試</h2>
-<ul class="small">
-<li><code>AEC/c_impl/include/aec_res.h</code>、<code>AEC/c_impl/src/aec_res.c</code></li>
-<li><code>AEC/c_impl/include/aec_config_build.h</code> — 庫內部:<code>aec_build_sg_config</code>／<code>aec_resolve_valid_config</code>(非對外 API)</li>
-<li><code>AEC/c_impl/test/test_aec_res.c</code> — <code>make test-aec-res</code>(含 render 的 ×32768 縮放、離開初始狀態、飽和後復原限制的判別案例)</li>
-<li><code>AEC/c_impl/test/test_zero_heap_aec.c</code>（含 AecRes 週期）、<code>test/no_stdio_main.c</code>（<code>make audit-no-stdio</code>）</li>
-<li><code>AEC/docs/c_user_manual_zh_TW_04_seam_troubleshooting.md</code> §8.5</li>
-<li>4ch 應用的實際用法(Audio_ALG):<code>pipelines/4ch_aec_bf_nr_res/mcab_static.c</code>、<code>mcab_raw.c</code>、<code>mcab_external_static.c</code>;<code>pipelines/dfn/4ch_aec_bf_dfn_res/main.c</code>;<code>pipelines/4ch_aec_bf_nr_res/mcab_sample_post.h</code>(<code>mcab_sample_res_input</code>、<code>mcab_sample_anr_gain</code>)</li>
-</ul>
 </body>
 </html>

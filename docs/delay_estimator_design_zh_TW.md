@@ -154,7 +154,7 @@ local-max scan 走幾個 32-bin 視窗，用最緊公式時 n=2 只會掃 1 個�
 
 各部署形態的 bulk delay 典型量級（經驗值，供選 mode/n 的第一輪判斷；
 正式選值仍以 bring-up 實測公式為準——見
-`delay_estimator_productization_plan_zh_TW.md` §「p99.9 residual +
+`reference/delay_selection.md` §「p99.9 residual +
 jitter + drift + safety margin < bank reliable reach」）：
 
 | 部署形態 | 典型 bulk delay | 性質 | 建議 mode / n |

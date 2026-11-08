@@ -22,8 +22,8 @@ numerical tolerance (not bit-equal):
   (`PBFDKF`, `AecState`, `SuppressionGain`, etc.). Built with
   `-ffp-contract=off -fno-math-errno` mandatory.
 
-The version is `__version__` in [aec.py](../python/aec.py); the changelog is
-[CHANGELOG.md](../CHANGELOG.md).
+The version is `__version__` in [aec.py](../../python/aec.py); the changelog is
+[CHANGELOG.md](../../CHANGELOG.md).
 
 All production C is float32 end-to-end (delay chain, orchestrator scalars,
 post/state modules, `residual_echo_estimator`, mic-path HPF). Python↔C
@@ -33,7 +33,7 @@ end-to-end tolerance gate `c_impl/test/parity_aec_e2e.c`.
 The **FFT backend is NE10 (float32, ARM NEON)** for both the malloc build
 (`make`) and the embedded deployment (caller pool via
 `aec_get_mem_size`/`aec_init`); the static path is byte-equal to the malloc
-path. Canonical algorithm reference: [aec_methods.md](aec_methods.md).
+path. Canonical algorithm reference: [aec_methods.md](../aec_methods.md).
 
 ## Common commands
 
@@ -172,7 +172,7 @@ HPF runs on the mic path only; `Saturation` / `EchoPathDelayEstimator` consume
 the raw reference.
 
 The post-filter is `AEC._aec3_post` in
-[python/modules/orchestrator.py](../python/modules/orchestrator.py), which
+[python/modules/orchestrator.py](../../python/modules/orchestrator.py), which
 drives the AEC3-aligned chain:
 
   modules/state         — AecState ADT + StationarityEstimator +
@@ -194,14 +194,14 @@ the linear residual at PBFDKF output (used by
 Tight coupling lives in **`PBFDKF` + shadow `PBFDAF` + `PathChangeRegimeHandler`**
 — the shadow filter and main filter exchange state via a regime handler
 that fires `boost_q` / `reverse_copy` / `main_paused` decisions. PBFDKF
-lives in [python/modules/filters.py](../python/modules/filters.py);
-PathChangeRegimeHandler in [python/modules/epc.py](../python/modules/epc.py).
+lives in [python/modules/filters.py](../../python/modules/filters.py);
+PathChangeRegimeHandler in [python/modules/epc.py](../../python/modules/epc.py).
 The handler is **load-bearing on the cohort tail**; do not remove or bypass it.
 
 ### `AecConfig` and presets
 
 Four presets — `mild` / `balanced` / `aggressive` / `no_floor` — are defined in
-[python/modules/config.py](../python/modules/config.py) (`from_preset`). All share
+[python/modules/config.py](../../python/modules/config.py) (`from_preset`). All share
 the same AEC3 chain and the four base overrides (`enable_cng`,
 `shadow_mu_min`, `warmup_frames`, `kalman_q_high`); everything else uses dataclass
 defaults. **Knobs are co-tuned** — don't tweak a single field without a full
@@ -222,8 +222,8 @@ exposes it rather than hiding it.
 
 ### Diagnostic surfaces (do not remove)
 
-- `AecStats` / `get_stats()` ([python/modules/dataclasses.py](../python/modules/dataclasses.py)
-  + the AEC method in [python/modules/orchestrator.py](../python/modules/orchestrator.py))
+- `AecStats` / `get_stats()` ([python/modules/dataclasses.py](../../python/modules/dataclasses.py)
+  + the AEC method in [python/modules/orchestrator.py](../../python/modules/orchestrator.py))
   — per-frame audio-passive trace consumed by `run_one_case.py` plots
   and external research tooling.
 - `AecResContext` — exposes `echo_spec` / per-bin Kalman state so the
@@ -238,8 +238,3 @@ exposes it rather than hiding it.
 - HPF defaults: far-end (ref) HPF=OFF, mic-path HPF=ON.
 - macOS: use `python3` (not `python`).
 - `active_render` threshold is **5.96e-4** (100² · 64 / 32768²).
-
-## Branch model
-
-`main` carries the production-graded code. Version history lives in
-[CHANGELOG.md](../CHANGELOG.md).

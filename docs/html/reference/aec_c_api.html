@@ -28,10 +28,10 @@ pre code{background:none;padding:0}
 </style>
 </head>
 <body>
-<nav><a href="../../../Audio_ALG/docs/html/index.html">index</a><a href="aec.html">aec</a><a href="aec_usage.html">呼叫使用</a><a href="aec_sequence.html">時序圖</a><a href="aec_params.html">外部參數</a><a href="aec_params_internal.html">內部參數</a><b class="cur">AEC API</b><a href="aec_c_api_params.html">參數效果</a><a href="aec_res.html">RES 級</a><a href="aec_detail.html">細節</a><a href="../../../NR/docs/html/nr.html">nr</a><a href="../../../NR/docs/html/nr_c_api_params.html">NR 參數</a><a href="../../../audiolib/common/docs/html/audio_common.html">audiolib</a><a href="../../../audiolib/common/docs/html/audio_common_params.html">audiolib 參數</a><a href="../../../audiolib/docs/html/spatial_chain.html">空間鏈</a><a href="../../../Audio_ALG/docs/html/integration_example.html">串接範例</a></nav>
+<nav aria-label="文件導覽"><a href="../index.html">AEC 文件首頁</a></nav>
 
 <h1>AEC C API 使用說明 — <code>AEC/c_impl</code></h1>
-<p class="small">呼叫順序與可編譯範例見 <a href="aec_usage.html">aec_usage</a>、時序圖見 <a href="aec_sequence.html">aec_sequence</a>、外部／內部參數見 <a href="aec_params.html">aec_params</a>／<a href="aec_params_internal.html">aec_params_internal</a>。本頁是<b>整合者視角</b>的 API 說明:init/process 要呼叫什麼、input/output 怎麼給、每個參數調了會有什麼結果、跟 NN 後級搭配時要怎麼用。演算法內部機制見 <a href="aec.html">aec.html</a>;完整欄位與錯誤語意的 canonical 出處是 <code>AEC/docs/c_user_manual_zh_TW.md</code> 索引所指的分冊(欄位參考 <code>c_user_manual_zh_TW_02_config.md</code> §6、錯誤語意表 <code>c_user_manual_zh_TW_01_lifecycle.md</code> §5)。<b>函式內部自行呼叫的子模組不在本頁範圍。</b></p>
+<p class="small">呼叫順序與可編譯範例見 <a href="aec_usage.html">aec_usage</a>、時序圖見 <a href="aec_sequence.html">aec_sequence</a>、外部／內部參數見 <a href="aec_params.html">aec_params</a>／<a href="aec_params_internal.html">aec_params_internal</a>。本頁是<b>整合者視角</b>的 API 說明:init/process 要呼叫什麼、input/output 怎麼給、每個參數調了會有什麼結果、跟 NN 後級搭配時要怎麼用。演算法內部機制見 <a href="aec.html">aec.html</a>;完整欄位與錯誤語意的 canonical 出處是 <code>AEC/docs/c_user_manual_zh_TW.md</code> 索引所指的分冊(欄位參考 <code>../../reference/configuration.md</code> §6、錯誤語意表 <code>../../reference/lifecycle.md</code> §5)。<b>函式內部自行呼叫的子模組不在本頁範圍。</b></p>
 
 <h2>1. 你只需要一個 header</h2>
 <pre>#include "aec.h"    /* 唯一使用者面 header */</pre>
@@ -63,37 +63,7 @@ pre code{background:none;padding:0}
 <div class="warn"><b>NR 的 grid 表與這裡不完全相同</b>:NR 另外支援 8k/128,而它的 8 kHz 預設是 128 不是 256。串成一條鏈時<b>不要各自呼叫各自的 default</b>,要由上層 resolve 出同一組 <code>(sample_rate, fft_size, hop)</code> 明確傳給兩邊。</div>
 
 <h2>3. 建立與生命週期</h2>
-<h3>Static pool(板端路徑)</h3>
-<pre>AecConfig cfg;
-aec_config_from_level(&amp;cfg, AEC_LEVEL_BALANCED, 16000);
-cfg.fft_size = 256;                       /* 明確指定,不要留 0 */
-cfg.delay_mode = AEC_DELAY_MATCHED;       /* 三態之一,見 §4 */
-
-size_t bytes = aec_get_mem_size(&amp;cfg);    /* 0 = cfg 無效 */
-void  *pool  = NULL;
-if (bytes == 0 || posix_memalign(&amp;pool, 16, bytes) != 0) { /* cfg 無效或配置失敗 */ }  /* 基底必須 16-byte 對齊 */
-Aec   *aec   = pool ? aec_init(pool, bytes, &amp;cfg) : NULL;
-if (!aec) { /* cfg 無效 / 未對齊 / pool 太小 */ }
-
-int hop = aec_hop_size(aec);              /* 128 */
-while (streaming) aec_process(aec, mic, ref, out);
-
-aec_destroy(aec);      /* static instance 不會釋放 caller pool */
-free(pool);</pre>
-
-<h3>Heap(桌面/測試)</h3>
-<pre>Aec aec;                                  /* caller 擁有這個 struct */
-if (aec_create(&amp;aec, &amp;cfg) != 0) { /* cfg 無效或 malloc 失敗 */ }
-aec_destroy(&amp;aec);                        /* 會 free 內部 arena */</pre>
-
-<div class="tblwrap"><table>
-<tr><th>規則</th><th>細節</th></tr>
-<tr><td>對齊</td><td><b>16 bytes</b>。<code>aec_init()</code> 在寫入任何 byte <b>之前</b>就檢查,未對齊回 NULL 且不動 pool</td></tr>
-<tr><td>查 size 與 init 必須用<b>同一份</b> cfg</td><td>兩者各自獨立計算,<b>傳不同 cfg 不會被偵測</b>(只有 <code>mem_size &lt; need</code> 這一層防護)。這是契約要求,程式不強制</td></tr>
-<tr><td>不要把 byte 數寫死</td><td>數值隨 backend／config／struct 大小整批移動。永遠用當前 cfg 呼叫 <code>aec_get_mem_size()</code></td></tr>
-<tr><td>init-time immutable</td><td><code>sample_rate</code>／<code>fft_size</code>／<code>delay_mode</code>／<code>delay_num_filters</code>／<code>filter_length</code>／<code>n_partitions</code>。改了必須重查 size 並重新 init</td></tr>
-<tr><td>拆解查詢</td><td><code>aec_get_mem_breakdown(&amp;cfg,&amp;bd)</code> → <code>total_bytes</code>／<code>estimator_bytes</code>／<code>ring_bytes</code>。<b>內部會重跑一次 validate,不要放 hot path</b></td></tr>
-</table></div>
+<p>建立、reset 與釋放的最小範例見<a href="aec_usage.html">呼叫使用</a>。固定記憶池在最後一次處理之前均由 caller 持有。</p>
 
 <h2>4. Delay mode — 三選一,init-time 決定</h2>
 <p>這是<b>整合時最先要決定</b>的事,因為它同時改變 pool layout 與 API 可用性。</p>
@@ -180,7 +150,7 @@ aec_get_linear_context(aec, &amp;lin);      /* 時域 seam:線性殘差 + 已對
 <p class="small">AEC <b>不做</b>最終 peak limiter。產品需要 limiter／AGC／DRC 時放在整條 chain 的最後。</p>
 
 <h2>8. 參數設定與效果</h2>
-<p>逐欄位的可調範圍與「調了會怎樣」獨立成頁:<a href="aec_c_api_params.html"><b>AEC 參數效果對照</b></a>。本頁其餘各節不依賴它。</p>
+<p>設定範圍、生效時點及對音訊的影響見<a href="aec_params.html#effects"><b>AEC 參數效果對照</b></a>。</p>
 
 <h2>9. 執行期控制</h2>
 <div class="tblwrap"><table>
@@ -220,7 +190,7 @@ aec_get_linear_context(aec, &amp;lin);      /* 時域 seam:線性殘差 + 已對
 <tr><td><code>near_power</code> / <code>out_power</code></td><td><b>EMA(alpha=0.95),不是瞬時值</b>。<code>out_power</code> 是線性、<b>pre-RES-gain</b> 的輸出功率</td></tr>
 <tr><td><code>duty_hops_total</code> / <code>duty_hops_run</code></td><td>matched-filter 實際參與率。<b>非 MATCHED 時兩者恆 0</b>;<code>aec_reset()</code> 會清零</td></tr>
 </table></div>
-<p class="small">建議 poll 頻率:每秒一次。這是 pull 型結構化快照,<b>在 release build 一樣可用</b>(<code>NO_STDIO=1</code> 的 archive 仍匯出 <code>aec_debug_status</code>)——詳見 <a href="../../../Audio_ALG/docs/html/integration_example.html">串接範例</a> 的 DEBUG 章節。</p>
+<p class="small">建議 poll 頻率:每秒一次。這是 pull 型結構化快照,<b>在 release build 一樣可用</b>(<code>NO_STDIO=1</code> 的 archive 仍匯出 <code>aec_debug_status</code>)——詳見 串接範例 的 DEBUG 章節。</p>
 
 <h3><code>AecStageTiming</code>(需 build flag)</h3>
 <p>五個 <code>uint32_t</code> 微秒欄位:<code>delay_us</code>／<code>frontend_us</code>／<code>linear_us</code>／<code>res_us</code>／<code>steering_us</code>。</p>
@@ -254,14 +224,5 @@ aec_get_linear_context(aec, &amp;lin);      /* 時域 seam:線性殘差 + 已對
 <li>最終 float→PCM 前做 saturating conversion;limiter 只放在整條 chain 最後。</li>
 </ul>
 
-<h2>相關檔案與測試路徑</h2>
-<ul class="small">
-<li><code>AEC/c_impl/include/aec.h</code> — 唯一使用者面 header</li>
-<li><code>AEC/c_impl/include/aec_res.h</code> — 另一個對外 header:獨立的 RES 級與舒適噪音填補(<a href="aec_res.html">說明頁</a>)</li>
-<li><code>AEC/c_impl/STATIC_MEMORY.md</code> — caller-pool 契約與可編譯範例(由 <code>test/docs_smoke.sh</code> 實際跑)</li>
-<li><code>AEC/docs/c_user_manual_zh_TW.md</code> — canonical 手冊索引;分冊:<code>_02_config.md</code> §6 完整欄位、<code>_01_lifecycle.md</code> §5 錯誤語意表、<code>_04_seam_troubleshooting.md</code> §9 疑難排解</li>
-<li><code>AEC/docs/nn_integration_interface.md</code> — NN seam 規格(三個 swap point)</li>
-<li><code>AEC/c_impl/example/aec_wav.c</code> — CLI,含 <code>--debug-log</code>／<code>--debug-trace</code></li>
-</ul>
 </body>
 </html>

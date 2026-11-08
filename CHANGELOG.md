@@ -4611,7 +4611,7 @@ recoverable from Git history.
   - underrun (capture w/ empty FIFO) → process with silent render + `AEC_BUF_RENDER_UNDERRUN`
   - overrun (render past capacity) → drop oldest + `AEC_BUF_RENDER_OVERRUN`
 - Lockstep (one `analyze_render` then one `process_capture`) is FIFO pass-through →
-  **byte-identical to `aec_process()`**. Verified by [c_impl/test/stream_sim.c](c_impl/test/stream_sim.c):
+  **byte-identical to `aec_process()`**. Verified by c_impl/test/stream_sim.c:
   lockstep 0/400 hops differ; overrun + underrun detection/recovery PASS.
 
 **Research-arc closure (no production change)**
@@ -5353,7 +5353,7 @@ After alignment shipped, dev-time substrate was removed. **Byte-equal vs `cd73f4
 
 ## [3.21.6] — 2026-05-21 — AEC3 Parity Completion (Sprint P1 ships; Sprints P2 / P4 closed intentionally-incompatible; Sprint P3 byte-equal structural)
 
-**Headline**: 1 production change shipped — **Sprint P1 AEC3 FilterAnalyzer port** (single-channel verbatim port of [`docs/aec3_extracts/src/aec3/filter_analyzer.cc`](docs/aec3_extracts/src/aec3/filter_analyzer.cc), `~250 LOC`, owned by `AecState`; default-True). The port produces a non-zero direct-path delay scalar that AEC3's reverb-tail update consumes — indirectly closes v3.21.5 Sprint C's reverb-tail blocker. Cumulative 800-case bench Pareto-positive vs v3.21.5: FS_static **+0.059** / FS_movement **+0.036** / DT buckets within ±0.01 / NE flat.
+**Headline**: 1 production change shipped — **Sprint P1 AEC3 FilterAnalyzer port** (single-channel verbatim port of `docs/aec3_extracts/src/aec3/filter_analyzer.cc`, `~250 LOC`, owned by `AecState`; default-True). The port produces a non-zero direct-path delay scalar that AEC3's reverb-tail update consumes — indirectly closes v3.21.5 Sprint C's reverb-tail blocker. Cumulative 800-case bench Pareto-positive vs v3.21.5: FS_static **+0.059** / FS_movement **+0.036** / DT buckets within ±0.01 / NE flat.
 
 Sprints P2 / P4 closed as **intentionally-incompatible with our PBFDKF architecture** — both AEC3 parity items are permanently retired (TransparentMode + AEC3-default-off stationarity); any v3.22+ revisit must be labelled as PBFDKF-specific divergence, NOT AEC3 parity restoration. Sprint P3 ships byte-equal structural parity (canonical control surface for `use_stationarity_properties` now lives at `SuppressorConfig.echo_audibility`, with top-level `aec3_post_stationarity_zero_enabled` retained as deprecated alias).
 
@@ -5361,7 +5361,7 @@ Cycle close: `docs/v3_21_6_cycle_close.md`. v3.22 entry gate (AEC3 parity baseli
 
 ### Sprint P1 — FilterAnalyzer port SHIPPED (Pareto-positive)
 
-AEC3 [`filter_analyzer.cc`](docs/aec3_extracts/src/aec3/filter_analyzer.cc) produces `FilterDelaysBlocks()` (per-channel direct-path delay) + `ConsistentFilterDetector` (peak-stability gate for `any_filter_consistent`). Pre-v3.21.6, our [`python/modules/state/filter_delay.py:57-60`](python/modules/state/filter_delay.py#L57) received `analyzer_filter_delay_estimates_blocks=None` always (FilterAnalyzer was a v3.18 audit-only stub at `python/modules/filter_analyzer.py`, since deleted) → `min_direct_path_filter_delay()` returned 0 → reverb-tail update never fired on cohort-tail cases. This was the root cause v3.21.5 Sprint C diagnosed but couldn't fix in the v3.21.5 narrow scope.
+AEC3 `filter_analyzer.cc` produces `FilterDelaysBlocks()` (per-channel direct-path delay) + `ConsistentFilterDetector` (peak-stability gate for `any_filter_consistent`). Pre-v3.21.6, our [`python/modules/state/filter_delay.py:57-60`](python/modules/state/filter_delay.py#L57) received `analyzer_filter_delay_estimates_blocks=None` always (FilterAnalyzer was a v3.18 audit-only stub at `python/modules/filter_analyzer.py`, since deleted) → `min_direct_path_filter_delay()` returned 0 → reverb-tail update never fired on cohort-tail cases. This was the root cause v3.21.5 Sprint C diagnosed but couldn't fix in the v3.21.5 narrow scope.
 
 P1 ships a full single-channel port (block units translated AEC3 `kBlockSize=64` 4ms → our `HOP_SAMPLES=160` 10ms; convergence hold 5s = 500 hops; consistency hold 1.5s = 150 hops). The new `state/filter_analyzer.py` (~250 LOC) covers `ConsistentFilterDetector` + 3-tap 600Hz HPF + region-sweep peak finder + state machine, verbatim against the AEC3 source. `AecState` owns the analyzer; `PBFDAF.get_time_domain_filter()` (new ~10 LOC IFFT concat helper) feeds the time-domain impulse response per hop. Reverb-update `_delay_blocks` switches from legacy `_current_delay // hop_size` to `aec_state.min_direct_path_filter_delay()`. The v3.18 Phase C.A audit-only stub (incompatible API) is deleted.
 
@@ -5371,7 +5371,7 @@ Known limitation (not blocking ship): `fa_consistent=0%` on the LN18k5r8 cohort 
 
 ### Sprint P2 — TransparentMode audit CLOSED intentionally-incompatible
 
-4 mismatch findings vs AEC3 source ([`transparent_mode.cc`](docs/aec3_extracts/src/aec3/transparent_mode.cc) Legacy variant + [`aec_state.cc:189-325`](docs/aec3_extracts/src/aec3/aec_state.cc#L189) Update flow):
+4 mismatch findings vs AEC3 source (`transparent_mode.cc` Legacy variant + `aec_state.cc:189-325` Update flow):
 
 - (A) `enable_transparent_mode=False` hard-coded in orchestrator with stale rationale citing the v3.20 legacy 10-frame ERLE latch (already retired in v3.21 by the per-frame e²<0.5·y² gate in `_aec3_post`)
 - (B) 3 block-unit constants in `transparent_mode.py` left at AEC3 4ms-block values with a misleading "blocks not hops -> stays N" comment; actually wall-clock durations
@@ -5451,7 +5451,7 @@ status for each item are recorded below.
 
 ### Sprint A — E2 = min(E2, Y2) clamp SHIPPED (Pareto-positive)
 
-AEC3 [`echo_remover.cc:495-501`](docs/aec3_extracts/src/aec3/echo_remover.cc#L495)
+AEC3 `echo_remover.cc:495-501`
 specifies `E2 = min(E2, Y2)` when `UsableLinearEstimate()` is True
 (bounds residual PSD by mic PSD). Our pre-v3.21.5 [`orchestrator.py:3479-3481`](python/modules/orchestrator.py#L3479)
 cited the AEC3 contract in a comment but the clamp itself was absent.
@@ -5467,8 +5467,8 @@ False for byte-equal vs v3.21.4).
 
 ### Sprint B — Stationarity AEC3-default-off CLOSED REJECTED (load-bearing safety net)
 
-AEC3 [`echo_audibility.h:40-51`](docs/aec3_extracts/src/aec3/echo_audibility.h#L40)
-+ [`residual_echo_estimator.cc:303-313`](docs/aec3_extracts/src/aec3/residual_echo_estimator.cc#L303)
+AEC3 `echo_audibility.h:40-51`
++ `residual_echo_estimator.cc:303-313`
 gates stationarity-driven R² scaling by `EchoCanceller3Config::EchoAudibility.use_stationarity_properties`
 (AEC3 default = False). Our pre-v3.21.5 [`orchestrator.py:3471`](python/modules/orchestrator.py#L3471)
 unconditionally zeroed R² on stationary bins. Sprint B introduced
@@ -5584,8 +5584,8 @@ deg −0.007). Strict regression, not Pareto.
 
 User redirect: physical-meaning analysis (not wall-clock) is the
 correct yardstick. AEC3 source inspection
-([dominant_nearend_detector.cc](docs/aec3_extracts/src/aec3/dominant_nearend_detector.cc) +
-[residual_echo_estimator.cc:340-358](docs/aec3_extracts/src/aec3/residual_echo_estimator.cc#L340))
+(dominant_nearend_detector.cc +
+residual_echo_estimator.cc:340-358)
 confirmed each counter measures a different physical quantity:
 
 - `trigger_threshold`: statistical hysteresis depth (+1/−1 random walk)

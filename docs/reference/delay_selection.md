@@ -1,8 +1,6 @@
-# AEC delay estimator 產品化：選型與驗證
+# AEC 延遲估計的選型與量測
 
-範圍：`AEC/`、`Audio_ALG/pipelines/`、`Audio_ALG/AIAEC/`。現行 API 與行為以
-`c_user_manual_zh_TW.md`、`delay_estimator_design_zh_TW.md`、公開 header 及測試為準；
-本文規定**選 delay mode／`delay_num_filters` 的量測方法**與**驗證項目**。
+配置 AEC 與後級模型時，先量測線性濾波器涵蓋時間、可擷取的播放延遲與模型的對齊範圍。詳細模式與欄位見 [AEC 手冊](../c_user_manual_zh_TW.md) 和[延遲估計器設計](../delay_estimator_design_zh_TW.md)。
 
 ## 1. 三個 delay 預算必須分開配置
 
@@ -72,41 +70,4 @@ p99.9 residual + jitter + drift + safety margin < bank reliable reach
 外部 coarse alignment 要刻意留下小幅正 residual（初始可驗 8～16 ms），不要過補成負 residual。
 
 實測的 duty-cycle engagement 用 `aec_wav` 結尾的 `duty:` 診斷行取得
-（`c_user_manual_zh_TW_04_seam_troubleshooting.md` §8.4）。
-
-## 3. 驗證項目
-
-### 3.1 結構／bit-exact gate
-
-- grid：16k/256/128、16k/512/256、48k/1024/512。
-- C：NE10 × SIMD=0/1 × shadow on/off × CNG on/off。
-- mono/4ch static-vs-heap/caller-pool parity。
-- 4ch matched-filter instance count 永遠 1。
-- fixed/external modes 不出現 matched-filter update。
-- reset 後 ring、generation token、delay state 正確。
-- `mem(n=1) < ... < mem(n=5)`、`FIXED mem < MATCHED n=1 mem`、
-  `EXTERNAL_ALIGNED mem < FIXED mem`（`make test-delay-num-filters`）。
-
-### 3.2 Audio gate
-
-- far-end static/movement。
-- double-talk static/movement。
-- near-end-only。
-- delay step/path change。
-- clock drift。
-- short clips、非 hop 整除 tail。
-- native 48 kHz recordings，不只升採樣素材。
-- AECMOS echo/deg、ERLE/residual RMS、applied-delay switches、acquisition time、deep-regression counts。
-- 部署 n<5 時，AIAEC 訓練／推論要用同一組 delay 設定驗證 acquisition/path-change residual；
-  不能只用 n=5 dataset 分數宣稱 train/deploy 一致。
-
-### 3.3 不放行條件
-
-以下任一成立即不放行：
-
-- 任一 mode 有隱式 fallback。
-- get-mem-size/carve 不 lockstep。
-- processing path allocation。
-- 4ch 不只一個 shared estimator。
-- aggregate 通過但 deep-regression/tail 超門檻。
-- AIAEC contract 與實際 deployed delay config 不一致。
+（`integration.md` §8.4）。

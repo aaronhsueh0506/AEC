@@ -1,4 +1,5 @@
-> [索引](c_user_manual_zh_TW.md) · 上一部分：[c_user_manual_zh_TW_03_level.md](c_user_manual_zh_TW_03_level.md) · 下一部分：[c_user_manual_zh_TW_05_appendix.md](c_user_manual_zh_TW_05_appendix.md) <!-- split-nav -->
+[C 使用手冊](../c_user_manual_zh_TW.md)
+
 ## 8. 進階整合 seam
 
 一般使用者不需要這一節。只有在你要自己接上外部的噪音抑制／後處理，或是要驅動多個
@@ -47,7 +48,7 @@ while (app_read_hop(mic, ref, hop)) {
 > 會一直觸發，不只在開頭幾秒。
 >
 > 既有 SDK 應用若還在渲染 `error_spec`，編譯與執行都不會報錯，但會失去守衛；遷移步驟、前後程式碼與驗收測試見
-> [`sdk_migration_output_guard.md`](sdk_migration_output_guard.md)，並以 `AEC_OUTPUT_GUARD_API_VERSION`（`aec.h`）在建置期檢查。
+> [`sdk_migration_output_guard.md`](../sdk_migration_output_guard.md)，並以 `AEC_OUTPUT_GUARD_API_VERSION`（`aec.h`）在建置期檢查。
 
 > **三個處理進入點可以自由混用。**
 >
@@ -160,7 +161,7 @@ engagement（`duty_hops_run / duty_hops_total`）。
   在計數的 call site（消耗 `run_filter` 的那一行）遞增，與實際執行的機制一致。
 - **純診斷**：兩個計數器只被寫入、從未被函式庫自己讀回，加起來是熱路徑上
   兩個整數遞增，不影響任何音訊輸出。
-- `example/aec_wav.c` 每次執行結尾印一行（[附錄 A「Duty census 診斷輸出」](c_user_manual_zh_TW_05_appendix.md#duty-census-診斷輸出)）。
+- `example/aec_wav.c` 每次執行結尾印一行（[附錄 A「Duty census 診斷輸出」](wav_cli.md#duty-census-診斷輸出)）。
 - 永久回歸測試：`make test-duty-census`（`test/test_duty_census.c`）。
 
 
@@ -168,7 +169,7 @@ engagement（`duty_hops_run / duty_hops_total`）。
 
 多條線性 AEC lane 先融合、再對融合後的頻譜算**一次**殘留回音抑制時使用（四麥克風
 線性 AEC + BF 之後的 post-beam RES）。`AecRes` 不屬於任何 `Aec`，也不屬於 Audio_ALG 的 4ch 流程層
-`mcab`（`pipelines/4ch_aec_bf_nr_res/mcab.h`）：mcab 是 flow 層而不是 library，四條 lane 與（MATCHED 時）
+`mcab`（`pipelines/4ch_aec_bf_nr_res/mcab.h`）：mcab 提供四聲道 AEC 前端，四條 lane 與（MATCHED 時）
 共用的 `DelayAec` 由應用建立後以指標注入，mcab 只管共用 delay 的對齊狀態、驅動這四條 lane（`mcab_process_front()`）與 `mcab_fuse()`
 （fuse 之後 `frame.g_res_ctx` 為 NULL），沒有 `enable_res`／RES 強度欄位，beamformer 也在 mcab 之外。
 要 RES 的 4ch 應用在自己的 init 裡 `aec_res_init()`（設定來自 `aec_config_from_level(level, sample_rate)`，
@@ -216,7 +217,7 @@ aec_cng_fill(&rng, spec, fused_comfort, g_res, g_nr, 0.31622777f, aec_res_n_bins
 
 測試：`make test-aec-res`（設定與 lane 逐位元相等、API 契約、render ×32768 縮放、離開初始狀態、
 飽和後復原限制）、`make test-zero-heap`、`make audit-no-stdio`。
-完整頁面見 [`docs/html/aec_res.html`](html/aec_res.html)。
+完整頁面見 [`docs/html/aec_res.html`](../html/reference/aec_res.html)。
 
 ### 8.6 線性對齊 context（`aec_get_linear_context`）
 
@@ -293,13 +294,13 @@ mic, ref (hop 個 float)
   `ac_istft_reset()`、`rng = AEC_CNG_SEED`、存下新值（§8.3）；**不要**為此呼叫 `aec_reset()`。NR 狀態、暫存增益要不要一起清，
   是應用自己的政策，函式庫不動它們。
 - **`aec_set_level()` 對這條鏈有效**：單聲道鏈的 `G_res` 來自 `Aec` 自己的
-  post 區塊，所以強度旋鈕直接用 `aec_set_level()`（[§7.1](c_user_manual_zh_TW_03_level.md#71-執行期切換-levelaec_set_level)）；四麥克風線性 AEC + BF 之後的
+  post 區塊，所以強度旋鈕直接用 `aec_set_level()`（[§7.1](levels.md#71-執行期切換-levelaec_set_level)）；四麥克風線性 AEC + BF 之後的
   `G_res` 來自應用在 4ch mcab flow 之後自己建立的 `AecRes`，才需要對它呼叫 `aec_res_set_level()`（§8.5）。
-- 下游若另有噪音抑制或 CNG，不要在 `aec_cng_fill` 之外再疊一層（[§6.2](c_user_manual_zh_TW_02_config.md#62-模組開關全部只接受-0-或-1)）。
+- 下游若另有噪音抑制或 CNG，不要在 `aec_cng_fill` 之外再疊一層（[§6.2](configuration.md#62-模組開關全部只接受-0-或-1)）。
 
 測試：單聲道鏈的行為由 `Audio_ALG` 的 `pipelines/mono_aec_nr_res` 測試涵蓋；本函式庫端的
 對應契約是 `make test-aec-res`、`make test-linear-context` 與 `make test-process-context`。
-元件頁見 [`docs/html/aec.html`](html/aec.html)（細節頁 [`docs/html/aec_detail.html`](html/aec_detail.html)）。
+元件頁見 [`docs/html/aec.html`](../html/reference/aec.html)（細節頁 [`docs/html/aec_detail.html`](../html/reference/aec_detail.html)）。
 
 ---
 
@@ -314,11 +315,11 @@ mic, ref (hop 個 float)
 依序處理：
 
 1. **先分離問題。** 設 `cfg.enable_res = 0` 跑一次，聽線性殘差。
-   - 回音仍然很大 → 問題在**線性側**：`ref` 送錯、延遲超出 [§3](c_user_manual_zh_TW.md#3-資料契約) 的可擷取上限、
+   - 回音仍然很大 → 問題在**線性側**：`ref` 送錯、延遲超出 [§3](../c_user_manual_zh_TW.md#3-資料契約) 的可擷取上限、
      回音路徑比 `filter_length` 長，或兩路取樣率不同。往下走第 2、3 點。
    - 線性殘差已經很乾淨 → 問題在**抑制強度**，跳到第 4 點。
 2. **檢查延遲。** 用 `aec_debug_status()` 讀 `delay_samples`：`-1` 代表還沒擷取到延遲。
-   若始終是 `-1`，確認遠端有足夠能量，並確認實際延遲落在 [§3](c_user_manual_zh_TW.md#3-資料契約) 表列的可擷取上限內。
+   若始終是 `-1`，確認遠端有足夠能量，並確認實際延遲落在 [§3](../c_user_manual_zh_TW.md#3-資料契約) 表列的可擷取上限內。
 3. **加長 filter。** 大房間或長殘響時調高 `filter_length`（單位是 **sample**）。
    必須 destroy 後重新 create，並重新評估記憶體與運算量。
 4. **加強抑制。** 改用 `AEC_LEVEL_AGGRESSIVE`；或直接把
@@ -367,11 +368,9 @@ mic, ref (hop 個 float)
 | 長時間後回音逐漸變差 | mic/ref clock drift | 改用共同時鐘，或在上游做 drift 補償。函式庫不處理。 |
 | 批次處理第二個檔案結果異常 | 沿用了前一個檔案的狀態 | 每個獨立串流前呼叫 `aec_reset()` |
 | 輸出有突波／發散 | 削波、`ref` 送錯、延遲劇烈變化 | 維持 `enable_saturation`、`enable_shadow` 開啟；檢查輸入是否已削波 |
-| 自己渲染 context 頻譜的舊程式，升級 SDK 後守衛 hop 偏大聲或 `aec_reset()` 後有舊尾巴 | 還在渲染 `error_spec`、沒處理 `aec_post_reset_serial()`、視窗或 CNG 種子與函式庫不同 | 照 [`sdk_migration_output_guard.md`](sdk_migration_output_guard.md) 的清單遷移，並跑其中的逐位元驗收 |
+| 自己渲染 context 頻譜的舊程式，升級 SDK 後守衛 hop 偏大聲或 `aec_reset()` 後有舊尾巴 | 還在渲染 `error_spec`、沒處理 `aec_post_reset_serial()`、視窗或 CNG 種子與函式庫不同 | 照 [`sdk_migration_output_guard.md`](../sdk_migration_output_guard.md) 的清單遷移，並跑其中的逐位元驗收 |
 | 噪音底聽起來不自然、會抽動 | CNG 疊了兩層 | 下游若已有噪音處理，設 `enable_cng = 0` |
-| 建立實例一直失敗 | 設定被驗證拒絕 | 對照 [§6](c_user_manual_zh_TW_02_config.md#6-aecconfig-完整參考) 的允許範圍；特別注意 `sample_rate`/`fft_size` 必須成對合法，以及 `spatial_linear_context` 的組合限制 |
+| 建立實例一直失敗 | 設定被驗證拒絕 | 對照 [§6](configuration.md#6-aecconfig-完整參考) 的允許範圍；特別注意 `sample_rate`/`fft_size` 必須成對合法，以及 `spatial_linear_context` 的組合限制 |
 | `SIMD=0` 與 `SIMD=1` 的輸出不同 | NEON kernel 與純量 kernel 的加總順序、融合乘加不同 | 這是預期行為。同一組建置旗標下 heap 與記憶池路徑才保證逐位元相同。 |
 
 ---
-
-> [索引](c_user_manual_zh_TW.md) · 上一部分：[c_user_manual_zh_TW_03_level.md](c_user_manual_zh_TW_03_level.md) · 下一部分：[c_user_manual_zh_TW_05_appendix.md](c_user_manual_zh_TW_05_appendix.md) <!-- split-nav -->

@@ -1,4 +1,5 @@
-> [索引](c_user_manual_zh_TW.md) · 上一部分：[c_user_manual_zh_TW_02_config.md](c_user_manual_zh_TW_02_config.md) · 下一部分：[c_user_manual_zh_TW_04_seam_troubleshooting.md](c_user_manual_zh_TW_04_seam_troubleshooting.md) <!-- split-nav -->
+[C 使用手冊](../c_user_manual_zh_TW.md)
+
 ## 7. Level 選擇
 
 C 稱這條強度軸為 **level**（`AecLevel`、`AEC_LEVEL_*`、`--level`），Python 對應物稱為 **preset**（`AecPreset`、`AecConfig.from_preset`、`--preset`）：**C level == Python preset**，名稱（`mild`／`balanced`／`aggressive`／`no_floor`）與數字（0..3，預設 `1` = balanced）兩邊相同。舊名稱 `AEC_PRESET_*` 與 `AecPreset` 仍保留在 `aec.h`（字面數值相同，因為 Python 測試以文字讀取這四行）；CLI 的 `--preset` 仍可作為 `--level` 的別名。
@@ -101,7 +102,7 @@ balanced**；這是 setter，有呼叫端可以回報，所以**直接拒絕**�
 **底層 primitive**。真正做事的是抑制器自己的入口。四麥克風產品共用的那個 post 級
 抑制器是一個 `AecRes`（沒有任何 `Aec` 擁有它；Audio_ALG 的 4ch mcab flow 也不含它，由應用在
 mcab 之後自己 `aec_res_init()` 並持有）；對它的入口是
-`aec_res_set_level()`（[§8.5](c_user_manual_zh_TW_04_seam_troubleshooting.md#85-獨立的-res-級aec_resh)），語意與 `aec_set_level()` 相同。`AecRes` 內部包的
+`aec_res_set_level()`（[§8.5](integration.md#85-獨立的-res-級aec_resh)），語意與 `aec_set_level()` 相同。`AecRes` 內部包的
 是 `SuppressionGain`，其底層函式為（內部 header，整合端不需要直接呼叫）：
 
 ```c
@@ -131,7 +132,7 @@ level 查表函式有三個：`aec_level_floor_db()`、`aec_level_dt_floor_db()`
 **四麥克風產品請勿對 lane 呼叫**。四條 lane 都以 `spatial_linear_context` 建立，
 根本不會走到 `suppression_gain_get_gain()`，所以對 lane 呼叫 `aec_set_level()`
 **依建構方式即為無效操作**——塑形輸出的 gain 來自該產品自己那一個共用的 post 級
-抑制器。請對那個 `AecRes` 呼叫 `aec_res_set_level(res, level, ramp_ms)`（[§8.5](c_user_manual_zh_TW_04_seam_troubleshooting.md#85-獨立的-res-級aec_resh)）——
+抑制器。請對那個 `AecRes` 呼叫 `aec_res_set_level(res, level, ramp_ms)`（[§8.5](integration.md#85-獨立的-res-級aec_resh)）——
 `res` 是應用在 mcab flow 之後自己建立的那一個——它針對的就是那個共用的 post 級抑制器。
 
 **A/B 量測時該預期什麼**（先讀這段再下結論）：far-active 地板只在
@@ -154,5 +155,3 @@ NO_FLOOR 切換與 round-trip 的覆蓋）與 `python/tests/test_runtime_preset.
 的 `test_set_preset_allows_no_floor` 等。
 
 ---
-
-> [索引](c_user_manual_zh_TW.md) · 上一部分：[c_user_manual_zh_TW_02_config.md](c_user_manual_zh_TW_02_config.md) · 下一部分：[c_user_manual_zh_TW_04_seam_troubleshooting.md](c_user_manual_zh_TW_04_seam_troubleshooting.md) <!-- split-nav -->

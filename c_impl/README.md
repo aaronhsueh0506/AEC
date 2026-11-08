@@ -7,19 +7,6 @@ C implementation of the AEC algorithm. Top-level orchestration in
 > Algorithm reference → [../docs/aec_methods.md](../docs/aec_methods.md)
 > Changelog → [../CHANGELOG.md](../CHANGELOG.md)
 
-## Layout
-
-```
-c_impl/
-├── include/        public headers
-├── src/            sources
-├── example/
-│   ├── aec_wav.c   CLI entry point
-│   └── wav_io.h
-├── test/           test harnesses (test/modules/: per-module parity checkers)
-└── Makefile
-```
-
 ## Build
 
 ```bash
@@ -102,24 +89,7 @@ images that link `libaec.a` without hosted stdio should build with
 debug object is absent, scans the archive and a minimal linked consumer for
 stdio symbols, and runs the consumer.
 
-## Run
-
-```bash
-BIN="$(make -s print-bin-dir)"
-"$BIN"/aec_wav mic.wav ref.wav out.wav --level balanced --cng
-```
-
-Levels (single residual-echo strength axis `min_gain_floor_far_active_db`,
-plus `no_floor`'s separate boolean gate `min_gain_split_floor_enabled`):
-`mild` (−20, near-priority) / `balanced` (−28, production) /
-`aggressive` (−38, echo-priority) / `no_floor` (floor mechanism off
-entirely — `--level 3` or `--level no_floor`, deepest point on the axis,
-most near-end loss). `--preset` is accepted as an alias of `--level`; the
-Python twins call the same axis "preset" (C level == Python preset). Other
-flags: `--cng`, `--debug` (one status line per second), `--debug-trace <path>` (opt-in per-frame CSV of post-filter internals —
-`usable_linear`, `fullband_erle`, `r2_mean`, `gain_mean`, `comfort_noise_mean`,
-… one row per hop; one NULL test per hop when off). `aec_wav --help` lists all
-options.
+一般呼叫與參數可查閱 [AEC 文件](../docs/html/index.html)。
 
 ## Precision & regression anchors
 
@@ -228,4 +198,4 @@ Full CLI options, C API reference, integration rules, runtime resource
 notes, and validation steps:
 [../docs/c_user_manual_zh_TW.md](../docs/c_user_manual_zh_TW.md). HTML pages (call order with a
 compile-checked example, sequence diagrams, external/internal parameter tables):
-[../docs/html/aec_usage.html](../docs/html/aec_usage.html).
+[../docs/html/aec_usage.html](../docs/html/reference/aec_usage.html).

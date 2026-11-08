@@ -1,4 +1,5 @@
-[Index](aec_methods.md) | Previous: [Part 1: Front-end blocks](aec_methods_01_front_end.md) | Next: (end) <!-- split-nav -->
+[Algorithm reference](../aec_methods.md)
+
 ## 3. AEC3 post-filter (`_aec3_post`)
 
 After the refined filter produces the linear residual error spectrum
@@ -286,5 +287,3 @@ AEC in response. The library touches neither NR nor NN state; following the
 reset there is the application's policy.
 
 ---
-
-[Index](aec_methods.md) | Previous: [Part 1: Front-end blocks](aec_methods_01_front_end.md) | Next: (end) <!-- split-nav -->
