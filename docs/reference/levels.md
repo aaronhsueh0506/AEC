@@ -2,7 +2,7 @@
 
 ## 7. Level 選擇
 
-C 稱這條強度軸為 **level**（`AecLevel`、`AEC_LEVEL_*`、`--level`），Python 對應物稱為 **preset**（`AecPreset`、`AecConfig.from_preset`、`--preset`）：**C level == Python preset**，名稱（`mild`／`balanced`／`aggressive`／`no_floor`）與數字（0..3，預設 `1` = balanced）兩邊相同。舊名稱 `AEC_PRESET_*` 與 `AecPreset` 仍保留在 `aec.h`（字面數值相同，因為 Python 測試以文字讀取這四行）；CLI 的 `--preset` 仍可作為 `--level` 的別名。
+C 稱這條強度軸為 **level**（`AecLevel`、`AEC_LEVEL_*`、`--level`），Python 對應物稱為 **preset**（`AecPreset`、`AecConfig.from_preset`、`--preset`）：**C level == Python preset**，名稱（`mild`／`balanced`／`aggressive`／`no_floor`）與數字（0..3，預設 `1` = balanced）兩邊相同。Python 測試以文字讀取 `aec.h` 的 `AEC_LEVEL_*` 四行；CLI 的 `--preset` 仍可作為 `--level` 的別名。
 
 ```c
 aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, 16000);
@@ -36,15 +36,15 @@ dB 欄位變成**惰性值**（維持 balanced 的 bytes，但 `get_min_gain` �
 ### 7.1 執行期切換 level（`aec_set_level`）
 
 ```c
-int aec_set_level(Aec* a, AecLevel level, float ramp_ms);
+int aec_set_level(Aec* a, AecLevel level);
 ```
 
 不需要重建實例。換 level 是**重新指定目標值**，不是重建：濾波器、延遲狀態、
 每一條平滑歷史、far-active latch 與 DominantNearend 計數器全部原封不動繼續
 跑。但三個欄位走不同的路：`min_gain_floor_far_active_db` 是抑制器每個 hop
-只讀一次的純量下限，`ramp_ms` 讓它用 dB 線性走到新值；`min_gain_floor_dt_db`
-是 double-talk 時的硬性覆寫，不是逐 hop 收斂的量，沒有 ramp 可言，不論
-`ramp_ms` 是多少都**立即套用**；`min_gain_split_floor_enabled` 是布林值，同樣
+只讀一次的純量下限，函式庫固定用 100 ms 讓它以 dB 線性走到新值；`min_gain_floor_dt_db`
+是 double-talk 時的硬性覆寫，不是逐 hop 收斂的量，沒有 ramp 可言，
+**立即套用**；`min_gain_split_floor_enabled` 是布林值，同樣
 **立即套用**（布林沒有連續路徑可以 ramp，與 DT 地板是同一種紀律，只是多套
 在第三個欄位上）——C 跟 Python 兩邊語意相同（Python 的 `AEC.set_preset()`
 同樣開放執行期切換 `no_floor`，見本節最後一段）。
@@ -70,27 +70,22 @@ Aec* a = aec_init(pool, aec_get_mem_size(&cfg), &cfg);
 
 for (;;) {
     /* 使用者把強度旋鈕轉到 aggressive：在兩個 hop 之間呼叫，
-     * 100 ms 內以 dB 線性走到新的地板 */
+     * 地板在 100 ms 內以 dB 線性走到新值 */
     if (ui_strength_changed())
-        (void)aec_set_level(a, AEC_LEVEL_AGGRESSIVE, 100.0f);
+        (void)aec_set_level(a, AEC_LEVEL_AGGRESSIVE);
 
     aec_process(a, mic, ref, out);   /* 各恰好 hop 個 float32 */
 }
 ```
 
-`ramp_ms` 語意：
-
-| `ramp_ms` | 行為 |
-|---|---|
-| `0.0f` | 下一個 hop 就套用，**不是錯誤**。落點與「用該 level 從頭建一個新實例」持有的 float 完全相同 |
-| `> 0.0f` | 以 dB 為單位線性走過去，每次 hop 走一步，最後**精確落在**目標值（不是漸近逼近）。上限 60 秒，超過即拒絕 |
-
-有 ramp 的理由：mild ↔ aggressive 是 18 dB 的落差，而這個地板是硬性 clamp，
-下游沒有任何東西會替它平滑。100 ms 是合理的起點，但這是呼叫端的選擇，
-函式庫沒有寫死任何政策。
+**ramp**：far-active 地板每個 hop 走一步，在 100 ms 內以 dB 線性走過去，最後**精確落在**目標值
+（不是漸近逼近）；落點與「用該 level 從頭建一個新實例」持有的 float 完全相同。函式庫把 100 ms 寫死為內部常數，
+呼叫端不能調。有 ramp 的理由：mild ↔ aggressive 是 18 dB 的落差，而這個地板是硬性 clamp，
+下游沒有任何東西會替它平滑。需要「下一個 hop 就生效」的測試，改走抑制器自己的
+`suppression_gain_set_split_floor_far_active_db(sg, db, 0.0f)`（見下方底層 primitive）。
 
 **回傳與拒絕**：成功回 `0`。以下情況回 `-1` 且**什麼都不寫**——`a == NULL`、
-`level` 超出 enum 範圍、`ramp_ms` 非有限值或超出 `[0, 60000]`。注意這裡與
+`level` 超出 enum 範圍。注意這裡與
 `aec_config_from_level()` 的差異：那是 config factory，遇到不認得的值**退回
 balanced**；這是 setter，有呼叫端可以回報，所以**直接拒絕**。
 
@@ -100,13 +95,12 @@ balanced**；這是 setter，有呼叫端可以回報，所以**直接拒絕**�
 （目標存在 config、進度存在 state，這是刻意分開的）。
 
 **底層 primitive**。真正做事的是抑制器自己的入口。四麥克風產品共用的那個 post 級
-抑制器是一個 `AecRes`（沒有任何 `Aec` 擁有它；Audio_ALG 的 4ch mcab flow 也不含它，由應用在
-mcab 之後自己 `aec_res_init()` 並持有）；對它的入口是
-`aec_res_set_level()`（[§8.5](integration.md#85-獨立的-res-級aec_resh)），語意與 `aec_set_level()` 相同。`AecRes` 內部包的
+抑制器在陣列實例的記憶池內（`AecConfig.n_mics = 4` 且 `residual = FULL`，[§8.8](integration.md#88-麥克風陣列實例n_mics--4)）；
+對它的入口就是 `aec_set_level()`，語意不變。它內部包的
 是 `SuppressionGain`，其底層函式為（內部 header，整合端不需要直接呼叫）：
 
 ```c
-#include "suppression_gain.h"   /* 內部 header；一般整合改用 aec_res_set_level() */
+#include "suppression_gain.h"   /* 內部 header；一般整合改用 aec_set_level() */
 
 int suppression_gain_set_split_floor_far_active_db(SuppressionGain* sg,
                                                    float db, float ramp_ms);
@@ -116,7 +110,7 @@ int suppression_gain_set_split_floor_enabled(SuppressionGain* sg, int enabled);
 
 `db` 分別對應 `AecConfig.min_gain_floor_far_active_db` / `min_gain_floor_dt_db`
 那兩個 dB-power 量，並且用**驗證器自己的**範圍 `[-300, 50]` 檢查——執行期呼叫
-不可能裝進一個 init 當初會拒絕的值。遠端地板的 `ramp_ms` 語意與上表相同；DT
+不可能裝進一個 init 當初會拒絕的值。遠端地板的 `ramp_ms` 在 `[0, 60000]` 內，`0` 是下一個 hop 就套用，大於 0 以 dB 線性走到目標（`aec_set_level()` 固定傳 100）；DT
 地板**沒有** `ramp_ms` 參數，因為它是逐 hop 的硬性覆寫而不是逐 hop 收斂的量，
 呼叫即立即套用。`enabled` 對應 `min_gain_split_floor_enabled`，同樣沒有
 `ramp_ms`（布林沒有連續路徑），任何非 0 值都會被 coerce 成 `1`；只有
@@ -125,15 +119,14 @@ int suppression_gain_set_split_floor_enabled(SuppressionGain* sg, int enabled);
 前兩者回 `0` 或 `-1`（NULL 或引數超出範圍），`-1` 時什麼都不寫：所有值都
 先算完、驗完，才寫第一個 store。
 
-level 查表函式有三個：`aec_level_floor_db()`、`aec_level_dt_floor_db()` 與
+level 查表函式有三個（函式庫內部，宣告在 `aec_internal.h`）：`aec_level_floor_db()`、`aec_level_dt_floor_db()` 與
 `aec_level_split_floor_enabled(AecLevel, int*)`，契約相同（in-enum 寫 `*enabled_out` 並回 `0`；out-of-enum 什麼都不寫並回 `-1`）（`aec_level_floor_db()`／`aec_level_dt_floor_db()` 對 `AEC_LEVEL_NO_FLOOR` 回的 `-28.0`／`-20.0` 只是惰性佔位值，不是該 level 的地板）——
 四麥克風產品的共用 post 級抑制器可以只讀這個 gate，不必連帶查兩個 dB 值。
 
-**四麥克風產品請勿對 lane 呼叫**。四條 lane 都以 `spatial_linear_context` 建立，
-根本不會走到 `suppression_gain_get_gain()`，所以對 lane 呼叫 `aec_set_level()`
-**依建構方式即為無效操作**——塑形輸出的 gain 來自該產品自己那一個共用的 post 級
-抑制器。請對那個 `AecRes` 呼叫 `aec_res_set_level(res, level, ramp_ms)`（[§8.5](integration.md#85-獨立的-res-級aec_resh)）——
-`res` 是應用在 mcab flow 之後自己建立的那一個——它針對的就是那個共用的 post 級抑制器。
+**陣列實例的 lane**。四條 lane 的 `AecConfig.residual` 都低於 `AEC_RESIDUAL_FULL`（`STATE`／`ESTIMATE`），
+根本不會走到 `suppression_gain_get_gain()`，所以 lane 自己的強度**依建構方式即為無效操作**——塑形輸出的 gain 來自
+融合後那一個共用的 post 級抑制器。對陣列實例呼叫 `aec_set_level(a, level)` 就是重設那個抑制器的強度
+（lane 不受影響）。
 
 **A/B 量測時該預期什麼**（先讀這段再下結論）：far-active 地板只在
 **far-active 且非 double-talk** 的 hop 上生效。double-talk 期間套用的是 DT 地板
@@ -144,9 +137,9 @@ far-active latch 尚未觸發之前，套用的是 far-silent 地板。同一個
 echo／degradation 的 A/B 會把 CNG 的變化錯記到別的機制頭上。請在 echo 對齊
 或 degradation 對齊的條件下比較，並實際試聽。
 
-Python 對應：`AEC.set_preset(preset, ramp_ms=0.0)`（同樣的語意；不合法的 preset 或
-`ramp_ms` 丟 `ValueError`，實例不變）。C/Python 兩邊對稱：
-`aec_set_level()` / `aec_res_set_level()` 與 Python 的 `AEC.set_preset()`
+Python 對應：`AEC.set_preset(preset, ramp_ms=0.0)`（Python 孿生保留 `ramp_ms` 參數，不合法的 preset 或
+`ramp_ms` 丟 `ValueError`，實例不變；C 端 ramp 固定 100 ms，等同 Python 傳 `ramp_ms=100.0`）。C/Python 兩邊對稱：
+`aec_set_level()` 與 Python 的 `AEC.set_preset()`
 都允許執行期切到/切出 `NO_FLOOR`（或 `no_floor`），沒有任何拒絕，兩邊都是
 gate 立即階躍、dB 欄位照既有 setter 走（見上方關於 ramp 與立即套用的段落）。
 建構時的 `no_floor`（`aec_config_from_level()` / `AecConfig.from_preset()`）

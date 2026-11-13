@@ -13,8 +13,9 @@
  *   5. THE GATE SURVIVES FAR SILENCE. The inst-ERLE ring holds ~15 entries and every far-silent hop pushes a 0.0 into it,
  *      so a realign arriving >= 16 hops after the last far burst (a wrapper re-measuring its alignment between bursts, the
  *      common case) would read "not cancelling" on a filter cancelling at 13 dB and take the reset branch for nothing.
- *      aec_linear_is_cancelling()'s windowed reading still knows. This needs the post-filter chain to run (context-only is
- *      enough), since that maintains the windowed ERLE.
+ *      aec_linear_is_cancelling()'s windowed reading still knows. The silent-gap rows run the lane the way a multi-lane
+ *      wrapper does, with the residual stage present (residual FULL driven by aec_process_linear() +
+ *      aec_process_residual()); the windowed ERLE they rely on is kept by the linear stage in every residual mode.
  *   6. THE RESET BRANCH RECONVERGES. When the gate legitimately rejects, the taps sit at the alignment the caller
  *      abandoned; keeping them (a counters-only echo-path-change) leaves the filter subtracting a decorrelated echo copy,
  *      measured at 1.3-1.5x the echo for 300+ hops. Pinned against an aec_reset() twin, whose trajectory the filter-only
@@ -90,6 +91,21 @@ static void scene_init(void)
     for (i = 0; i < g_total; ++i) g_far_hist[i] = noise_next();
 }
 
+/* One hop of the linear residual. A residual-OFF instance is driven by aec_process(), whose output is the linear residual;
+ * a FULL instance by the split pair (the library applies no gain there), whose linear residual is raw_output. */
+static void process_hop(Aec* a, const float* mic, const float* far, float* out)
+{
+    int st;
+    if (a->cfg.residual == AEC_RESIDUAL_FULL) {
+        st = aec_process_linear(a, mic, far);
+        if (st == AEC_OK) st = aec_process_residual(a, NULL);
+        if (st == AEC_OK) memcpy(out, a->raw_output, (size_t)HOP * sizeof(float));
+    } else {
+        st = aec_process(a, mic, far, out);
+    }
+    if (st != AEC_OK) { fprintf(stderr, "FAIL: process status %d\n", st); g_failures++; }
+}
+
 /* Serve one hop: mic = 0.5 * far_hist[n - D]; far = far_hist[n - align]. */
 static float run_hop(Aec* a, int h, int align, float* out)
 {
@@ -100,7 +116,7 @@ static float run_hop(Aec* a, int h, int align, float* out)
         mic[i] = 0.5f * g_far_hist[base + i - D];
         far[i] = g_far_hist[base + i - align];
     }
-    aec_process(a, mic, far, out);
+    process_hop(a, mic, far, out);
     for (i = 0; i < HOP; ++i) r2 += (double)out[i] * out[i];
     return (float)sqrt(r2 / HOP);
 }
@@ -121,21 +137,18 @@ static void run_silent_hop(Aec* a, float* out)
 {
     float zero[HOP];
     memset(zero, 0, sizeof zero);
-    aec_process(a, zero, zero, out);
+    process_hop(a, zero, zero, out);
 }
 
-/* res_context=1 keeps the post-filter chain running in context-only mode: the
- * emitted samples are still exactly the linear residual (aec_post_run's
- * context_only path forwards raw_output untouched), but the windowed-ERLE
- * bookkeeping the realign gate reads is maintained. That is the seam
- * configuration a 4-lane wrapper -- the caller this API exists for -- runs. */
+/* res_context=1 runs the post-filter chain through the split entry points (residual FULL, no gain applied): the emitted
+ * samples are still exactly the linear residual (raw_output). That is the seam configuration a multi-lane wrapper -- the
+ * caller this API exists for -- runs. */
 static int make_external_ctx(Aec* a, int warm_transfer, int res_context)
 {
     AecConfig cfg;
     aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, SR);
     cfg.fft_size = FFT;
-    cfg.enable_res = 0;                    /* output IS the linear residual */
-    cfg.return_res_context = res_context;
+    cfg.residual = res_context ? AEC_RESIDUAL_FULL : AEC_RESIDUAL_OFF;   /* output IS the linear residual */
     cfg.delay_mode = AEC_DELAY_EXTERNAL_ALIGNED;
     cfg.delay_acquire_warm_transfer = warm_transfer;
     return aec_create(a, &cfg);
@@ -242,11 +255,12 @@ int main(void)
     CHECK(rc == 0, "soft instance: create");
     for (h = 0; h < HOPS; ++h) run_hop(&soft, h, D, out);
     {
-        AecLinearContext c0, c1;
-        aec_get_linear_context(&soft, &c0);
+        AecLinearView c0, c1;
+        c0.struct_size = c1.struct_size = sizeof c0;
+        CHECK(aec_get_linear(&soft, &c0) == AEC_OK, "linear view before the realign");
         CHECK(aec_apply_external_realign(&soft, 64) == 0,
               "gate off falls to the reset path");
-        aec_get_linear_context(&soft, &c1);
+        CHECK(aec_get_linear(&soft, &c1) == AEC_OK, "linear view after the realign");
         /* EXTERNAL_ALIGNED owns no ring offset, so this call is the only thing
          * that can ever move the token a consumer polls to flush far caches.
          * Both outcomes must move it -- the warm instance from row 1 realigned
@@ -262,18 +276,19 @@ int main(void)
      * filter that is cancelling at ~13 dB windowed. */
     {
         Aec gap;
-        AecLinearContext g0, g1;
+        AecLinearView g0, g1;
+        g0.struct_size = g1.struct_size = sizeof g0;
         rc = make_external_ctx(&gap, 1, 1);
         CHECK(rc == 0, "silent-gap instance: create");
         for (h = 0; h < HOPS; ++h) resid = run_hop(&gap, h, 0, out);
         CHECK(resid < 0.5f * echo_rms(HOPS - 1),
               "silent-gap: raw-far convergence before the silence");
         for (h = 0; h < GAP; ++h) run_silent_hop(&gap, out);
-        aec_get_linear_context(&gap, &g0);
+        CHECK(aec_get_linear(&gap, &g0) == AEC_OK, "silent-gap: linear view before the realign");
         rc = aec_apply_external_realign(&gap, D - 0);
         CHECK(rc == 1,
               "silent-gap realign still takes the warm tap-transfer path");
-        aec_get_linear_context(&gap, &g1);
+        CHECK(aec_get_linear(&gap, &g1) == AEC_OK, "silent-gap: linear view after the realign");
         CHECK(g1.generation != g0.generation,
               "warm outcome advances the alignment generation");
         worst = 0.0f;

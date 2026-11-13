@@ -96,11 +96,14 @@ void ree_init(ResidualEchoEstimator *r,
     r->render_pre_window_size = use_aec_echo_gen_window ? 1 : 0;
     r->render_post_window_size = 1;
 
+    /* NULL storage (a lane that never runs the estimator) is tolerated: only the scalar settings above are used then. */
     r->x2_noise_floor = x2_noise_floor;
     r->x2_noise_floor_counter = x2_noise_floor_counter;
-    for (k = 0; k < n_bins; ++k) {
-        r->x2_noise_floor[k] = echo_model->min_noise_floor_power;
-        r->x2_noise_floor_counter[k] = noise_floor_hold_hops;
+    if (x2_noise_floor) {
+        for (k = 0; k < n_bins; ++k) {
+            r->x2_noise_floor[k] = echo_model->min_noise_floor_power;
+            r->x2_noise_floor_counter[k] = noise_floor_hold_hops;
+        }
     }
 
     reverb_model_init(&r->reverb_model, reverb_model_storage, n_bins);
@@ -124,12 +127,13 @@ void ree_init(ResidualEchoEstimator *r,
     r->last_r2_direct = last_r2_direct_store;
     r->last_r2_reverb = last_r2_reverb_store;
     r->scratch = scratch_store;
-    memset(r->last_r2_direct, 0, (size_t)n_bins * sizeof(float));
-    memset(r->last_r2_reverb, 0, (size_t)n_bins * sizeof(float));
+    if (r->last_r2_direct) memset(r->last_r2_direct, 0, (size_t)n_bins * sizeof(float));
+    if (r->last_r2_reverb) memset(r->last_r2_reverb, 0, (size_t)n_bins * sizeof(float));
 }
 
 void ree_reset(ResidualEchoEstimator *r) {
     int k;
+    if (!r->x2_noise_floor) return;   /* no storage: nothing was ever carved */
     for (k = 0; k < r->n_bins; ++k) {
         r->x2_noise_floor[k] = r->echo_model.min_noise_floor_power;
         r->x2_noise_floor_counter[k] = r->noise_floor_hold_hops;

@@ -5,7 +5,7 @@
 #   env  : PYTHON           interpreter with numpy/scipy/soundfile (default python3)
 #
 # What it does
-#   1. Verifies the source wavs against test/golden/parity_e2e_inputs.sha256 (missing file or hash mismatch => FAIL;
+#   1. Verifies the source wavs against test/parity_e2e_inputs.sha256 (missing file or hash mismatch => FAIL;
 #      wav/aec_challenge_blind/ is git-ignored, so the pin is the only link).
 #   2. Regenerates every golden with python/diag/gen_aec_e2e_golden.py into <workdir> (never into git) and replays it through
 #      the C checker. Pass/fail is the checker's own exit code; its TOL_E2E / TOL_E2E_48K are not re-implemented here.
@@ -29,7 +29,7 @@ while [ "$#" -gt 0 ]; do
 done
 PYTHON=${PYTHON:-python3}
 WAV_ROOT=$AEC_ROOT/wav          # the generator reads <aec-root>/wav and cannot be redirected
-PIN=$AEC_ROOT/c_impl/test/golden/parity_e2e_inputs.sha256
+PIN=$AEC_ROOT/c_impl/test/parity_e2e_inputs.sha256
 GEN=$AEC_ROOT/python/diag/gen_aec_e2e_golden.py
 export OMP_NUM_THREADS=1 PYTHONDONTWRITEBYTECODE=1
 
@@ -42,7 +42,7 @@ else SHA() { sha256sum "$1" | cut -d' ' -f1; }; fi
 mkdir -p "$WORK" || exit 2
 
 # ---- 1. pinned inputs -------------------------------------------------------------------------
-echo "== inputs (pin: test/golden/parity_e2e_inputs.sha256, wav root: <aec-root>/wav)"
+echo "== inputs (pin: test/parity_e2e_inputs.sha256, wav root: <aec-root>/wav)"
 pin_bad=0
 while read -r want rel; do
     case "$want" in ''|'#'*) continue ;; esac
@@ -85,7 +85,8 @@ while IFS='|' read -r id sr level flags expect; do
     if ! "$PYTHON" "$GEN" "$g" "$level" --sr "$sr" $flags > "$log.gen" 2>&1; then
         echo "FAIL(setup): golden generation failed for $id (see $log.gen)"; tail -5 "$log.gen" >&2; fail=1; continue
     fi
-    "$CHECKER" "$g" "$level" $flags > "$log" 2>&1; rc=$?
+    case "$level" in mild) clevel=0 ;; balanced) clevel=1 ;; aggressive) clevel=2 ;; no_floor) clevel=3 ;; *) clevel=$level ;; esac
+    "$CHECKER" "$g" "$clevel" $flags > "$log" 2>&1; rc=$?
     tol=$(sed -n 's/.*(tol=\([^)]*\)).*/\1/p' "$log" | head -1)
     lin=$(sed -n 's/^  raw_output(linear) mism=[0-9]* (max=\([^ ]*\) .*/\1/p' "$log" | head -1)
     outm=$(sed -n 's/^  >>> out\[hop\] mism=[0-9]* (max=\([^ ]*\) .*/\1/p' "$log" | head -1)

@@ -9,9 +9,8 @@
 extern "C" {
 #endif
 
-/* Validates `in` and writes the resolved config (deprecated fields folded) to
- * `out`. Returns 1 on success, 0 if `in` is NULL or invalid; `out` is
- * untouched on failure. */
+/* Validates `in` and writes a copy to `out`. Returns 1 on success, 0 if `in`
+ * is NULL or invalid; `out` is untouched on failure. */
 int aec_resolve_valid_config(const AecConfig* in, AecConfig* out);
 
 /* Suppression-gain config and tuning for a config produced by

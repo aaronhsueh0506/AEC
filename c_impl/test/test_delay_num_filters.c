@@ -13,7 +13,7 @@
  *      350 ms echo does not lock at n=2 (outside 221 ms) but does lock at n=5 (inside 509 ms), the control that makes the
  *      previous assertion meaningful. Mutations that must fail: reverting the loop bound in da_matched_filter_update() to
  *      DA_NUM_FILTERS, or hardcoding DA_NUM_FILTERS in aec.c's delay_aec_init() call (the n=2 / 350 ms case then locks).
- *   3. Out-of-range config values are rejected by aec_validate_config (aec_create fails) rather than silently normalised.
+ *   3. Out-of-range config values are rejected by aec_resolve_valid_config (aec_create fails) rather than silently normalised.
  *   4. delay_aec_get_mem_size()/delay_aec_init() reject out-of-range n too (get_mem_size -> 0, init -> nonzero; a silent
  *      clamp would run a different bank than requested), plus the pool rejection contract (NULL / misaligned base / one
  *      byte short).

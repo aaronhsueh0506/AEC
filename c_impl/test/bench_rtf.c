@@ -1,7 +1,7 @@
 /* bench_rtf.c -- per-module real-time-factor (RTF) benchmark harness.
  *
  * Standalone timing harness: measures the wall-clock cost of aec_process() over a long synthetic (or --wav) input, with and
- * without the post-filter (enable_res), so the post-filter's own cost can be isolated as a derived third line. By default no
+ * without the post-filter (residual stage), so the post-filter's own cost can be isolated as a derived third line. By default no
  * Python, corpus or network is needed: a deterministic LCG generates the far-end/near-end signals in-process.
  *
  * Build: `make bench` from c_impl/ (respects SIMD and EXTRA_CFLAGS, like bin/aec_wav; set CC / EXTRA_CFLAGS to
@@ -9,7 +9,7 @@
  *
  * Usage:
  *   ./bin/bench_rtf [--seconds N] [--repeat M]
- *                    [--level 0|1|2|3|mild|balanced|aggressive|no_floor]
+ *                    [--level 0|1|2|3]
  *                    [--sr HZ] [--fft N] [--stage full|linear|both]
  *                    [--scene noise|bursts] [--live-observer]
  *                    [--wav mic.wav ref.wav]
@@ -22,8 +22,8 @@
  * PROFILE=1 adds one line per stage, "buckets_us_per_hop", with the mean of each stage-timing bucket over the fastest pass.
  *
  * Stages:
- *   full   - production config (level's enable_res=1, enable_cng=1; the same config aec_wav's `--level <p> --cng` builds).
- *   linear - identical config with enable_res=0 (linear-filter-only path).
+ *   full   - production config (level's residual FULL, enable_cng=1; the same config aec_wav's `--level <p> --cng` builds).
+ *   linear - identical config with residual OFF (linear-filter-only path).
  *   post   - derived (full.total_s - linear.total_s); an approximation of the post-filter chain's own cost, not an
  *            independently timed stage.
  *
@@ -33,6 +33,7 @@
  * `--scene bursts` (non-stationary far-end) or a real `--wav` recording instead.
  */
 #include "aec.h"
+#include "cli_level.h"
 #include "wav_io.h"
 
 #include <math.h>
@@ -151,7 +152,7 @@ static void print_usage(const char* prog) {
         "Options:\n"
         "  --seconds N                          synthetic input length (default 60)\n"
         "  --repeat M                            passes per stage, report min and median (default 1)\n"
-        "  --level {0|1|2|3|mild|balanced|aggressive|no_floor}   default: balanced (1); --preset is an alias\n"
+        "  --level {0|1|2|3}                     0 mild, 1 balanced (default), 2 aggressive, 3 no_floor; --preset is an alias\n"
         "  --sr HZ                               sample rate of the synthetic input (default 16000)\n"
         "  --fft N                               FFT size (default: the level's)\n"
         "  --stage {full|linear|both}            stages to run (default: both)\n"
@@ -159,14 +160,6 @@ static void print_usage(const char* prog) {
         "  --wav <mic.wav> <ref.wav>             use a recording instead of synthetic input\n"
         "  --live-observer                       A21 Stage 2 observer on (default off)\n",
         prog);
-}
-
-static int parse_level(const char* s, AecLevel* out) {
-    if (!strcmp(s, "0") || !strcmp(s, "mild"))       { *out = AEC_LEVEL_MILD;       return 0; }
-    if (!strcmp(s, "1") || !strcmp(s, "balanced"))   { *out = AEC_LEVEL_BALANCED;   return 0; }
-    if (!strcmp(s, "2") || !strcmp(s, "aggressive")) { *out = AEC_LEVEL_AGGRESSIVE; return 0; }
-    if (!strcmp(s, "3") || !strcmp(s, "no_floor"))   { *out = AEC_LEVEL_NO_FLOOR;   return 0; }
-    return -1;
 }
 
 static const char* level_name(AecLevel p) {
@@ -291,8 +284,8 @@ int main(int argc, char** argv) {
         } else if (!strcmp(arg, "--repeat") && i + 1 < argc) {
             repeat = atoi(argv[++i]);
         } else if ((!strcmp(arg, "--level") || !strcmp(arg, "--preset")) && i + 1 < argc) {
-            if (parse_level(argv[++i], &level) != 0) {
-                fprintf(stderr, "ERROR: unknown level '%s'. Valid: 0|1|2|3|mild|balanced|aggressive|no_floor\n", argv[i]);
+            if (aec_cli_parse_level(argv[++i], &level) != 0) {
+                fprintf(stderr, "ERROR: unknown level '%s'. Valid: 0 (mild) | 1 (balanced) | 2 (aggressive) | 3 (no_floor)\n", argv[i]);
                 return 2;
             }
         } else if (!strcmp(arg, "--sr") && i + 1 < argc) {
@@ -394,7 +387,7 @@ int main(int argc, char** argv) {
         full_s = run_stage("full", &full_cfg, mic_buf, ref_buf, hop, n_hops, repeat, audio_seconds);
 
     AecConfig linear_cfg = full_cfg;
-    linear_cfg.enable_res = 0;
+    linear_cfg.residual = AEC_RESIDUAL_OFF;
     if (stage_sel != 1)
         linear_s = run_stage("linear", &linear_cfg, mic_buf, ref_buf, hop, n_hops, repeat, audio_seconds);
 

@@ -76,6 +76,10 @@ static void noise_spectrum_update(NoiseSpectrum *n, const float *spectrum) {
 
 /* StationarityEstimator */
 
+int stationarity_estimator_window_hops(int hop_samples, int sample_rate) {
+    return aec_blocks_to_hops(13, hop_samples, sample_rate);
+}
+
 void stationarity_estimator_init(StationarityEstimator *s,
                                  int n_freqs, int hop_samples, int sample_rate,
                                  float *noise_storage,
@@ -84,7 +88,7 @@ void stationarity_estimator_init(StationarityEstimator *s,
                                  float *history_storage) {
     int i;
     s->n_freqs = n_freqs;
-    s->window_hops = aec_blocks_to_hops(13, hop_samples, sample_rate);
+    s->window_hops = stationarity_estimator_window_hops(hop_samples, sample_rate);
     s->hangover_hops = aec_blocks_to_hops(12, hop_samples, sample_rate);
     /* Noise-tracker constants are rescaled to the live grid like window_hops/hangover_hops. */
     noise_spectrum_init(&s->noise, n_freqs, STAT_MIN_NOISE_POWER_FLOAT,

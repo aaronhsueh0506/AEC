@@ -89,6 +89,15 @@ images that link `libaec.a` without hosted stdio should build with
 debug object is absent, scans the archive and a minimal linked consumer for
 stdio symbols, and runs the consumer.
 
+### Single-channel library (`AEC_NO_ARRAY=1`)
+
+`make lib AEC_NO_ARRAY=1` builds a `libaec.a` without the four-microphone array instance: `src/aec_array.c` and `src/aec_res.c` are not compiled
+(`-DAEC_NO_ARRAY`), `AecConfig.n_mics` other than 1 is refused (`aec_get_mem_size()` 0, `aec_init()` NULL, `aec_create()` -1), and
+`aec_get_array()` and the `aec_array_*()` diagnostics are not defined. Everything single-channel behaves byte for byte as in the full library. On the host
+the archive's `__TEXT` drops by about 21 kB at `SIMD=1` (184,765 -> 163,433 B) and 18 kB at `SIMD=0` (166,881 -> 148,721 B). The flag is part of the config hash, so the
+two builds keep separate `obj/` and `bin/` directories; the array-only test targets print "SKIPPED" under it. Consumers pass it through to this build
+(`make AEC_NO_ARRAY=1` in Audio_ALG/pipelines).
+
 一般呼叫與參數可查閱 [AEC 文件](../docs/html/index.html)。
 
 ## Precision & regression anchors
@@ -144,6 +153,44 @@ caller-pool path (`aec_get_mem_size`/`aec_init`), and differs from numpy's fp64
   result at the cap as at a synthetic huge value.
   `test/run_counter_saturation_ubsan.sh` runs the same source under
   `-fsanitize=undefined` (like `test/run_selftest_ubsan.sh`).
+- `test/test_split_entry.c` (`make test-split-entry`) — the three entry points
+  (`aec_process`, `aec_process_linear`, `aec_process_residual`), the views
+  (`aec_get_linear`, `aec_get_residual`) and the gain / comfort-noise helpers
+  (`aec_apply_gain`, `aec_apply_cng`) in every `AecConfig.residual` mode on three grids, with the order / argument checks.
+  Every field of every hop is hashed into a line stream (see "Line-stream baselines" below). `test/test_process_context.c`
+  (`make test-process-context`) holds the same entry points to each other: `aec_process`
+  against the split pair on one instance and on two, and `STATE` against `FULL`.
+- `test/test_split_entry2.c` (`make test-split-entry-2`) — the second single-channel scene set
+  (`test/baseline2_mono.h`): a clipping far end and
+  microphone, double talk with the near-end-recent latch, a 50 ms path jump with the Path A/B choice, the bad-relock revert and its reject
+  veto, clock drift, resets, `FIXED` and `EXTERNAL_ALIGNED` with `aec_apply_external_realign`, `aec_set_level` ramps in flight on all four
+  levels, shadow / high-pass / comfort noise / saturation off, live observer, windowed noise tracker, duty cycle and the 8 kHz grid,
+  chained per-group hashes. Also `aec_process` alternating with the split calls hop by hop, and the carve of every instance kind
+  ending exactly at `aec_get_mem_size()`.
+- `test/test_split_entry3.c` (`make test-split-entry-3`) — the third single-channel scene set
+  (`test/baseline3_mono.h`): free-running two-path scenes
+  in which the bad-relock judgment (windowed ERLE after a confirmed delay shift against the value before it, 1 dB margin) comes
+  out by itself, with the ERLE improving (kept), clearly worse (reverted), 0.5 dB either side of the margin, worse without an
+  estimate (kept) and on the soft path, on the three product grids; the test prints every judgment (hop, ERLE before / after,
+  outcome) and checks it against the case table.
+- `test/test_aec_array.c` (`make test-aec-array`) — the four-microphone array instance
+  (`AecConfig.n_mics = 4`) driven hop by hop in `STATE`, `ESTIMATE` and `FULL` (hashed into a line stream), plus
+  the contract checks (pool vs heap, pool fills and offsets, reset equals fresh, descriptor).
+  `test/test_aec_array_flow.c` (`make test-aec-array-flow`, an `AEC_TESTING` build) holds the
+  state-machine groups (shared-delay admission, quarantine, duty cycle,
+  far-FFT sharing, lane contract, DSP errors).
+- `test/test_aec_array2.c` (`make test-aec-array-2`) — the second array scene set
+  (`test/baseline2_array.h`): a clipped and a silent microphone,
+  double talk, a clipping far end, `capture_proxy_channel` 1-3, a caller-supplied `beamformed_error`, clock drift, `aec_set_level`
+  in flight, lanes without the shadow filter, the 32/36-sample admission band, the backward and forward moves under the quarantine
+  and the duty cycle, a reset inside double talk; `STATE`, `ESTIMATE` and `FULL` runs, plus per-hop view invariants.
+- **Line-stream baselines.** The five tests above (`test-split-entry`, `-2`, `-3`, `test-aec-array`, `-2`) each print or hash
+  their fields into a line stream. No baseline is shipped: the one-off files written by the pre-split API were compared
+  bit for bit with this version (all three single-channel sets and both array sets, `SIMD=0` and `SIMD=1`) and retired on
+  2026-11-13. `AEC_TEST_BASELINE_WRITE=<dir> make test-split-entry` (likewise the other four, each run from `c_impl/`)
+  writes `<dir>/split_entry_simd{0,1}.txt` from the build at hand (`simd0` = `SIMD=0`, `simd1` = NEON; nothing on other
+  hosts); `AEC_TEST_BASELINE=<dir>` compares every line with it. Capture the baseline from the finished version before the
+  next change, compare after it; the files are valid for the host, compiler and FFT backend that wrote them.
 - `test/test_rate_structural.c` (`make test-rate-structural`) — per-rate
   structure at each of the four whitelisted grids (8k/256, 16k/256, 16k/512,
   48k/1024): synthesis-window COLA, impulse-through-linear and
@@ -180,7 +227,7 @@ size_t bytes = aec_get_mem_size(&cfg);   /* query at runtime; size is backend/co
 void*  pool  = your_static_alloc(bytes); /* MUST be 16-byte aligned (posix_memalign, etc.) */
 Aec*   a     = aec_init(pool, bytes, &cfg);  /* NULL on failure; byte-equal to aec_create output */
 /* ... aec_process(a, ...) ... */
-aec_destroy(a);   /* pool instance: releases nothing (drops internal references only); idempotent */
+aec_destroy(a);   /* pool instance: releases nothing (marks the handle destroyed); idempotent */
 free(pool);
 ```
 
@@ -193,6 +240,18 @@ post-filter, main, shadow and observer filters (`test/test_shared_fft_handle.c`)
 carved from `pool` (vendored patch P0001, see
 audiolib/common/lib/ne10/VENDORED.md), so the static path is heap-free —
 verified with an allocator hook by `test/test_zero_heap_aec.c`.
+
+### Array instance
+
+`AecConfig.n_mics = AEC_ARRAY_MICS` (4) builds the whole four-microphone linear flow in one pool: four lanes (each a
+single-channel `EXTERNAL_ALIGNED` instance), one shared delay estimator with one aligned far, and the fusion buffers.
+The beamformer and the synthesis stay with the caller. Per hop: `aec_process_linear()` (interleaved `float[hop][4]`),
+`aec_get_array()`, the caller's beamformer, `aec_process_residual(a, &beam)`, then `aec_get_residual()` /
+`aec_apply_gain()` / `aec_apply_cng()`. Query the pool with `aec_get_mem_requirements()` and build with
+`aec_init_ex()`; the pool size depends on `residual` (see `STATIC_MEMORY.md`). Not done yet: the far-side state is
+still per lane (only the delay estimator, the aligned far and the far FFT result are shared), and each lane still
+carves a full single-channel pool. Contract and example:
+[../docs/reference/integration.md](../docs/reference/integration.md) §8.8.
 
 Full CLI options, C API reference, integration rules, runtime resource
 notes, and validation steps:

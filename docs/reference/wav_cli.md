@@ -16,7 +16,7 @@ BIN="$(make -s -C c_impl print-bin-dir)"
 
 | 旗標 | 說明 |
 |---|---|
-| `--level {0\|1\|2\|3\|mild\|balanced\|aggressive\|no_floor}` | 預設 `balanced`（`1`）；`0` = mild、`1` = balanced、`2` = aggressive、`3` = no_floor（即 `AecLevel` 的數值），名稱也可用；`--preset` 仍可作為別名 |
+| `--level {0\|1\|2\|3}` | 預設 `1`（balanced）；`0` = mild、`1` = balanced、`2` = aggressive、`3` = no_floor（即 `AecLevel` 的數值）。只收整串十進位數字，名稱、空字串、`1x` 一律以結束碼 2 拒絕；`--preset` 仍可作為別名 |
 | `--cng` | 開啟舒適噪音 |
 | `--no-cng` | 關閉舒適噪音 |
 | `--no-delay-est` | 關閉線上延遲估計 |
@@ -39,7 +39,7 @@ BIN="$(make -s -C c_impl print-bin-dir)"
 > 舒適噪音**預設就是開的**，`--cng` 與 `--no-cng` 只是明確覆寫。
 
 > `--delay-mode`／`--delay-num-filters`／`--fixed-delay` 三個旗標的值**未經
-> CLI 驗證就直接寫入 `AecConfig`**——`aec_validate_config()` 是唯一的範圍與
+> CLI 驗證就直接寫入 `AecConfig`**——`aec_resolve_valid_config()` 是唯一的範圍與
 > mode／欄位相容性權威（[§6](configuration.md#6-aecconfig-完整參考)），CLI 不做第二次檢查也不做 clamp。組合非法
 > 時（例如 `--fixed-delay` 給負值、`--delay-mode fixed` 沒給 `--fixed-delay`、
 > `--delay-mode external` 卻改了 `--delay-num-filters`）`aec_create()` 會
@@ -51,7 +51,7 @@ BIN="$(make -s -C c_impl print-bin-dir)"
 （[§6.7](configuration.md#67-靜態記憶體拆解aec_get_mem_breakdown)）後印一行到 **stdout**（其餘旗標一律印到 stderr）：
 
 ```text
-mem: sr=16000 fft=256 hop=128 mode=matched n=5 fixed_delay_samples=-1 total_bytes=366000 estimator_bytes=33936 ring_bytes=131072
+mem: sr=16000 fft=256 hop=128 mode=matched n=5 fixed_delay_samples=-1 total_bytes=343760 estimator_bytes=33936 ring_bytes=131072
 ```
 
 欄位依序：resolved 後的 `sample_rate`／`fft_size`／`hop_size`、`delay_mode`、
@@ -98,7 +98,7 @@ duty: matched_filter_ran=0/0 hops (n/a -- no matched-filter estimator in delay_m
 |---:|---|
 | 0 | 成功 |
 | 1 | 參數不足（印出用法） |
-| 2 | 未知的 level 或未知的選項 |
+| 2 | 未知的 level（不是 0–3 的整串數字）或未知的選項 |
 | 3 | 無法開啟輸入檔或無法寫入輸出檔 |
 | 4 | 取樣率不支援、mic/ref 取樣率不一致，或訊號格點無效 |
 

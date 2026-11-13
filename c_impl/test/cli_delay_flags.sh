@@ -3,7 +3,7 @@
 # cli_delay_flags.sh -- test of aec_wav's --delay-mode / --delay-num-filters / --fixed-delay / --print-mem-size options.
 #
 # Scope: CLI plumbing only. A value typed on the command line must land in the AecConfig handed to aec_create() and
-# aec_get_mem_breakdown(); an illegal mode/field combination must be rejected, not clamped (aec_validate_config is the
+# aec_get_mem_breakdown(); an illegal mode/field combination must be rejected, not clamped (aec_resolve_valid_config is the
 # single authority); and --print-mem-size must report the number the library itself returns. Bank-size geometry, the
 # ring-size formula and the mode x field validation matrix belong to test_delay_num_filters.c, test_linear_context.c and
 # test_config_validation.c.
@@ -92,7 +92,7 @@ for d in 0 1600 8000; do
 done
 
 # ============================================================================
-# 5. Illegal mode/field combinations are REJECTED (aec_validate_config is the sole authority): a bad combination must fail
+# 5. Illegal mode/field combinations are REJECTED (aec_resolve_valid_config is the sole authority): a bad combination must fail
 #    the run, never be clamped or ignored into a different configuration. Check (a) below is the mutation target.
 # ============================================================================
 # (a) --fixed-delay negative under FIXED (the "unset" sentinel is -1; FIXED demands >= 0, so every negative value, -1
@@ -106,7 +106,7 @@ for bad in -1 -2 -100; do
     fi
 done
 # (b) --fixed-delay given without --delay-mode fixed (mode stays MATCHED,
-#     which demands the sentinel -1 — see aec_validate_config's switch).
+#     which demands the sentinel -1 — see aec_resolve_valid_config's switch).
 if "$AEC_WAV" "$MIC" "$REF" "$TMP/o5b.wav" --cng --fixed-delay 1600 >/dev/null 2>&1; then
     ck no "--fixed-delay without --delay-mode fixed rejected"
 else

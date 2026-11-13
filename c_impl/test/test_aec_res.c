@@ -1,4 +1,4 @@
-/* test_aec_res.c -- aec_res.h: standalone residual-echo suppression stage.
+/* test_aec_res.c -- src/aec_res_internal.h: the residual-echo suppression gain stage (internal; the array instance's gain).
  *
  *  A  configuration: the suppressor an AecRes builds is bit-for-bit the one an
  *     Aec lane builds (heap and caller-pool lanes), on every supported grid
@@ -10,6 +10,10 @@
  *     the two flags that make it inert in the shipped configuration cleared),
  *     and the floor_first_increase limit on the first recovery hop after a
  *     saturated echo.
+ *  F  far-end statistics: aec_render_stats against a direct computation, and
+ *     the statistics form of AecResInput against the render_hop form
+ *     (bit-identical gains and suppressor state over 400 hops that cross the
+ *     low-render detector and the far-active latch, on every grid).
  */
 #include "src/aec_res.c"
 
@@ -146,7 +150,8 @@ static void test_contract(void) {
     { AecResInput t = in; t.near_spec = NULL; CHECK(aec_res_process(r, &t) == NULL, "process rejects NULL near_spec"); }
     { AecResInput t = in; t.r2 = NULL; CHECK(aec_res_process(r, &t) == NULL, "process rejects NULL r2"); }
     { AecResInput t = in; t.comfort_noise = NULL; CHECK(aec_res_process(r, &t) == NULL, "process rejects NULL comfort_noise"); }
-    { AecResInput t = in; t.render_hop = NULL; CHECK(aec_res_process(r, &t) == NULL, "process rejects NULL render_hop"); }
+    { AecResInput t = in; t.render_hop = NULL; t.render_sum_sq = 0.0f; t.render_peak_sq = 0.0f;
+      CHECK(aec_res_process(r, &t) != NULL, "NULL render_hop selects the statistics fields"); }
 
     for (i = 0; i < 300; ++i) {
         g1 = aec_res_process(r, &in);
@@ -163,18 +168,18 @@ static void test_contract(void) {
     aec_res_split_floor(r, &live, &target);
     floor_mild = 0.0f; floor_aggr = 0.0f;
     CHECK(live == target && target > 0.0f, "fresh instance: live floor equals target");
-    CHECK(aec_res_set_level(NULL, AEC_LEVEL_MILD, 0.0f) == -1, "set_level rejects NULL");
-    CHECK(aec_res_set_level(r, (AecLevel)9, 0.0f) == -1, "set_level rejects an unknown level");
-    CHECK(aec_res_set_level(r, AEC_LEVEL_MILD, -1.0f) == -1, "set_level rejects a negative ramp");
-    CHECK(aec_res_set_level(r, AEC_LEVEL_MILD, 1e9f) == -1, "set_level rejects a ramp past the limit");
+    CHECK(aec_res_set_level(NULL, AEC_LEVEL_MILD) == -1, "set_level rejects NULL");
+    CHECK(aec_res_set_level(r, (AecLevel)9) == -1, "set_level rejects an unknown level");
     { float l2, t2; aec_res_split_floor(r, &l2, &t2);
       CHECK(l2 == live && t2 == target, "a rejected level change writes nothing"); }
-    CHECK(aec_res_set_level(r, AEC_LEVEL_AGGRESSIVE, 0.0f) == 0, "set_level aggressive");
+    CHECK(aec_res_set_level(r, AEC_LEVEL_AGGRESSIVE) == 0, "set_level aggressive");
     aec_res_split_floor(r, &live, &floor_aggr);
     CHECK(aec_res_process(r, &in) != NULL, "process after level change");
     aec_res_split_floor(r, &live, &target);
-    CHECK(live == floor_aggr && target == floor_aggr, "immediate retarget lands on the next hop");
-    CHECK(aec_res_set_level(r, AEC_LEVEL_MILD, 0.0f) == 0, "set_level mild");
+    CHECK(target == floor_aggr && live > floor_aggr, "the level change walks: the live floor trails the target");
+    for (i = 0; i < 64 && live != target; ++i) { aec_res_process(r, &in); aec_res_split_floor(r, &live, &target); }
+    CHECK(live == floor_aggr && target == floor_aggr, "the level ramp lands on the target");
+    CHECK(aec_res_set_level(r, AEC_LEVEL_MILD) == 0, "set_level mild");
     aec_res_split_floor(r, &live, &floor_mild);
     CHECK(floor_mild > floor_aggr, "mild floor is above aggressive floor");
     aec_res_reset(r);
@@ -189,7 +194,7 @@ static void test_contract(void) {
      * here. */
     CHECK(r->sg.cfg.split_floor_enabled == 1,
           "no_floor: mild left the gate enabled");
-    CHECK(aec_res_set_level(r, AEC_LEVEL_NO_FLOOR, 0.0f) == 0,
+    CHECK(aec_res_set_level(r, AEC_LEVEL_NO_FLOOR) == 0,
           "no_floor: retarget to NO_FLOOR accepted");
     CHECK(r->sg.cfg.split_floor_enabled == 0,
           "no_floor: gate off immediately, before any reset");
@@ -198,7 +203,7 @@ static void test_contract(void) {
     aec_res_reset(r);
     CHECK(r->sg.cfg.split_floor_enabled == 0,
           "no_floor: aec_res_reset() preserves the gate OFF across reset");
-    CHECK(aec_res_set_level(r, AEC_LEVEL_BALANCED, 0.0f) == 0,
+    CHECK(aec_res_set_level(r, AEC_LEVEL_BALANCED) == 0,
           "no_floor: retarget back to BALANCED accepted");
     CHECK(r->sg.cfg.split_floor_enabled == 1,
           "no_floor: gate back on immediately");
@@ -218,7 +223,8 @@ static void test_contract(void) {
         int same = 1;
         memset(blk2, 0x5A, need);
         f = aec_res_init(blk2, need, &cfg);
-        aec_res_set_level(f, AEC_LEVEL_MILD, 0.0f);
+        aec_res_set_level(f, AEC_LEVEL_MILD);
+        aec_res_reset(f);   /* a reset lands the floor on its target at once, as r has */
         aec_res_reset(r);
         for (i = 0; i < 50; ++i) {
             g1 = aec_res_process(r, &in);
@@ -235,7 +241,8 @@ static void test_contract(void) {
         int same = 1;
         memset(blk3, 0x00, need);
         f = aec_res_init(blk3, need, &cfg);
-        aec_res_set_level(f, AEC_LEVEL_MILD, 0.0f);
+        aec_res_set_level(f, AEC_LEVEL_MILD);
+        aec_res_reset(f);   /* a reset lands the floor on its target at once, as r has */
         aec_res_reset(r);
         for (i = 0; i < 50; ++i) {
             g1 = aec_res_process(r, &in);
@@ -515,12 +522,150 @@ static void test_saturated_recovery(void) {
     }
 }
 
+/* ---- F ---- */
+static void test_render_stats(void) {
+    enum { MAXN = 1024 };
+    static float hop[MAXN + 8], x2[MAXN];
+    static const int SIZES[] = {1, 2, 3, 63, 64, 100, 128, 255, 256, 512, 777, 1024};
+    size_t si;
+    AecRenderStats st;
+    for (si = 0; si < sizeof SIZES / sizeof SIZES[0]; ++si) {
+        int n = SIZES[si], i;
+        float peak = 0.0f;
+        double ref_sum = 0.0;
+        for (i = 0; i < n; ++i) hop[i] = 0.9f * srand_f() * (i % 37 == 0 ? 0.01f : 1.0f);
+        aec_render_stats(hop, n, &st);
+        for (i = 0; i < n; ++i) {
+            float s = hop[i] * 32768.0f;
+            x2[i] = s * s;
+            if (x2[i] > peak) peak = x2[i];
+            ref_sum += (double)x2[i];
+        }
+        CHECK(st.peak_sq == peak, "n=%d: peak_sq equals the largest squared scaled sample", n);
+        CHECK(st.sum_sq == sk_pairwise_sum_tailfold_b_f32(x2, (size_t)n),
+              "n=%d: sum_sq equals the pairwise sum of the squared scaled samples", n);
+        CHECK(fabs((double)st.sum_sq - ref_sum) <= 1e-4 * ref_sum, "n=%d: sum_sq is the sum of squares", n);
+    }
+    { float one = 0.25f; aec_render_stats(&one, 1, &st);
+      CHECK(st.sum_sq == 8192.0f * 8192.0f && st.peak_sq == 8192.0f * 8192.0f, "n=1: exact square of 0.25 * 32768"); }
+    st.sum_sq = 1.0f; st.peak_sq = 1.0f;
+    aec_render_stats(NULL, 128, &st);
+    CHECK(st.sum_sq == 0.0f && st.peak_sq == 0.0f, "NULL hop gives zero statistics");
+    st.sum_sq = 1.0f; st.peak_sq = 1.0f;
+    aec_render_stats(hop, 0, &st);
+    CHECK(st.sum_sq == 0.0f && st.peak_sq == 0.0f, "n = 0 gives zero statistics");
+    st.sum_sq = 1.0f; st.peak_sq = 1.0f;
+    aec_render_stats(hop, MAXN + 1, &st);
+    CHECK(st.sum_sq == 0.0f && st.peak_sq == 0.0f, "n beyond the supported hop gives zero statistics");
+    aec_render_stats(hop, 128, NULL);
+    CHECK(1, "NULL out is accepted");
+}
+
+/* Far-end signal for hop h of 400: silence, a quiet steady floor with an occasional click (low-render
+ * detector on, then off through the click), a loud burst (crosses the far-active latch), a second
+ * silence and a moderate stationary tail. */
+static void far_hop(int h, float* x, int hop) {
+    int k;
+    float amp;
+    if (h < 40) amp = 0.0f;
+    else if (h < 120) amp = 2e-5f;
+    else if (h < 160) amp = 3e-4f;
+    else if (h < 200) amp = 0.6f;
+    else if (h < 240) amp = 0.0f;
+    else if (h < 330) amp = 1e-5f;
+    else amp = 0.05f;
+    for (k = 0; k < hop; ++k) x[k] = amp * srand_f();
+    if (h >= 60 && h < 120 && h % 9 == 0) x[hop / 3] = 5e-4f;    /* click above 3x the average */
+}
+
+static int bits_equal(const float* a, const float* b, int n) {
+    return memcmp(a, b, (size_t)n * sizeof(float)) == 0;
+}
+
+static void test_stats_form(void) {
+    int g, p;
+    enum { HOPS = 400 };
+    for (g = 0; g < N_GRIDS; ++g) {
+        for (p = 0; p < N_LEVELS; ++p) {
+            AecConfig cfg = make_cfg(g, p);
+            size_t need = aec_res_get_mem_size(&cfg);
+            void *mem_a = aligned_block(need), *mem_b = aligned_block(need);
+            AecRes *ra = aec_res_init(mem_a, need, &cfg), *rb = aec_res_init(mem_b, need, &cfg);
+            int n, hop, h, k, gains_equal = 1, state_equal = 1, low_on = 0, low_off = 0, unlatched_early = 0,
+                latched_late = 0;
+            Complex *err, *near;
+            float *r2, *cn, *rend;
+            char id[48];
+            snprintf(id, sizeof id, "%d/%d/level%d", GRIDS[g][0], GRIDS[g][1], p);
+            if (!ra || !rb) { CHECK(0, "%s: init", id); free(mem_a); free(mem_b); continue; }
+            n = ra->n_bins; hop = ra->hop_size;
+            err = (Complex*)calloc((size_t)n, sizeof(Complex));
+            near = (Complex*)calloc((size_t)n, sizeof(Complex));
+            r2 = (float*)calloc((size_t)n, sizeof(float));
+            cn = (float*)calloc((size_t)n, sizeof(float));
+            rend = (float*)calloc((size_t)hop, sizeof(float));
+            for (h = 0; h < HOPS; ++h) {
+                AecResInput ia, ib;
+                AecRenderStats st;
+                const float *ga, *gb;
+                float echo_lvl = (h / 50) % 2 ? 1e8f : 1e4f;
+                float near_amp = (h / 70) % 2 ? 3e-3f : 3e-4f;
+                for (k = 0; k < n; ++k) {
+                    err[k].r = near_amp * srand_f(); err[k].i = near_amp * srand_f();
+                    near[k].r = near_amp * srand_f(); near[k].i = near_amp * srand_f();
+                    r2[k] = echo_lvl * (0.1f + urand());
+                    cn[k] = 1e2f * (0.5f + urand());
+                }
+                far_hop(h, rend, hop);
+                ia.error_spec = ib.error_spec = err; ia.near_spec = ib.near_spec = near;
+                ia.r2 = ib.r2 = r2; ia.comfort_noise = ib.comfort_noise = cn;
+                ia.all_converged = ib.all_converged = (h > 100 && h % 3 != 0);
+                ia.max_dt = ib.max_dt = (h % 11 == 0) ? 0.5f : 0.0f;
+                ia.max_saturation = ib.max_saturation = (h % 23 == 0) ? 1.0f : 0.0f;
+                ia.clock_drift = ib.clock_drift = (h % 17 == 0);
+                ia.render_hop = rend; ia.render_sum_sq = ia.render_peak_sq = 12345.0f;   /* ignored */
+                aec_render_stats(rend, hop, &st);
+                ib.render_hop = NULL; ib.render_sum_sq = st.sum_sq; ib.render_peak_sq = st.peak_sq;
+
+                /* low-render detector decision this hop, from the instance about to see it */
+                {
+                    float avg = ra->sg.low_render_avg_power;
+                    int low = avg < ra->sg.cfg.low_render_threshold &&
+                              st.peak_sq < 3.0f * (avg * (64.0f / (float)hop));
+                    if (low) low_on++; else low_off++;
+                }
+                ga = aec_res_process(ra, &ia);
+                gb = aec_res_process(rb, &ib);
+                if (!ga || !gb || !bits_equal(ga, gb, n)) gains_equal = 0;
+                if (ra->sg.low_render_avg_power != rb->sg.low_render_avg_power ||
+                    ra->sg.far_active_latched != rb->sg.far_active_latched ||
+                    ra->sg.dne_nearend_state != rb->sg.dne_nearend_state ||
+                    ra->sg.dne_hold_counter != rb->sg.dne_hold_counter ||
+                    ra->sg.dne_trigger_counter != rb->sg.dne_trigger_counter ||
+                    ra->sg.initial_state != rb->sg.initial_state ||
+                    memcmp(ra->sg_storage, rb->sg_storage,
+                           sg_float_count(n, ra->sg_cfg.nearend_smoother_n) * sizeof(float)) != 0)
+                    state_equal = 0;
+                if (h == 5 && !ra->sg.far_active_latched) unlatched_early = 1;
+                if (h >= 160 && ra->sg.far_active_latched) latched_late = 1;
+            }
+            CHECK(gains_equal, "%s: statistics form gives bit-identical gains over %d hops", id, HOPS);
+            CHECK(state_equal, "%s: statistics form leaves identical suppressor state", id);
+            CHECK(low_on > 0 && low_off > 0, "%s: both low-render branches exercised (%d on, %d off)", id, low_on, low_off);
+            CHECK(unlatched_early && latched_late, "%s: far-active latch is off before the burst and on after", id);
+            free(err); free(near); free(r2); free(cn); free(rend); free(mem_a); free(mem_b);
+        }
+    }
+}
+
 int main(void) {
     test_config();
     test_contract();
     test_render_scale();
     test_initial_phase();
     test_saturated_recovery();
+    test_render_stats();
+    test_stats_form();
     printf("test_aec_res: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }

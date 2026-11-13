@@ -13,14 +13,17 @@
  *   0  -> aec_create + one hop of aec_process + aec_destroy all succeeded
  *   1  -> aec_create failed
  *   2  -> aec_hop_size() returned an unusable value
- *   3  -> the standalone RES stage (aec_res.h) failed to initialise
+ *   3  -> the RES gain stage (aec_res_internal.h) failed to initialise
  *
  * Build/run: see the `audit-no-stdio` Makefile target (../Makefile), which
  * compiles this against a NO_STDIO=1 libaec.a + the resolved audiolib
  * archive, `nm`s the result, and runs it.
  */
 #include "aec.h"
-#include "aec_res.h"
+#include "aec_internal.h"
+#ifndef AEC_NO_ARRAY
+#include "../src/aec_res_internal.h"
+#endif
 #include <string.h>
 
 int main(void) {
@@ -43,6 +46,7 @@ int main(void) {
 
     aec_destroy(&a);
 
+#ifndef AEC_NO_ARRAY
     {
         static Complex spec[1024];
         static float cn[1024], gr[1024];
@@ -63,5 +67,6 @@ int main(void) {
             aec_cng_fill(&rng, spec, cn, gr, NULL, 0.3f, aec_res_n_bins(r));
         }
     }
+#endif
     return 0;
 }

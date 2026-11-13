@@ -14,9 +14,9 @@
  *   - aec_destroy(NULL) is a safe no-op.
  *   - Calling aec_destroy() twice on the same successfully-created instance
  *     is safe (idempotent: the second call frees nothing and dereferences
- *     nothing already freed) PROVIDED the instance is not used (aec_process
- *     etc.) between or after the two destroy calls — that is NOT
- *     guaranteed/tested here, only double-destroy-then-stop is.
+ *     nothing already freed).
+ *   - A destroyed handle is refused by the entry points (aec.h, "A destroyed
+ *     handle"): process calls answer AEC_ERR_ARG and aec_get_linear() zeroes *out.
  *
  * Build (standalone, from c_impl/):
  *   make -C ../../audiolib/common lib
@@ -31,6 +31,7 @@
  *   leaks --atExit -- ./bin/test_lifecycle
  */
 #include "aec.h"
+#include "aec_internal.h"
 #include "aec_pool_test_util.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -96,11 +97,31 @@ static void test_destroy_null(void) {
     CHECK(1, "aec_destroy(NULL) does not crash");
 }
 
+/* The process and view entry points on a destroyed single-channel handle (the pool or Aec storage is still alive). */
+static void check_destroyed_single(Aec* a, const char* what) {
+    static float mic[4096], ref[4096], out[4096];
+    AecLinearView lv;
+    char msg[96];
+    size_t n, declared;
+    memset(&lv, 0x5A, sizeof lv);
+    lv.struct_size = sizeof lv;
+    snprintf(msg, sizeof msg, "%s: aec_process is refused", what);
+    CHECK(aec_process(a, mic, ref, out) == AEC_ERR_ARG, msg);
+    snprintf(msg, sizeof msg, "%s: aec_process_linear is refused", what);
+    CHECK(aec_process_linear(a, mic, ref) == AEC_ERR_ARG, msg);
+    snprintf(msg, sizeof msg, "%s: aec_process_linear_shared_far_from answers AEC_ERR_ARG", what);
+    CHECK(aec_process_linear_shared_far_from(a, mic, ref, NULL) == AEC_ERR_ARG, msg);
+    snprintf(msg, sizeof msg, "%s: aec_get_linear is refused", what);
+    CHECK(aec_get_linear(a, &lv) == AEC_ERR_ARG, msg);
+    snprintf(msg, sizeof msg, "%s: aec_get_linear zeroes *out but struct_size", what);
+    memcpy(&declared, &lv, sizeof declared);
+    for (n = sizeof declared; n < sizeof lv; ++n) if (((unsigned char*)&lv)[n]) break;
+    CHECK(declared == sizeof lv && n == sizeof lv, msg);
+}
+
 /* Double-destroy: aec_destroy() is idempotent on a successfully-created
- * instance as long as nothing calls back into it between/after the two
- * destroy calls (aec_process/aec_reset after a destroy is NOT supported —
- * only "destroy twice, then stop" is). Covers both the heap-arena path
- * (aec_create) and the static-pool path (aec_init). */
+ * instance. Covers both the heap-arena path (aec_create) and the static-pool
+ * path (aec_init). */
 static void test_double_destroy_heap(void) {
     AecConfig cfg;
     aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, 16000);
@@ -117,6 +138,7 @@ static void test_double_destroy_heap(void) {
     aec_destroy(&a);
     aec_destroy(&a);   /* second call must not double-free / use-after-free */
     CHECK(1, "double-destroy (heap-arena path): second aec_destroy() does not crash");
+    check_destroyed_single(&a, "destroyed heap handle");
 }
 
 static void test_double_destroy_static(void) {
@@ -142,6 +164,7 @@ static void test_double_destroy_static(void) {
     aec_destroy(a);
     aec_destroy(a);   /* second call must not double-free / use-after-free */
     CHECK(1, "double-destroy (static-pool path): second aec_destroy() does not crash");
+    check_destroyed_single(a, "destroyed static handle");
 
     free(pool);
 }

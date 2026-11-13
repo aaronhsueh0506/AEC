@@ -121,6 +121,22 @@ ifeq ($(NO_STDIO),1)
   CFLAGS += -DAEC_NO_STDIO
 endif
 
+# AEC_NO_ARRAY=1 builds the single-channel library: -DAEC_NO_ARRAY, no src/aec_array.c and no src/aec_res.c (the four-microphone
+# array instance and its gain stage), and AecConfig.n_mics other than 1 is rejected by aec_resolve_valid_config() / aec_init() /
+# aec_create(). aec_get_array(), the aec_array_*() diagnostics and the lane entry points are then not defined. The array-only test
+# targets (test-aec-array, test-aec-array-2, test-aec-array-flow, test-aec-res) are skipped with a message. Set before CFG_SIG is
+# computed so it keys its own obj/bin directory.
+AEC_NO_ARRAY ?= 0
+ifneq ($(words $(AEC_NO_ARRAY)),1)
+$(error AEC_NO_ARRAY must be exactly 0 or 1, got '$(AEC_NO_ARRAY)')
+endif
+ifneq ($(filter-out 0 1,$(AEC_NO_ARRAY)),)
+$(error AEC_NO_ARRAY must be exactly 0 or 1, got '$(AEC_NO_ARRAY)')
+endif
+ifeq ($(AEC_NO_ARRAY),1)
+  CFLAGS += -DAEC_NO_ARRAY
+endif
+
 # FP-contraction policy, shared by all four repos: FP_POLICY is appended to CFLAGS last, after every other append and
 # before CFG_SIG is computed, so an EXTRA_CFLAGS=-ffp-contract=fast (or -Ofast/-ffast-math) cannot win. It keeps scalar and
 # NEON operation order stable and lets audiolib's guarded AArch64 sqrtf lower to FSQRT without an errno-checking libm
@@ -198,8 +214,8 @@ CFLAGS    += $(FP_POLICY)
 COMMON_FWD = BACKEND=$(BACKEND) SIMD=$(SIMD) WERROR=$(WERROR) CC='$(CC)' CXX='$(CXX)' EXTRA_CFLAGS='$(EXTRA_CFLAGS)' NO_STDIO=$(NO_STDIO) TOOLCHAIN_CHECK=$(TOOLCHAIN_CHECK)
 
 ifeq ($(COMMON_LIB),)
-.PHONY: all bench test test-full test-counter-saturation test-rate-structural test-config-validation test-process-context test-avg-reverb-slots test-linear-context test-guard-unify test-res-nearend-gate test-runtime-preset test-delay-num-filters test-duty-census test-external-realign test-cli-delay-flags test-shared-far-spec test-spectral-reuse test-heap-alignment test-shared-fft-handle test-synthesis-window test-static-aec test-memory-layout test-reset-parity test-zero-heap test-aec-res test-detectors-parity test-detectors-parity-all test-parity-e2e pyc-parity-driver
-all bench test test-full test-counter-saturation test-rate-structural test-config-validation test-process-context test-avg-reverb-slots test-linear-context test-guard-unify test-res-nearend-gate test-runtime-preset test-delay-num-filters test-duty-census test-external-realign test-cli-delay-flags test-shared-far-spec test-spectral-reuse test-heap-alignment test-shared-fft-handle test-synthesis-window test-static-aec test-memory-layout test-reset-parity test-zero-heap test-aec-res test-detectors-parity test-detectors-parity-all test-parity-e2e pyc-parity-driver:
+.PHONY: all bench test test-full test-counter-saturation test-rate-structural test-config-validation test-process-context test-split-entry test-split-entry-2 test-split-entry-3 test-aec-array test-aec-array-2 test-aec-array-flow test-avg-reverb-slots test-linear-context test-guard-unify test-res-nearend-gate test-runtime-preset test-delay-num-filters test-duty-census test-external-realign test-cli-delay-flags test-shared-far-spec test-spectral-reuse test-heap-alignment test-shared-fft-handle test-synthesis-window test-static-aec test-memory-layout test-handle-ready test-reset-parity test-zero-heap test-aec-res test-detectors-parity test-detectors-parity-all test-parity-e2e pyc-parity-driver
+all bench test test-full test-counter-saturation test-rate-structural test-config-validation test-process-context test-split-entry test-split-entry-2 test-split-entry-3 test-aec-array test-aec-array-2 test-aec-array-flow test-avg-reverb-slots test-linear-context test-guard-unify test-res-nearend-gate test-runtime-preset test-delay-num-filters test-duty-census test-external-realign test-cli-delay-flags test-shared-far-spec test-spectral-reuse test-heap-alignment test-shared-fft-handle test-synthesis-window test-static-aec test-memory-layout test-handle-ready test-reset-parity test-zero-heap test-aec-res test-detectors-parity test-detectors-parity-all test-parity-e2e pyc-parity-driver:
 	+@ac="$$($(MAKE) -s --no-print-directory -C $(COMMON_DIR) $(COMMON_FWD) print-lib-path)"; \
 	 test -n "$$ac" || { echo "FATAL: could not resolve audiolib archive path (COMMON_DIR=$(COMMON_DIR) -- is audiolib present as a sibling of this repo?)" >&2; exit 1; }; \
 	 $(MAKE) --no-print-directory $@ COMMON_LIB="$$ac"
@@ -219,16 +235,21 @@ ifeq ($(NO_STDIO),1)
   SRCS := $(filter-out $(SRC_DIR)/aec_debug.c,$(SRCS))
 endif
 
+# AEC_NO_ARRAY=1: the array instance and its gain stage (aec_res.c is used by nothing else) are not built or archived.
+ifeq ($(AEC_NO_ARRAY),1)
+  SRCS := $(filter-out $(SRC_DIR)/aec_array.c $(SRC_DIR)/aec_res.c,$(SRCS))
+endif
+
 # --- Hash-keyed object/binary directories + CFG_SIG ------------------------
 # obj/<backend>-<sig>/ and bin/<backend>-<sig>/ keep builds that differ in any flag from sharing objects or delivering each
 # other's binaries. The payload covers the tools (CC CXX AR RANLIB LINK), CFLAGS/CXXFLAGS/CPPFLAGS/LDFLAGS and their EXTRA_*
-# hooks, BACKEND, SIMD, PROFILE, WERROR, AEC_TESTING, NO_STDIO, DEBUG, TOOLCHAIN_CHECK, the sorted SRCS and
+# hooks, BACKEND, SIMD, PROFILE, WERROR, AEC_TESTING, NO_STDIO, AEC_NO_ARRAY, DEBUG, TOOLCHAIN_CHECK, the sorted SRCS and
 # COMMON_PRODUCER_SIG (empty for goals that never touch audiolib). CC_TARGET_SIG adds the effective ABI/FP/ISA predefines,
 # since the same CC command can select a different SDK through PATH. The hash is POSIX cksum of the unstripped payload.
 # Define it after CFLAGS/LDFLAGS are complete and before the first rule that uses $(OBJ_DIR)/$(BIN_DIR): Make expands
 # prerequisite lists at parse time, so an earlier use would see an empty CFG_SIG.
 override CC_TARGET_SIG := $(shell sh $(COMMON_DIR)/scripts/target_abi_signature.sh $(CC) $(CPPFLAGS) $(CFLAGS))
-CFG_SIG_PAYLOAD := CC_TARGET_SIG=$(CC_TARGET_SIG) CC=$(CC) CXX=$(CXX) AR=$(AR) RANLIB=$(RANLIB) LINK=$(LINK) CFLAGS=$(CFLAGS) CXXFLAGS=$(CXXFLAGS) CPPFLAGS=$(CPPFLAGS) LDFLAGS=$(LDFLAGS) EXTRA_CFLAGS=$(EXTRA_CFLAGS) EXTRA_LDFLAGS=$(EXTRA_LDFLAGS) BACKEND=$(BACKEND) SIMD=$(SIMD) PROFILE=$(PROFILE) WERROR=$(WERROR) AEC_TESTING=$(AEC_TESTING) NO_STDIO=$(NO_STDIO) DEBUG=$(DEBUG) TOOLCHAIN_CHECK=$(TOOLCHAIN_CHECK) COMMON_PRODUCER_SIG=$(COMMON_PRODUCER_SIG) SRCS=$(sort $(SRCS))
+CFG_SIG_PAYLOAD := CC_TARGET_SIG=$(CC_TARGET_SIG) CC=$(CC) CXX=$(CXX) AR=$(AR) RANLIB=$(RANLIB) LINK=$(LINK) CFLAGS=$(CFLAGS) CXXFLAGS=$(CXXFLAGS) CPPFLAGS=$(CPPFLAGS) LDFLAGS=$(LDFLAGS) EXTRA_CFLAGS=$(EXTRA_CFLAGS) EXTRA_LDFLAGS=$(EXTRA_LDFLAGS) BACKEND=$(BACKEND) SIMD=$(SIMD) PROFILE=$(PROFILE) WERROR=$(WERROR) AEC_TESTING=$(AEC_TESTING) NO_STDIO=$(NO_STDIO) AEC_NO_ARRAY=$(AEC_NO_ARRAY) DEBUG=$(DEBUG) TOOLCHAIN_CHECK=$(TOOLCHAIN_CHECK) COMMON_PRODUCER_SIG=$(COMMON_PRODUCER_SIG) SRCS=$(sort $(SRCS))
 CFG_SIG := $(shell printf '%s' "$(CFG_SIG_PAYLOAD)" | cksum | cut -d' ' -f1)
 
 # OBJ_ROOT / BIN_ROOT place the keyed trees (default obj/ and bin/ here). Placement only, so not in CFG_SIG; the isolation
@@ -239,6 +260,14 @@ OBJ_DIR  = $(OBJ_ROOT)/$(BACKEND)-$(CFG_SIG)
 BIN_DIR  = $(BIN_ROOT)/$(BACKEND)-$(CFG_SIG)
 
 OBJS  = $(patsubst $(SRC_DIR)/%.c,$(OBJ_DIR)/%.o,$(SRCS))
+
+# The AecRes gain stage (src/aec_res.c) is not part of an AEC_NO_ARRAY library; the single-channel tests that use it as their
+# reference stage link it as test support.
+ifeq ($(AEC_NO_ARRAY),1)
+TEST_RES_OBJ = $(OBJ_DIR)/aec_res.o
+else
+TEST_RES_OBJ =
+endif
 
 EXAMPLE_SRCS = $(EXAMPLE_DIR)/aec_wav.c
 EXAMPLE_OBJS = $(patsubst $(EXAMPLE_DIR)/%.c,$(OBJ_DIR)/%.o,$(EXAMPLE_SRCS))
@@ -255,7 +284,7 @@ TEST_CS_SRCS   = $(TEST_DIR)/test_counter_saturation.c
 TEST_CS_OBJS   = $(patsubst $(TEST_DIR)/%.c,$(OBJ_DIR)/%.o,$(TEST_CS_SRCS))
 TEST_CS_TARGET = $(BIN_DIR)/test_counter_saturation
 
-# aec_get_linear_context() seam: aligned-far alias and content, generation bumps, UNLOCKED reporting. Needs the full Aec
+# aec_get_linear() seam: aligned-far alias and content, generation bumps, UNLOCKED reporting. Needs the full Aec
 # type.
 TEST_LC_SRCS   = $(TEST_DIR)/test_linear_context.c
 TEST_LC_OBJS   = $(patsubst $(TEST_DIR)/%.c,$(OBJ_DIR)/%.o,$(TEST_LC_SRCS))
@@ -275,7 +304,7 @@ TEST_RNG_OBJS   = $(patsubst $(TEST_DIR)/%.c,$(OBJ_DIR)/%.o,$(TEST_RNG_SRCS))
 TEST_RNG_TARGET = $(BIN_DIR)/test_res_nearend_gate
 
 # Runtime strength retarget (suppression_gain_set_split_floor_far_active_db, aec_set_level): immediate retarget, ramp timing,
-# retarget mid-ramp, reset keeps the target, rejection writes nothing, spatial_linear_context lanes never ramp. Needs the full
+# retarget mid-ramp, reset keeps the target, rejection writes nothing, lanes below AEC_RESIDUAL_FULL never ramp. Needs the full
 # Aec and SuppressionGain types.
 TEST_RP_SRCS   = $(TEST_DIR)/test_runtime_preset.c
 TEST_RP_OBJS   = $(patsubst $(TEST_DIR)/%.c,$(OBJ_DIR)/%.o,$(TEST_RP_SRCS))
@@ -283,7 +312,7 @@ TEST_RP_TARGET = $(BIN_DIR)/test_runtime_preset
 
 # Matched-filter bank size (AecConfig.delay_num_filters -> delay_aec_get_mem_size/delay_aec_init): the default is the
 # 5-filter geometry, a shorter bank loses reach, the pool scales with n, and out-of-range values are rejected at every layer
-# (aec_validate_config and the pool-first delay_aec_get_mem_size/delay_aec_init, which do not clamp). Needs the full Aec
+# (aec_resolve_valid_config and the pool-first delay_aec_get_mem_size/delay_aec_init, which do not clamp). Needs the full Aec
 # type.
 TEST_DNF_SRCS   = $(TEST_DIR)/test_delay_num_filters.c
 TEST_DNF_OBJS   = $(patsubst $(TEST_DIR)/%.c,$(OBJ_DIR)/%.o,$(TEST_DNF_SRCS))
@@ -317,11 +346,46 @@ TEST_CV_SRCS   = $(TEST_DIR)/test_config_validation.c
 TEST_CV_OBJS   = $(patsubst $(TEST_DIR)/%.c,$(OBJ_DIR)/%.o,$(TEST_CV_SRCS))
 TEST_CV_TARGET = $(BIN_DIR)/test_config_validation
 
-# aec_process_context(): it may be interleaved freely with aec_process() on one instance, and every AecResContext field a
-# caller reads is byte-identical between them. Needs the full Aec type.
+# The split pair aec_process_linear() + aec_process_residual(): it may be interleaved freely with aec_process() on one instance,
+# and every AecLinearView / AecResidualView field a caller reads is byte-identical between them. Needs the full Aec type.
 TEST_PC_SRCS   = $(TEST_DIR)/test_process_context.c
 TEST_PC_OBJS   = $(patsubst $(TEST_DIR)/%.c,$(OBJ_DIR)/%.o,$(TEST_PC_SRCS))
 TEST_PC_TARGET = $(BIN_DIR)/test_process_context
+
+# The three entry points (aec_process / aec_process_linear / aec_process_residual), their views and the gain / comfort-noise
+# helpers on three grids, with the order / argument checks. Needs the full Aec type.
+TEST_SE_SRCS   = $(TEST_DIR)/test_split_entry.c
+TEST_SE_OBJS   = $(patsubst $(TEST_DIR)/%.c,$(OBJ_DIR)/%.o,$(TEST_SE_SRCS))
+TEST_SE_TARGET = $(BIN_DIR)/test_split_entry
+
+# The second single-channel scene set (saturation, double talk, delay shifts and the bad-relock revert, drift, reset, FIXED and
+# EXTERNAL_ALIGNED with realign, levels in flight, switched-off blocks, live observer, duty cycle, 8 kHz) and the carve-end /
+# alternation checks. Cases and runner: test/baseline2_mono.h.
+TEST_SE2_SRCS   = $(TEST_DIR)/test_split_entry2.c
+TEST_SE2_OBJS   = $(patsubst $(TEST_DIR)/%.c,$(OBJ_DIR)/%.o,$(TEST_SE2_SRCS))
+TEST_SE2_TARGET = $(BIN_DIR)/test_split_entry2
+
+# The third single-channel scene set: bad-relock judgments (revert / no revert, either side of the 1 dB margin) that free-running
+# two-path scenes produce by themselves. Case table: test/baseline3_mono.h.
+TEST_SE3_SRCS   = $(TEST_DIR)/test_split_entry3.c
+TEST_SE3_OBJS   = $(patsubst $(TEST_DIR)/%.c,$(OBJ_DIR)/%.o,$(TEST_SE3_SRCS))
+TEST_SE3_TARGET = $(BIN_DIR)/test_split_entry3
+
+# The four-microphone array instance (n_mics = 4) driven through its residual modes, with its contract checks; and the
+# shared-alignment / quarantine / duty-cycle /
+# lane-contract state-machine checks ported from the flow's own suite (those reach the duty-cycle hooks of
+# test/aec_test_hooks.h, so they run in an AEC_TESTING build).
+TEST_AA_SRCS   = $(TEST_DIR)/test_aec_array.c
+TEST_AA_OBJS   = $(patsubst $(TEST_DIR)/%.c,$(OBJ_DIR)/%.o,$(TEST_AA_SRCS))
+TEST_AA_TARGET = $(BIN_DIR)/test_aec_array
+# The second array scene set (clipped / silent microphone, double talk, proxy channel, caller-supplied beamformed error, clock
+# drift, levels, shadow off, admission band, quarantine, duty cycle; STATE / ESTIMATE / FULL), test/baseline2_array.h.
+TEST_AA2_SRCS   = $(TEST_DIR)/test_aec_array2.c
+TEST_AA2_OBJS   = $(patsubst $(TEST_DIR)/%.c,$(OBJ_DIR)/%.o,$(TEST_AA2_SRCS))
+TEST_AA2_TARGET = $(BIN_DIR)/test_aec_array2
+TEST_AF_SRCS   = $(TEST_DIR)/test_aec_array_flow.c
+TEST_AF_OBJS   = $(patsubst $(TEST_DIR)/%.c,$(OBJ_DIR)/%.o,$(TEST_AF_SRCS))
+TEST_AF_TARGET = $(BIN_DIR)/test_aec_array_flow
 
 # Average-render-reverb ring-slot selection (aec_post_avg_reverb_slots): the
 # delayed and the one-older partition must never alias the newest one.
@@ -329,7 +393,7 @@ TEST_ARS_SRCS   = $(TEST_DIR)/test_avg_reverb_slots.c
 TEST_ARS_OBJS   = $(patsubst $(TEST_DIR)/%.c,$(OBJ_DIR)/%.o,$(TEST_ARS_SRCS))
 TEST_ARS_TARGET = $(BIN_DIR)/test_avg_reverb_slots
 
-# aec_process_context_shared_far_from(): a borrowed far-end spectrum gives a byte-identical AecResContext, is genuinely consumed,
+# aec_process_linear_shared_far_from(): a borrowed far-end spectrum gives byte-identical views, is genuinely consumed,
 # aec_reset() clears a pending borrow, and the real-FFT-compute counter reflects borrow vs compute.
 TEST_SFS_SRCS   = $(TEST_DIR)/test_shared_far_spec.c
 TEST_SFS_OBJS   = $(patsubst $(TEST_DIR)/%.c,$(OBJ_DIR)/%.o,$(TEST_SFS_SRCS))
@@ -360,7 +424,7 @@ TEST_STATIC_REF ?= ../wav/aec_challenge_blind/doubletalk/0I0XMl3M0ECO0U1N0cJvpg_
 TEST_STATIC_SR  ?= 16000
 
 # aec_reset() equals a fresh instance: a never-warmed and a warmed-then-reset instance on the same config produce
-# byte-identical out[hop], AecResContext.formed_hop and AecResContext.error_spec over the whole post-reset run, on the three
+# byte-identical out[hop], AecResidualView.formed_hop and AecResidualView.error_spec over the whole post-reset run, on the three
 # product grids and both consumption modes.
 TEST_RPY_SRCS   = $(TEST_DIR)/test_reset_parity.c
 TEST_RPY_OBJS   = $(patsubst $(TEST_DIR)/%.c,$(OBJ_DIR)/%.o,$(TEST_RPY_SRCS))
@@ -380,7 +444,7 @@ TEST_ZH_SRCS   = $(TEST_DIR)/test_zero_heap_aec.c
 TEST_ZH_OBJS   = $(patsubst $(TEST_DIR)/%.c,$(OBJ_DIR)/%.o,$(TEST_ZH_SRCS))
 TEST_ZH_TARGET = $(BIN_DIR)/test_zero_heap_aec
 
-# Standalone RES stage (aec_res.h): configuration equality with an Aec lane,
+# RES gain stage (src/aec_res_internal.h, internal): configuration equality with an Aec lane,
 # gain and comfort-noise equality with the multi-lane pipelines' stage, API
 # contract. The test includes src/aec_res.c for the struct, so it links the
 # library objects without aec_res.o.
@@ -389,7 +453,7 @@ TEST_AR_TARGET  = $(BIN_DIR)/test_aec_res
 
 # --- Python<->C parity harness (test/pyc_parity_aec.sh, test/pyc_parity/) ---
 # test-parity-e2e : end-to-end gate (test/parity_aec_e2e.c) against goldens regenerated by python/diag/gen_aec_e2e_golden.py
-#                   into $(BIN_DIR) (never into git); wavs pinned by test/golden/parity_e2e_inputs.sha256. 16/48 kHz must pass;
+#                   into $(BIN_DIR) (never into git); wavs pinned by test/parity_e2e_inputs.sha256. 16/48 kHz must pass;
 #                   the 8 kHz row is the expected red. Part of `make test-full` only: the lean pyc suite catches the same
 #                   planted regressions at a fraction of the cost.
 # pyc-parity-driver : builds test/pyc_parity/aec_run.c (the C side) for this configuration; test/pyc_parity_aec.sh calls it
@@ -543,13 +607,13 @@ test-header-fresh:
 	  exit 1; \
 	fi
 
-# Compile-only C++ check of include/aec.h (the library itself has no C++ TU): both spellings of the level, AecLevel and
-# AecPreset, must be assignable from the legacy AEC_PRESET_* names and accepted by aec_set_level(). It needs no audiolib
+# Compile-only C++ check of include/aec.h and include/aec_internal.h (the library itself has no C++ TU): the AEC_LEVEL_*
+# enumerators must be accepted by aec_config_from_level(), aec_set_level() and the level lookups. It needs no audiolib
 # archive, so it sits outside the COMMON_LIB dispatch like test-header-fresh.
 .PHONY: test-header-cpp
 test-header-cpp:
 	$(CXX) -std=c++11 -fsyntax-only -Wall -Wextra -Werror -I./include -I$(COMMON_DIR)/include -I$(COMMON_DIR) $(TEST_DIR)/test_header_cpp.cpp
-	@echo "test-header-cpp: aec.h compiles as C++11 and the legacy level names convert"
+	@echo "test-header-cpp: aec.h and aec_internal.h compile as C++11 and the AEC_LEVEL_* enumerators convert"
 
 # Builds AND runs (unlike `bench`, which only builds) the delay_aec_reset() test. It is self-contained (synthetic signals,
 # no fixture file).
@@ -617,7 +681,7 @@ $(TEST_NT_TARGET): $(TEST_NT_OBJ) $(OBJ_DIR)/aec_scale.o | _cfg_guard
 # $(TARGET)/$(BENCH_TARGET) relink only then.
 # =============================================================================
 ifneq ($(COMMON_LIB),)
-.PHONY: all bench FORCE test test-full test-counter-saturation test-rate-structural _run-rate-structural test-config-validation test-process-context test-avg-reverb-slots test-linear-context test-guard-unify test-res-nearend-gate test-runtime-preset test-delay-num-filters test-duty-census test-external-realign test-cli-delay-flags test-shared-far-spec test-spectral-reuse test-heap-alignment test-shared-fft-handle test-synthesis-window test-static-aec test-memory-layout test-reset-parity test-zero-heap test-aec-res test-detectors-parity test-detectors-parity-all test-parity-e2e pyc-parity-driver
+.PHONY: all bench FORCE test test-full test-counter-saturation test-rate-structural _run-rate-structural test-config-validation test-process-context test-split-entry test-split-entry-2 test-split-entry-3 test-aec-array test-aec-array-2 test-aec-array-flow test-avg-reverb-slots test-linear-context test-guard-unify test-res-nearend-gate test-runtime-preset test-delay-num-filters test-duty-census test-external-realign test-cli-delay-flags test-shared-far-spec test-spectral-reuse test-heap-alignment test-shared-fft-handle test-synthesis-window test-static-aec test-memory-layout test-handle-ready test-reset-parity test-zero-heap test-aec-res test-detectors-parity test-detectors-parity-all test-parity-e2e pyc-parity-driver
 all: $(TARGET)
 bench: $(BENCH_TARGET)
 
@@ -643,11 +707,49 @@ test-config-validation: $(TEST_CV_TARGET)
 test-process-context: $(TEST_PC_TARGET)
 	"$(abspath $(TEST_PC_TARGET))"
 
+# Builds AND runs.
+test-split-entry: $(TEST_SE_TARGET)
+	"$(abspath $(TEST_SE_TARGET))"
+
+# Builds AND runs.
+test-split-entry-2: $(TEST_SE2_TARGET)
+	"$(abspath $(TEST_SE2_TARGET))"
+
+# Builds AND runs.
+test-split-entry-3: $(TEST_SE3_TARGET)
+	"$(abspath $(TEST_SE3_TARGET))"
+
 test-avg-reverb-slots: $(TEST_ARS_TARGET)
 	"$(abspath $(TEST_ARS_TARGET))"
 
+# The array-only targets (the four-microphone instance and its gain stage) are skipped, with a message, when AEC_NO_ARRAY=1.
+ifeq ($(AEC_NO_ARRAY),1)
+test-aec-array test-aec-array-2 test-aec-array-flow test-aec-res:
+	@echo "$@: SKIPPED -- array-only test; AEC_NO_ARRAY=1 builds the single-channel library"
+else
+# Build AND run. Re-invoke make with AEC_TESTING=1: both read the admission candidate through aec_test_hooks.h.
+test-aec-array:
+	+@$(MAKE) --no-print-directory AEC_TESTING=1 _run-aec-array
+
+_run-aec-array: $(TEST_AA_TARGET)
+	"$(abspath $(TEST_AA_TARGET))"
+
+test-aec-array-2:
+	+@$(MAKE) --no-print-directory AEC_TESTING=1 _run-aec-array-2
+
+_run-aec-array-2: $(TEST_AA2_TARGET)
+	"$(abspath $(TEST_AA2_TARGET))"
+
+# Builds AND runs. Re-invokes make with AEC_TESTING=1 for the duty-cycle hooks, like test-rate-structural.
+test-aec-array-flow:
+	+@$(MAKE) --no-print-directory AEC_TESTING=1 _run-aec-array-flow
+
+_run-aec-array-flow: $(TEST_AF_TARGET)
+	"$(abspath $(TEST_AF_TARGET))"
+
 test-aec-res: $(TEST_AR_TARGET)
 	"$(abspath $(TEST_AR_TARGET))"
+endif
 
 # Builds AND runs, same convention as test-counter-saturation above.
 test-linear-context: $(TEST_LC_TARGET)
@@ -720,6 +822,13 @@ test-memory-layout: $(OBJS) $(COMMON_LIB) | _cfg_guard
 	$(LINK) $(CFLAGS) -o "$(BIN_DIR)/test_memory_layout" "$(OBJ_DIR)/test_memory_layout.o" $(OBJS) $(COMMON_LIB) $(LDFLAGS)
 	"$(abspath $(BIN_DIR)/test_memory_layout)"
 
+# Builds AND runs. check_handle_entries.py first compares the entries the test calls with the Aec-handle prototypes of aec.h and aec_internal.h.
+test-handle-ready: $(OBJS) $(COMMON_LIB) | _cfg_guard
+	$(PYTHON) -I "$(TEST_DIR)/check_handle_entries.py" include/aec.h "$(TEST_DIR)/test_handle_ready.c" include/aec_internal.h
+	$(CC) $(CFLAGS) -c -o "$(OBJ_DIR)/test_handle_ready.o" "$(TEST_DIR)/test_handle_ready.c"
+	$(LINK) $(CFLAGS) -o "$(BIN_DIR)/test_handle_ready" "$(OBJ_DIR)/test_handle_ready.o" $(OBJS) $(COMMON_LIB) $(LDFLAGS)
+	"$(abspath $(BIN_DIR)/test_handle_ready)"
+
 test-static-aec: $(TEST_STATIC_TARGET)
 	@test -f "$(TEST_STATIC_MIC)" || { echo "FATAL: TEST_STATIC_MIC not found: $(TEST_STATIC_MIC)" >&2; exit 1; }
 	@test -f "$(TEST_STATIC_REF)" || { echo "FATAL: TEST_STATIC_REF not found: $(TEST_STATIC_REF)" >&2; exit 1; }
@@ -762,11 +871,11 @@ test-zero-heap: $(TEST_ZH_TARGET)
 #   `make test-full` adds what is slow or changes rarely: the SIMD-independent targets under SIMD=0 as well, the end-to-end
 #   gate, the full pyc matrix instead of the lean one, the UBSan --use-standard-math variants, the Makefile flag-policy
 #   script and the signal-handling script that tests the UBSan wrappers' traps.
-TEST_SIMD_DEP   = selftest test-process-context test-linear-context test-guard-unify test-aec-res test-res-nearend-gate test-runtime-preset \
+TEST_SIMD_DEP   = selftest test-process-context test-split-entry test-split-entry-2 test-split-entry-3 test-aec-array test-aec-array-2 test-aec-array-flow test-linear-context test-guard-unify test-aec-res test-res-nearend-gate test-runtime-preset \
                   test-delay-num-filters test-duty-census test-external-realign test-reset-parity test-delay-reset \
                   test-delay-dominant-selection test-delay-kernels test-delay-matched-neon test-neon-twins \
                   test-rate-structural test-counter-saturation
-TEST_SIMD_INDEP = test-heap-alignment test-memory-layout test-config-validation test-avg-reverb-slots \
+TEST_SIMD_INDEP = test-heap-alignment test-memory-layout test-handle-ready test-config-validation test-avg-reverb-slots \
                   test-shared-far-spec test-spectral-reuse test-shared-fft-handle test-synthesis-window test-static-aec test-zero-heap \
                   test-header-fresh test-header-cpp test-detectors-parity-all test-cli-delay-flags
 TEST_BUILD_GATES = test-no-testing-symbols audit-no-stdio
@@ -829,6 +938,30 @@ $(TEST_CV_TARGET): $(OBJS) $(TEST_CV_OBJS) $(COMMON_LIB) | _cfg_guard
 $(TEST_PC_TARGET): $(OBJS) $(TEST_PC_OBJS) $(COMMON_LIB) | _cfg_guard
 	$(LINK) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 	@echo "test_process_context [$(BACKEND)] -> $@"
+
+$(TEST_SE_TARGET): $(OBJS) $(TEST_RES_OBJ) $(TEST_SE_OBJS) $(COMMON_LIB) | _cfg_guard
+	$(LINK) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+	@echo "test_split_entry [$(BACKEND)] -> $@"
+
+$(TEST_AA_TARGET): $(OBJS) $(TEST_AA_OBJS) $(COMMON_LIB) | _cfg_guard
+	$(LINK) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+	@echo "test_aec_array [$(BACKEND)] -> $@"
+
+$(TEST_SE2_TARGET): $(OBJS) $(TEST_RES_OBJ) $(TEST_SE2_OBJS) $(COMMON_LIB) | _cfg_guard
+	$(LINK) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+	@echo "test_split_entry2 [$(BACKEND)] -> $@"
+
+$(TEST_SE3_TARGET): $(OBJS) $(TEST_RES_OBJ) $(TEST_SE3_OBJS) $(COMMON_LIB) | _cfg_guard
+	$(LINK) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+	@echo "test_split_entry3 [$(BACKEND)] -> $@"
+
+$(TEST_AA2_TARGET): $(OBJS) $(TEST_AA2_OBJS) $(COMMON_LIB) | _cfg_guard
+	$(LINK) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+	@echo "test_aec_array2 [$(BACKEND)] -> $@"
+
+$(TEST_AF_TARGET): $(OBJS) $(TEST_AF_OBJS) $(COMMON_LIB) | _cfg_guard
+	$(LINK) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+	@echo "test_aec_array_flow [$(BACKEND)] -> $@"
 
 $(TEST_ARS_TARGET): $(OBJS) $(TEST_ARS_OBJS) $(COMMON_LIB) | _cfg_guard
 	$(LINK) $(CFLAGS) -o $@ $^ $(LDFLAGS)
@@ -906,15 +1039,15 @@ $(TEST_RPY_TARGET): $(OBJS) $(TEST_RPY_OBJS) $(COMMON_LIB) | _cfg_guard
 	$(LINK) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 	@echo "test_reset_parity [$(BACKEND)] -> $@"
 
-$(TEST_ZH_TARGET): $(OBJS) $(TEST_ZH_OBJS) $(COMMON_LIB) | _cfg_guard
+$(TEST_ZH_TARGET): $(OBJS) $(TEST_RES_OBJ) $(TEST_ZH_OBJS) $(COMMON_LIB) | _cfg_guard
 	+$(MAKE) -C $(COMMON_DIR) $(COMMON_FWD) test_zero_heap
 ifeq ($(shell uname -s),Darwin)
 	@ac_bin="$$($(MAKE) -s -C $(COMMON_DIR) $(COMMON_FWD) print-bin-dir)"; \
-	$(LINK) $(CFLAGS) -fno-builtin -o $@ $(OBJS) $(TEST_ZH_OBJS) $(COMMON_LIB) \
+	$(LINK) $(CFLAGS) -fno-builtin -o $@ $(OBJS) $(TEST_RES_OBJ) $(TEST_ZH_OBJS) $(COMMON_LIB) \
 		-L"$$ac_bin" -lzero_heap_hook -Wl,-rpath,"$$ac_bin" $(LDFLAGS)
 else
 	@ac_obj="$$($(MAKE) -s -C $(COMMON_DIR) $(COMMON_FWD) print-obj-dir)"; \
-	$(LINK) $(CFLAGS) -fno-builtin -o $@ $(OBJS) $(TEST_ZH_OBJS) \
+	$(LINK) $(CFLAGS) -fno-builtin -o $@ $(OBJS) $(TEST_RES_OBJ) $(TEST_ZH_OBJS) \
 		"$$ac_obj/zero_heap_hook.o" $(COMMON_LIB) $(LDFLAGS) \
 		-Wl,--wrap=malloc -Wl,--wrap=calloc -Wl,--wrap=realloc -Wl,--wrap=free
 endif
@@ -1307,8 +1440,22 @@ help:
 	@echo "  test-rate-structural  Build + run the permanent per-rate structural"
 	@echo "                  regression test (test_rate_structural) -- run from c_impl/"
 	@echo "  test-avg-reverb-slots  Build + run the average-render-reverb ring-slot test"
-	@echo "  test-process-context  Build + run the permanent context-only-processing"
-	@echo "                  regression test (test_process_context) -- run from c_impl/"
+	@echo "  test-process-context  Build + run the permanent split-entry-point regression test"
+	@echo "                  (test_process_context: aec_process vs the split pair) -- run from c_impl/"
+	@echo "  test-split-entry  Build + run the three-entry-point test (test_split_entry)"
+	@echo "  test-split-entry-2  Build + run the second single-channel scene set (saturation, double talk, delay shifts,"
+	@echo "                  drift, reset, realign, levels, toggles, 8 kHz), the alternation and carve-end checks"
+	@echo "                  (test_split_entry2)"
+	@echo "  test-split-entry-3  Build + run the third single-channel scene set (bad-relock judgments that two-path scenes"
+	@echo "                  produce by themselves: natural reverts and non-reverts either side of the margin)"
+	@echo "                  (test_split_entry3)"
+	@echo "  test-aec-array  Build + run the array-instance test and its contract checks (test_aec_array)"
+	@echo "  test-aec-array-2  Build + run the second array scene set (clipped / silent microphone, proxy channel,"
+	@echo "                  caller beamformed error, drift, levels, quarantine) (test_aec_array2)"
+	@echo "                  AEC_TEST_BASELINE_WRITE=<dir> / AEC_TEST_BASELINE=<dir> capture / compare the line stream of"
+	@echo "                  the five test-split-entry* / test-aec-array* tests (none shipped; run each from c_impl/)"
+	@echo "  test-aec-array-flow  Build + run the array shared-alignment / quarantine / duty-cycle /"
+	@echo "                  lane-contract state-machine tests (test_aec_array_flow, AEC_TESTING build)"
 	@echo "  test-delay-num-filters  Build + run the permanent matched-filter-bank-size"
 	@echo "                  regression test (test_delay_num_filters) -- run from c_impl/"
 	@echo "  test-duty-census  Build + run the permanent matched-filter duty-cycle"
@@ -1320,6 +1467,7 @@ help:
 	@echo "                  regression test (test_shared_far_spec) -- run from c_impl/"
 	@echo "  test-spectral-reuse  Build + run spectrum-power reuse and fallback regression"
 	@echo "  test-heap-alignment  Check aligned arena allocation and failure cleanup"
+	@echo "  test-handle-ready    Every aec.h entry refuses a zero-filled, failed-create or destroyed handle"
 	@echo "  test-shared-fft-handle  Build + run the permanent shared-FFT-handle"
 	@echo "                  regression test (test_shared_fft_handle) -- run from c_impl/"
 	@echo "  test-synthesis-window  Build + run the aec_synthesis_window() accessor test (3 grids, refusals)"
@@ -1340,9 +1488,9 @@ help:
 	@echo "                  48 kHz anti-alias pair (the only gate that sees the pair kernel; scalar vs itself with SIMD=0)"
 	@echo "  test-delay-matched-neon  Bit-exact matched-filter kernels (dot, NLMS update, fused update + next dot, core)"
 	@echo "                  vs a portable model of the AArch64 NEON dataflow; scalar kernels vs the scalar model otherwise"
-	@echo "  test-aec-res    Standalone RES stage (aec_res.h): lane-equal config, API contract, render scale, initial phase"
+	@echo "  test-aec-res    RES gain stage (src/aec_res_internal.h): lane-equal config, API contract, render scale, initial phase"
 	@echo "  test-header-fresh  Regenerate include/aec_balanced_config.h and diff it against the checked-in copy"
-	@echo "  test-header-cpp  Compile-only C++11 check that aec.h's legacy AEC_PRESET_* names convert to AecLevel/AecPreset"
+	@echo "  test-header-cpp  Compile-only C++11 check that aec.h and aec_internal.h compile as C++ with the AEC_LEVEL_* names"
 	@echo "  test-detectors-parity  Gate detectors.c against the Python reference (regenerates the golden)"
 	@echo "  test-detectors-parity-all  Run detector parity on legacy 8 kHz and all three product grids"
 	@echo "  debug   Build with -g -DAEC_DEBUG"
@@ -1360,7 +1508,7 @@ help:
 	@echo "   COMMON_LIB the same way phase 1 does -- see the two-phase dispatch"
 	@echo "   comment in this Makefile -- and pass it: make print-bin-dir COMMON_LIB=\"...\")"
 	@echo "  ./bin/<backend>-<config-hash>/aec_wav <mic.wav> <ref.wav> <out.wav> [options]"
-	@echo "  ./bin/<backend>-<config-hash>/bench_rtf [--seconds N] [--repeat M] [--level 0|1|2|3|mild|balanced|aggressive|no_floor] [--sr HZ] [--fft N] [--stage full|linear|both] [--scene noise|bursts]"
+	@echo "  ./bin/<backend>-<config-hash>/bench_rtf [--seconds N] [--repeat M] [--level 0|1|2|3] [--sr HZ] [--fft N] [--stage full|linear|both] [--scene noise|bursts]"
 	@echo "  make COMMON_DIR=<path>       (override audiolib location)"
 	@echo "  make WERROR=1            (opt-in: -Werror for this repo's own sources)"
 	@echo "  make lib NO_STDIO=1      (opt-in: stdio-free libaec.a for board/no-stdio builds --"

@@ -71,7 +71,7 @@ int main(int argc, char* argv[]) {
     if (have_fixed_delay)        cfg.fixed_delay_samples = fixed_delay_samples;
 
     AecMemBreakdown mb;
-    if (!aec_get_mem_breakdown(&cfg, &mb)) {
+    if (aec_get_mem_breakdown(&cfg, &mb) != AEC_OK) {
         fprintf(stderr, "ERROR: aec_get_mem_breakdown rejected the config\n");
         return 1;
     }

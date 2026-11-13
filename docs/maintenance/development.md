@@ -84,11 +84,11 @@ work="$(mktemp -d)"                 # scratch dir for the two renders; delete it
 cd c_impl && make clean && make   # BEFORE editing
 bin_before="$(make -s print-bin-dir)"
 mkdir -p "$work/cbe_before" "$work/cbe_after"
-for f in <stems>; do "$bin_before/aec_wav" "wav/${f}_mic.wav" "wav/${f}_lpb.wav" "$work/cbe_before/${f}.wav" --level balanced --cng; done
+for f in <stems>; do "$bin_before/aec_wav" "wav/${f}_mic.wav" "wav/${f}_lpb.wav" "$work/cbe_before/${f}.wav" --level 1 --cng; done
 # ... make edits ...
 cd c_impl && make clean && make   # AFTER editing
 bin_after="$(make -s print-bin-dir)"
-for f in <stems>; do "$bin_after/aec_wav" "wav/${f}_mic.wav" "wav/${f}_lpb.wav" "$work/cbe_after/${f}.wav" --level balanced --cng; done
+for f in <stems>; do "$bin_after/aec_wav" "wav/${f}_mic.wav" "wav/${f}_lpb.wav" "$work/cbe_after/${f}.wav" --level 1 --cng; done
 for f in "$work"/cbe_after/*.wav; do \
   cmp -s "$f" "$work/cbe_before/$(basename "$f")" \
     && echo "MATCH $(basename "$f")" || echo "DIFFER $(basename "$f")"; done
@@ -125,7 +125,7 @@ make                  # debug: `make debug` (adds -g -DAEC_DEBUG)
 # `make print-bin-dir` (same flags) resolves the exact path, or use
 # `make publish` for a stable dist/<backend>/current/ path:
 bin="$(make -s print-bin-dir)"
-"$bin/aec_wav" mic.wav ref.wav out.wav --level balanced --cng
+"$bin/aec_wav" mic.wav ref.wav out.wav --level 1 --cng
 "$bin/aec_wav" mic.wav ref.wav out.wav --debug-trace aec_trace.csv
 ```
 
@@ -189,7 +189,8 @@ drives the AEC3-aligned chain:
 
 `enable_res` gates the post-filter; running with `--enable-res 0` emits
 the linear residual at PBFDKF output (used by
-`eval_aec_challenge.py`'s `_ours_nores.wav` companion render).
+`eval_aec_challenge.py`'s `_ours_nores.wav` companion render). (Python twin; the C `AecConfig` has the single
+`residual` field instead, `AEC_RESIDUAL_OFF` being this bypass.)
 
 Tight coupling lives in **`PBFDKF` + shadow `PBFDAF` + `PathChangeRegimeHandler`**
 — the shadow filter and main filter exchange state via a regime handler
@@ -229,7 +230,8 @@ exposes it rather than hiding it.
 - `AecResContext` — exposes `echo_spec` / per-bin Kalman state so the
   linear stage can feed an external (or NN) post-filter;
   `AecConfig.return_res_context = True` switches `aec.process()` return
-  type to `(out, AecResContext)`.
+  type to `(out, AecResContext)`. (Python twin; the C side exposes the same data through `aec_get_linear()` /
+  `aec_get_residual()`, see `docs/reference/integration.md` §8.3.)
 
 ## Conventions
 

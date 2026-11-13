@@ -1,4 +1,4 @@
-/* test_config_validation.c -- negative-input tests: aec_validate_config() (aec.c) is the single source of truth for
+/* test_config_validation.c -- negative-input tests: aec_resolve_valid_config() (aec.c) is the single source of truth for
  * AecConfig bounds-checking, wired into all three public entry points that derive sizes/state from a config. This test
  * proves each entry point rejects a bad config through its own failure convention (no release-path asserts):
  *   - aec_get_mem_size(cfg)        -> 0
@@ -20,6 +20,7 @@
  */
 #include "aec.h"
 #include "aec_pool_test_util.h"
+#include "res_gain_of.h"
 /* AECB_RATE_TABLE / aecb_rate_cfg(): the tuning table carries its
  * own {n_bins, fft_size, block_size, hop_size} alongside ~40 tuning
  * constants. test_signal_grid_resolver() pins it against the shared
@@ -191,7 +192,7 @@ static void test_misaligned_base(void) {
  * Hz range: hpf_init() (audiolib hpf.c, called from aec_carve whenever enable_highpass is set)
  * rejects any cutoff_hz that is not finite, not > 0, or not < 0.45*sample_rate, silently returning
  * NULL and leaving the instance without a mic-path HPF. E.g. {sample_rate=8000,
- * highpass_cutoff_hz=4000} would pass a flat range. aec_validate_config mirrors hpf_params_valid
+ * highpass_cutoff_hz=4000} would pass a flat range. aec_resolve_valid_config mirrors hpf_params_valid
  * when enable_highpass=1, so every combination hpf_init rejects is rejected here too (all three
  * entry points) and every combination it accepts still works end to end. */
 static void test_highpass_cutoff(void) {
@@ -312,128 +313,72 @@ static void test_highpass_cutoff(void) {
 /* Otherwise-valid 16 kHz balanced config: get_mem_size>0, init OK, one hop of process runs, so
  * validation did not break the real path. aec_destroy() is deliberately not called here:
  * lifecycle/leak coverage is test_static_aec.c's job. */
-/* spatial_linear_context level 2 (AEC_CONTEXT_LINEAR_ONLY) skips the
- * residual-echo half of the post block, so like level 1 it only makes sense
- * under context_only; levels above 2 do not exist. */
-static void test_linear_only_level_requires_context_only(void) {
+/* AecConfig.residual is range-checked ([OFF, FULL]); every in-range mode builds, and what the residual view exposes
+ * follows the mode: OFF has no residual stage at all, STATE has the linear half and the rendering base but neither r2, the
+ * comfort noise nor the gain, ESTIMATE adds r2 and the comfort noise, FULL adds the gain. */
+static void test_residual_mode_range_and_exposure(void) {
     AecConfig valid_cfg; base_cfg(&valid_cfg);
     size_t sz = aec_get_mem_size(&valid_cfg);
     void* mem = aec_test_pool_alloc(sz);
-    CHECK(sz > 0 && mem != NULL, "linear-only level test setup: pool allocated");
+    CHECK(sz > 0 && mem != NULL, "residual mode test setup: pool allocated");
 
     {
         AecConfig cfg; base_cfg(&cfg);
-        cfg.enable_res = 0; cfg.return_res_context = 0;
-        cfg.spatial_linear_context = AEC_CONTEXT_LINEAR_ONLY;
-        check_rejected("spatial_linear_context=2, return_res_context=0", &cfg, mem, sz);
+        cfg.residual = (AecResidualMode)(AEC_RESIDUAL_FULL + 1);
+        check_rejected("residual=FULL+1 (no such mode)", &cfg, mem, sz);
     }
     {
         AecConfig cfg; base_cfg(&cfg);
-        cfg.enable_res = 1; cfg.return_res_context = 1;
-        cfg.spatial_linear_context = AEC_CONTEXT_LINEAR_ONLY;
-        check_rejected("spatial_linear_context=2, enable_res=1", &cfg, mem, sz);
+        cfg.residual = (AecResidualMode)-1;
+        check_rejected("residual=-1", &cfg, mem, sz);
     }
     {
         AecConfig cfg; base_cfg(&cfg);
-        cfg.enable_res = 0; cfg.return_res_context = 1;
-        cfg.spatial_linear_context = AEC_CONTEXT_LINEAR_ONLY + 1;
-        check_rejected("spatial_linear_context=3 (no such level)", &cfg, mem, sz);
+        cfg.residual = (AecResidualMode)7;
+        check_rejected("residual=7", &cfg, mem, sz);
     }
     {
-        AecConfig cfg; base_cfg(&cfg);
-        cfg.enable_res = 0; cfg.return_res_context = 1;
-        cfg.spatial_linear_context = -1;
-        check_rejected("spatial_linear_context=-1", &cfg, mem, sz);
-    }
-    {
-        AecConfig cfg; base_cfg(&cfg);
-        cfg.enable_res = 0; cfg.return_res_context = 1;
-        cfg.spatial_linear_context = AEC_CONTEXT_LINEAR_ONLY;
-        Aec a;
-        int rc = aec_create(&a, &cfg);
-        CHECK(rc == 0, "spatial_linear_context=2 with context_only satisfied: aec_create() succeeds");
-        if (rc == 0) {
+        static const AecResidualMode modes[4] = { AEC_RESIDUAL_OFF, AEC_RESIDUAL_STATE, AEC_RESIDUAL_ESTIMATE,
+                                                  AEC_RESIDUAL_FULL };
+        static const char* const names[4] = { "OFF", "STATE", "ESTIMATE", "FULL" };
+        int m;
+        for (m = 0; m < 4; ++m) {
+            AecConfig cfg; base_cfg(&cfg);
+            cfg.residual = modes[m];
+            Aec a;
+            char what[160];
+            int rc = aec_create(&a, &cfg);
+            snprintf(what, sizeof(what), "residual=%s: aec_create() succeeds", names[m]);
+            CHECK(rc == 0, what);
+            if (rc != 0) continue;
             int hop = aec_hop_size(&a);
             float* mic = (float*)calloc((size_t)hop, sizeof(float));
             float* ref = (float*)calloc((size_t)hop, sizeof(float));
-            AecResContext ctx;
-            aec_process_context(&a, mic, ref);
-            aec_get_res_context(&a, &ctx);
-            CHECK(ctx.res_gain == NULL && ctx.r2 == NULL && ctx.comfort_noise == NULL,
-                  "spatial_linear_context=2: res_gain, r2 and comfort_noise are NULL");
-            CHECK(ctx.formed_hop != NULL && ctx.error_spec != NULL &&
-                  ctx.echo_spec != NULL && ctx.near_spec != NULL && ctx.far_spec != NULL,
-                  "spatial_linear_context=2: the linear half is still exposed");
+            AecResidualView rv;
+            memset(&rv, 0, sizeof rv); rv.struct_size = sizeof rv;
+            CHECK(aec_process_linear(&a, mic, ref) == AEC_OK, "residual mode: aec_process_linear() runs");
+            if (modes[m] == AEC_RESIDUAL_OFF) {
+                snprintf(what, sizeof(what), "residual=OFF: aec_process_residual() and aec_get_residual() are AEC_ERR_MODE");
+                CHECK(aec_process_residual(&a, NULL) == AEC_ERR_MODE && aec_get_residual(&a, &rv) == AEC_ERR_MODE, what);
+            } else {
+                CHECK(aec_process_residual(&a, NULL) == AEC_OK, "residual mode: aec_process_residual() runs");
+                CHECK(aec_get_residual(&a, &rv) == AEC_OK, "residual mode: aec_get_residual() succeeds");
+                snprintf(what, sizeof(what), "residual=%s: the linear half and the rendering base are exposed", names[m]);
+                CHECK(rv.formed_hop != NULL && rv.error_spec != NULL && rv.echo_spec != NULL && rv.near_spec != NULL &&
+                      rv.far_spec != NULL && rv.base_spec != NULL, what);
+                snprintf(what, sizeof(what), "residual=%s: r2 and comfort_noise are %s", names[m],
+                         modes[m] == AEC_RESIDUAL_STATE ? "NULL" : "exposed");
+                CHECK((rv.r2 != NULL) == (modes[m] != AEC_RESIDUAL_STATE) &&
+                      (rv.comfort_noise != NULL) == (modes[m] != AEC_RESIDUAL_STATE), what);
+                snprintf(what, sizeof(what), "residual=%s: res_gain is %s", names[m],
+                         modes[m] == AEC_RESIDUAL_FULL ? "exposed" : "NULL");
+                CHECK((rv.res_gain != NULL) == (modes[m] == AEC_RESIDUAL_FULL) &&
+                      (res_gain_of(&a) != NULL) == (modes[m] == AEC_RESIDUAL_FULL), what);
+            }
             aec_destroy(&a);
             free(mic); free(ref);
         }
     }
-    free(mem);
-}
-
-/* spatial_linear_context's whole premise is that apply_output() never reads the skipped gain, which
- * holds only under context_only (enable_res==0 && return_res_context==1). Every other combination
- * must be rejected by aec_validate_config() itself, not left to the aec_post_run() debug assert
- * alone. */
-static void test_spatial_linear_context_requires_context_only(void) {
-    AecConfig valid_cfg; base_cfg(&valid_cfg);
-    size_t sz = aec_get_mem_size(&valid_cfg);
-    CHECK(sz > 0, "spatial_linear_context test setup: valid 16k config sizes > 0");
-    void* mem = aec_test_pool_alloc(sz);
-    CHECK(mem != NULL, "spatial_linear_context test setup: aligned pool");
-
-    {
-        AecConfig cfg; base_cfg(&cfg);
-        cfg.enable_res = 0;
-        cfg.return_res_context = 0;
-        cfg.spatial_linear_context = 1;
-        check_rejected("spatial_linear_context=1, return_res_context=0",
-                       &cfg, mem, sz);
-    }
-    {
-        AecConfig cfg; base_cfg(&cfg);
-        cfg.enable_res = 1;
-        cfg.return_res_context = 1;
-        cfg.spatial_linear_context = 1;
-        check_rejected("spatial_linear_context=1, enable_res=1",
-                       &cfg, mem, sz);
-    }
-    {
-        /* Out-of-range value: caught by the range check ahead of the
-         * compound check. */
-        AecConfig cfg; base_cfg(&cfg);
-        cfg.enable_res = 0;
-        cfg.return_res_context = 1;
-        cfg.spatial_linear_context = 3;
-        check_rejected("spatial_linear_context=3 (no such level)", &cfg, mem, sz);
-    }
-
-    {
-        AecConfig cfg; base_cfg(&cfg);
-        cfg.enable_res = 0;
-        cfg.return_res_context = 1;
-        cfg.spatial_linear_context = 1;
-        Aec a;
-        int rc = aec_create(&a, &cfg);
-        CHECK(rc == 0, "spatial_linear_context=1 with context_only satisfied: "
-                       "aec_create() succeeds");
-        if (rc == 0) {
-            int hop = aec_hop_size(&a);
-            float* mic = (float*)calloc((size_t)hop, sizeof(float));
-            float* ref = (float*)calloc((size_t)hop, sizeof(float));
-            float* out = (float*)malloc((size_t)hop * sizeof(float));
-            AecResContext ctx;
-            aec_process(&a, mic, ref, out);
-            aec_get_res_context(&a, &ctx);
-            CHECK(ctx.res_gain == NULL,
-                  "spatial_linear_context=1: AecResContext.res_gain is NULL");
-            CHECK(ctx.r2 != NULL && ctx.comfort_noise != NULL,
-                  "spatial_linear_context=1: r2/comfort_noise still exposed");
-            aec_destroy(&a);
-            free(mic); free(ref); free(out);
-        }
-    }
-
     free(mem);
 }
 
@@ -629,7 +574,7 @@ static void test_direct_init_rejects_bad_rate(void) {
 }
 
 /* ── shared signal-grid resolver: lockstep across every entry point ───────
- * (sample_rate, fft_size) admissibility (aec_validate_config()), the `hop = fft/2` / `K = fft/2+1` derivation
+ * (sample_rate, fft_size) admissibility (aec_resolve_valid_config()), the `hop = fft/2` / `K = fft/2+1` derivation
  * (aec_derive_dims()) and AECB_RATE_TABLE's geometry columns all read one resolver. On all four supported grids:
  *   1. the resolver's frame/hop/n_freqs are what the grid table says, hard-coded rather than recomputed from `fft/2`;
  *   2. the grid aec_get_mem_size() sized against == the grid aec_init()/aec_create() initialised against == the hop
@@ -637,7 +582,7 @@ static void test_direct_init_rejects_bad_rate(void) {
  *   3. fft_size == 0 ("auto") and every mismatched pair (16k/1024, 48k/256, 8k/512, ...) are rejected by all three entry
  *      points: 16 kHz has two production grids, so a library that guessed would silently pick one.
  * Mutations that must fail: editing one AEC_GRID_TABLE row's hop; making aec_derive_dims re-derive `hop = fft/2` itself.
- * Not caught here: removing the aec_resolve_signal_grid() call from aec_validate_config() alone, since aecb_rate_cfg()
+ * Not caught here: removing the aec_resolve_signal_grid() call from aec_resolve_valid_config() alone, since aecb_rate_cfg()
  * returns NULL for an unsupported pair and aec_get_mem_size() then returns 0. */
 static void test_signal_grid_resolver(void) {
     struct { int sr, fft, frame, hop, K, legacy; const char* tag; } grids[] = {
@@ -652,7 +597,7 @@ static void test_signal_grid_resolver(void) {
         AecSignalGrid g;
         memset(&g, 0, sizeof g);
         snprintf(label, sizeof(label), "%s: resolves", grids[i].tag);
-        CHECK(aec_resolve_signal_grid(grids[i].sr, grids[i].fft, &g) == 1, label);
+        CHECK(aec_resolve_signal_grid(grids[i].sr, grids[i].fft, &g) == AEC_OK, label);
         snprintf(label, sizeof(label), "%s: frame/hop/n_freqs as tabled",
                  grids[i].tag);
         CHECK(g.sample_rate == grids[i].sr && g.fft_size == grids[i].fft &&
@@ -738,8 +683,8 @@ static void test_signal_grid_resolver(void) {
         int rates[] = { 8000, 16000, 48000 };
         for (size_t i = 0; i < sizeof(rates) / sizeof(rates[0]); ++i) {
             snprintf(label, sizeof(label),
-                     "sr=%d: aec_resolve_signal_grid(fft=0) == 0", rates[i]);
-            CHECK(aec_resolve_signal_grid(rates[i], 0, NULL) == 0, label);
+                     "sr=%d: aec_resolve_signal_grid(fft=0) is refused", rates[i]);
+            CHECK(aec_resolve_signal_grid(rates[i], 0, NULL) == AEC_ERR_ARG, label);
             AecConfig c; aec_config_from_level(&c, AEC_LEVEL_BALANCED, rates[i]);
             c.fft_size = 0;
             snprintf(label, sizeof(label), "sr=%d + fft_size=0 (auto)", rates[i]);
@@ -753,7 +698,7 @@ static void test_signal_grid_resolver(void) {
         for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); ++i) {
             snprintf(label, sizeof(label), "sr=%d + fft_size=%d does not resolve",
                      bad[i].sr, bad[i].fft);
-            CHECK(aec_resolve_signal_grid(bad[i].sr, bad[i].fft, NULL) == 0, label);
+            CHECK(aec_resolve_signal_grid(bad[i].sr, bad[i].fft, NULL) == AEC_ERR_ARG, label);
             AecConfig c; aec_config_from_level(&c, AEC_LEVEL_BALANCED, bad[i].sr);
             c.fft_size = bad[i].fft;
             snprintf(label, sizeof(label), "sr=%d + fft_size=%d",
@@ -761,19 +706,19 @@ static void test_signal_grid_resolver(void) {
             check_rejected(label, &c, mem, sz);
         }
         /* An unsupported rate resolves at no fft at all. */
-        CHECK(aec_resolve_signal_grid(44100, 1024, NULL) == 0,
+        CHECK(aec_resolve_signal_grid(44100, 1024, NULL) == AEC_ERR_ARG,
               "sr=44100 does not resolve at any fft_size");
         CHECK(aec_is_valid_sample_rate(44100) == 0,
               "sr=44100 is not a valid sample rate");
         /* A NULL out pointer is a pure validity query, not a crash. */
-        CHECK(aec_resolve_signal_grid(16000, 256, NULL) == 1,
+        CHECK(aec_resolve_signal_grid(16000, 256, NULL) == AEC_OK,
               "resolver accepts a NULL out (validity-only query)");
         /* On failure *out is left untouched -- a caller that ignores the
          * return value must not read a half-filled grid as if it were real. */
         {
             AecSignalGrid g; memset(&g, 0x5A, sizeof g);
             AecSignalGrid before = g;
-            CHECK(aec_resolve_signal_grid(16000, 1024, &g) == 0 &&
+            CHECK(aec_resolve_signal_grid(16000, 1024, &g) == AEC_ERR_ARG &&
                   memcmp(&g, &before, sizeof g) == 0,
                   "resolver leaves *out untouched on failure");
         }
@@ -795,7 +740,7 @@ static void test_signal_grid_resolver(void) {
             snprintf(label, sizeof(label),
                      "aec_config_defaults(sr=%d) is immediately resolvable",
                      dflt[i].sr);
-            CHECK(aec_resolve_signal_grid(c.sample_rate, c.fft_size, NULL) == 1,
+            CHECK(aec_resolve_signal_grid(c.sample_rate, c.fft_size, NULL) == AEC_OK,
                   label);
         }
         /* An unsupported rate gets fft_size 0 -- which the core then
@@ -806,85 +751,25 @@ static void test_signal_grid_resolver(void) {
     }
 }
 
-/* ── delay-mode translation + mode x field compatibility ──────────────────
- * Two properties need permanent cover:
- *   1. TRANSLATION: aec_config_resolve_delay() maps every deprecated shape (enable_delay_est / fixed_delay_samples) onto
- *      exactly one delay_mode and rewrites the deprecated mirror from the result, idempotently. It mirrors
- *      python/tests/test_delay_mode.py's mapping-table test row for row.
- *   2. STRICTNESS: an illegal mode x field combination is REJECTED by all three entry points, not normalised and not
- *      ignored. check_rejected() makes a fix to only ONE entry point fail here.
- * Mutations that must fail: dropping the `fixed_delay_samples >= 0` arm of the translation ("legacy fixed" rows resolve
- * to EXTERNAL_ALIGNED); dropping the `!cfg->enable_delay_est` guard (the MATCHED default row fails); dropping the mirror
- * rewrite (the idempotency rows fail); dropping any arm of the validator's mode switch (the matrix fails). */
-static void test_delay_mode_translation(void) {
-    struct {
-        int est; int fixed; AecDelayMode in; AecDelayMode want; const char* tag;
-    } rows[] = {
-        { 1, -1,   AEC_DELAY_MATCHED,          AEC_DELAY_MATCHED,
-          "default (est=1, fixed=-1, MATCHED) -> MATCHED" },
-        { 0, -1,   AEC_DELAY_MATCHED,          AEC_DELAY_EXTERNAL_ALIGNED,
-          "legacy est=0, fixed=-1 -> EXTERNAL_ALIGNED" },
-        { 0, 1600, AEC_DELAY_MATCHED,          AEC_DELAY_FIXED,
-          "legacy est=0, fixed>=0 -> FIXED" },
-        { 0, 1600, AEC_DELAY_FIXED,            AEC_DELAY_FIXED,
-          "est=0 + explicit FIXED -> FIXED" },
-        { 0, -1,   AEC_DELAY_EXTERNAL_ALIGNED, AEC_DELAY_EXTERNAL_ALIGNED,
-          "est=0 + explicit EXTERNAL -> EXTERNAL_ALIGNED" },
-        { 1, 1600, AEC_DELAY_FIXED,            AEC_DELAY_FIXED,
-          "est=1 (default) + explicit FIXED -> FIXED" },
-        { 1, -1,   AEC_DELAY_EXTERNAL_ALIGNED, AEC_DELAY_EXTERNAL_ALIGNED,
-          "est=1 (default) + explicit EXTERNAL -> EXTERNAL_ALIGNED" },
-    };
-    char label[224];
-    for (size_t i = 0; i < sizeof(rows) / sizeof(rows[0]); ++i) {
-        AecConfig cfg; base_cfg(&cfg);
-        cfg.enable_delay_est = rows[i].est;
-        cfg.fixed_delay_samples = rows[i].fixed;
-        cfg.delay_mode = rows[i].in;
-        snprintf(label, sizeof(label), "translate: %s", rows[i].tag);
-        CHECK(aec_config_resolve_delay(&cfg) == 0 &&
-              cfg.delay_mode == rows[i].want, label);
-        /* Mirror rewritten from the resolved mode, both directions. */
-        snprintf(label, sizeof(label), "translate: %s (mirror rewritten)",
-                 rows[i].tag);
-        CHECK(cfg.enable_delay_est ==
-              (rows[i].want == AEC_DELAY_MATCHED ? 1 : 0), label);
-        /* Idempotent: a second pass must not move anything. */
-        AecConfig again = cfg;
-        snprintf(label, sizeof(label), "translate: %s (idempotent)",
-                 rows[i].tag);
-        CHECK(aec_config_resolve_delay(&again) == 0 &&
-              again.delay_mode == cfg.delay_mode &&
-              again.enable_delay_est == cfg.enable_delay_est, label);
-    }
-
-    /* Out-of-enum delay_mode is the helper's only failure mode. */
-    {
-        AecConfig cfg; base_cfg(&cfg);
-        cfg.delay_mode = (AecDelayMode)3;
-        CHECK(aec_config_resolve_delay(&cfg) == -1,
-              "translate: delay_mode=3 (out of enum) == -1");
-    }
-    CHECK(aec_config_resolve_delay(NULL) == -1,
-          "translate: NULL config == -1");
-
+/* ── delay-mode defaults + mode x field compatibility ─────────────────────
+ * An illegal mode x field combination is REJECTED by all three entry points (aec_get_mem_size, aec_create, aec_init), not
+ * normalised and not ignored. check_rejected() makes a fix to only ONE entry point fail here.
+ * Mutations that must fail: dropping any arm of the validator's mode switch (the matrix fails); dropping the out-of-enum
+ * delay_mode check (the delay_mode=7 row fails). */
+static void test_delay_mode_defaults(void) {
     /* aec_config_defaults must spell fixed_delay_samples out rather than
      * leaving it at the memset 0 -- 0 is a LEGAL fixed delay, so a memset
      * default would make the shipped default config an illegal
      * MATCHED+fixed combination. */
-    {
-        AecConfig cfg; aec_config_defaults(&cfg, 16000);
-        CHECK(cfg.delay_mode == AEC_DELAY_MATCHED,
-              "defaults: delay_mode == MATCHED");
-        CHECK(cfg.fixed_delay_samples == -1,
-              "defaults: fixed_delay_samples == -1 (not the memset 0)");
-        CHECK(cfg.enable_delay_est == 1,
-              "defaults: deprecated mirror agrees with MATCHED");
-        aec_config_from_level(&cfg, AEC_LEVEL_AGGRESSIVE, 48000);
-        CHECK(cfg.delay_mode == AEC_DELAY_MATCHED &&
-              cfg.fixed_delay_samples == -1,
-              "from_level: keeps the default delay mode/fixed sentinel");
-    }
+    AecConfig cfg; aec_config_defaults(&cfg, 16000);
+    CHECK(cfg.delay_mode == AEC_DELAY_MATCHED,
+          "defaults: delay_mode == MATCHED");
+    CHECK(cfg.fixed_delay_samples == -1,
+          "defaults: fixed_delay_samples == -1 (not the memset 0)");
+    aec_config_from_level(&cfg, AEC_LEVEL_AGGRESSIVE, 48000);
+    CHECK(cfg.delay_mode == AEC_DELAY_MATCHED &&
+          cfg.fixed_delay_samples == -1,
+          "from_level: keeps the default delay mode/fixed sentinel");
 }
 
 static void test_delay_mode_illegal_combinations(void) {
@@ -942,14 +827,11 @@ static void test_delay_mode_illegal_combinations(void) {
             check_rejected(label, &c, mem, sz);
         }
     }
-    /* Out-of-enum mode, and a garbage (non-boolean) deprecated mirror. */
+    /* Out-of-enum mode, and a non-boolean switch. */
     {
         AecConfig c; base_cfg(&c);
         c.delay_mode = (AecDelayMode)7;
         check_rejected("delay_mode=7 (out of enum)", &c, mem, sz);
-        base_cfg(&c);
-        c.enable_delay_est = 42;
-        check_rejected("enable_delay_est=42 (non-boolean mirror)", &c, mem, sz);
         base_cfg(&c);
         c.min_gain_split_floor_enabled = 2;
         check_rejected("min_gain_split_floor_enabled=2 (non-boolean)", &c, mem, sz);
@@ -980,13 +862,9 @@ static void test_delay_mode_illegal_combinations(void) {
             Aec a;
             snprintf(label, sizeof(label), "%s: aec_create() == 0", ok[i].tag);
             CHECK(aec_create(&a, &c) == 0, label);
-            /* The instance keeps the RESOLVED config: delay_mode is the
-             * single source of truth after construction. */
-            snprintf(label, sizeof(label), "%s: instance keeps the resolved mode",
+            snprintf(label, sizeof(label), "%s: instance keeps the mode",
                      ok[i].tag);
-            CHECK(a.cfg.delay_mode == ok[i].m &&
-                  a.cfg.enable_delay_est == (ok[i].m == AEC_DELAY_MATCHED),
-                  label);
+            CHECK(a.cfg.delay_mode == ok[i].m, label);
             snprintf(label, sizeof(label), "%s: estimator built iff MATCHED",
                      ok[i].tag);
             CHECK(a.has_delay == (ok[i].m == AEC_DELAY_MATCHED), label);
@@ -1026,29 +904,6 @@ static void test_delay_mode_illegal_combinations(void) {
         }
     }
 
-    /* The deprecated spelling must size and construct exactly like the explicit one, which makes
-     * the deprecated mirror a translation layer rather than a second source of truth. */
-    {
-        AecConfig legacy; base_cfg(&legacy);
-        legacy.enable_delay_est = 0;
-        AecConfig explicit_ext; base_cfg(&explicit_ext);
-        explicit_ext.delay_mode = AEC_DELAY_EXTERNAL_ALIGNED;
-        CHECK(aec_get_mem_size(&legacy) == aec_get_mem_size(&explicit_ext) &&
-              aec_get_mem_size(&legacy) > 0,
-              "legacy est=0 sizes identically to explicit EXTERNAL_ALIGNED");
-
-        AecConfig legacy_fixed; base_cfg(&legacy_fixed);
-        legacy_fixed.enable_delay_est = 0;
-        legacy_fixed.fixed_delay_samples = 1600;
-        AecConfig explicit_fixed; base_cfg(&explicit_fixed);
-        explicit_fixed.delay_mode = AEC_DELAY_FIXED;
-        explicit_fixed.fixed_delay_samples = 1600;
-        CHECK(aec_get_mem_size(&legacy_fixed) ==
-              aec_get_mem_size(&explicit_fixed) &&
-              aec_get_mem_size(&legacy_fixed) > 0,
-              "legacy est=0+fixed sizes identically to explicit FIXED");
-    }
-
     free(mem);
 }
 
@@ -1058,10 +913,9 @@ int main(void) {
     test_config_factories_unsupported_rate();
     test_highpass_cutoff();
     test_misaligned_base();
-    test_spatial_linear_context_requires_context_only();
-    test_linear_only_level_requires_context_only();
+    test_residual_mode_range_and_exposure();
     test_signal_grid_resolver();
-    test_delay_mode_translation();
+    test_delay_mode_defaults();
     test_delay_mode_illegal_combinations();
     test_valid_config_smoke();
     test_multi_rate_valid_smoke();

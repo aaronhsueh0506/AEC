@@ -2,9 +2,9 @@
  * grid (8000/256, 16000/256, 16000/512, 48000/1024):
  *   (a)  COLA: the rate's synthesis window (AecBalancedRateDims::synth_window, via aecb_rate_cfg()) satisfies
  *        w[i]^2 + w[i+hop_size]^2 == 1 within 1e-6.
- *   (b)  impulse through the linear path (enable_res = 0, enable_cng = 0): finite output from hop 0 and residual
+ *   (b)  impulse through the linear path (residual OFF, enable_cng = 0): finite output from hop 0 and residual
  *        energy well below mic energy after convergence. (b2): the same excitation through the full post chain
- *        (enable_res = 1), which reads the per-grid aecb_rate_cfg() tuning row.
+ *        (residual FULL), which reads the per-grid aecb_rate_cfg() tuning row.
  *   (c)  aec_get_mem_size grows 8k < 16k < 48k and is identical across the four levels at a fixed rate. (c2):
  *        aec_init (static pool) is byte-equal to aec_create (heap) on every grid.
  *   (d)  retiming of the top-level constants authored as hop counts / per-hop EMAs on the 10 ms / 16 kHz grid
@@ -13,9 +13,9 @@
  *   (d2) the same for the adaptation-path constants (Aec::alpha_pow, alpha_erl_tracking/converged, PBFDKF::alpha_r,
  *        Saturation::alpha_attack/release) and the duty-cycle ERLE watchdog leak (0.1 dB/s); (d2b): that leak is exact
  *        at its authoring grid. (d3)-(d7) are described at their sections.
- *   (e)  external RES/NR seam: ctx.error_spec reconstructs the previous ctx.formed_hop through the sqrt-Hann WOLA and
- *        near_spec == error_spec + echo_spec, with shadow selection on and off. (e2): spatial_linear_context leaves
- *        every context field except res_gain identical to a baseline. (e3): suppression_gain_update_dominant_nearend()
+ *   (e)  external RES/NR seam: the residual view's error_spec reconstructs the previous formed_hop through the sqrt-Hann WOLA
+ *        and near_spec == error_spec + echo_spec, with shadow selection on and off. (e2): residual ESTIMATE (no gain) leaves
+ *        every residual-view field except res_gain identical to a FULL baseline. (e3): suppression_gain_update_dominant_nearend()
  *        tracks get_gain()'s DominantNearend state hop by hop.
  *
  * Build (standalone; from c_impl/):
@@ -132,9 +132,22 @@ static float lcg_uniform(void) {
     return (float)(g_lcg_state >> 8) / (float)(1u << 24);
 }
 
+/* One hop through the split entry points (residual stage runs, the library applies no gain), and the residual view. */
+static void split_hop(Aec *a, const float *mic, const float *far) {
+    int st = aec_process_linear(a, mic, far);
+    if (st == AEC_OK) st = aec_process_residual(a, NULL);
+    if (st != AEC_OK) CHECK(0, "split hop: aec_process_linear + aec_process_residual");
+}
+
+static int residual_view(const Aec *a, AecResidualView *v) {
+    memset(v, 0, sizeof *v);
+    v->struct_size = sizeof *v;
+    return aec_get_residual(a, v) == AEC_OK;
+}
+
 /* ── (b) impulse-through-linear-path (and, parametrized, through the full
  * post-filter chain) ────────────────────────────────────────────────────── */
-static void run_impulse_test(int enable_res, const char *label) {
+static void run_impulse_test(int res_enabled, const char *label) {
     /* A periodic impulse train is adversarial for the online delay estimator: an exactly periodic comb is ambiguous under
      * any matched filter, so the estimator can lock onto a spurious lag part-way through a long run at 16k/48k. An i.i.d.
      * sparse random impulse train (probability PULSE_PROB per sample, LCG-driven position and amplitude) keeps the impulse
@@ -153,7 +166,7 @@ static void run_impulse_test(int enable_res, const char *label) {
         AecConfig cfg;
         aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, sr);
         cfg.fft_size = GRIDS[r].fft_size;
-        cfg.enable_res = enable_res;
+        cfg.residual = res_enabled ? AEC_RESIDUAL_FULL : AEC_RESIDUAL_OFF;
         cfg.enable_cng = 0;   /* deterministic -- no dither noise floor */
 
         Aec aec;
@@ -221,10 +234,10 @@ static void run_impulse_test(int enable_res, const char *label) {
 }
 
 static void test_impulse_linear_path(void) {
-    run_impulse_test(0, "linear-only");   /* aec_wav.c's --no-res knob */
+    run_impulse_test(0, "linear-only");   /* residual OFF: aec_wav.c's --no-res knob */
 }
 
-/* Same excitation through the full post-filter chain (RES), the production path (BALANCED ships with enable_res=1).
+/* Same excitation through the full post-filter chain (RES), the production path (BALANCED ships with residual FULL).
  * The 16000/256 grid has its own aecb_rate_cfg() tuning row (CNG/REE/SG parameters) that only this test runs end to
  * end. */
 static void test_impulse_res_enabled(void) {
@@ -253,10 +266,9 @@ static void test_res_context_wola_identity(void) {
             aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, sr);
             cfg.fft_size = fft_size;
             cfg.enable_shadow = shadow;
-            cfg.enable_res = 0;
-            cfg.return_res_context = 1;
+            cfg.residual = AEC_RESIDUAL_FULL;
             cfg.enable_cng = 0;
-            cfg.enable_delay_est = 0;
+            cfg.delay_mode = AEC_DELAY_EXTERNAL_ALIGNED;
             cfg.enable_highpass = 0;
             cfg.enable_saturation = 0;
 
@@ -285,15 +297,14 @@ static void test_res_context_wola_identity(void) {
 
             g_lcg_state = 0x574F4C41u + (unsigned)(17 * r + shadow);
             for (int hi = 0; hi < N_HOPS && context_valid; ++hi) {
-                AecResContext ctx;
+                AecResidualView ctx;
                 for (int i = 0; i < hop; ++i) {
                     far[i] = 0.18f * (2.0f * lcg_uniform() - 1.0f);
                     mic[i] = 0.45f * far[i]
                            + 0.025f * (2.0f * lcg_uniform() - 1.0f);
                 }
-                aec_process(&aec, mic, far, out);
-                aec_get_res_context(&aec, &ctx);
-                if (!ctx.error_spec || !ctx.echo_spec || !ctx.near_spec ||
+                split_hop(&aec, mic, far);
+                if (!residual_view(&aec, &ctx) || !ctx.error_spec || !ctx.echo_spec || !ctx.near_spec ||
                     !ctx.formed_hop || ctx.n_freqs != n_freqs ||
                     ctx.hop_size != hop) {
                     context_valid = 0;
@@ -325,7 +336,7 @@ static void test_res_context_wola_identity(void) {
             }
 
             snprintf(what, sizeof(what),
-                     "sr=%d fft=%d shadow=%d: RES context exposes complete WOLA fields",
+                     "sr=%d fft=%d shadow=%d: residual view exposes complete WOLA fields",
                      sr, fft_size, shadow);
             CHECK(context_valid, what);
             snprintf(what, sizeof(what),
@@ -346,14 +357,13 @@ static void test_res_context_wola_identity(void) {
     }
 }
 
-/* ── (e2) spatial_linear_context: skipping the unused per-lane G_res leaves every OTHER context field
- * byte-identical, every grid, shadow on/off ────
- * A multi-channel flow layer (e.g. Audio_ALG pipelines/4ch_aec_bf_nr_res/mcab.c, through mcab_apply_lane_contract()
- * with enable_post = 1) sets level 1 (AEC_CONTEXT_NO_GAIN) to stop computing a per-lane suppression gain that only a
- * downstream fused stage reads, while suppression_gain_update_dominant_nearend() still runs every hop, so the next
+/* ── (e2) residual ESTIMATE: skipping the unused per-lane G_res leaves every OTHER residual-view field
+ * byte-identical to a FULL baseline, every grid, shadow on/off ────
+ * A multi-channel flow layer (e.g. the array instance in aec_array.c) runs its lanes at AEC_RESIDUAL_ESTIMATE to stop
+ * computing a per-lane suppression gain that only a downstream fused stage reads, while suppression_gain_update_dominant_nearend() still runs every hop, so the next
  * hop's ERLE onset decision, and therefore r2, are unaffected. The DominantNearend state machine itself is tested in
  * test_suppression_gain_dne_prefix_matches_get_gain(). */
-static void test_spatial_linear_context_matches_baseline(void) {
+static void test_residual_estimate_matches_baseline(void) {
     /* 200, not 80: at the default 16k/256 grid DominantNearend does not reach its ACTIVE hold state within 80 hops on this
      * synthetic signal. saw_dominant_nearend below asserts that dne_nearend_state == 1 is reached at least once, so a run
      * that never activates it fails instead of testing less than it claims. */
@@ -379,18 +389,17 @@ static void test_spatial_linear_context_matches_baseline(void) {
             aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, sr);
             cfg.fft_size = fft_size;
             cfg.enable_shadow = shadow;
-            cfg.enable_res = 0;
-            cfg.return_res_context = 1;
+            cfg.residual = AEC_RESIDUAL_FULL;
             cfg.enable_cng = 0;
-            cfg.enable_delay_est = 0;
+            cfg.delay_mode = AEC_DELAY_EXTERNAL_ALIGNED;
             cfg.enable_highpass = 0;
             cfg.enable_saturation = 0;
 
             int rc_base = aec_create(&base, &cfg);
-            cfg.spatial_linear_context = 1;
+            cfg.residual = AEC_RESIDUAL_ESTIMATE;
             int rc_spatial = aec_create(&spatial, &cfg);
             snprintf(what, sizeof(what),
-                     "sr=%d fft=%d shadow=%d: construct spatial_linear_context pair",
+                     "sr=%d fft=%d shadow=%d: construct FULL / ESTIMATE pair",
                      sr, fft_size, shadow);
             CHECK(rc_base == 0 && rc_spatial == 0, what);
             if (rc_base != 0 || rc_spatial != 0) {
@@ -415,7 +424,7 @@ static void test_spatial_linear_context_matches_baseline(void) {
                 ((300 * sr) / (1000 * hop)) > 0 ? (300 * sr) / (1000 * hop) : 1;
             g_lcg_state = 0x53504331u + (unsigned)(17 * r + shadow);
             for (int hi = 0; hi < N_HOPS && valid; ++hi) {
-                AecResContext ctx_base, ctx_spatial;
+                AecResidualView ctx_base, ctx_spatial;
                 int burst_on = ((hi / burst_hops_local) % 2) == 0;
                 float far_scale = burst_on ? 0.18f : 0.002f;
                 for (int i = 0; i < hop; ++i) {
@@ -425,12 +434,11 @@ static void test_spatial_linear_context_matches_baseline(void) {
                 }
                 /* Identical inputs fed to both instances every hop -- mic/far
                  * are read-only, so one pair of buffers is safe to reuse. */
-                aec_process(&base, mic, far, out_base);
-                aec_process(&spatial, mic, far, out_spatial);
-                aec_get_res_context(&base, &ctx_base);
-                aec_get_res_context(&spatial, &ctx_spatial);
-
-                if (!ctx_base.r2 || !ctx_base.comfort_noise ||
+                split_hop(&base, mic, far);
+                memcpy(out_base, base.raw_output, (size_t)hop * sizeof(float));   /* the linear residual */
+                if (aec_process(&spatial, mic, far, out_spatial) != AEC_OK) CHECK(0, "ESTIMATE aec_process");   /* ditto */
+                if (!residual_view(&base, &ctx_base) || !residual_view(&spatial, &ctx_spatial) ||
+                    !ctx_base.r2 || !ctx_base.comfort_noise ||
                     !ctx_base.near_spec || !ctx_base.echo_spec ||
                     !ctx_base.error_spec || !ctx_base.formed_hop ||
                     !ctx_spatial.r2 || !ctx_spatial.comfort_noise ||
@@ -499,7 +507,7 @@ static void test_spatial_linear_context_matches_baseline(void) {
             }
 
             snprintf(what, sizeof(what),
-                     "sr=%d fft=%d shadow=%d: baseline exposes res_gain, spatial_linear_context exposes NULL",
+                     "sr=%d fft=%d shadow=%d: FULL exposes res_gain, ESTIMATE exposes NULL",
                      sr, fft_size, shadow);
             CHECK(valid && !base_res_gain_ever_null && spatial_res_gain_seen_null, what);
             snprintf(what, sizeof(what),
@@ -553,7 +561,7 @@ static void test_suppression_gain_dne_prefix_matches_get_gain(void) {
         aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, sr);
         cfg.fft_size = fft_size;
         cfg.enable_cng = 0;
-        cfg.enable_delay_est = 0;
+        cfg.delay_mode = AEC_DELAY_EXTERNAL_ALIGNED;
 
         int rc_full = aec_create(&full, &cfg);
         int rc_prefix = aec_create(&prefix_only, &cfg);
@@ -661,7 +669,7 @@ static void test_static_pool_matches_heap(void) {
         AecConfig cfg;
         aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, sr);
         cfg.fft_size = fft_size;
-        cfg.enable_res = 1;   /* exercise the full post-chain, not just the linear filter */
+        cfg.residual = AEC_RESIDUAL_FULL;   /* exercise the full post-chain, not just the linear filter */
         cfg.enable_cng = 0;   /* deterministic */
 
         Aec aec_heap;
@@ -931,11 +939,11 @@ static void test_adaptation_constant_retiming(void) {
             /* Expressed as the span the anchor is stated in (how long the peak takes to leak the watchdog's whole 6 dB collapse
              * threshold), so it goes through check_close like every other wall-clock row and reads against the 60 s figure
              * the inventory records. */
-            double leak_db_per_s = (double)aec.duty_erle_leak_db / hop_s;
+            double leak_db_per_s = (double)aec.duty.erle_leak_db / hop_s;
             check_close("duty_erle watchdog 6 dB collapse span", sr, fft,
                         6.0 / leak_db_per_s * 1000.0, 60000.0, ALPHA_TOL);
             check_moved("duty_erle_leak_db", sr, fft,
-                        (double)aec.duty_erle_leak_db, 0.001);
+                        (double)aec.duty.erle_leak_db, 0.001);
 
             /* The hook (d2b) reads the authoring grid through must not drift
              * from what aec_carve() actually stored; asserted here, where the
@@ -943,8 +951,8 @@ static void test_adaptation_constant_retiming(void) {
             snprintf(what, sizeof(what),
                      "sr=%d fft=%d: duty_erle_leak_db (%.9g) is the retiming "
                      "helper's own answer for this grid", sr, fft,
-                     (double)aec.duty_erle_leak_db);
-            CHECK(aec.duty_erle_leak_db ==
+                     (double)aec.duty.erle_leak_db);
+            CHECK(aec.duty.erle_leak_db ==
                       aec_testing_legacy10ms_rate(0.001f, hop, sr), what);
         }
 
@@ -1049,7 +1057,7 @@ static void test_retimed_constants_reach_the_audio_path(void) {
 
         aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, sr);
         cfg.fft_size = fft;
-        cfg.enable_delay_est = 0;
+        cfg.delay_mode = AEC_DELAY_EXTERNAL_ALIGNED;
         cfg.enable_highpass = 0;    /* a DC near level must survive to near_hop */
         cfg.enable_saturation = 0;
         cfg.enable_cng = 0;
@@ -1611,7 +1619,7 @@ int main(void) {
     test_impulse_linear_path();
     test_impulse_res_enabled();
     test_res_context_wola_identity();
-    test_spatial_linear_context_matches_baseline();
+    test_residual_estimate_matches_baseline();
     test_suppression_gain_dne_prefix_matches_get_gain();
     test_static_pool_matches_heap();
     test_mem_size_consistency();

@@ -1,8 +1,9 @@
 /* aec_wav.c -- WAV processing CLI on top of aec.
- *  - --level takes 0/1/2/3 or mild/balanced/aggressive/no_floor; --preset is an alias.
+ *  - --level takes 0 mild, 1 balanced, 2 aggressive or 3 no_floor (a whole decimal number); --preset is an alias.
  *  - The hop size comes from the library's signal grid (fft_size / 2).
  *  - --debug-level / --debug sets the debug level and periodic status print. */
 #include "aec.h"
+#include "cli_level.h"
 #include "aec_debug.h"
 #include "wav_io.h"
 #include <stdio.h>
@@ -13,7 +14,7 @@ static void print_usage(const char* prog) {
     fprintf(stderr,
         "Usage: %s <mic.wav> <ref.wav> <out.wav> [options]\n\n"
         "Options:\n"
-        "  --level {0|1|2|3|mild|balanced|aggressive|no_floor}   default: balanced (1)\n"
+        "  --level {0|1|2|3}              0 mild, 1 balanced (default), 2 aggressive, 3 no_floor\n"
         "                                 (--preset is accepted as an alias)\n"
         "  --cng                          Enable comfort noise\n"
         "  --no-cng                       Explicitly disable CNG\n"
@@ -71,14 +72,6 @@ static void print_config_rejected(const char* who, int sr,
             cfg->delay_num_filters, cfg->fixed_delay_samples);
 }
 
-static int parse_level(const char* s, AecLevel* out) {
-    if (!strcmp(s, "0") || !strcmp(s, "mild"))       { *out = AEC_LEVEL_MILD;       return 0; }
-    if (!strcmp(s, "1") || !strcmp(s, "balanced"))   { *out = AEC_LEVEL_BALANCED;   return 0; }
-    if (!strcmp(s, "2") || !strcmp(s, "aggressive")) { *out = AEC_LEVEL_AGGRESSIVE; return 0; }
-    if (!strcmp(s, "3") || !strcmp(s, "no_floor"))   { *out = AEC_LEVEL_NO_FLOOR;   return 0; }
-    return -1;
-}
-
 int main(int argc, char* argv[]) {
     if (argc < 4) { print_usage(argv[0]); return 1; }
     const char* mic_path = argv[1];
@@ -94,7 +87,7 @@ int main(int argc, char* argv[]) {
     int debug_status = 0;
     int fft_size = 0;
     /* Delay-mode overrides use a separate "given" flag, and are handed to aec_create() unvalidated
-     * so aec_validate_config() is the single authority; illegal values fail the run instead of
+     * so aec_resolve_valid_config() is the single authority; illegal values fail the run instead of
      * being clamped. */
     AecDelayMode delay_mode = AEC_DELAY_MATCHED;  int have_delay_mode = 0;
     int delay_num_filters = 0;                    int have_delay_num_filters = 0;
@@ -105,9 +98,8 @@ int main(int argc, char* argv[]) {
     for (int i = 4; i < argc; ++i) {
         const char* arg = argv[i];
         if ((!strcmp(arg, "--level") || !strcmp(arg, "--preset")) && i + 1 < argc) {
-            if (parse_level(argv[++i], &level) != 0) {
-                fprintf(stderr, "ERROR: unknown level '%s'. "
-                                "Valid: 0|1|2|3|mild|balanced|aggressive|no_floor\n", argv[i]);
+            if (aec_cli_parse_level(argv[++i], &level) != 0) {
+                fprintf(stderr, "ERROR: unknown level '%s'. Valid: 0 (mild) | 1 (balanced) | 2 (aggressive) | 3 (no_floor)\n", argv[i]);
                 return 2;
             }
         } else if (!strcmp(arg, "--cng"))           explicit_cng = 1;
@@ -182,7 +174,7 @@ int main(int argc, char* argv[]) {
     /* Grid resolution happens here: the fft_size handed to aec_create() is always concrete (the
      * rate's default unless --fft-size is given), since the core refuses fft_size == 0. */
     if (fft_size > 0) cfg.fft_size = fft_size;
-    if (!aec_resolve_signal_grid(sr, cfg.fft_size, NULL)) {
+    if (aec_resolve_signal_grid(sr, cfg.fft_size, NULL) != AEC_OK) {
         fprintf(stderr,
                 "ERROR: unsupported AEC signal grid (sr=%d, fft=%d); "
                 "use 256/512 @16kHz, 1024 @48kHz, or 256 @8kHz (legacy)\n",
@@ -191,13 +183,14 @@ int main(int argc, char* argv[]) {
         return 4;
     }
     if (explicit_cng >= 0) cfg.enable_cng = explicit_cng;
-    if (no_delay_est) cfg.enable_delay_est = 0;
-    if (no_res)       cfg.enable_res = 0;
+    if (no_res)       cfg.residual = AEC_RESIDUAL_OFF;
     if (no_shadow)    cfg.enable_shadow = 0;
     if (no_hpf)       cfg.enable_highpass = 0;
     if (have_delay_mode)         cfg.delay_mode = delay_mode;
     if (have_delay_num_filters)  cfg.delay_num_filters = delay_num_filters;
     if (have_fixed_delay)        cfg.fixed_delay_samples = fixed_delay_samples;
+    if (no_delay_est && cfg.delay_mode == AEC_DELAY_MATCHED)
+        cfg.delay_mode = cfg.fixed_delay_samples >= 0 ? AEC_DELAY_FIXED : AEC_DELAY_EXTERNAL_ALIGNED;
     if (have_delay_est_period)   cfg.delay_est_period_s = delay_est_period_s;
 
     /* --print-mem-size: report the static-pool size and exit before any audio is touched. */
@@ -205,7 +198,7 @@ int main(int argc, char* argv[]) {
         AecSignalGrid grid;
         aec_resolve_signal_grid(sr, cfg.fft_size, &grid);
         AecMemBreakdown mb;
-        if (!aec_get_mem_breakdown(&cfg, &mb)) {
+        if (aec_get_mem_breakdown(&cfg, &mb) != AEC_OK) {
             print_config_rejected("aec_get_mem_breakdown", sr, &cfg);
             wav_close_read(mr); wav_close_read(rr);
             return 4;
@@ -283,7 +276,7 @@ int main(int argc, char* argv[]) {
             level == AEC_LEVEL_MILD ? "mild" :
             level == AEC_LEVEL_BALANCED ? "balanced" :
             level == AEC_LEVEL_AGGRESSIVE ? "aggressive" : "no_floor",
-            cfg.enable_cng, cfg.enable_delay_est,
+            cfg.enable_cng, cfg.delay_mode == AEC_DELAY_MATCHED,
             delay_mode_name(cfg.delay_mode), cfg.delay_num_filters,
             cfg.fixed_delay_samples);
 

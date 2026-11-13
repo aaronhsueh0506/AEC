@@ -18,10 +18,10 @@ cfg.enable_cng = 0;          /* 只覆寫你真的要改的 */
 改 [§7](levels.md#7-level-選擇) 表列的三個 floor 欄位（`min_gain_floor_far_active_db`、`min_gain_floor_dt_db`、`min_gain_split_floor_enabled`）。以下所有預設值與範圍都直接取自程式碼。
 
 **參數分級**：建議對外開放的只有 `sample_rate`、`fft_size`、`filter_length`、`delay_mode`、
-`fixed_delay_samples`、`delay_num_filters`、`enable_res`、`enable_cng` 與 level（經由
+`fixed_delay_samples`、`delay_num_filters`、`residual`、`enable_cng` 與 level（經由
 `min_gain_floor_far_active_db`／`min_gain_floor_dt_db`／`min_gain_split_floor_enabled` 三個欄位）；
 進階外部為 `enable_highpass`、`highpass_cutoff_hz`、`enable_shadow`、`delay_est_period_s`；
-`return_res_context`、`spatial_linear_context` 是串鏈整合者專用；`enable_delay_est` 已 deprecated；
+`residual` 的 `STATE`／`ESTIMATE` 與 `aec_process_linear()`／`aec_process_residual()` 是串鏈整合者專用；
 其餘 38 個欄位（§6.5 與 §6.6 的欄位、live observer 等）屬內部調校參數，不建議開放。
 逐欄分級、出處行與理由見 [外部參數](../html/reference/aec_params.html) 與 [內部參數](../html/reference/aec_params_internal.html)。
 
@@ -34,19 +34,16 @@ cfg.enable_cng = 0;          /* 只覆寫你真的要改的 */
 | `filter_length` | `int` | `sr × 52/1000`（48 kHz 為 `sr × 64/1000`）→ 8k:416、16k:832、48k:3072；不支援的取樣率為 `0`（與 `fft_size` 同為 `0`，建立時被拒絕） | 1 – 4096 | **單位是 sample，不是 ms。** 涵蓋的回音路徑長度。大房間／長殘響時調高，代價是記憶體與運算量上升。 |
 | `n_partitions` | `int` | `0`（自動） | `0` 或 1 – 256 | 留 `0` 即可，由 `filter_length` 與 hop 自動推導。 |
 
-### 6.2 模組開關（全部只接受 0 或 1）
+### 6.2 模組開關（除 `residual` 外只接受 0 或 1）
 
 | 欄位 | 預設 | 說明／何時調整 |
 |---|---:|---|
-| `enable_res` | `1` | 殘留回音抑制。關閉後輸出是純線性 filter 殘差、延遲降為 0，但回音殘留明顯變多。診斷時可關（見 [§9](integration.md#9-常見問題排除)）。 |
+| `residual` | `AEC_RESIDUAL_FULL` | `AecResidualMode`：後級（殘留回音抑制）做到哪裡，允許範圍 `AEC_RESIDUAL_OFF`（0）…`AEC_RESIDUAL_FULL`（3），範圍外會被驗證拒絕。`FULL`＝完整抑制（`aec_process()` 套用增益、加舒適噪音並合成）；`OFF`＝只有線性 filter，輸出是純線性殘差、延遲降為 0，但回音殘留明顯變多，診斷時可用（見 [§9](integration.md#9-常見問題排除)）。`STATE`、`ESTIMATE` 給自己套增益的整合者，見 [§8](integration.md#8-進階整合-seam)。不影響**單聲道**實例的記憶池大小；`n_mics = 4` 的陣列實例則隨它改變，且不接受 `OFF`（[§6.8](#68-陣列實例欄位n_mics--4)）。 |
 | `enable_cng` | `1` | 舒適噪音。若下游還有另一套噪音處理／CNG，**請關掉這個**，兩層疊加會讓噪音底變得不自然。 |
-| `enable_delay_est` | `1` | **DEPRECATED**——`delay_mode` 的相容轉譯層（見 [§3](../c_user_manual_zh_TW.md#延遲契約) 延遲契約與 §6.4）。設 0 等同 `EXTERNAL_ALIGNED`（或帶 `fixed_delay_samples` 時等同 `FIXED`）。`EXTERNAL_ALIGNED` 會少掉 165,008 B 記憶體（16 kHz/256，見 [§4](lifecycle.md#4-生命週期) 記憶池表）。新程式請直接寫 `delay_mode`。 |
 | `enable_highpass` | `1` | mic 路徑的高通濾波（見 `highpass_cutoff_hz`）。上游已有高通時可關。 |
 | `enable_saturation` | `1` | 削波偵測與參考訊號軟限幅。建議維持開啟。 |
-| `enable_shadow` | `1` | 輔助 filter，用於偵測回音路徑變化。關閉會少掉 42,880 B（16 kHz/256，見 [§4](lifecycle.md#4-生命週期) 記憶池表），但路徑突變後的恢復會變慢。 |
+| `enable_shadow` | `1` | 輔助 filter，用於偵測回音路徑變化。關閉會少掉 28,912 B（16 kHz/256，見 [§4](lifecycle.md#4-生命週期) 記憶池表），但路徑突變後的恢復會變慢。 |
 | `saturation_softclip_ref` | `1` | 對參考訊號套用軟限幅。`enable_saturation = 0` 時無作用。 |
-| `return_res_context` | `0` | 進階整合用，見 [§8](integration.md#8-進階整合-seam)。 |
-| `spatial_linear_context` | `0` | 進階整合用，見 [§8](integration.md#8-進階整合-seam)。`1`：不計算這條 lane 自己的 `res_gain`。`2`（`AEC_CONTEXT_LINEAR_ONLY`）：呼叫端只讀 context 的線性半邊（`formed_hop`、`error_spec`、`echo_spec`、`near_spec`、`far_spec`、delay 與判定欄位）時使用，post 區塊在 AecState 更新後停止，跳過 R²／comfort noise／抑制增益；線性輸出與 `0`／`1` **逐位元相同**，`res_gain`、`r2`、`comfort_noise` 讀為 `NULL`、`res_floor_protect` 為 0，本機實測 `aec_process_context()` 省約 11–14 %。**只有在 `enable_res = 0` 且 `return_res_context = 1` 時才合法**，其他組合與 0..2 以外的值會被驗證拒絕。 |
 
 ### 6.3 抑制強度
 
@@ -141,18 +138,18 @@ void aec_get_last_timing(const Aec* a, AecStageTiming* out);
   render activity、`mu_scale`、mic-clip、RSA 更新，以及 shadow filter。
   **不含** `delay_us`，兩者不會重複計算。
 - `linear_us`：主自適應濾波器；若本實例自己算 far-end FFT（而不是透過
-  `aec_process_context_shared_far_from()` 借用），FFT 也算在這裡。
+  `aec_process_linear_shared_far_from()` 借用），FFT 也算在這裡。
 - `steering_us`：主濾波器與 post 區塊之間的全部工作——stationarity refresh、
   `e2_coarse`/ERL publish 與 coarse rescue、double-talk analyzer、EPV、
   `shadow_rise`、misadjustment estimator。它們都不直接動樣本，只決定下一個
   hop 怎麼適應，但確實是每個 hop 的真實成本。
-- `res_us`：AEC3 post/RES 區塊。只要 `enable_res` **或** `return_res_context`
-  其中之一為真就會跑，所以 context-only 的呼叫端也會看到真實數字。
+- `res_us`：AEC3 post/RES 區塊。只要 `AecConfig.residual` 不是 `AEC_RESIDUAL_OFF`
+  就會跑，所以拆開進入點（`aec_process_residual()`）的呼叫端也會看到真實數字。
 
 五者**刻意不等於**整個呼叫：餘額是 `res_us` 收尾之後才跑的 per-sample power
 EMA 與收斂偵測。要呈現完整分解的呼叫端得自己把餘額算出來。
 
-每次 `aec_process*()` 進入時清零，所以一個 hop 只會回報它真的跑到的階段。
+每次 `aec_process*()` 在引數檢查之後清零，所以一個 hop 只會回報它真的跑到的階段；被引數檢查拒絕（NULL、已銷毀 handle、非有限樣本）的呼叫不動記錄。
 解析度是微秒，低於 1 µs 的階段會讀到 0。
 
 #### 預設關閉
@@ -187,8 +184,7 @@ make PROFILE=1 EXTRA_CFLAGS='-DAEC_NOW_US=board_timer_us -include my_timer.h'
 數值，而不是一個小的錯誤值。指向一個永遠回傳同一個值的函式是合法用法——每個
 階段都讀 0，只剩對一個沒人回讀的結構做幾次純量寫入。
 
-包裝這個函式庫的上層元件各自有同名慣例的覆寫點（例如 Audio_ALG 的 4 聲道
-mcab flow 用 `MCAB_NOW_US`），刻意不共用：一個元件的
+包裝這個函式庫的上層元件若有自己的計時覆寫點，刻意不共用：一個元件的
 時鐘屬於該元件自己的建置契約。
 
 ### 6.6c Live observer（實驗性）
@@ -226,10 +222,17 @@ typedef struct AecMemBreakdown {
     size_t total_bytes;       /* == aec_get_mem_size(cfg)                 */
     size_t estimator_bytes;   /* delay_aec_get_mem_size(); 0 非 MATCHED  */
     size_t ring_bytes;        /* 對齊環形緩衝；0 為 EXTERNAL_ALIGNED     */
+    size_t lane_bytes;        /* 陣列：四條 lane 池合計；單聲道為 0      */
+    size_t fusion_bytes;      /* 陣列：控制區塊、融合緩衝、共用 FFT 控制代碼與增益階段；單聲道為 0 */
 } AecMemBreakdown;
 
+/* AEC_OK（0）並填入 *out；cfg 為 NULL 或無效則 AEC_ERR_ARG 並把 *out 清零 */
 int aec_get_mem_breakdown(const AecConfig* cfg, AecMemBreakdown* out);
 ```
+
+陣列實例（`n_mics = 4`）的 `lane_bytes`／`fusion_bytes` 才非 0，`estimator_bytes`／`ring_bytes` 是共用估計器與共用對齊環的；
+`estimator_bytes`、`ring_bytes`、`lane_bytes`、`fusion_bytes` 四者相加**不等於** `total_bytes`：差的是 `Aec` 標頭
+（`sizeof(Aec)` 對齊 16 B），它不在任何一個欄位之內（實測數字見 [§4](lifecycle.md#陣列實例的記憶池)）。
 
 把 [§4](lifecycle.md#4-生命週期) 記憶池大小表格背後的算法變成一個可查詢的 API：`total_bytes` 就是
 `aec_get_mem_size(cfg)` 本身（同一次呼叫算出來，不是另一套算式），
@@ -237,8 +240,28 @@ int aec_get_mem_breakdown(const AecConfig* cfg, AecMemBreakdown* out);
 `aec_get_mem_size()` 內部本來就在用的同一批 helper（`delay_aec_get_mem_size()`、
 `aec_derive_dims()` 的 ring 大小 out-param）——查詢這個函式不可能得到與
 `aec_carve()` 實際切出來的 pool 佈局不同的答案。失敗條件與
-`aec_get_mem_size()` 完全一致：`cfg` 為 `NULL` 或未通過 `aec_validate_config()`
+`aec_get_mem_size()` 完全一致：`cfg` 為 `NULL` 或未通過 `aec_resolve_valid_config()`
 時回傳 0（並把 `*out` 清零）。`example/aec_wav.c` 的 `--print-mem-size`
 （[附錄 A](wav_cli.md#附錄-aaec_wav-命令列工具)）就是這個 API 的一個瘦封裝。
+
+### 6.8 陣列實例欄位（`n_mics = 4`）
+
+| 欄位 | 型別 | 預設 | 允許範圍 | 說明 |
+|---|---|---:|---|---|
+| `n_mics` | `int` | `1` | `1` 或 `AEC_ARRAY_MICS`（4） | `4` 建出四麥克風陣列實例：四條 lane、共用 delay 估計器與對齊後 far、融合緩衝都在同一塊記憶池，一次 `aec_init()`（或 `aec_create()`）。呼叫序列見 [§8.8](integration.md#88-麥克風陣列實例n_mics--4)。建立時，不可變。 |
+| `capture_proxy_channel` | `int` | `0` | `0` – 3（單聲道必須是 0） | 共用 delay 估計器的 capture 輸入取哪一路麥克風；`delay_backward_quarantine_*` 也以這一路 lane 的消除狀態為準。 |
+| `delay_backward_quarantine_enabled` | `int` | `0` | 0 / 1（單聲道必須是 0） | 只在 `MATCHED` 有意義。比目前 delay 更早的新估計，在 capture-proxy lane 仍在消除期間先保留 `delay_backward_quarantine_s` 秒再採用；消除失效就立刻採用。前向移動與首次取得不受影響。 |
+| `delay_backward_quarantine_s` | `float` | `1.0` | 0 – 3600 | 上一項的保留時間（秒），建立時換算成 hop 數（下限 1）。 |
+
+以 `make AEC_NO_ARRAY=1` 建置的單聲道函式庫沒有陣列實例：`n_mics` 不是 1 時 `aec_get_mem_size()` 回 0、`aec_init()` 回 NULL、`aec_create()` 回 -1，`aec_get_array()` 與 `aec_array_*()` 診斷函式不存在（呼叫即連結錯誤）。flag 折進 config hash，與一般建置各有自己的 `bin/<backend>-<hash>/`；實測 `libaec.a` 的 `__TEXT` 減少約 21 kB（SIMD=1，184,765 → 163,433 B；SIMD=0 為 166,881 → 148,721 B）。
+
+陣列實例對既有欄位的規則：
+
+- `residual` 必須是 `STATE`、`ESTIMATE` 或 `FULL`（`OFF` 被拒絕），並改變池大小；
+- 格點只接受 16 kHz／256、16 kHz／512、48 kHz／1024，`max_delay_ms` 必須 ≤ 4096；
+- `delay_mode`、`delay_num_filters`、`fixed_delay_samples`、`delay_est_period_s`、`max_delay_ms` 描述**共用**的對齊，每條 lane 一律以 `EXTERNAL_ALIGNED` 吃對齊後的 far；
+  `delay_est_init_s`、`delay_buffer_ms` 不被讀（duty-cycle 保持時間固定 0.3 s，環形緩衝大小由 `max_delay_ms` 決定）；
+- 其餘欄位（`filter_length`、`mu`、`enable_shadow`、偵測器門檻…）原樣交給每條 lane；level 欄位只作用在融合後的一次增益階段，lane 自己的 level 沒有效果；
+- `aec_set_level()` 重新設定融合的增益階段（`FULL`）；`STATE`／`ESTIMATE` 沒有增益階段，呼叫回 0 但無效。
 
 ---

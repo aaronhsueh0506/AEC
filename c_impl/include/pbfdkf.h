@@ -116,6 +116,15 @@ int    pbfdaf_init_static(PBFDAF* p, void* mem, size_t mem_size,
                            float mu, float delta, int hop_size,
                     int with_process_scratch, int sample_rate,
                     FftHandle* shared_fft);
+/* Follower: a lightweight shadow of far_owner (an initialised filter at the same n_partitions and hop_size). It lacks near_spec,
+ * error_spec_windowed and spec_scratch, and shares far_owner's X_buf and x2_cache, so both must see the same far input and the
+ * same far-history clears and partition steps every hop. Process scratch is included. */
+size_t pbfdaf_get_mem_size_follower(int block_size, int n_partitions, int hop_size);
+int    pbfdaf_init_static_follower(PBFDAF* p, void* mem, size_t mem_size,
+                                   int block_size, int n_partitions,
+                                   float mu, float delta, int hop_size,
+                                   int sample_rate, FftHandle* shared_fft,
+                                   const PBFDAF* far_owner);
 /* Drops the borrowed shared_fft reference only. */
 void pbfdaf_free(PBFDAF* p);
 void pbfdaf_reset(PBFDAF* p);

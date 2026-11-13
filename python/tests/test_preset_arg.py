@@ -33,11 +33,11 @@ def test_everything_else_is_rejected(text):
 
 
 def test_numbers_follow_the_c_enum_order():
-    """c_impl/include/aec.h: AEC_PRESET_MILD=0, BALANCED=1, AGGRESSIVE=2, NO_FLOOR=3."""
+    """c_impl/include/aec.h: AEC_LEVEL_MILD=0, BALANCED=1, AGGRESSIVE=2, NO_FLOOR=3."""
     here = os.path.dirname(os.path.abspath(__file__))
     header = os.path.join(here, '..', '..', 'c_impl', 'include', 'aec.h')
     with open(header, encoding='utf-8') as fh:
         text = fh.read()
     for value, name in enumerate(PRESET_NAMES):
-        m = re.search(r'AEC_PRESET_%s\s*=\s*(\d+)' % name.upper(), text)
+        m = re.search(r'AEC_LEVEL_%s\s*=\s*(\d+)' % name.upper(), text)
         assert m and int(m.group(1)) == value

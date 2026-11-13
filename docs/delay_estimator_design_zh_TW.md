@@ -130,7 +130,7 @@ scalar 路徑保留原演算。`make test-delay-kernels` 對照獨立的分開�
 **Config 通路**：Python `AecConfig.delay_num_filters`
 （1..5，`__post_init__` fail-fast 驗證）→ orchestrator → LegacyDelayShim
 → `EchoPathDelayEstimator(num_filters=…)`；C `AecConfig::delay_num_filters`
-（`aec_validate_config` 拒絕超界）→ `delay_aec_get_mem_size()` /
+（`aec_resolve_valid_config` 拒絕超界）→ `delay_aec_get_mem_size()` /
 `delay_aec_init()` → runtime `DaMatchedFilter::num_filters`。
 
 **RAM 隨 n 縮**：`DelayAec` 是 metadata + pool pointers，bank／accumulated

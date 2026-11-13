@@ -1,6 +1,7 @@
-/* aec_res.c -- standalone residual-echo suppression gain; see aec_res.h. */
-#include "aec_res.h"
+/* aec_res.c -- residual-echo suppression gain stage; see aec_res_internal.h. */
+#include "aec_res_internal.h"
 #include "aec_config_build.h"
+#include "aec_internal.h"
 #include "aec_balanced_config.h"
 #include "utility/simd_aec.h"
 #include "utility/fast_math.h"
@@ -12,8 +13,9 @@
 
 /* int16^2 power scale of r2 / comfort_noise relative to audio-scale spectra */
 #define AEC_RES_PSD_SCALE (32768.0f * 32768.0f)
-#define AEC_RES_DT_PROTECT_THRESHOLD 0.2f
 #define AEC_RES_SATURATION_THRESHOLD 0.5f
+/* Same bound as the suppressor's render statistics */
+#define AEC_RES_STATS_MAX_HOP 1024
 
 struct AecRes {
     int n_bins;
@@ -46,7 +48,7 @@ size_t aec_res_get_mem_size(const AecConfig* cfg) {
     AecSignalGrid grid;
     size_t total;
     if (!resolve(cfg, &resolved, &sg_cfg, &sg_tun)) return 0;
-    if (!aec_resolve_signal_grid(resolved.sample_rate, resolved.fft_size, &grid)) return 0;
+    if (aec_resolve_signal_grid(resolved.sample_rate, resolved.fft_size, &grid) != AEC_OK) return 0;
     if (sg_cfg.nearend_smoother_n < 1) return 0;
     total = ck_align16_size(sizeof(struct AecRes));
     total = ck_field_size(total, sg_float_count(grid.n_freqs, sg_cfg.nearend_smoother_n),
@@ -91,7 +93,7 @@ AecRes* aec_res_init(void* mem, size_t bytes, const AecConfig* cfg) {
     need = aec_res_get_mem_size(cfg);
     if (need == 0 || bytes < need) return NULL;
     if (!resolve(cfg, &resolved, &sg_cfg, &sg_tun)) return NULL;
-    if (!aec_resolve_signal_grid(resolved.sample_rate, resolved.fft_size, &grid)) return NULL;
+    if (aec_resolve_signal_grid(resolved.sample_rate, resolved.fft_size, &grid) != AEC_OK) return NULL;
 
     r = (AecRes*)mem;
     memset(r, 0, sizeof *r);
@@ -118,8 +120,8 @@ int aec_res_hop_size(const AecRes* r) { return r ? r->hop_size : 0; }
 
 const float* aec_res_process(AecRes* r, const AecResInput* in) {
     int k;
-    if (!r || !in || !in->error_spec || !in->near_spec || !in->r2 ||
-        !in->comfort_noise || !in->render_hop)
+    float sum_sq, peak_sq;
+    if (!r || !in || !in->error_spec || !in->near_spec || !in->r2 || !in->comfort_noise)
         return NULL;
 
     /* Near-end power on the int16^2 scale; once every filter has converged the residual power caps
@@ -134,27 +136,43 @@ const float* aec_res_process(AecRes* r, const AecResInput* in) {
         }
         r->near_power[k] = n2 * AEC_RES_PSD_SCALE;
     }
-    sk_scale_f32(r->render_scaled, in->render_hop, 32768.0f, r->hop_size);
+    if (in->render_hop) {
+        sk_scale_f32(r->render_scaled, in->render_hop, 32768.0f, r->hop_size);
+        suppression_gain_render_stats(r->render_scaled, r->hop_size, &sum_sq, &peak_sq);
+    } else {
+        sum_sq = in->render_sum_sq;
+        peak_sq = in->render_peak_sq;
+    }
 
     if (r->sg.initial_state && in->all_converged)
         suppression_gain_set_initial_state(&r->sg, 0);
     r->sg.dt_protect_active = in->max_dt > AEC_RES_DT_PROTECT_THRESHOLD;
-    return suppression_gain_get_gain(&r->sg, r->near_power, in->r2, in->r2,
-                                     in->comfort_noise, r->render_scaled,
-                                     in->clock_drift,
-                                     in->max_saturation > AEC_RES_SATURATION_THRESHOLD);
+    return suppression_gain_get_gain_stats(&r->sg, r->near_power, in->r2, in->r2,
+                                           in->comfort_noise, sum_sq, peak_sq,
+                                           in->clock_drift,
+                                           in->max_saturation > AEC_RES_SATURATION_THRESHOLD);
 }
 
-int aec_res_set_level(AecRes* r, AecLevel level, float ramp_ms) {
+void aec_render_stats(const float* hop, int n, AecRenderStats* out) {
+    float scaled[AEC_RES_STATS_MAX_HOP];
+    if (!out) return;
+    out->sum_sq = 0.0f;
+    out->peak_sq = 0.0f;
+    if (!hop || n <= 0 || n > AEC_RES_STATS_MAX_HOP) return;
+    sk_scale_f32(scaled, hop, 32768.0f, n);
+    suppression_gain_render_stats(scaled, n, &out->sum_sq, &out->peak_sq);
+}
+
+int aec_res_set_level(AecRes* r, AecLevel level) {
     float db, dt_db;
     int en;
     if (!r) return -1;
     if (aec_level_floor_db(level, &db) != 0) return -1;
     if (aec_level_dt_floor_db(level, &dt_db) != 0) return -1;
     if (aec_level_split_floor_enabled(level, &en) != 0) return -1;
-    /* The suppressor validates and applies first and writes nothing on refusal. ramp_ms governs the
+    /* The suppressor validates and applies first and writes nothing on refusal. The ramp governs the
      * far-active floor only; the DT floor and the split-floor gate step immediately. */
-    if (suppression_gain_set_split_floor_far_active_db(&r->sg, db, ramp_ms) != 0)
+    if (suppression_gain_set_split_floor_far_active_db(&r->sg, db, AEC_LEVEL_RAMP_MS) != 0)
         return -1;
     if (suppression_gain_set_split_floor_dt_db(&r->sg, dt_db) != 0)
         return -1;
@@ -173,40 +191,29 @@ int aec_res_split_floor(const AecRes* r, float* live, float* target) {
     return 0;
 }
 
-/* Bins per chunk of the shared comfort-noise core: the N^2 -> amplitude conversion is vectorised per chunk, the random phase
- * draws stay strictly sequential in bin order. */
-#define AEC_CNG_CHUNK 64
+/* ---- test-only hooks (aec_test_hooks.h; compiled only under -DAEC_TESTING) ------------------------------------------------ */
+#ifdef AEC_TESTING
+typedef struct AecTestingRes AecTestingRes;   /* opaque in aec_test_hooks.h; an AecRes here */
 
-void aec_cng_fill(uint32_t* rng, Complex* spec, const float* cn,
-                  const float* g_res, const float* g_nr, float nr_floor, int n) {
-    static const float inv_psd_scale = 1.0f / AEC_RES_PSD_SCALE;
-    float pw[AEC_CNG_CHUNK], amp[AEC_CNG_CHUNK];
-    uint32_t seed;
-    int k0;
-    if (!rng || !spec || !cn || !g_res || n < 3) return;
-    seed = *rng;
-    for (k0 = 1; k0 < n - 1; k0 += AEC_CNG_CHUNK) {
-        int m = n - 1 - k0, j;
-        if (m > AEC_CNG_CHUNK) m = AEC_CNG_CHUNK;
-        /* amp[j] = sqrt(max(cn / 32768^2, 0)); the square root reads pw and writes amp (no in-place call) */
-        sk_scale_f32(pw, cn + k0, inv_psd_scale, m);
-        sk_clip_f32(pw, 0.0f, (float)INFINITY, m);
-        sk_fast_sqrt_f32(pw, amp, m);
-        for (j = 0; j < m; ++j) {
-            int bin = k0 + j;
-            uint32_t ix;
-            float ng, cn_re, cn_im, t;
-            seed = (seed * 69069u + 1u) & 0x7FFFFFFFu;
-            ix = seed >> 26;
-            cn_re = amp[j] * AECB_SQRT2_SIN_LUT[ix];
-            cn_im = amp[j] * AECB_SQRT2_SIN_LUT[(ix + 8u) & 31u];
-            t = 1.0f - g_res[bin] * g_res[bin];
-            if (t < 0.0f) t = 0.0f;
-            ng = fast_sqrt(t);
-            if (g_nr) ng = ng * fmaxf(g_nr[bin], nr_floor);
-            spec[bin].r += ng * cn_re;
-            spec[bin].i += ng * cn_im;
-        }
-    }
-    *rng = seed;
+size_t aec_testing_res_mem_size(const AecConfig* cfg) { return aec_res_get_mem_size(cfg); }
+
+AecTestingRes* aec_testing_res_init(void* mem, size_t bytes, const AecConfig* cfg) {
+    return (AecTestingRes*)aec_res_init(mem, bytes, cfg);
 }
+
+const float* aec_testing_res_process(AecTestingRes* r, const AecResidualView* view) {
+    AecResInput in;
+    if (!view) return NULL;
+    memset(&in, 0, sizeof in);
+    in.error_spec = view->error_spec;
+    in.near_spec = view->near_spec;
+    in.r2 = view->r2;
+    in.comfort_noise = view->comfort_noise;
+    in.render_hop = view->far_hop;
+    in.all_converged = view->all_converged;
+    in.max_dt = view->max_dt;
+    in.max_saturation = view->max_saturation;
+    in.clock_drift = view->clock_drift;
+    return aec_res_process((AecRes*)r, &in);
+}
+#endif

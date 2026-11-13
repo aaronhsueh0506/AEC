@@ -94,7 +94,7 @@ render () {  # render <aec_wav> <label> <fft>
     local mic="$DATASET/$sc/${stem}_mic.wav"
     local lpb="$DATASET/$sc/${stem}_lpb.wav"
     [ -f "$mic" ] && [ -f "$lpb" ] || { echo "  missing source: $stem" >&2; continue; }
-    if "$exe" "$mic" "$lpb" "$dir/${stem}_ours.wav" --preset balanced --cng \
+    if "$exe" "$mic" "$lpb" "$dir/${stem}_ours.wav" --level 1 --cng \
            --fft-size "$fft" ${EXTRA[@]+"${EXTRA[@]}"} >/dev/null 2>&1; then
       n=$((n+1))
     else

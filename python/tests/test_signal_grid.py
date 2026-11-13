@@ -2,7 +2,7 @@
 
 The frame geometry is derived from ONE table by ONE resolver, and
 ``__post_init__`` is its only caller; the C port carries its own copy in
-``aec_validate_config``/``aec_derive_dims``, kept in lockstep by the C-parity
+``aec_resolve_valid_config``/``aec_derive_dims``, kept in lockstep by the C-parity
 row. Asserted:
   - frame/hop/n_freqs on all four supported grids (three product grids plus
     8 kHz), hard-coded rather than recomputed from the source's own ``// 2``;

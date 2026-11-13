@@ -1,5 +1,5 @@
 /* test_runtime_preset.c -- regression test for the runtime strength retarget:
- * suppression_gain_set_split_floor_far_active_db() and its aec_set_level() wrapper.
+ * suppression_gain_set_split_floor_far_active_db() and its aec_set_level() wrapper (a fixed 100 ms ramp).
  *
  * mild/balanced differ in exactly one field, min_gain_floor_far_active_db; aggressive also differs in
  * min_gain_floor_dt_db (aec_config_from_level). Both reach the suppressor as a single scalar clamp read once per hop, so a
@@ -10,9 +10,11 @@
  * so the trajectory is observable per hop through a->a3_sg even on hops where the clamp is not binding.
  *
  * What only this test proves (the byte-equal gate cannot):
- *   1. ramp_ms == 0 lands on EXACTLY the float a fresh instance constructed with that level holds.
- *   2. ramp_ms > 0 advances once per hop, is monotonic, never overshoots, and lands exactly on the hop the ms->hops
- *      conversion predicts (a geometric walk that merely converges leaves a residue and stays nominally live).
+ *   1. A ramp of 0 ms (suppression_gain_set_split_floor_far_active_db) and a completed aec_set_level() ramp both land on
+ *      EXACTLY the float a fresh instance constructed with that level holds.
+ *   2. The 100 ms ramp advances once per hop, is monotonic, never overshoots, and lands exactly on the hop the ms->hops
+ *      conversion predicts (a geometric walk that merely converges leaves a residue and stays nominally live); the
+ *      suppressor's own ramp_ms conversion is checked at half-hop inputs.
  *   3. A call during a ramp restarts from the CURRENT live value: it neither snaps back to the old target nor inherits the
  *      old ratio.
  *   4. aec_reset() abandons ramp progress but keeps the target (the ramp lives in the state block, the target in cfg, which
@@ -21,15 +23,16 @@
  *      validator's own [-300, 50], so a runtime call cannot install a value init would have refused.
  *   6. The setter disturbs nothing else: the far-active latch, DominantNearend counters, initial_state and the three
  *      smoothing histories survive.
- *   7. A lane configured with spatial_linear_context never reaches get_gain, so a retarget there is inert by construction
+ *   7. A lane whose AecConfig.residual is below FULL (STATE, ESTIMATE) never reaches get_gain, so a retarget there is inert by construction
  *      (the ramp does not step); this fails if the 4-channel product's setter is simplified into per-lane calls.
- *   8. The level integers (mild 0, balanced 1, aggressive 2, no_floor 3), the three lookup getters, the balanced fallback of
- *      aec_config_from_level and the legacy AEC_PRESET_x / AecPreset names.
+ *   8. The level integers (mild 0, balanced 1, aggressive 2, no_floor 3), the three lookup getters and the balanced fallback of
+ *      aec_config_from_level.
  *
  * Mutation coverage: run_landing_is_load_bearing() replays the same walk with the exact-landing branch removed and asserts
  * that the residue appears, so assertion 2 is shown to be capable of failing.
  */
 #include "aec.h"
+#include "aec_internal.h"
 #include "suppression_gain.h"
 
 #include <math.h>
@@ -71,35 +74,44 @@ static void run_hops(Aec *a, int hop, int first, int count) {
     for (h = first; h < first + count; ++h) step(a, hop, h);
 }
 
-static int open_aec(Aec *a, AecLevel level, int spatial_lane) {
+/* residual: the AecConfig.residual of the instance (FULL is the default). */
+static int open_aec(Aec *a, AecLevel level, AecResidualMode residual) {
     AecConfig cfg;
     aec_config_from_level(&cfg, level, 16000);
-    if (spatial_lane) {
-        cfg.enable_res = 0;
-        cfg.return_res_context = 1;
-        cfg.spatial_linear_context = 1;
-    }
+    cfg.residual = residual;
     return aec_create(a, &cfg);
 }
 
-/* ── 1: ramp_ms == 0 lands on the constructed float ──────────────────────── */
+/* ── 1: a ramp of 0 ms, and a completed level ramp, land on the constructed float ─────────────────────────── */
 
 static void run_immediate_matches_construction(void) {
-    Aec live, fresh;
-    CHECK(open_aec(&live, AEC_LEVEL_BALANCED, 0) == 0, "immediate: created");
-    CHECK(open_aec(&fresh, AEC_LEVEL_AGGRESSIVE, 0) == 0,
+    Aec live, fresh, ramped;
+    int hop, i;
+    CHECK(open_aec(&live, AEC_LEVEL_BALANCED, AEC_RESIDUAL_FULL) == 0, "immediate: created");
+    CHECK(open_aec(&ramped, AEC_LEVEL_BALANCED, AEC_RESIDUAL_FULL) == 0, "immediate: level-ramp instance created");
+    CHECK(open_aec(&fresh, AEC_LEVEL_AGGRESSIVE, AEC_RESIDUAL_FULL) == 0,
           "immediate: reference instance created");
-    CHECK(aec_set_level(&live, AEC_LEVEL_AGGRESSIVE, 0.0f) == 0,
+    hop = aec_hop_size(&live);
+    CHECK(suppression_gain_set_split_floor_far_active_db(&live.a3_sg, LEVEL_DB_AGGRESSIVE, 0.0f) == 0,
           "immediate: retarget accepted");
     CHECK(live.a3_sg.split_floor_far_active_live ==
               fresh.a3_sg.split_floor_far_active_live,
-          "ramp_ms=0 lands on the CONSTRUCTED float exactly");
+          "ramp 0 lands on the CONSTRUCTED float exactly");
     CHECK(live.a3_sg.cfg.split_floor_far_active ==
               fresh.a3_sg.cfg.split_floor_far_active,
-          "ramp_ms=0 retargets cfg to the constructed float exactly");
-    CHECK(live.cfg.min_gain_floor_far_active_db == LEVEL_DB_AGGRESSIVE,
-          "ramp_ms=0 mirrors the dB into AecConfig");
+          "ramp 0 retargets cfg to the constructed float exactly");
+
+    CHECK(aec_set_level(&ramped, AEC_LEVEL_AGGRESSIVE) == 0, "immediate: level retarget accepted");
+    CHECK(ramped.cfg.min_gain_floor_far_active_db == LEVEL_DB_AGGRESSIVE,
+          "the level mirrors the dB into AecConfig");
+    CHECK(ramped.a3_sg.split_floor_far_active_live != fresh.a3_sg.split_floor_far_active_live,
+          "a level change does not land at once: the live floor still trails the target (the 100 ms ramp)");
+    for (i = 0; i < 40; ++i) step(&ramped, hop, i);
+    CHECK(ramped.a3_sg.split_floor_far_active_live ==
+              fresh.a3_sg.split_floor_far_active_live,
+          "a completed level ramp lands on the CONSTRUCTED float exactly");
     aec_destroy(&live);
+    aec_destroy(&ramped);
     aec_destroy(&fresh);
 }
 
@@ -111,7 +123,7 @@ static void run_ramp_timing_and_shape(void) {
     int want_hops;
     float target, prev, cur;
 
-    CHECK(open_aec(&a, AEC_LEVEL_MILD, 0) == 0, "ramp: created");
+    CHECK(open_aec(&a, AEC_LEVEL_MILD, AEC_RESIDUAL_FULL) == 0, "ramp: created");
     hop = aec_hop_size(&a);
     want_hops = (int)(100.0 * 1e-3 * 16000.0 / (double)hop);
     run_hops(&a, hop, 0, 20);
@@ -120,7 +132,7 @@ static void run_ramp_timing_and_shape(void) {
     CHECK(prev == floor_of(LEVEL_DB_MILD),
           "ramp: 20 untouched hops leave the live floor at its construction "
           "value");
-    CHECK(aec_set_level(&a, AEC_LEVEL_AGGRESSIVE, 100.0f) == 0,
+    CHECK(aec_set_level(&a, AEC_LEVEL_AGGRESSIVE) == 0,
           "ramp: accepted");
     target = a.a3_sg.cfg.split_floor_far_active;
     CHECK(a.a3_sg.split_floor_far_active_live == prev,
@@ -141,7 +153,7 @@ static void run_ramp_timing_and_shape(void) {
           "ramp: a landed ramp stays landed");
 
     /* Ascending leg: same properties with the comparison reversed. */
-    CHECK(aec_set_level(&a, AEC_LEVEL_MILD, 100.0f) == 0,
+    CHECK(aec_set_level(&a, AEC_LEVEL_MILD) == 0,
           "ramp: ascending leg accepted");
     target = a.a3_sg.cfg.split_floor_far_active;
     prev = a.a3_sg.split_floor_far_active_live;
@@ -164,10 +176,10 @@ static void run_retarget_mid_ramp(void) {
     int hop, i;
     float start, mid, target, prev, cur;
 
-    CHECK(open_aec(&a, AEC_LEVEL_MILD, 0) == 0, "mid-ramp: created");
+    CHECK(open_aec(&a, AEC_LEVEL_MILD, AEC_RESIDUAL_FULL) == 0, "mid-ramp: created");
     hop = aec_hop_size(&a);
     start = a.a3_sg.split_floor_far_active_live;
-    aec_set_level(&a, AEC_LEVEL_AGGRESSIVE, 100.0f);
+    aec_set_level(&a, AEC_LEVEL_AGGRESSIVE);
     run_hops(&a, hop, 0, 3);
     mid = a.a3_sg.split_floor_far_active_live;
     CHECK(mid < start && mid > a.a3_sg.cfg.split_floor_far_active,
@@ -175,7 +187,7 @@ static void run_retarget_mid_ramp(void) {
 
     /* Back to the original floor: this leg must REVERSE, which a restart that
      * inherited the old descending ratio could not do. */
-    CHECK(aec_set_level(&a, AEC_LEVEL_MILD, 100.0f) == 0,
+    CHECK(aec_set_level(&a, AEC_LEVEL_MILD) == 0,
           "mid-ramp: retarget accepted");
     CHECK(a.a3_sg.split_floor_far_active_live == mid,
           "mid-ramp: the retarget continues from the CURRENT live value");
@@ -191,16 +203,16 @@ static void run_retarget_mid_ramp(void) {
     CHECK(a.a3_sg.split_floor_far_active_live == target && target == start,
           "mid-ramp: reversed leg lands exactly back on the original floor");
 
-    /* An immediate call during a ramp lands now. */
-    aec_set_level(&a, AEC_LEVEL_AGGRESSIVE, 100.0f);
+    /* A 0 ms retarget during a ramp lands now. */
+    aec_set_level(&a, AEC_LEVEL_AGGRESSIVE);
     step(&a, hop, 200);
-    CHECK(aec_set_level(&a, AEC_LEVEL_BALANCED, 0.0f) == 0,
+    CHECK(suppression_gain_set_split_floor_far_active_db(&a.a3_sg, LEVEL_DB_BALANCED, 0.0f) == 0,
           "mid-ramp: immediate retarget accepted");
     CHECK(a.a3_sg.split_floor_far_active_live ==
               a.a3_sg.cfg.split_floor_far_active &&
               a.a3_sg.split_floor_far_active_live ==
                   floor_of(LEVEL_DB_BALANCED),
-          "mid-ramp: an immediate call during a ramp lands now");
+          "mid-ramp: a 0 ms call during a ramp lands now");
     aec_destroy(&a);
 }
 
@@ -212,7 +224,7 @@ static void run_reset_and_isolation(void) {
     int latch, dne_hold, dne_trig, init_state;
     float g0, n0, e0;
 
-    CHECK(open_aec(&a, AEC_LEVEL_BALANCED, 0) == 0, "isolation: created");
+    CHECK(open_aec(&a, AEC_LEVEL_BALANCED, AEC_RESIDUAL_FULL) == 0, "isolation: created");
     hop = aec_hop_size(&a);
     run_hops(&a, hop, 0, 40);
 
@@ -223,7 +235,7 @@ static void run_reset_and_isolation(void) {
     g0 = a.a3_sg.last_gain[0];
     n0 = a.a3_sg.last_nearend[0];
     e0 = a.a3_sg.last_echo[0];
-    CHECK(aec_set_level(&a, AEC_LEVEL_MILD, 100.0f) == 0,
+    CHECK(aec_set_level(&a, AEC_LEVEL_MILD) == 0,
           "isolation: ramped retarget accepted mid-stream");
     CHECK(a.a3_sg.far_active_latched == latch &&
               a.a3_sg.dne_hold_counter == dne_hold &&
@@ -235,7 +247,7 @@ static void run_reset_and_isolation(void) {
           "isolation: far-active latch, DominantNearend counters, "
           "initial_state and the three smoothing histories all survive");
 
-    CHECK(aec_set_level(&a, AEC_LEVEL_AGGRESSIVE, 1000.0f) == 0,
+    CHECK(aec_set_level(&a, AEC_LEVEL_AGGRESSIVE) == 0,
           "reset: long ramp armed");
     run_hops(&a, hop, 40, 3);
     CHECK(a.a3_sg.split_floor_far_active_live !=
@@ -269,7 +281,7 @@ static void run_rejection_is_total(void) {
     Aec a;
     unsigned i;
 
-    CHECK(open_aec(&a, AEC_LEVEL_MILD, 0) == 0, "rejection: created");
+    CHECK(open_aec(&a, AEC_LEVEL_MILD, AEC_RESIDUAL_FULL) == 0, "rejection: created");
     run_hops(&a, aec_hop_size(&a), 0, 8);
     for (i = 0; i < sizeof(BAD) / sizeof(BAD[0]); ++i) {
         SuppressionGain before = a.a3_sg;
@@ -281,7 +293,7 @@ static void run_rejection_is_total(void) {
     }
     CHECK(suppression_gain_set_split_floor_far_active_db(NULL, -28.0f, 0.0f)
               == -1, "rejection: NULL suppressor");
-    CHECK(aec_set_level(NULL, AEC_LEVEL_MILD, 0.0f) == -1,
+    CHECK(aec_set_level(NULL, AEC_LEVEL_MILD) == -1,
           "rejection: NULL instance");
 
     /* suppression_gain_set_split_floor_dt_db() has no ramp_ms, so only the
@@ -307,37 +319,41 @@ static void run_rejection_is_total(void) {
         CHECK(suppression_gain_set_split_floor_dt_db(NULL, -20.0f) == -1,
               "rejection: NULL suppressor (dt setter)");
     }
-    CHECK(aec_set_level(&a, (AecLevel)77, 0.0f) == -1 &&
+    CHECK(aec_set_level(&a, (AecLevel)77) == -1 &&
               a.cfg.min_gain_floor_far_active_db == LEVEL_DB_MILD,
           "rejection: out-of-enum level REFUSED and cfg untouched (the config "
           "factory falls back to balanced; a setter must not)");
-    CHECK(aec_set_level(&a, AEC_LEVEL_AGGRESSIVE, 60001.0f) == -1 &&
-              a.cfg.min_gain_floor_far_active_db == LEVEL_DB_MILD,
-          "rejection: a refused ramp_ms leaves AecConfig untouched");
     aec_destroy(&a);
 }
 
-/* ── 7: a spatial_linear_context lane never reaches get_gain ─────────────── */
+/* ── 7: a lane below AEC_RESIDUAL_FULL never reaches get_gain ───────────── */
 
-static void run_spatial_lane_is_inert(void) {
-    Aec a;
-    int hop;
-    float before_live;
+static void run_residual_below_full_is_inert(void) {
+    static const AecResidualMode MODES[2] = { AEC_RESIDUAL_STATE, AEC_RESIDUAL_ESTIMATE };
+    static const char *const NAMES[2] = { "STATE", "ESTIMATE" };
+    int m;
+    for (m = 0; m < 2; ++m) {
+        Aec a;
+        int hop;
+        float before_live;
+        char msg[200];
 
-    CHECK(open_aec(&a, AEC_LEVEL_BALANCED, 1) == 0, "spatial lane: created");
-    hop = aec_hop_size(&a);
-    run_hops(&a, hop, 0, 40);
+        snprintf(msg, sizeof(msg), "%s lane: created", NAMES[m]);
+        CHECK(open_aec(&a, AEC_LEVEL_BALANCED, MODES[m]) == 0, msg);
+        hop = aec_hop_size(&a);
+        run_hops(&a, hop, 0, 40);
 
-    CHECK(aec_set_level(&a, AEC_LEVEL_AGGRESSIVE, 100.0f) == 0,
-          "spatial lane: the setter still reports success");
-    before_live = a.a3_sg.split_floor_far_active_live;
-    run_hops(&a, hop, 40, 40);
-    CHECK(a.a3_sg.split_floor_far_active_live == before_live,
-          "spatial lane: 40 hops advance the ramp ZERO times -- the lane never "
-          "reaches get_gain, so a per-lane retarget is inert by construction "
-          "and the 4-channel product must retarget its shared post-stage "
-          "suppressor instead");
-    aec_destroy(&a);
+        snprintf(msg, sizeof(msg), "%s lane: the setter still reports success", NAMES[m]);
+        CHECK(aec_set_level(&a, AEC_LEVEL_AGGRESSIVE) == 0, msg);
+        before_live = a.a3_sg.split_floor_far_active_live;
+        run_hops(&a, hop, 40, 40);
+        snprintf(msg, sizeof(msg),
+                 "%s lane: 40 hops advance the ramp ZERO times -- the lane never reaches get_gain, so a per-lane "
+                 "retarget is inert by construction and the 4-channel product must retarget its shared post-stage "
+                 "suppressor instead", NAMES[m]);
+        CHECK(a.a3_sg.split_floor_far_active_live == before_live, msg);
+        aec_destroy(&a);
+    }
 }
 
 /* ── C/Python rounding parity at a HALF hop ──────────────────────────────
@@ -370,14 +386,14 @@ static void run_half_hop_rounding_parity(void) {
     int hop, i, c, landed;
     float ramp_ms, target;
 
-    CHECK(open_aec(&a, AEC_LEVEL_MILD, 0) == 0, "half-hop: created");
+    CHECK(open_aec(&a, AEC_LEVEL_MILD, AEC_RESIDUAL_FULL) == 0, "half-hop: created");
     hop = aec_hop_size(&a);
     CHECK(hop == 128, "half-hop: the table below is authored at hop 128");
 
     for (c = 0; c < (int)(sizeof(CASES) / sizeof(CASES[0])); ++c) {
         char msg[160];
         ramp_ms = CASES[c].ramp_ms;
-        CHECK(aec_set_level(&a, AEC_LEVEL_AGGRESSIVE, ramp_ms) == 0,
+        CHECK(suppression_gain_set_split_floor_far_active_db(&a.a3_sg, LEVEL_DB_AGGRESSIVE, ramp_ms) == 0,
               "half-hop: retarget accepted");
         target = a.a3_sg.cfg.split_floor_far_active;
         landed = -1;
@@ -389,7 +405,7 @@ static void run_half_hop_rounding_parity(void) {
         snprintf(msg, sizeof(msg), "half-hop: %s", CASES[c].what);
         CHECK(landed == CASES[c].hops, msg);
         /* Back to the start floor for the next case, immediately. */
-        aec_set_level(&a, AEC_LEVEL_MILD, 0.0f);
+        suppression_gain_set_split_floor_far_active_db(&a.a3_sg, LEVEL_DB_MILD, 0.0f);
     }
     aec_destroy(&a);
 }
@@ -404,13 +420,13 @@ static void run_no_floor_switch(void) {
      * landing field-for-field on a freshly constructed NO_FLOOR instance --
      * the same "ramp_ms==0 matches construction" property test 1 proves for
      * the dB floors, proven here for the boolean gate too. */
-    CHECK(open_aec(&live, AEC_LEVEL_BALANCED, 0) == 0,
+    CHECK(open_aec(&live, AEC_LEVEL_BALANCED, AEC_RESIDUAL_FULL) == 0,
           "no_floor: created (balanced)");
-    CHECK(open_aec(&fresh_nf, AEC_LEVEL_NO_FLOOR, 0) == 0,
+    CHECK(open_aec(&fresh_nf, AEC_LEVEL_NO_FLOOR, AEC_RESIDUAL_FULL) == 0,
           "no_floor: reference NO_FLOOR instance created");
     CHECK(live.a3_sg.cfg.split_floor_enabled == 1,
           "no_floor: balanced starts with the gate enabled");
-    CHECK(aec_set_level(&live, AEC_LEVEL_NO_FLOOR, 0.0f) == 0,
+    CHECK(aec_set_level(&live, AEC_LEVEL_NO_FLOOR) == 0,
           "no_floor: retarget INTO NO_FLOOR accepted");
     CHECK(live.a3_sg.cfg.split_floor_enabled == 0,
           "no_floor: the gate steps off immediately (no ramp -- a boolean "
@@ -425,9 +441,9 @@ static void run_no_floor_switch(void) {
     /* AWAY FROM NO_FLOOR: the gate steps back on AND the far-active/dt scalars are written through
      * the existing setters; flipping only the boolean (or only the scalar) cannot happen here
      * because aec_set_level() always writes all three together. */
-    CHECK(open_aec(&fresh_bal, AEC_LEVEL_BALANCED, 0) == 0,
+    CHECK(open_aec(&fresh_bal, AEC_LEVEL_BALANCED, AEC_RESIDUAL_FULL) == 0,
           "no_floor: reference BALANCED instance created");
-    CHECK(aec_set_level(&live, AEC_LEVEL_BALANCED, 0.0f) == 0,
+    CHECK(aec_set_level(&live, AEC_LEVEL_BALANCED) == 0,
           "no_floor: retarget AWAY FROM NO_FLOOR accepted");
     CHECK(live.a3_sg.cfg.split_floor_enabled == 1,
           "no_floor: the gate steps back on immediately");
@@ -456,13 +472,13 @@ static void run_no_floor_round_trip(void) {
     Aec a, fresh;
     int hop;
 
-    CHECK(open_aec(&a, AEC_LEVEL_BALANCED, 0) == 0, "round-trip: created");
+    CHECK(open_aec(&a, AEC_LEVEL_BALANCED, AEC_RESIDUAL_FULL) == 0, "round-trip: created");
     hop = aec_hop_size(&a);
     run_hops(&a, hop, 0, 8);   /* a few real hops so the gain path has state */
 
-    CHECK(aec_set_level(&a, AEC_LEVEL_NO_FLOOR, 0.0f) == 0,
+    CHECK(aec_set_level(&a, AEC_LEVEL_NO_FLOOR) == 0,
           "round-trip: BALANCED -> NO_FLOOR accepted");
-    CHECK(open_aec(&fresh, AEC_LEVEL_NO_FLOOR, 0) == 0,
+    CHECK(open_aec(&fresh, AEC_LEVEL_NO_FLOOR, AEC_RESIDUAL_FULL) == 0,
           "round-trip: fresh NO_FLOOR reference created");
     CHECK(a.a3_sg.cfg.split_floor_enabled ==
               fresh.a3_sg.cfg.split_floor_enabled,
@@ -470,9 +486,9 @@ static void run_no_floor_round_trip(void) {
     aec_destroy(&fresh);
     run_hops(&a, hop, 8, 8);
 
-    CHECK(aec_set_level(&a, AEC_LEVEL_AGGRESSIVE, 0.0f) == 0,
+    CHECK(aec_set_level(&a, AEC_LEVEL_AGGRESSIVE) == 0,
           "round-trip: NO_FLOOR -> AGGRESSIVE accepted");
-    CHECK(open_aec(&fresh, AEC_LEVEL_AGGRESSIVE, 0) == 0,
+    CHECK(open_aec(&fresh, AEC_LEVEL_AGGRESSIVE, AEC_RESIDUAL_FULL) == 0,
           "round-trip: fresh AGGRESSIVE reference created");
     CHECK(a.a3_sg.cfg.split_floor_enabled ==
               fresh.a3_sg.cfg.split_floor_enabled &&
@@ -489,7 +505,7 @@ static void run_no_floor_round_trip(void) {
 
 /* AecRes-side NO_FLOOR + aec_res_reset() coverage (the r->sg_cfg mirror that aec_res_reset()'s
  * rebuild() re-inits split_floor_enabled from) lives in test_aec_res.c: AecRes is opaque in
- * aec_res.h, and that test includes src/aec_res.c for internal-state assertions. */
+ * aec_res_internal.h, and that test includes src/aec_res.c for internal-state assertions. */
 
 /* ── mutation: the exact-landing branch must be load-bearing ─────────────── */
 
@@ -498,10 +514,10 @@ static void run_landing_is_load_bearing(void) {
     float target, live;
     int i, hop, want_hops;
 
-    CHECK(open_aec(&a, AEC_LEVEL_MILD, 0) == 0, "mutation: created");
+    CHECK(open_aec(&a, AEC_LEVEL_MILD, AEC_RESIDUAL_FULL) == 0, "mutation: created");
     hop = aec_hop_size(&a);
     want_hops = (int)(100.0 * 1e-3 * 16000.0 / (double)hop);
-    aec_set_level(&a, AEC_LEVEL_AGGRESSIVE, 100.0f);
+    aec_set_level(&a, AEC_LEVEL_AGGRESSIVE);
     target = a.a3_sg.cfg.split_floor_far_active;
     /* Replay the same walk WITHOUT the snap-to-target branch. */
     live = a.a3_sg.split_floor_far_active_live;
@@ -512,26 +528,18 @@ static void run_landing_is_load_bearing(void) {
     aec_destroy(&a);
 }
 
-/* ── level numbering, the lookup getters and the legacy names ─────────────
- * The integers are the CLI and board-script contract, so they are pinned here; the legacy AEC_PRESET_x / AecPreset
- * spellings must stay interchangeable with AEC_LEVEL_x / AecLevel because the Python twins read them from the header. */
+/* ── level numbering and the lookup getters ───────────────────────────────
+ * The integers are the CLI and board-script contract, so they are pinned here. */
 
-static void run_level_names_and_legacy_aliases(void) {
+static void run_level_numbering_and_lookups(void) {
     static const float far_db[4] = { -20.0f, -28.0f, -38.0f, -28.0f };
     static const float dt_db[4]  = { -20.0f, -20.0f, -30.0f, -20.0f };
     static const int   split[4]  = { 1, 1, 1, 0 };
     AecConfig cfg;
-    AecPreset legacy = AEC_PRESET_AGGRESSIVE;
     int l;
 
     CHECK(AEC_LEVEL_MILD == 0 && AEC_LEVEL_BALANCED == 1 && AEC_LEVEL_AGGRESSIVE == 2 && AEC_LEVEL_NO_FLOOR == 3,
           "levels: mild 0, balanced 1, aggressive 2, no_floor 3");
-    CHECK(AEC_PRESET_MILD == AEC_LEVEL_MILD && AEC_PRESET_BALANCED == AEC_LEVEL_BALANCED &&
-              AEC_PRESET_AGGRESSIVE == AEC_LEVEL_AGGRESSIVE && AEC_PRESET_NO_FLOOR == AEC_LEVEL_NO_FLOOR,
-          "legacy AEC_PRESET_x equals AEC_LEVEL_x");
-    aec_config_from_level(&cfg, legacy, 16000);
-    CHECK(cfg.min_gain_floor_far_active_db == LEVEL_DB_AGGRESSIVE,
-          "a legacy AecPreset value is accepted as an AecLevel");
 
     for (l = 0; l < 4; ++l) {
         float db = 123.0f, dt = 123.0f;
@@ -566,11 +574,11 @@ int main(void) {
     run_retarget_mid_ramp();
     run_reset_and_isolation();
     run_rejection_is_total();
-    run_spatial_lane_is_inert();
+    run_residual_below_full_is_inert();
     run_no_floor_switch();
     run_no_floor_round_trip();
     run_landing_is_load_bearing();
-    run_level_names_and_legacy_aliases();
+    run_level_numbering_and_lookups();
     printf("\n%d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }

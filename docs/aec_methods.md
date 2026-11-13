@@ -167,8 +167,13 @@ shows their public configuration values, not necessarily the internal hop count.
 
 Defaults above are the Python `AecConfig` dataclass values. The C `aec_config_defaults()`
 (`c_impl/src/aec.c`) differs in three fields: `enable_cng` (C: 1), `warmup_frames` (C: 100) and
-`delay_est_period_s` (C: 0.0, i.e. the matched filter analyses every hop). C also carries
-`spatial_linear_context` and the reserved `epc_mu_floor` (no consumer), which the Python config does not have.
+`delay_est_period_s` (C: 0.0, i.e. the matched filter analyses every hop). C also carries the reserved `epc_mu_floor`
+(no consumer), which the Python config does not have. The C `AecConfig` does not have the Python flag pair
+`enable_res` / `return_res_context` either: its single field `residual` (`AecResidualMode`, default `AEC_RESIDUAL_FULL`)
+covers them (Python `enable_res=True` = C `FULL` driven by `aec_process()`; `enable_res=False, return_res_context=True` =
+C `FULL` driven by `aec_process_linear()` + `aec_process_residual()`; both false = C `OFF`), and the C `AEC_RESIDUAL_STATE` /
+`AEC_RESIDUAL_ESTIMATE` modes skip the residual-echo half or the gain of the post chain for multi-lane callers.
+The Python names in the rest of this section are the Python twin's own.
 
 The **DT-aware recovery group** has two halves:
 `dt_aware_recovery_soft` softens the delay/EPC recovery ([§2.3](reference/linear_frontend.md#23-delay-estimator-aec3-aligned)), gated on the

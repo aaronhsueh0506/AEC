@@ -24,6 +24,8 @@
  *      never-initialised struct would answer 0.0.
  *   7. The ERLE watchdog leaks the retimed per-hop amount (Aec::duty_erle_leak_db), reconstructed bit-exactly from the
  *      peak trajectory. test_rate_structural (d2)/(d2b) pin the field's value; only this proves the watchdog branch reads it.
+ *   8. The shared duty gate steps exactly: it arms after hold_hops consecutive stable estimates, then runs one hop in
+ *      period_hops; aec_ring_write/aec_ring_read round-trip a wrapping copy at a nonzero offset.
  *
  * The census is diagnostic and must not perturb the signal path; this test does not assert that.
  *
@@ -39,6 +41,7 @@
  * Also wired into the Makefile: `make test-duty-census`.
  */
 #include "aec.h"
+#include "../src/aec_array_internal.h"
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
@@ -220,7 +223,7 @@ int main(void) {
           "AEC_DELAY_EXTERNAL_ALIGNED leaves both census counters at 0 "
           "(no estimator)");
     /* ---- 6c: the caller contracted that ref arrives aligned, so there is no uncertainty to report, and specifically
-     *          not the 0.0 a read of the never-constructed DelayAec would produce. Same value aec_get_linear_context()
+     *          not the 0.0 a read of the never-constructed DelayAec would produce. Same value aec_get_linear()
      *          reports for this mode. */
     snprintf(msg, sizeof msg,
              "AEC_DELAY_EXTERNAL_ALIGNED delay_confidence == 1.0 (caller "
@@ -285,26 +288,26 @@ int main(void) {
          * bit-exactness claim belongs to the authoring grid, not this one. */
         snprintf(msg, sizeof msg,
                  "duty_erle_leak_db = 0.1 dB/s x %d/%d s hop (%.9g/hop)",
-                 HOP, SR, (double)aec.duty_erle_leak_db);
-        CHECK(fabs((double)aec.duty_erle_leak_db * SR / HOP - 0.1) <= 1e-6,
+                 HOP, SR, (double)aec.duty.erle_leak_db);
+        CHECK(fabs((double)aec.duty.erle_leak_db * SR / HOP - 0.1) <= 1e-6,
               msg);
         snprintf(msg, sizeof msg,
                  "the 8 ms hop does NOT carry the 10 ms literal (%.9g != "
-                 "0.001)", (double)aec.duty_erle_leak_db);
-        CHECK(aec.duty_erle_leak_db != 0.001f, msg);
+                 "0.001)", (double)aec.duty.erle_leak_db);
+        CHECK(aec.duty.erle_leak_db != 0.001f, msg);
 
         for (i = 0; i < WD_HOPS; ++i) {
-            float prev_peak = aec.duty_erle_peak;
-            int   prev_active = aec.duty_active;
+            float prev_peak = aec.duty.erle_peak;
+            int   prev_active = aec.duty.active;
             aec_process(&aec, &g_wd_near[i * HOP], &g_wd_far[i * HOP], g_out);
             /* Only the steady decay branch is reconstructible here: arming
              * jumps the peak to the current ERLE, a rise re-seeds it from
              * the same, and a watchdog trip zeroes it and disarms. Each of
              * those is excluded by its own state change, not by a threshold. */
-            if (prev_active && aec.duty_active &&
-                aec.duty_erle_peak < prev_peak) {
+            if (prev_active && aec.duty.active &&
+                aec.duty.erle_peak < prev_peak) {
                 leak_hops++;
-                if (aec.duty_erle_peak != prev_peak - aec.duty_erle_leak_db)
+                if (aec.duty.erle_peak != prev_peak - aec.duty.erle_leak_db)
                     mismatches++;
             }
         }
@@ -318,6 +321,50 @@ int main(void) {
                  leak_hops);
         CHECK(leak_hops > 0, msg);
         aec_destroy(&aec);
+    }
+
+    /* 8a. Gate stepping, pinned to hold_hops and period_hops. */
+    {
+        AecDutyGate g;
+        int runs[10], i, ok = 1, armed_at = -1;
+        memset(&g, 0, sizeof g);
+        g.hold_hops = 3;
+        g.period_hops = 4;
+        g.erle_leak_db = 0.0f;
+        aec_duty_reset(&g);
+        for (i = 0; i < 6; ++i) {
+            aec_duty_end(&g, 5, 1, 10.0f);
+            if (g.active && armed_at < 0) armed_at = i;
+        }
+        CHECK(armed_at == 3, "the gate arms on the hold_hops-th stable estimate after the first sighting");
+        aec_duty_reset(&g);
+        aec_duty_end(&g, 5, 1, 10.0f);
+        aec_duty_end(&g, 5, 1, 10.0f);
+        aec_duty_end(&g, 5, 1, 10.0f);
+        aec_duty_end(&g, 5, 1, 10.0f);
+        CHECK(g.active == 1, "armed after 1 + hold_hops estimates");
+        for (i = 0; i < 10; ++i) runs[i] = aec_duty_begin(&g);
+        {
+            static const int want[10] = {0, 0, 0, 1, 0, 0, 0, 1, 0, 0};
+            for (i = 0; i < 10; ++i) if (runs[i] != want[i]) ok = 0;
+        }
+        CHECK(ok, "an armed gate analyses exactly one hop in period_hops");
+        aec_duty_end(&g, 6, 1, 10.0f);
+        CHECK(g.active == 0, "a moved estimate disarms the gate");
+    }
+
+    /* 8b. Ring copy that wraps, at a nonzero offset. */
+    {
+        float ring[8] = {0}, src[5] = {1, 2, 3, 4, 5}, dst[5] = {0};
+        static const float want_ring[8] = {3, 4, 5, 0, 0, 0, 1, 2};
+        int i, ok = 1;
+        aec_ring_write(ring, 8, 6, src, 5);
+        for (i = 0; i < 8; ++i) if (ring[i] != want_ring[i]) ok = 0;
+        CHECK(ok, "aec_ring_write wraps the tail to the ring start");
+        aec_ring_read(ring, 8, 6, dst, 5);
+        ok = 1;
+        for (i = 0; i < 5; ++i) if (dst[i] != src[i]) ok = 0;
+        CHECK(ok, "aec_ring_read returns the wrapped copy in order");
     }
 
     printf("\n%d passed, %d failed\n", g_pass, g_fail);

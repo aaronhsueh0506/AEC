@@ -47,10 +47,14 @@ void suppression_gain_init(SuppressionGain *sg,
     sg->gain = gain_out;
     sg->sum_scratch = sum_scratch;
 
-    for (k = 0; k < cfg->n_bins; ++k) {
-        sg->last_gain[k] = 1.0f;
-        sg->last_nearend[k] = 0.0f;
-        sg->last_echo[k] = 0.0f;
+    /* The gain arrays may all be NULL when only the DominantNearend state is used (suppression_gain_get_gain() is then never
+     * called). */
+    if (sg->last_gain && sg->last_nearend && sg->last_echo) {
+        for (k = 0; k < cfg->n_bins; ++k) {
+            sg->last_gain[k] = 1.0f;
+            sg->last_nearend[k] = 0.0f;
+            sg->last_echo[k] = 0.0f;
+        }
     }
     sg->low_render_avg_power = 32768.0f * 32768.0f;
     /* The power IIR (0.9 / 0.1) is per 4 ms block; the wall-clock-rescaled form is optional and
@@ -177,21 +181,30 @@ static int ne_state_for_gain_rules(const SuppressionGain *sg) {
     return sg->stat_mask_frac > sg->cfg.stat_aware_ne_proxy_threshold;
 }
 
-/* Low-noise render detector: returns the flag and updates the average power. */
-static int low_noise_render_detect(SuppressionGain *sg, const float *rb,
-                                   int hop, float *x2_sum_out) {
-    const SuppressionGainConfig *c = &sg->cfg;
-    float x2[1024];          /* hop_size <= 1024 */
-    float x2_sum, x2_max;
-    int low_noise, i;
-    *x2_sum_out = 0.0f;
-    if (hop <= 0 || hop > (int)(sizeof(x2) / sizeof(x2[0]))) return 0;
+/* Largest hop the render statistics support (scratch size of the squared-sample array). */
+#define SG_RENDER_STATS_MAX_HOP 1024
+
+void suppression_gain_render_stats(const float *render_block, int n,
+                                   float *sum_sq, float *peak_sq) {
+    float x2[SG_RENDER_STATS_MAX_HOP];
+    int i;
+    *sum_sq = 0.0f;
+    *peak_sq = 0.0f;
+    if (!render_block || n <= 0 || n > SG_RENDER_STATS_MAX_HOP) return;
     /* Squared samples (scale 1). */
-    sk_sq_scale_f32(rb, 1.0f, x2, hop);
-    x2_sum = sk_pairwise_sum_tailfold_b_f32(x2, (size_t)hop);
-    *x2_sum_out = x2_sum;
-    x2_max = x2[0];
-    for (i = 1; i < hop; ++i) if (x2[i] > x2_max) x2_max = x2[i];
+    sk_sq_scale_f32(render_block, 1.0f, x2, n);
+    *sum_sq = sk_pairwise_sum_tailfold_b_f32(x2, (size_t)n);
+    *peak_sq = x2[0];
+    for (i = 1; i < n; ++i) if (x2[i] > *peak_sq) *peak_sq = x2[i];
+}
+
+/* Low-noise render detector: returns the flag and updates the average power. A hop outside the
+ * supported range leaves the average untouched and reports no low-noise render. */
+static int low_noise_render_detect(SuppressionGain *sg, int hop,
+                                   float x2_sum, float x2_max) {
+    const SuppressionGainConfig *c = &sg->cfg;
+    int low_noise;
+    if (hop <= 0 || hop > SG_RENDER_STATS_MAX_HOP) return 0;
     /* Normalise the average power to per-sample (reference block is 64 samples) before the peak
      * comparison. */
     {
@@ -528,11 +541,32 @@ const float *suppression_gain_get_gain(
     const float *render_block,
     int clock_drift,
     int saturated_echo) {
+    float sum_sq, peak_sq;
+    suppression_gain_render_stats(render_block, sg->cfg.hop_size, &sum_sq, &peak_sq);
+    return suppression_gain_get_gain_stats(sg, nearend_spectrum, residual_echo,
+                                           residual_echo_unbounded, comfort_noise,
+                                           sum_sq, peak_sq, clock_drift, saturated_echo);
+}
+
+const float *suppression_gain_get_gain_stats(
+    SuppressionGain *sg,
+    const float *nearend_spectrum,
+    const float *residual_echo,
+    const float *residual_echo_unbounded,
+    const float *comfort_noise,
+    float render_sum_sq,
+    float render_peak_sq,
+    int clock_drift,
+    int saturated_echo) {
     const SuppressionGainConfig *c = &sg->cfg;
     int n = c->n_bins;
     int low_noise_render;
-    float render_x2_sum = 0.0f;
     int hf_lim_applied;
+
+    assert(sg->gain);       /* NULL arrays: an instance that only tracks DominantNearend */
+
+    /* A hop outside the supported range has no statistics (what get_gain() reads from it). */
+    if (c->hop_size <= 0 || c->hop_size > SG_RENDER_STATS_MAX_HOP) render_sum_sq = 0.0f;
 
     advance_split_floor_ramp(sg);
 
@@ -540,13 +574,12 @@ const float *suppression_gain_get_gain(
         sg, nearend_spectrum, residual_echo, residual_echo_unbounded,
         comfort_noise);
 
-    low_noise_render = low_noise_render_detect(sg, render_block, c->hop_size,
-                                                &render_x2_sum);
+    low_noise_render = low_noise_render_detect(sg, c->hop_size, render_sum_sq,
+                                                render_peak_sq);
 
     /* Split-floor far-active latch. */
     if (c->split_floor_enabled && !sg->far_active_latched) {
-        /* Reuse the render x2 sum from low_noise_render_detect. */
-        float mean_pow = render_x2_sum / (float)c->hop_size;
+        float mean_pow = render_sum_sq / (float)c->hop_size;
         if (mean_pow > c->split_floor_latch_power) sg->far_active_latched = 1;
     }
 

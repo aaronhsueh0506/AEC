@@ -8,7 +8,8 @@
  * away.
  */
 #include "aec.h"
-#include "aec_res.h"
+#include "aec_internal.h"
+#include "../src/aec_res_internal.h"
 #include "zero_heap_hook.h"
 
 #include <stdio.h>
@@ -47,7 +48,7 @@ static int run_res_cycle(void* mem, size_t bytes, const AecConfig* cfg) {
         const float* g;
         if (h == HOPS_PER_PHASE) {
             aec_res_reset(res);
-            if (aec_res_set_level(res, AEC_LEVEL_AGGRESSIVE, 50.0f) != 0) return -1;
+            if (aec_res_set_level(res, AEC_LEVEL_AGGRESSIVE) != 0) return -1;
         }
         g = aec_res_process(res, &in);
         if (!g) return -1;

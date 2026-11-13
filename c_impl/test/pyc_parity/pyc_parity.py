@@ -113,7 +113,7 @@ TOL = {
     'L2_out_max_abs': 2.0e-3,        # unchanged; worst GREEN 7.893e-4 (recdc.48k1024.bal.nohpf), margin 2.53x
     'L2_raw_max_abs': 2.0e-4,        # tightened 10x (was 2.0e-3); worst GREEN 9.049e-5, margin 2.21x
     'L2_out_rms_db': -61.0,          # tightened 1 dB (was -60.0); worst GREEN -67.75 dB, margin 6.75 dB
-    # context seam (aec_get_res_context), Layer 1 only
+    # context seam (aec_get_linear / aec_get_residual views), Layer 1 only
     'CTX_scalar_rel': 2.0e-5,        # tightened 50x (was 1.0e-3); worst GREEN 2.265e-6 (erle_factor), margin 8.8x
     'CTX_spec_rel_l2': 1.0e-5,       # tightened 100x (was 1.0e-3); worst GREEN 5.28e-7 (echo_spec), margin 18.9x
     'CTX_gain_max_abs': 1.0e-3,      # printed only (no longer gates, see CTX_gain_wrel_l2): a per-bin, per-hop maximum is set by the
@@ -404,10 +404,10 @@ def build_scenarios():
         add(Scn('dtb.%s.bal.obs' % g, 'dtb', g, obs=True, red=('S-02',), quick=(g == '16k256')))
     add(Scn('rec.8k256.bal.obs', 'rec', '8k256', obs=True))
     add(Scn('rec.16k256.bal.obs', 'rec', '16k256', obs=True))
-    # D. context seam (aec_get_res_context). S-05 (filter_converged one hop
+    # D. context seam (aec_get_linear / aec_get_residual views). S-05 (filter_converged one hop
     # late on the rising edge) was fixed 2026-10-20: Python now patches the
     # field after update_convergence runs for the hop, matching C's
-    # aec_get_res_context() post-update pull contract. No marker needed.
+    # aec_get_linear() post-update pull contract. No marker needed.
     add(Scn('dtb.16k256.bal.ctx', 'dtb', '16k256', ctx=True, quick=True, lean=True))
     add(Scn('dtb.48k1024.bal.ctx', 'dtb', '48k1024', ctx=True))
     add(Scn('speechdt.16k256.bal.ctx_nores', 'speechdt', '16k256', ctx=True, res=False))
@@ -562,6 +562,10 @@ def read_trace(path):
     return rows
 
 
+# The C driver takes the level as its enum number; the Python twin keeps the names.
+C_LEVEL_DIGIT = {'mild': '0', 'balanced': '1', 'aggressive': '2', 'no_floor': '3'}
+
+
 class Runner(object):
     def __init__(self, args):
         self.a = args
@@ -582,7 +586,7 @@ class Runner(object):
         d = os.path.join(self.work, 'run', scn.id)
         os.makedirs(d, exist_ok=True)
         pre = os.path.join(d, 'c_' + build)
-        run([binp, mic, ref, pre, str(scn.sr), str(scn.fft), scn.preset] + scn.c_flags(), log=pre + '.log')
+        run([binp, mic, ref, pre, str(scn.sr), str(scn.fft), C_LEVEL_DIGIT[scn.preset]] + scn.c_flags(), log=pre + '.log')
         self.cache[key] = pre
         return pre
 

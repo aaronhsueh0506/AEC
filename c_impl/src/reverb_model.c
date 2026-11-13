@@ -7,11 +7,11 @@
 void reverb_model_init(ReverbModel *m, float *reverb_storage, int n_bins) {
     m->n_bins = n_bins;
     m->reverb = reverb_storage;
-    memset(m->reverb, 0, (size_t)n_bins * sizeof(float));
+    if (m->reverb) memset(m->reverb, 0, (size_t)n_bins * sizeof(float));
 }
 
 void reverb_model_reset(ReverbModel *m) {
-    memset(m->reverb, 0, (size_t)m->n_bins * sizeof(float));
+    if (m->reverb) memset(m->reverb, 0, (size_t)m->n_bins * sizeof(float));
 }
 
 void reverb_model_update_no_freq_shaping(ReverbModel *m,

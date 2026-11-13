@@ -1,4 +1,4 @@
-/* test_linear_context.c -- regression test for the AecLinearContext seam (aec_get_linear_context): the read-only view an
+/* test_linear_context.c -- regression test for the linear-stage seam (aec_get_linear, AecLinearView): the read-only view an
  * external neural post-filter uses to consume the formed linear error plus the same time-domain aligned far the PBFDKF
  * consumed.
  *
@@ -56,11 +56,23 @@ static int g_pass = 0;
         else         { printf("pass: %s\n", (msg)); g_pass++; } \
     } while (0)
 
+/* The split-entry configuration: residual FULL, every hop driven by aec_process_linear() + aec_process_residual(). */
 static void context_only_config(AecConfig* cfg, int sample_rate, int fft_size) {
     aec_config_from_level(cfg, AEC_LEVEL_BALANCED, sample_rate);
-    cfg->enable_res = 0;
-    cfg->return_res_context = 1;
+    cfg->residual = AEC_RESIDUAL_FULL;
     if (fft_size > 0) cfg->fft_size = fft_size;
+}
+
+/* One hop of a split-entry instance (the library applies no gain and synthesizes nothing). */
+static void split_hop(Aec* a, const float* mic, const float* far) {
+    int st = aec_process_linear(a, mic, far);
+    if (st == AEC_OK) st = aec_process_residual(a, NULL);
+    if (st != AEC_OK) { printf("FAIL: split hop refused (%d)\n", st); g_fail++; }
+}
+
+static void get_linear(const Aec* a, AecLinearView* v) {
+    v->struct_size = sizeof *v;
+    if (aec_get_linear(a, v) != AEC_OK) { printf("FAIL: aec_get_linear refused\n"); g_fail++; }
 }
 
 /* Deterministic xorshift noise, same style as the sibling tests. */
@@ -77,8 +89,7 @@ static float rng_uniform(float amp) {
  * side, exactly which raw samples an aligned far_hop must contain.  Sized
  * for the largest scenario (48 kHz: 1500 hops x 512). */
 /* Sized for the largest scenario: 500 acquisition + 5000 shift hops at 48 kHz/hop 512. The generous
- * shift budget is deliberate: with the ERLE watchdog live in this enable_res=0 context-only config
- * (the last_erle_windowed cache condition is enable_res || return_res_context), a confirmed delay
+ * shift budget is deliberate: with the ERLE watchdog live in this split-entry config, a confirmed delay
  * shift still needs seconds of audio to re-lock (ERLE collapse resumes full-rate matched-filter
  * analysis, then consensus must rebuild). The measured re-lock hop count is printed as info. */
 #define MAX_SAMPLES (5600 * 512 + 8192)
@@ -91,7 +102,7 @@ static float g_far_hist[MAX_SAMPLES];
  * their own locals between hops (fill windows, lock transitions, wrap classification). */
 static long drive_hop(Aec* a, long pushed, int true_delay) {
     int hop = a->hop_size;
-    float mic[1024], out[1024];
+    float mic[1024];
     int i;
     if (pushed + hop > MAX_SAMPLES) {
         printf("FAIL: history overflow\n"); g_fail++; return pushed;
@@ -102,7 +113,7 @@ static long drive_hop(Aec* a, long pushed, int true_delay) {
         src = pushed + i - true_delay;
         mic[i] = (src >= 0) ? 0.5f * g_far_hist[src] : 0.0f;
     }
-    aec_process(a, mic, g_far_hist + pushed, out);
+    split_hop(a, mic, g_far_hist + pushed);
     return pushed + hop;
 }
 
@@ -129,20 +140,20 @@ typedef struct LockWatch {
     int content_violation;
     unsigned gen_before;
     unsigned gen_at_lock;
-    AecLinearContext at_lock;
+    AecLinearView at_lock;
 } LockWatch;
 
 static void watch_hop(Aec* a, long pushed, void* user) {
     LockWatch* w = (LockWatch*)user;
-    AecLinearContext ctx;
+    AecLinearView ctx;
     int hop = a->hop_size;
     long start;
-    aec_get_linear_context(a, &ctx);
+    get_linear(a, &ctx);
     w->hops_seen++;
     /* Content proof on EVERY hop, not only at lock: UNLOCKED promises the caller's RAW far, and
      * from the first hop the ring can serve the offset the seam promises far[t - delay_samples].
      * Byte-compared against the history just pushed (amplitude 0.05 never soft-clips), not merely
-     * non-NULL: aec_get_linear_context() assigns aligned_far_hop = a->far_hop unconditionally, so a
+     * non-NULL: aec_get_linear() assigns aligned_far_hop = a->far_hop unconditionally, so a
      * NULL test can never fail. */
     start = pushed - hop -
             (ctx.delay_state == AEC_LINEAR_DELAY_UNLOCKED ? 0 : ctx.delay_samples);
@@ -179,8 +190,8 @@ static void scenario_acquire_and_verify(int sample_rate, int fft_size,
     int hop = a.hop_size;
 
     long pushed = 0;
-    AecLinearContext ctx0;
-    aec_get_linear_context(&a, &ctx0);
+    AecLinearView ctx0;
+    get_linear(&a, &ctx0);
     LockWatch w; memset(&w, 0, sizeof w);
     w.gen_before = ctx0.generation;
 
@@ -198,8 +209,8 @@ static void scenario_acquire_and_verify(int sample_rate, int fft_size,
     snprintf(msg, sizeof msg, "%s: first lock: generation == start+1", tag);
     CHECK(w.gen_at_lock == w.gen_before + 1, msg);
 
-    AecLinearContext ctx;
-    aec_get_linear_context(&a, &ctx);
+    AecLinearView ctx;
+    get_linear(&a, &ctx);
     snprintf(msg, sizeof msg, "%s: steady state LOCKED after lock", tag);
     CHECK(ctx.delay_state == AEC_LINEAR_DELAY_LOCKED, msg);
     snprintf(msg, sizeof msg, "%s: confidence >= 0.5 once locked", tag);
@@ -215,8 +226,13 @@ static void scenario_acquire_and_verify(int sample_rate, int fft_size,
 
     snprintf(msg, sizeof msg, "%s: aligned_far_hop aliases a->far_hop", tag);
     CHECK(ctx.aligned_far_hop == a.far_hop, msg);
-    snprintf(msg, sizeof msg, "%s: formed_linear_hop aliases the formed output", tag);
-    CHECK(ctx.formed_linear_hop == a.a3_lfs.e_form, msg);
+    snprintf(msg, sizeof msg, "%s: residual view formed_hop aliases the formed output", tag);
+    {
+        AecResidualView rv;
+        memset(&rv, 0, sizeof rv);
+        rv.struct_size = sizeof rv;
+        CHECK(aec_get_residual(&a, &rv) == AEC_OK && rv.formed_hop == a.a3_lfs.e_form, msg);
+    }
 
     /* Content proof: the exposed hop == raw far delayed by delay_samples,
      * byte for byte (no soft-clip at this amplitude, so the ring holds the
@@ -234,7 +250,7 @@ static void scenario_acquire_and_verify(int sample_rate, int fft_size,
     w2.gen_before = gen_locked;
     /* reuse watch via fresh struct: it counts CHANGED hops from here on */
     run_hops(&a, 5000, true_delay + 10 * hop, &pushed, watch_hop, &w2);
-    aec_get_linear_context(&a, &ctx);
+    get_linear(&a, &ctx);
     printf("info: %s: shift re-lock after %d hops (%.1f s audio)\n", tag,
            w2.first_changed_hop,
            (double)w2.first_changed_hop * hop / sample_rate);
@@ -257,7 +273,7 @@ static void scenario_acquire_and_verify(int sample_rate, int fft_size,
     /* Reset: one more generation bump, back to UNLOCKED. */
     unsigned gen_shift = ctx.generation;
     aec_reset(&a);
-    aec_get_linear_context(&a, &ctx);
+    get_linear(&a, &ctx);
     snprintf(msg, sizeof msg, "%s: reset: generation advanced", tag);
     CHECK(ctx.generation > gen_shift, msg);
     snprintf(msg, sizeof msg, "%s: reset: UNLOCKED with delay_samples == -1", tag);
@@ -267,19 +283,15 @@ static void scenario_acquire_and_verify(int sample_rate, int fft_size,
     g_rng_state = 0x11EC5EEDu;  /* keep scenarios independent of ordering */
 }
 
-/* EXTERNAL_ALIGNED (and its deprecated spelling, enable_delay_est=0): no estimator, no ring. The
- * caller contracted that far is already aligned, so the seam reports delay_samples 0, LOCKED from
- * the first hop, frozen generation, and exposes the caller's own hop byte for byte, never a ring
- * read. `legacy` drives the same assertions through the deprecated enable_delay_est=0 spelling,
- * proving the translation lands on this mode. */
-static void scenario_external_aligned(int legacy) {
-    const char* tag = legacy ? "external-aligned(legacy est=0)"
-                             : "external-aligned";
+/* EXTERNAL_ALIGNED: no estimator, no ring. The caller contracted that far is already aligned, so the
+ * seam reports delay_samples 0, LOCKED from the first hop, frozen generation, and exposes the caller's
+ * own hop byte for byte, never a ring read. */
+static void scenario_external_aligned(void) {
+    const char* tag = "external-aligned";
     char msg[160];
     AecConfig cfg;
     context_only_config(&cfg, 16000, 0);
-    if (legacy) cfg.enable_delay_est = 0;
-    else        cfg.delay_mode = AEC_DELAY_EXTERNAL_ALIGNED;
+    cfg.delay_mode = AEC_DELAY_EXTERNAL_ALIGNED;
     Aec a;
     snprintf(msg, sizeof msg, "%s: aec_create", tag);
     CHECK(aec_create(&a, &cfg) == 0, msg);
@@ -290,8 +302,8 @@ static void scenario_external_aligned(int legacy) {
 
     int hop = a.hop_size;
     long pushed = 0;
-    AecLinearContext first, ctx;
-    aec_get_linear_context(&a, &first);
+    AecLinearView first, ctx;
+    get_linear(&a, &first);
 
     /* Walk EVERY hop: the far the seam exposes must equal the far this test
      * just handed in (modulo nothing -- amplitude 0.05 never soft-clips). */
@@ -299,7 +311,7 @@ static void scenario_external_aligned(int legacy) {
     for (int h = 0; h < 120; ++h) {
         long base = pushed;
         pushed = drive_hop(&a, pushed, 800);
-        aec_get_linear_context(&a, &ctx);
+        get_linear(&a, &ctx);
         if (memcmp(ctx.aligned_far_hop, g_far_hist + base,
                    (size_t)hop * sizeof(float)) != 0) content_ok = 0;
         if (ctx.delay_state != AEC_LINEAR_DELAY_LOCKED ||
@@ -323,15 +335,14 @@ static void scenario_external_aligned(int legacy) {
  * verbatim (never -1, never the estimator's 0.0 confidence), must not claim
  * LOCKED while the ring is still filling, and must never bump generation --
  * there is nothing that could re-lock. */
-static void scenario_fixed_delay(int legacy) {
-    const char* tag = legacy ? "fixed(legacy est=0+fixed)" : "fixed";
+static void scenario_fixed_delay(void) {
+    const char* tag = "fixed";
     char msg[160];
     const int fixed = 1600;   /* 100 ms at 16 kHz */
     AecConfig cfg;
     context_only_config(&cfg, 16000, 0);
     cfg.fixed_delay_samples = fixed;
-    if (legacy) cfg.enable_delay_est = 0;
-    else        cfg.delay_mode = AEC_DELAY_FIXED;
+    cfg.delay_mode = AEC_DELAY_FIXED;
     Aec a;
     snprintf(msg, sizeof msg, "%s: aec_create", tag);
     CHECK(aec_create(&a, &cfg) == 0, msg);
@@ -341,8 +352,8 @@ static void scenario_fixed_delay(int legacy) {
     CHECK(a.ref_ring != NULL && !a.has_delay, msg);
 
     int hop = a.hop_size;
-    AecLinearContext first, ctx;
-    aec_get_linear_context(&a, &first);
+    AecLinearView first, ctx;
+    get_linear(&a, &first);
     snprintf(msg, sizeof msg, "%s: delay_samples reads the configured delay "
                               "before the first hop", tag);
     CHECK(first.delay_samples == fixed, msg);
@@ -358,7 +369,7 @@ static void scenario_fixed_delay(int legacy) {
     int content_ok = 1, changed_seen = 0;
     for (int h = 0; h < 400; ++h) {
         pushed = drive_hop(&a, pushed, fixed);
-        aec_get_linear_context(&a, &ctx);
+        get_linear(&a, &ctx);
         if (ctx.delay_samples != fixed) delay_ok = 0;
         if (ctx.delay_confidence != 1.0f) conf_ok = 0;
         if (ctx.generation != first.generation) gen_ok = 0;
@@ -400,7 +411,7 @@ static void scenario_fixed_delay(int legacy) {
      * re-seed the applied delay from the config, not to -1. */
     unsigned gen_before = ctx.generation;
     aec_reset(&a);
-    aec_get_linear_context(&a, &ctx);
+    get_linear(&a, &ctx);
     snprintf(msg, sizeof msg, "%s: reset re-seeds the configured delay (not -1)", tag);
     CHECK(ctx.delay_samples == fixed && a.current_delay == fixed, msg);
     snprintf(msg, sizeof msg, "%s: reset returns to UNLOCKED (ring emptied)", tag);
@@ -423,10 +434,10 @@ static void scenario_fixed_zero_delay(void) {
     CHECK(aec_create(&a, &cfg) == 0, "fixed0: aec_create");
     CHECK(a.ref_ring != NULL, "fixed0: ring still carved (unlike EXTERNAL)");
     long pushed = 0;
-    AecLinearContext first, ctx;
-    aec_get_linear_context(&a, &first);
+    AecLinearView first, ctx;
+    get_linear(&a, &first);
     run_hops(&a, 40, 0, &pushed, NULL, NULL);
-    aec_get_linear_context(&a, &ctx);
+    get_linear(&a, &ctx);
     CHECK(ctx.delay_samples == 0 && ctx.delay_state == AEC_LINEAR_DELAY_LOCKED,
           "fixed0: LOCKED at delay 0 from the start");
     CHECK(ctx.generation == first.generation,
@@ -532,7 +543,7 @@ static void scenario_fixed_ring_wraps(int sr, int fft, int fixed, int hops,
     raw_hops = (fixed + hop - 1) / hop;
 
     for (h = 0; h < hops; ++h) {
-        AecLinearContext ctx;
+        AecLinearView ctx;
         int read_pos;
         pushed = drive_hop(&a, pushed, fixed);
         /* Recompute the read the engine just made, from the post-write
@@ -540,7 +551,7 @@ static void scenario_fixed_ring_wraps(int sr, int fft, int fixed, int hops,
         read_pos = (a.ref_ring_write - hop - a.current_delay) % a.ref_ring_size;
         if (read_pos < 0) read_pos += a.ref_ring_size;
         if (read_pos + hop > a.ref_ring_size) wrapped++;
-        aec_get_linear_context(&a, &ctx);
+        get_linear(&a, &ctx);
         if (h < raw_hops) continue;
         if (ctx.delay_state != AEC_LINEAR_DELAY_LOCKED) locked_ok = 0;
         {
@@ -591,9 +602,9 @@ static void scenario_fixed_reset_refill(void) {
     for (pass = 0; pass < 2; ++pass) {
         int unlocked_hops = 0, content_ok = 1, locked_ok = 1;
         for (h = 0; h < 3 * (raw_hops + 1); ++h) {
-            AecLinearContext ctx;
+            AecLinearView ctx;
             pushed = drive_hop(&a, pushed, fixed);
-            aec_get_linear_context(&a, &ctx);
+            get_linear(&a, &ctx);
             if (ctx.delay_state == AEC_LINEAR_DELAY_UNLOCKED) {
                 unlocked_hops++;
                 continue;
@@ -680,7 +691,7 @@ static void scenario_unfilled_ring_reads_unlocked(void) {
     Aec a;
     CHECK(aec_create(&a, &cfg) == 0, "unfilled-ring: aec_create");
     int hop = a.hop_size;
-    float mic[1024], out[1024];
+    float mic[1024];
     memset(mic, 0, sizeof mic);
 
     /* Simulate an established lock whose ring content has just been wiped
@@ -693,11 +704,11 @@ static void scenario_unfilled_ring_reads_unlocked(void) {
 
     long base = pushed;
     for (int i = 0; i < hop; ++i) g_far_hist[base + i] = rng_uniform(0.05f);
-    aec_process(&a, mic, g_far_hist + base, out);
+    split_hop(&a, mic, g_far_hist + base);
     pushed = base + hop;
 
-    AecLinearContext ctx;
-    aec_get_linear_context(&a, &ctx);
+    AecLinearView ctx;
+    get_linear(&a, &ctx);
     CHECK(ctx.delay_samples == 5000, "unfilled-ring: delay reads as applied");
     CHECK(ctx.delay_state == AEC_LINEAR_DELAY_UNLOCKED,
           "unfilled-ring: UNLOCKED while the ring cannot cover the delay");
@@ -710,10 +721,10 @@ static void scenario_unfilled_ring_reads_unlocked(void) {
     for (int h = 0; h < 5000 / hop + 4; ++h) {
         base = pushed;
         for (int i = 0; i < hop; ++i) g_far_hist[base + i] = rng_uniform(0.05f);
-        aec_process(&a, mic, g_far_hist + base, out);
+        split_hop(&a, mic, g_far_hist + base);
         pushed = base + hop;
     }
-    aec_get_linear_context(&a, &ctx);
+    get_linear(&a, &ctx);
     CHECK(ctx.delay_state == AEC_LINEAR_DELAY_LOCKED,
           "unfilled-ring: LOCKED once the ring covers the delay");
     long start = pushed - hop - ctx.delay_samples;
@@ -737,8 +748,8 @@ static void scenario_ring_filled_saturates(void) {
     CHECK(a.ref_ring_filled == rs, "filled saturates at ring size");
     run_hops(&a, 100, 1600, &pushed, NULL, NULL);
     CHECK(a.ref_ring_filled == rs, "filled stays frozen at ring size");
-    AecLinearContext ctx;
-    aec_get_linear_context(&a, &ctx);
+    AecLinearView ctx;
+    get_linear(&a, &ctx);
     CHECK(ctx.delay_state != AEC_LINEAR_DELAY_UNLOCKED || ctx.delay_samples < 0,
           "saturated fill never blocks a valid locked state");
     aec_destroy(&a);
@@ -751,7 +762,7 @@ static void scenario_ring_filled_saturates(void) {
  * filtering-quality analyzer never calls the linear estimate usable; meanwhile the adaptive filter
  * fits far-shaped noise onto the near speech and subtracts something that was never there. The
  * analysis seam (formed_hop / error_spec) is the real residual and is NOT bounded; the rendering base
- * (aec_get_output_base) must not carry more windowed energy than the capture spectrum on any hop whose
+ * (aec_get_residual().base_spec) must not carry more windowed energy than the capture spectrum on any hop whose
  * usable verdict is false, and the guard must actually fire in this scenario. */
 static void scenario_far_active_no_echo(int silent_mic, const char *label) {
     AecConfig cfg;
@@ -764,35 +775,32 @@ static void scenario_far_active_no_echo(int silent_mic, const char *label) {
 
     g_rng_state = 0x11EC5EEDu;
     aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, 16000);
-    cfg.enable_res = 0;
-    cfg.return_res_context = 1;      /* the seam the NN post-filter consumes */
+    cfg.residual = AEC_RESIDUAL_FULL;   /* the seam the NN post-filter consumes (split entry points) */
     if (aec_create(&a, &cfg) != 0) { CHECK(0, "create"); return; }
     hop = aec_hop_size(&a);
     mic = (float *)malloc((size_t)hop * sizeof(float));
     far = (float *)malloc((size_t)hop * sizeof(float));
 
     for (h = 0; h < HOPS; ++h) {
-        AecResContext ctx;
-        AecOutputBase ob;
+        AecResidualView ob;
         double eo = 0.0, em = 0.0;
         for (i = 0; i < hop; ++i) {
             /* Loud reference, quiet near, and NO path between them. */
             far[i] = rng_uniform(0.6f);
             mic[i] = silent_mic ? 0.0f : rng_uniform(0.05f);
         }
-        aec_process_context(&a, mic, far);
-        aec_get_res_context(&a, &ctx);
+        split_hop(&a, mic, far);
         memset(&ob, 0, sizeof ob);
         ob.struct_size = sizeof ob;
-        if (aec_get_output_base(&a, &ob) != 0) { CHECK(0, "output base"); break; }
+        if (aec_get_residual(&a, &ob) != AEC_OK) { CHECK(0, "residual view"); break; }
         if (ob.guard_active) guard_hops++;
-        if (ctx.usable_linear) continue;
+        if (ob.usable_linear) continue;
         unusable_hops++;
         for (i = 0; i < ob.n_freqs; ++i) {
             eo += (double)ob.base_spec[i].r * ob.base_spec[i].r
                 + (double)ob.base_spec[i].i * ob.base_spec[i].i;
-            em += (double)ctx.near_spec[i].r * ctx.near_spec[i].r
-                + (double)ctx.near_spec[i].i * ctx.near_spec[i].i;
+            em += (double)ob.near_spec[i].r * ob.near_spec[i].r
+                + (double)ob.near_spec[i].i * ob.near_spec[i].i;
         }
         e_out += eo; e_mic += em;
         if (h > 8 && em > 1e-12 && eo / em > worst) worst = eo / em;
@@ -824,10 +832,8 @@ int main(void) {
     scenario_acquire_and_verify(16000, 0,   1600, "16k/fft256");
     scenario_acquire_and_verify(16000, 512, 1600, "16k/fft512");
     scenario_acquire_and_verify(48000, 0,   4800, "48k/fft1024");
-    scenario_external_aligned(/*legacy=*/0);
-    scenario_external_aligned(/*legacy=*/1);
-    scenario_fixed_delay(/*legacy=*/0);
-    scenario_fixed_delay(/*legacy=*/1);
+    scenario_external_aligned();
+    scenario_fixed_delay();
     scenario_fixed_zero_delay();
     scenario_fixed_ring_exact_size();
     scenario_fixed_ring_wraps(16000,  256,   100, 400, "16k/256 fixed=100");

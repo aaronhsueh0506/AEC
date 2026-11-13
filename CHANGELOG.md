@@ -43,6 +43,361 @@ when verdict requires it.
 ---
 
 
+## [Unreleased] — 2026-11-13 — Finish round: duty-gate / ring structural test, stale numbers and wording fixed
+
+**Output unchanged** (no change under `src/` or `include/` apart from one comment in `aec_post.h`).
+
+- `test_duty_census.c` gains section 8: `aec_duty_end/begin` stepped with `hold_hops = 3`, `period_hops = 4` (arms on the hold-th stable estimate, then runs one hop in four, a moved estimate disarms) and an `aec_ring_write/aec_ring_read` round trip that wraps at a nonzero offset. Three mutants that only the retired baseline files caught (duty hold `>=` -> `>`, period wrap `>=` -> `>`, `aec_ring_read` tail copied to `dst` instead of `dst + first`) now fail this test.
+- Docs: `sizeof(AecConfig)` 232 -> 228 B; `libaec.a` `__TEXT` 184,765 B (`AEC_NO_ARRAY=1`: 163,433 B) at `SIMD=1`, 166,881 B (148,721 B) at `SIMD=0`; broken `§6.2` anchor in `integration.md`; the `sdk_migration_output_guard.md` example no longer passes a removed argument; `integration.md` §8.9 gives one example call of `aec_apply_external_realign()`; the HTML reference pages show the 2-argument `aec_set_level`, no longer present `aec_level_*` / `aec_cng_fill` as public, carry symbol names instead of drifting line numbers, and count 57 `AecConfig` fields.
+- `parity_aec_e2e.c` and the Makefile help text document numeric levels only; the `test-header-cpp` message no longer mentions legacy names.
+
+## [Unreleased] — 2026-11-13 — Public header trims, legacy aliases and `enable_delay_est` removed, duty-gate / ring helpers merged, single-channel dead allocations removed
+
+**Output unchanged.** The five entry-point baseline streams (split_entry 1-3, aec_array 1-2) compared against the files the pre-split API wrote (AEC 2c8ced3 `git archive`, SIMD=1 and SIMD=0): every line identical except the pool `META` lines (`mem_size_*`, `sizeof_Aec`) of split_entry, which this entry moves on purpose. `make test-full` (SIMD=1), `make test` (SIMD=0) and `make AEC_NO_ARRAY=1 test` (SIMD=1, 0) pass.
+
+- **Header.** `aec_process_linear_shared_far_from`, `aec_level_floor_db` / `aec_level_dt_floor_db` / `aec_level_split_floor_enabled` and `aec_cng_fill` moved from `aec.h` to the new library-internal `include/aec_internal.h` (`aec_apply_cng_spec` stays public). Deleted: `aec_get_residual_gain` (read `aec_get_residual().res_gain`), `aec_array_duty_hops_total` / `_run` (read `AecDebugStatus`), `aec_array_pending_delay_candidate` (now the test hook `aec_testing_array_pending_delay_candidate`; `test-aec-array` and `test-aec-array-2` re-invoke make with `AEC_TESTING=1` like `test-aec-array-flow`), the `aec_testing_array_*` clause of the `AEC_NO_ARRAY` preamble, `AEC_PRESET_*` / `AecPreset`, `Aec::scr_e2coa_pre` / `scr_erl_arr`.
+- **`enable_delay_est` and `aec_config_resolve_delay()` removed.** `delay_mode` is the only selector; `aec_wav --no-delay-est` now sets `delay_mode` (FIXED when `fixed_delay_samples >= 0`, else EXTERNAL_ALIGNED). Callers that used `enable_delay_est = 0` as the only selector now name the mode.
+- **Duty gate and reference ring shared.** `Aec::duty_*` and the array flow's copy are one `AecDutyGate` with `aec_duty_reset/begin/end` and one `aec_duty_leak_db()`; the single-channel ring and the array ring use `aec_ring_write/read`. Mutating `aec_duty_begin` (inverted `run_filter`) changes 4 of the 5 baseline streams, mutating the ring read changes all 5.
+- **Single-channel dead allocations.** `x2_past` and the `X_buf` fallback of the render-reverb term, `rh_st` (the echo-generating window is on in the balanced configuration), stationarity-history rows beyond the ring's length, the shadow filter's own `X_buf` / `x2_cache` / `near_spec` / `error_spec_windowed` / `spec_scratch` (the shadow is now a follower of the main filter in every instance; shadow vs main far history was compared every hop over about 1.5 million hops of the test suite with zero differences), and, for `STATE` array lanes, the residual-echo estimator and comfort-noise arrays (`ree_init()` and the reverb models take NULL storage). `AEC_LAYOUT_VERSION` stays 1 (never released); `build_flags_hash` tokens updated.
+- **Pool sizes** (balanced, MATCHED n=5, 64-bit host): mono 16k/256 366,048 -> 343,760 B, 16k/512 494,768 -> 456,640, 48k/1024 1,162,784 -> 1,078,560; array 16k/256 STATE/ESTIMATE/FULL 710,576/716,832/724,736 -> 616,912/712,448/720,352, 16k/512 1,106,288/1,118,688/1,132,736 -> 920,464/1,110,208/1,124,256, 48k/1024 2,433,104/2,457,792/2,487,200 -> 2,062,960/2,441,120/2,470,528; `sizeof(Aec)` 6,400 -> 6,368. `libaec.a` text (SIMD=1) 186,105 -> 184,829 B, `AEC_NO_ARRAY=1` 164,509 -> 163,429 B.
+- **Supersedes** the pool figures and the `sizeof(Aec)` statements of the earlier 2026-11-13 entries below ("Review fixes: residual getters need a completed hop...", "Array lanes 1-3 reuse lane 0's far-only analysis", "Array lane pools shrink by 22 %", "A handle is usable only after a successful create / init") and of the 2026-11-12 array entry: they describe the state before this entry. Baseline note: the mono streams come from the release build, the array streams (`test-aec-array`, `test-aec-array-2`) from an `AEC_TESTING=1` build; the lines are identical either way.
+- Tests: `test/res_gain_of.h` (view-based replacement of the deleted getter); `check_handle_entries.py` also reads `aec_internal.h`; the delay-mode translation tests are replaced by the delay-mode defaults and the rejection matrix; `test_spectral_reuse` skips the spectra a follower shadow does not have; `test_memory_layout` pins updated. Python `test_preset_arg.py` reads `AEC_LEVEL_*`.
+
+## [Unreleased] — 2026-11-13 — `aec_set_level(Aec*, AecLevel)`: the ramp is an internal 100 ms; `--level` takes numbers; the array's gain stage can be replayed through an AEC_TESTING hook
+
+**API change; output changes only where a level is changed at run time.** Every instance built at a level, and every run that never calls `aec_set_level()`, is unchanged.
+
+- `aec_set_level(a, level)` replaces `aec_set_level(a, level, ramp_ms)`. The far-active floor always walks to its new value linearly in dB over `AEC_LEVEL_RAMP_MS` (100 ms, `src/aec_res_internal.h`); the DT floor and the split-floor flag still step at once. A caller that passed another time (0 for "next hop", up to 60 s) no longer can. `aec_res_set_level(r, level)` (internal) follows the same rule. `suppression_gain_set_split_floor_far_active_db(sg, db, ramp_ms)` keeps its `ramp_ms` (`test_runtime_preset.c` drives it with 0 ms and with the half-hop inputs).
+- Level arguments are numbers. `aec_wav`, `bench_rtf`, `parity_aec_e2e` and `pyc_parity/aec_run` read `--level` through `example/cli_level.h` (`aec_cli_parse_level()`): a whole decimal string 0..3 (0 mild, 1 balanced, 2 aggressive, 3 no_floor); a name, an empty or padded string, a suffix (`1x`) or a number out of range prints an error and exits 2 (it was a name table, `bench_rtf` and `aec_wav` also took names). `pyc_parity.py` and `run_parity_e2e.sh` translate their level names to the number for the C side only; the Python twins keep names. `README.md`, `docs/maintenance/development.md`, `docs/reference/wav_cli.md`, `docs/html/index.html` and `eval/run_c_ab.sh` use `--level 1`.
+- `aec_test_hooks.h` (AEC_TESTING build only): `aec_testing_res_mem_size()`, `aec_testing_res_init()` and `aec_testing_res_process()` run the array's gain stage (`src/aec_res.c`) on its own over an `AecResidualView`, fed the way the array feeds its own stage. `test_aec_array_flow.c` (now 713 checks) shows the standalone stage equals the array's own `res_gain` on every one of 400 hops at 16k/256, 16k/512 and 48k/1024, and that a stage at another level differs on 156-232 hops (the comparison can fail). `make test-no-testing-symbols` passes in both directions (14 `aec_testing_*` symbols in the AEC_TESTING archive, none in the production one). Audio_ALG's `pyc_parity_pipelines.sh` links that archive into one extra driver (`pyc_drv_4ch_replay`) so the nine `l2.res4.*.replay` rows recompute G_res again.
+- Tests: `test_runtime_preset.c` drives the 0 ms behaviour through the suppressor and checks a completed `aec_set_level()` ramp lands on the constructed float; `test_aec_res.c` checks the walk and its landing; `test_aec_array.c`, `test_aec_array2.c`, `test_handle_ready.c`, `test_zero_heap_aec.c`, `test_header_cpp.cpp` and the `baseline2_*.h` harness follow the new signature (a level event carries only the level).
+- Baseline streams (`AEC_TEST_BASELINE`, files captured from the previous version at `SIMD=1` and `SIMD=0`): `aec_array`, `split_entry` and `split_entry3` are byte-identical (0 mismatches of 138,315 / 76,527 / 5,910 lines); `aec_array2` and `split_entry2` differ only in the cases that contain a level event (`levels`, `level0`, `level1`, `level3`, `fixed`), only in the `gain`, `apply` and `out` lines and only from the first event on (266 of 6,903 and 1,110 of 22,465 lines); every other case matches. Those cases are excluded from the comparison for this change; the next baseline is captured from this version.
+
+## [Unreleased] — 2026-11-13 — A handle is usable only after a successful create / init (`Aec.ready`); baseline capture fails loudly
+
+**Output unchanged** (all five baseline streams are byte-identical to the ones captured before this entry at `SIMD=1` and `SIMD=0`; `sizeof(Aec)` and every pool size unchanged).
+
+- `Aec.destroyed` became `Aec.ready` (same byte): set as the last statement of a successful `aec_create()` / `aec_init()` (single-channel, array, lane), cleared by `aec_destroy()`. A NULL, zero-filled or never-built handle, the handle a failed `aec_create()` left behind and a destroyed handle are refused with the same codes. `aec_unusable()` moved to `src/aec_array_internal.h`; `aec_array.c` no longer repeats the raw test.
+- `make test-handle-ready` (new, `test/test_handle_ready.c`): all 29 `aec.h` entry points that take an `Aec` handle on a zero `Aec` (static, stack, calloc, a zero pool cast to `Aec*`), after a failed `aec_create()` (also over a destroyed handle) and after `aec_destroy()` for single-channel and array, heap and caller pool; a live handle of each kind is the control. `test/check_handle_entries.py` compares the list of calls with the prototypes in `aec.h`. Each of three mutations (the predicate without `ready`, a missing `ready = 1`, a missing `ready = 0`) was seen to fail it.
+- Config validation: `aec_validate_config()` and `aec_resolved_config()` are one `aec_resolve_valid_config()` (the delay is resolved once); the quarantine range checks are shared by the `AEC_NO_ARRAY` and the array build; `aec_array_impl_config_ok()` is declared only where it exists.
+- `test/baseline_stream.h` replaces five copies of the baseline loader. Asking for a baseline (`AEC_TEST_BASELINE`, `AEC_TEST_BASELINE_WRITE`) and not getting it (missing or unreadable file, unwritable directory, host build without a `simd0` / `simd1` name, `G2_ONLY` set) is a failure, not a pass with a note. `test_split_entry2.c` always requires its apply cross-check to have run, `test_aec_array2.c` requires its view invariants to have run on at least one hop.
+- `test_memory_layout.c`: the 216-configuration array walk fails on a refused size and requires all 216 to be checked on every ABI; the array pins print a skip line on 32-bit.
+- `gen_aec_balanced_config_h.py`: the multi-rate comment no longer claims a single including TU (comment-only change of `aec_balanced_config.h`); the EMR alias list is built once.
+
+## [Unreleased] — 2026-11-13 — One-off pre-split baselines retired; the entry-point tests keep an optional line-stream baseline
+
+**No library change.** The files that the pre-split API (AEC 2c8ced3, audiolib 43d562a, Audio_ALG cf023eb) wrote for the entry-point split
+and the array fold were one-off evidence. Before they were deleted the same recipe was re-run on pristine `git archive` copies of those
+commits (`SIMD=0` and `SIMD=1`, Apple arm64 / Apple clang 17 / NE10) and every file was reproduced byte for byte; the tests of the new API had
+consumed all of their lines with 0 mismatches: single-channel set 1 (76,527 lines), set 2 (22,465) and set 3, the bad-relock judgments that
+free-running scenes produce (5,910), and array set 1 (138,315) and set 2 (6,903). The files, their writers, `build_dump.sh`, the READMEs and
+`PORTING.md` (the map from the old `test_mcab.c` groups to the array tests) are no longer in the tree.
+
+- `test/golden/` is removed. The source pin of the end-to-end parity gate moved to `test/parity_e2e_inputs.sha256` (`run_parity_e2e.sh`, `make test-parity-e2e`).
+- `test_split_entry.c`, `test_split_entry2.c`, `test_split_entry3.c`, `test_aec_array.c` and `test_aec_array2.c` keep every structural check and
+  no longer look for a file. Their hashed line stream can be captured and compared: `AEC_TEST_BASELINE_WRITE=<dir>` writes
+  `<dir>/<test>_simd{0,1}.txt` (`simd0` = `SIMD=0`, `simd1` = NEON build, nothing on other hosts), `AEC_TEST_BASELINE=<dir>` compares every line.
+  The next change captures its baseline from this version first. The pool-size lines (`mem_size_*`, `sizeof_Aec`, `aec_res_mem_size`),
+  skipped while comparing with the pre-split files, are now compared. The scene-expectation checks of `test_split_entry3.c` (and the apply
+  cross-check count of `test_split_entry2.c`) run on the NEON and scalar builds without a file, as before.
+- `make test-split-entry-3` is new (the third set; mono only, also under `AEC_NO_ARRAY=1`).
+
+## [Unreleased] — 2026-11-13 — Follow-up: non-finite input and destroyed handles are documented and tested as the code behaves
+
+**Output unchanged; no code path changed** (comments and tests only). A non-finite input sample makes `aec_process_linear()` answer `AEC_ERR_ARG` before anything is written: the previous hop's views stay readable, its pending linear frame stays pending and the
+stage-timing record is untouched. The docs (`aec.h`, the C API / sequence pages, `lifecycle.md`, `integration.md`, `configuration.md` and the Audio_ALG `mcab` references) said the previous views were invalidated, the valid flag cleared or the timing zeroed. A `beamformed_error` with
+a non-finite bin is `AEC_ERR_ARG` (not `AEC_ERR_DSP`) and resets nothing in the array.
+
+- `test_aec_array.c` `check_destroyed_refuses()` (array and single-channel, heap and static) now also checks `aec_process_linear_shared_far_from()` -> `AEC_ERR_ARG` and that `aec_get_residual()`, `aec_get_linear()` and `aec_get_array()` leave a zeroed record with
+  only `struct_size` set; `test_lifecycle.c` and `test_memory_layout.c` repeat the single-channel part (the latter also runs under `AEC_NO_ARRAY=1`). Each assertion was checked to fail with its fix removed.
+- Comments of the `aec_carve()` failure paths no longer claim an FFT handle is released (every handle lives in the carved memory; the heap path frees the arena).
+
+## [Unreleased] — 2026-11-13 — Generated balanced-config header: tables that are prefixes of another table are emitted once
+
+**Output unchanged.** `python/diag/gen_aec_balanced_config_h.py` emits a table as a `#define` naming an earlier table when the table is bytewise the leading floats of it (a consumer reads only `table_len` entries). Per-bin tables are
+exactly such prefixes: every `*_EMR_TR` table of every grid is the constant 0.3 (one `AECB_SG_EMR_TR_COMMON[513]` serves all eight), the 8 kHz `ENR_TR` / `ENR_SU` tables start with the 16 kHz ones, and the 8 kHz and 16 kHz/256
+synthesis windows are equal (`AECB_SYNTH_WINDOW_256`, emitted under `AECB_ENABLE_8K || AECB_ENABLE_16K_256`). The per-grid `AECB_ENABLE_*` defaults moved above the first table that depends on them; no macro was renamed. A table that is not a
+prefix is still emitted in full, and `make test-header-fresh` regenerates the header and diffs it against the checked-in copy.
+
+- `include/aec_balanced_config.h`: 140,411 -> 108,764 B (540 -> 550 lines).
+- `libaec.a` `__TEXT` (host, sum of the members' `__TEXT` sections): 196,661 -> 187,405 B at `SIMD=1`, 178,481 -> 169,225 B at `SIMD=0`; `__TEXT,__const` 33,284 -> 24,028 B in both (`__text` unchanged).
+  The pool sizes do not move. Entries below that quote a `libaec.a` size were measured before this one, except the `AEC_NO_ARRAY` entry, which quotes the sizes after it.
+- Tests: the four array / split-entry goldens (`golden*_simd{0,1}.txt`) are byte-identical and still match at `SIMD=1` and `SIMD=0`.
+
+## [Unreleased] — 2026-11-13 — `AEC_NO_ARRAY`: a single-channel library without the four-microphone array instance
+
+**Output unchanged.** The default build (`AEC_NO_ARRAY=0`) is the same code as before bit for bit: `test-split-entry`, `test-split-entry-2`, `test-aec-array`, `test-aec-array-2` match their goldens at `SIMD=1` and `SIMD=0`, and with `AEC_NO_ARRAY=1`
+the two single-channel goldens still match bit for bit.
+
+- **`make AEC_NO_ARRAY=1` (`-DAEC_NO_ARRAY`)** builds a `libaec.a` without `aec_array.o` and `aec_res.o` (the array instance, its lanes and the stand-alone gain stage; nothing else uses them). The lane entry points of `aec.c` and the dispatch to the array are
+  compiled out (`aec_array_internal.h` maps the dispatch targets to constants, so no undefined reference survives at any optimisation level). `AecConfig.n_mics` other than 1 is refused by every construction path: `aec_get_mem_size()` 0,
+  `aec_init()` / `aec_init_ex()` NULL, `aec_create()` -1. `aec_get_array()`, the `aec_array_*()` diagnostics and the `aec_testing_array_*()` hooks are not defined (a call is a link error); `aec.h` is the same in both builds (documented at its top).
+  The flag is part of `CFG_SIG` (and of the compile flags), so the two builds never share an `obj/` or `bin/` directory.
+- **Tests.** With `AEC_NO_ARRAY=1` the array-only targets (`test-aec-array`, `test-aec-array-2`, `test-aec-array-flow`, `test-aec-res`) print a "SKIPPED" line and succeed; every other target runs, including both single-channel goldens
+  (`test-split-entry*` link `aec_res.o` as test support: their reference gain stage). `test_split_entry2.c` and `test_memory_layout.c` check that `n_mics = 4` is refused; `test-header-cpp` takes the flag.
+- **Size (host build, sum of the `__TEXT` sections).** `libaec.a`: 187,405 -> 165,265 B at `SIMD=1` (-22,140), 169,225 -> 150,285 B at `SIMD=0` (-18,940). A linked mono program (`aec_init`, `aec_process`, `aec_destroy`): 259,559 -> 237,303 B at `SIMD=1`
+  and 235,635 -> 216,571 B at `SIMD=0`; with `-Wl,-dead_strip` 173,061 -> 166,729 B and 153,585 -> 147,373 B (a program that calls nothing else of the array loses only what `aec_init` / `aec_destroy` reach).
+
+## [Unreleased] — 2026-11-13 — Review fixes: array beam validation, destroyed handles, status convention, header clarifications
+
+**Output unchanged**: both golden sets (`test-split-entry`, `test-aec-array`, `-2` of each) still match bit for bit at `SIMD=1` and `SIMD=0`.
+
+- **`aec_process_residual()` on an array validates the beam up front.** A `beamformed_error` with a non-finite bin is now `AEC_ERR_ARG` like non-finite or all-zero
+  weights: no reset, the hop stays open, the previous views stay readable. It used to be `AEC_ERR_DSP` and reset all four lanes and the gain stage
+  (seconds of re-adaptation for one bad bin of the application's beamformer; the Python twin already rejects non-finite beamformer output with a `ValueError` and no state change). `AEC_ERR_DSP` remains for what only shows after the arguments pass (finite weights whose projections overflow, internal
+  consistency checks). Test: `short_stream` / `test_dsp_error_resets_the_instance` in `test_aec_array.c`, `test_aec_array_flow.c`.
+- **A destroyed handle is deterministic.** `aec_destroy()` of an `aec_create()` instance (array or single channel) frees the arena, zeroes the caller's `Aec` and sets its `destroyed` flag;
+  static (`aec_init`) instances are flagged the same way (an array's pool block keeps no state of its own for it). Every entry point then refuses the handle (`AEC_ERR_ARG`, `-1`, `0`, `NULL`, zeroed records as
+  documented) instead of the heap array falling into the single-channel path and faulting. `aec_hop_size()` reads 0 for a NULL or destroyed handle, `aec_reset(NULL)` and `aec_reset()` of a destroyed handle are no-ops,
+  and `aec_debug_status()` zeroes its record for a NULL or destroyed handle. A freed `Aec` or pool stays undefined (documented in `aec.h`). The flag is a byte beside `is_static` (the two were one `int`), so `sizeof(Aec)`
+  (6,400 B) and every pool size are unchanged and the library keeps no global state at all; one inline helper (`aec_unusable()`) is the check at each entry point.
+  Test: `test_use_after_destroy_and_null` (heap and static, array and single channel); with the flag never set, or the helper reduced to a NULL test, the test crashes (verified by mutation).
+- **The array's gain stage reads the aligned far through `AecResInput.render_hop`** (the pooled `render_scaled` buffer) instead of `aec_render_stats()` into a stack array: the peak stack of
+  `aec_process_residual()` on a `FULL` array drops from 8,584 to 4,472 bytes (host build, measured with a painted stack), arithmetic and results identical.
+- **`aec_get_mem_breakdown()` and `aec_resolve_signal_grid()` return `AecStatus`** (`AEC_OK` = 0 on success, `AEC_ERR_ARG` otherwise) instead of `1` / `0`, so every status-returning call
+  of the library reads the same way. All callers are converted: the AEC tests and CLI example, the Audio_ALG pipelines, tests and AIAEC front end, and the board samples (the "returns 1 on success" warning comments are gone);
+  docs, the function map and the reference pages follow. Code that tested the result with `!` must now test `!= AEC_OK`.
+- **Header clarity (`aec.h`)**: the file header no longer says "single-channel"; the aliasing rule of `aec_apply_gain()` is stated (in place on the caller's own buffer that is the view's `base_spec` is allowed
+  and bit-identical to the out-of-place result, the view then holds the gained data; any other overlap is not), with a test (`test_apply_gain_in_place`); the "Array instance" section lists the config fields an array
+  ignores (`delay_est_init_s`, `delay_buffer_ms`, `dt_aware_res_floor_enabled` and `ne_recent_*` for the fused gain, the 4096 ms `max_delay_ms` cap and the missing 8 kHz grid), says that
+  `capture_proxy_channel` is the only microphone the shared estimator hears, states how the fused gain differs from the single-channel gain, and gives the lifetime rules of the array views
+  (`error_spec` / `base_spec` alias the caller's `beamformed_error`; lane views survive `aec_reset()` uncleared). `AecDebugStatus` cites `AecLinearView.filter_converged`; "a refused call leaves the instance untouched"
+  now names the `AEC_ERR_DSP` exception; comments that still named `AecLinearContext` / `AecResContext` use the current types.
+- `aec_array_realign_*_lane_count` still count four soft lanes for a `changed` hop whose delta is 0 (for example a first acquisition at delay 0). No test in this repository reaches that case (skipping it
+  moves no golden and no flow test), but the Python twin (`realign_soft_lane_count`) documents and counts it the same way and the `pyc_parity` run compares the pair, so the behaviour is documented in `aec.h` and kept.
+- Docs/map: `docs/c_python_function_map.md` lists `aec_close_linear`, `aec_far_donor_ok`, `aec_input_finite`, `aec_unusable`, `live_array` and drops the two clock rows whose function moved into a header; `test_c_python_map.py` passes again.
+- `libaec.a` `__TEXT` (host, sum of the members' `__TEXT` sections): 196,597 -> 196,661 B at `SIMD=1`, 178,669 -> 178,481 B at `SIMD=0` (this entry's net: the destroyed-handle flag, the NULL / destroyed checks and the single up-front beam test, minus the per-call `aec_render_stats` copy on the array path; the same tree with the shared destroyed control block it replaced measured 199,181 / 181,121 B, so the flag saves 2,520 / 2,640 B). Peak stack of an array `aec_process_residual()` (`FULL`): 8,584 -> 4,472 B.
+
+## [Unreleased] — 2026-11-13 — Second golden set for the entry-point split (`test-split-entry-2`, `test-aec-array-2`)
+
+**Output and public API unchanged.** One init-time check added: `aec_init()` / `aec_create()` of a single-channel instance fail when the carve does not end exactly at
+`aec_get_mem_size()` (a lane already did); no configuration of the sweep in `test_split_entry2.c` trips it.
+
+- New baselines written by the pre-split API (AEC 2c8ced3, audiolib 43d562a, Audio_ALG cf023eb): single-channel (22,465 lines) and array (6,903 lines), with their writers
+  and sha256 (one-off files, retired on 2026-11-13 after the bit-exact comparison; see the retirement entry above).
+  The first set did not reach: saturation (`saturation_level` > 0.5), double talk (`dt_indicator` > 0.2) with the near-end-recent floor, clock drift, a confirmed delay shift
+  with the bad-relock revert and its reject veto, `aec_reset` mid-stream, `FIXED` / `EXTERNAL_ALIGNED` with `aec_apply_external_realign`, levels in flight,
+  switched-off blocks, live observer, duty cycle, 8 kHz; for the array a clipped / silent microphone, `capture_proxy_channel` != 0, a caller-supplied `beamformed_error`,
+  clock drift, `aec_set_level`, lanes without the shadow filter, the 32/36-sample admission band and quarantine moves in both directions.
+- `make test-split-entry-2` (also `aec_process` alternating with the split calls, and the carve end of every instance kind) and `make test-aec-array-2` (also per-hop view invariants:
+  `res_floor_protect` is the `max_dt` decision, the caller's `beamformed_error` is the fused error, the instance's gain and `aec_apply_gain` against the explicit forms) compare bit for bit
+  at `SIMD=1` and `SIMD=0` on the host recorded in the READMEs; both pass with 0 mismatches. The six mutations the first set did not detect (saturated-echo min gain, clock-drift term of the HF limiter, bad-relock revert
+  without the taps, `res_floor_protect` of the single-channel and of the array view, `ne_recent` hold halved) and nine more (saturation EMA attack, saturated-capture threshold,
+  array saturation from lane 0 only, array clock drift forced off, DT-protect threshold, single-channel carve size, reject-list veto removed, array proxy channel ignored,
+  array admission band 32 -> 33) each fail at least one of the two new tests.
+- Per-hop group hashes are chained, printed every 16 hops and on every event; `G2_VERBOSE=<file>` writes the unchained per-hop hashes (the writer takes the same switch), `G2_ONLY=<substring>` selects cases.
+
+## [Unreleased] — 2026-11-13 — Review fixes: residual getters need a completed hop, array pool and delay-ring edge cases
+
+Both golden files (`split_entry`, `array_entry`) still compare with 0 mismatches at `SIMD=1` and `SIMD=0`.
+
+- **Single-channel residual getters** (`aec_get_residual()`, `aec_get_residual_gain()`, `aec_apply_gain()`, `aec_apply_cng()`) return
+  `AEC_ERR_SEQUENCE` / `NULL` until a residual stage has completed since construction or `aec_reset()` (they used to read an
+  unwritten pool). `Aec` gains one `int`: `sizeof(Aec)` 6,392 -> 6,400; the pools do not change (both round up to 6,400).
+- **Non-finite input.** `aec_process()`, `aec_process_linear()` and `aec_process_linear_shared_far_from()` on a single-channel instance return
+  `AEC_ERR_ARG` for a NaN / Inf sample and change nothing, as the array already did. A refused array `aec_process_linear()` no longer
+  drops the previous hop's views.
+- **`aec_reset()` of a poisoned instance** now also restores `PBFDKF.erl_per_bin`; before, a finite but overflowing sample kept
+  re-poisoning the first hops after the reset.
+- **Array pool.** `aec_init()` accepts a pool larger than `aec_get_mem_size()` (it used to return NULL). The control block drops
+  four unused members: every array pool is 256 B smaller (16k/256 FULL 724,736; 16k/512 1,132,736; 48k/1024 2,487,200).
+- **Array MATCHED delay.** An estimate longer than the reference ring (`max_delay_ms` smaller than the echo path) is not accepted;
+  before, `align_render()` refused it and the whole array was reset each time the estimator relocked.
+- `aec_far_fft_real_compute_count(NULL)` answers 0; `aec_apply_gain_spec()` ignores NULL pointers and `n <= 0`.
+- Internal: one clock shim, shared duty constants, `AEC_MAX_MICS` removed (`AEC_ARRAY_MICS`), the DT-protect threshold in one place.
+
+## [Unreleased] — 2026-11-13 — Array lanes 1-3 reuse lane 0's far-only analysis (bit-exact, about 4 % less CPU)
+
+**Output, public API, pool sizes (`sizeof(Aec)` 6,392, array 724,736 / 1,132,736 / 2,487,200 B FULL) and the single-channel path are unchanged.**
+Both golden files (`split_entry`, `array_entry`) still compare with 0 mismatches at `SIMD=1` and `SIMD=0`.
+
+- Lane 0 publishes what only depends on the far signal; lanes 1-3 take it instead of recomputing (`AecFarShare` in `aec_array_internal.h`, three levels):
+  - `hop`, valid whenever the lanes see one far hop: reference saturation and the soft-clip it implies, the far mean square, the render-activity
+    detector, the "far peak reached the floor" test.
+  - `fft`, valid when the lanes' spectra agree (not on a mixed warm/soft realign hop): the far PSD, the scaled render block and the active-render
+    verdict inside the post chain.
+  - `analysis`, valid while the lane's far history has been identical to lane 0's since the last reset: the render-signal analyser (tonal counters,
+    poor-excitation verdict, narrow-band mask) and the noise-floor update. A borrowing lane does not keep its own copy current; the array
+    marks it stale, and the lane takes lane 0's state (`aec_lane_adopt_far_analysis()`) before it next computes locally.
+- Identity check: after every shared-alignment change the array compares each lane's far history (`far_buffer` and the previous hop's `|X|^2` of the
+  main and shadow filters, `aec_lane_far_history_equal()`) with lane 0's. A lane that differs (a soft realign clears the history, a warm one keeps it)
+  leaves the shared set and follows its own analysis until `aec_reset()`; so after one mixed warm/soft realign the affected lanes stay local
+  (as before this change) and only the unaffected ones keep the saving. The far history itself (`X_buf`, `x2_cache`, `far_buffer`) is not shared.
+- Not hoisted: the per-lane stationarity flags and history ring (they add the lane's own reverb), the far sum of squares inside the two filters
+  (13-56 ns per lane, inside the measurement noise), and everything on the near, error or weight side.
+- `AecArray` flags are bytes now so the control block keeps its size; `AEC_TESTING` adds `aec_testing_array_set_far_hoist()` (forces every lane local),
+  `_far_sync_lanes()`, `_far_stale_lanes()` and `_lane()`.
+- Tests (`make test-aec-array-flow`, +180 checks): a hoisted array against an all-local twin over speech, tones + clipping + silence, uniform and mixed
+  warm/soft realign (lane 0 on either side), the output-guard scene, a reset and a mid-stream switch, in `STATE`/`ESTIMATE`/`FULL` on the three grids.
+  Outputs, the delay state and the skipped analysis state are compared bit for bit, and every lane left in sync must have an unchanged far history.
+  Skipping the identity check, skipping the adopt, a wrong mask, saturation state or PSD source each fail it.
+- Measured on this host (Apple M4, `SIMD=1`, per 4-lane hop `FULL`, median of 9 interleaved runs, two repetitions, one unrelated process kept a core busy
+  throughout): `EXTERNAL_ALIGNED` 16k/256 24.0 -> 23.1 us (-4.0 to -4.5 %), 16k/512 43.9 -> 42.2 us (-3.9 to -4.6 %), 48k/1024 95.8 -> 91.9 us (-4.0 to -4.1 %);
+  `MATCHED` (the shared estimator is common to both) -2.8 to -3.0 %, -3.2 to -3.7 %, -3.3 to -3.8 %. `libaec.a` text grows by 1.9 kB (194,025 -> 195,897 B
+  at `SIMD=1`, 176,685 -> 178,493 B at `SIMD=0`).
+
+## [Unreleased] — 2026-11-13 — The stand-alone `AecRes` API leaves the public headers
+
+- `include/aec_res.h` is gone from the install surface: the residual-echo gain stage (`AecRes`, `AecResInput`, `aec_res_*`,
+  `aec_render_stats`) is the library-internal `src/aec_res_internal.h`; the array instance and the single-channel post chain
+  keep using it unchanged. Callers take the gain from `aec_get_residual_gain()` / `aec_get_residual()` and set its strength
+  with `aec_set_level()`.
+- `aec_cng_fill()` moves to `aec.h` and from `src/aec_res.c` to `src/aec.c`; signature, arithmetic and draw schedule are unchanged
+  (the golden files still compare with 0 mismatches). Code that included `aec_res.h` for it only needs `aec.h`.
+- `AecConfig.residual` comment corrected: the pool size is independent of it for a single-channel instance, and grows
+  STATE < ESTIMATE < FULL for an array.
+- Docs: integration §8.5 now describes `aec_cng_fill()`; the levels, usage, sequence and RES pages, the manual and the function map
+  follow. Historical entries below keep the old names.
+
+
+## [Unreleased] — 2026-11-13 — Array lane pools shrink by 22 % (bit-exact)
+
+**The array pool shrinks; its output does not change, and the single-channel pool does not change.** Each of the four lanes
+is now built by an internal lane path (`aec_lane_get_mem_size()` / `aec_lane_init()`, `aec_array_internal.h`) that
+refuses any config but a lane's (`n_mics` 1, `EXTERNAL_ALIGNED`, residual `STATE` or `ESTIMATE`) and carves only what that
+contract runs. A stand-alone `Aec`, `aec_get_mem_size()` of any single-channel config and `test_memory_layout`'s single-channel
+pins (366,048 / 494,768 / 1,162,784 B) are untouched. Public API, `AEC_LAYOUT_VERSION` (1, never released) and `sizeof(Aec)` (6,392) are unchanged;
+the array part of the carve text behind `build_flags_hash` now reads `fft,lane4(shared-fft,lean)`.
+
+### Changed (array lanes only)
+- **One FFT handle for the four lanes** (21,456 / 40,656 / 79,056 B). The handle holds the twiddle config and a staging block
+  that every call overwrites before reading; lanes run strictly one after another within a hop (the main filter, the shadow
+  filter and the post chain of one lane already shared one handle). It sits in the array pool and is counted in `fusion_bytes`.
+- **No delay-shift snapshots** (59,968 / 69,952 / 205,248 B): `delay_shift_judgment_pre_W`, `_pre_shadow_W` and `_pre_H_error` are
+  written and read only inside the MATCHED estimator's path (`has_delay`), which a lane never has.
+- **No synthesis or gain buffers** (45,952 / 86,912 / 181,120 B for the four lanes): `ola`, `eout`, `eout_full`
+  (`aec_post_apply_output()` runs only for `FULL` without `context_only`), the eleven SuppressionGain arrays (only
+  `suppression_gain_get_gain()` reads them; a lane tracks `DominantNearend` only), the REE render-history rows (read only
+  without the echo-generating window) and `x2_past` (read only when the filter has no `x2_cache`). `aec_post_reset()` and
+  `suppression_gain_init()` accept NULL for these; `aec_post_apply_output()` and `suppression_gain_get_gain_stats()` assert.
+- **The lane's shadow filter follows the main filter** (55,872 / 74,112 / 197,120 B): `pbfdaf_init_static_follower()` shares
+  the main filter's `X_buf` and `x2_cache` and drops `near_spec`, `error_spec_windowed` and `spec_scratch` (its frontend is
+  lightweight). Sharing is exact only because every writer of the far history is paired between the two filters: both run every hop with the same far
+  input (the main filter takes the shadow's far spectrum), both advance `partition_idx` on every path, and every
+  `pbfdkf_reset` / `pbfdaf_reset` / `reset_taps` / `clear_far_history` / `warm_shift_ir` call site in `aec.c` hits both. An
+  instrumented build of the pre-change code compared the two filters' `X_buf`, `x2_cache` and `partition_idx` before the shadow and after the
+  main filter on every hop of every test that runs a shadow (1,172,330 comparisons, 0 differences, mixed realign and reset included).
+- **Stationarity history rows** (20,608 / 53,440 / 90,240 B): a lane carves the ring's `aec_blocks_to_hops(13, ...)` rows
+  (`stationarity_estimator_window_hops()`) instead of 16.
+- The lane carve is checked to end exactly at the size it announced.
+
+### Result (host, balanced, `MATCHED`, `delay_num_filters = 5`; bytes)
+| grid | STATE | ESTIMATE | FULL | before (FULL) | lane each (before) |
+|---|---:|---:|---:|---:|---:|
+| 16k/256 | 710,576 | 716,832 | 724,736 | 928,848 | 148,288 (201,040) |
+| 16k/512 | 1,106,288 | 1,118,688 | 1,132,736 | 1,458,064 | 245,104 (329,760) |
+| 48k/1024 | 2,433,104 | 2,457,792 | 2,487,200 | 3,240,240 | 539,472 (734,256) |
+
+The array is 204,112 / 325,328 / 753,040 B smaller (22.0 / 22.3 / 23.2 %) for all three residual modes. `lane_bytes`: 593,152 /
+980,416 / 2,157,888; `fusion_bytes` (FULL) 24,672 / 44,384 / 86,880 (it now includes the shared FFT handle: 7,152 / 13,552 /
+26,352). `libaec.a` `__TEXT` (`size`, sum over members): SIMD=1 191,730 -> 194,025 B, SIMD=0 174,422 -> 176,685 B (+2.3 kB: the lane path and the follower filter variant).
+
+### Verified
+- `make test-split-entry` and `make test-aec-array` (both golden files, not regenerated) bit-exact at SIMD=1 and SIMD=0
+  (76,506 and 263,031 compared lines, 0 mismatches), `test-aec-array-flow`, `test-memory-layout` (now also pins the array pools and
+  walks 216 array configurations: three grids x STATE / ESTIMATE / FULL x three delay modes x shadow / live observer / mic high-pass
+  on and off, each refused at `need - 1`, accepted at `need` with the tail canary intact, then 60 hops, `aec_reset()` and 10 hops),
+  and the rest of the AEC `test-*` targets. Mutation checks on a scratch copy: a shadow `X_buf` offset by one element fails
+  `test-aec-array` (125,491 mismatching golden lines); one fewer stationarity-history row fails it (61,820).
+- Not done: a `STATE` lane still carves the residual-echo estimator arrays and the comfort-noise arrays its early exit never
+  reads (about 26 kB per lane at 16k/256), because the estimator's scalars are read before that exit and its init / reset write
+  the arrays; the embedded `DelayAec` (1,488 B) in `Aec`; the far-side state per lane (see below).
+
+## [Unreleased] — 2026-11-12 — Four-microphone array instance (`AecConfig.n_mics = 4`)
+
+**New C API surface; the single-channel instance is unchanged.** The four-microphone linear flow that Audio_ALG's 4ch `mcab`
+kept over four caller-owned lanes, a caller-owned delay estimator and a stand-alone `AecRes` is now one instance of this
+library: `AecConfig.n_mics = AEC_ARRAY_MICS` and one `aec_init()` / `aec_create()` place four lanes (each a single-channel
+`EXTERNAL_ALIGNED` instance), one shared delay estimator with one aligned far, and the fusion buffers in one pool. The
+beamformer (SRP-PHAT, BF, VAD) and the synthesis stay with the caller.
+
+### Added
+- Config: `n_mics` (1 or 4), `capture_proxy_channel` ([0, 3]), `delay_backward_quarantine_enabled` / `_s`. An array instance
+  accepts 16k/256, 16k/512 and 48k/1024 only, `residual` STATE / ESTIMATE / FULL (not OFF) and `max_delay_ms` <= 4096;
+  `delay_est_init_s` and `delay_buffer_ms` are not read by it.
+- Per hop: `aec_process_linear(a, mics, ref)` (interleaved `float[hop][4]`) -> `aec_get_array()` (`AecArrayView`: each lane's
+  analysis spectrum, rendering base, formed hop, guard flag, the aligned far and the shared `AecDelayState`) -> the caller's
+  beamformer -> `aec_process_residual(a, &beam)` (`AecBeam`: channel-major weights `Complex[4][n_freqs]`, optional
+  `beamformed_error`) -> `aec_get_residual_gain()` / `aec_apply_gain()` / `aec_apply_cng()`.
+- `AecStatus` gains `AEC_ERR_DSP` (-4): a lane or the fusion refused the hop; the whole instance has been reset as by `aec_reset()`.
+- `AecMemBreakdown` gains `lane_bytes` and `fusion_bytes`; diagnostics `aec_array_*` (warm / soft realign lane counts, pending
+  delay candidate, duty census, matched-filter and lane counts, `aec_array_get_timing()`).
+- Mode behaviour: with `STATE` the residual stage is `AEC_ERR_MODE` (lanes only); with `ESTIMATE` it fuses without a gain and may
+  be repeated on a hop; with `FULL` a second `aec_process_residual()` on the same hop is `AEC_ERR_SEQUENCE`. In the fused
+  `AecResidualView` `formed_hop` and `echo_spec` are `NULL`. `aec_process()`, `aec_process_linear_shared_far_from()` and
+  `aec_apply_external_realign()` are refused on an array instance (`AEC_ERR_MODE`, `AEC_ERR_MODE`, `-1`).
+- `aec_post_reset_serial()` of an array is the sum of the lanes' counters: `aec_reset()` moves it by 4.
+- Tests: `make test-aec-array` (every line of the baseline written by the pre-fold `mcab` flow, a one-off file retired on 2026-11-13, plus contract checks)
+  and `make test-aec-array-flow` (524 state-machine checks ported from `test_mcab.c`; the map of what moved and what stays in Audio_ALG was in the retired
+  `PORTING.md`). With SIMD=1 on the freeze host (Apple arm64,
+  Apple clang 17, NE10): 138,315 golden lines consumed, 0 mismatches, 612,258 checks, 0 failed; flow tests all passed. SIMD=0 was not re-run for this entry.
+- Docs: `docs/reference/{integration,lifecycle,configuration}.md` (section 8.8, array pool, section 6.8), `docs/c_user_manual_zh_TW.md`,
+  the four HTML reference pages, `c_impl/README.md`, `c_impl/STATIC_MEMORY.md`. The C example in 8.8 compiles with
+  `-Wall -Wextra -Werror` and runs.
+
+### Array pool sizes (host measurement; balanced, `MATCHED`, `delay_num_filters = 5`)
+| grid | STATE | ESTIMATE | FULL | `lane_bytes` | `fusion_bytes` (FULL) |
+|---|---:|---:|---:|---:|---:|
+| 16k/256 | 914,688 | 920,944 | 928,848 | 804,160 | 17,776 |
+| 16k/512 | 1,431,616 | 1,444,016 | 1,458,064 | 1,319,040 | 31,088 |
+| 48k/1024 | 3,186,144 | 3,210,832 | 3,240,240 | 2,937,024 | 60,784 |
+
+Unlike a single-channel instance, the array pool depends on `residual`. The `Aec` header (6,400 B) is in none of the breakdown fields.
+
+### Not done
+- The far-side state is still held per lane; only the delay estimator, the aligned far and, within a hop, lane 0's far FFT
+  result (borrowed by lanes 1-3) are shared.
+- Each lane still carves its full single-channel `EXTERNAL_ALIGNED` pool (201,040 / 329,760 / 734,256 B, identical for STATE and
+  ESTIMATE lanes), including storage its mode does not use; about 87 / 90 / 91 % of the `FULL` array pool. Reducing it is a later step
+  (done in the 2026-11-13 entry above; the table above is the pool before it).
+- Audio_ALG's `mcab` and the stand-alone `AecRes` path are not yet moved onto the array instance.
+- The pre-split baseline files (retired on 2026-11-13) were produced and compared on one host only; other hosts and the target board are unverified.
+
+
+## [Unreleased] — 2026-11-12 — Split entry points and `AecConfig.residual` replace the context API
+
+**Breaking C API change; output bits unchanged.** The single-channel instance now has three entry points and one setting
+for how far the residual stage goes. Every old-API configuration maps onto a new mode (old-to-new list below), and the per-hop
+outputs of the new calls equal the old ones bit for bit: `make test-split-entry` reproduces all 76,506 compared lines of
+the one-off baseline files of the pre-split API (Apple arm64 / Apple clang 17, NE10; both SIMD settings; retired on
+2026-11-13 after a re-run of the old API reproduced them byte for byte, see the retirement entry above).
+
+### Changed (API, breaking)
+- **`AecConfig.residual`** (`AecResidualMode`: `AEC_RESIDUAL_OFF`, `STATE`, `ESTIMATE`, `FULL`; default `FULL`) replaces the
+  three flags `enable_res`, `return_res_context` and `spatial_linear_context` (and the `AEC_CONTEXT_*` constants). Old to new:
+  `enable_res = 0, return_res_context = 0` is `OFF`; `AEC_CONTEXT_LINEAR_ONLY` is `STATE`; `AEC_CONTEXT_NO_GAIN` is `ESTIMATE`;
+  `enable_res = 0, return_res_context = 1` is `FULL` driven by `aec_process_linear()` + `aec_process_residual()`;
+  `enable_res = 1` is `FULL` driven by `aec_process()` (the library applies the gain, adds comfort noise and synthesizes).
+  Validation is one range check on `residual`; the old flag-combination rules are gone.
+- **Entry points return `AecStatus`** (`AEC_OK` = 0, `AEC_ERR_ARG`, `AEC_ERR_MODE`, `AEC_ERR_SEQUENCE`, `AEC_ERR_DSP`) instead of
+  `void`: `aec_process(a, mic, ref, out)`, `aec_process_linear(a, mic, ref)`, `aec_process_residual(a, beam)` (single channel: `NULL`) and
+  `aec_process_linear_shared_far_from()`. A refused call touches nothing. `aec_process_context()` and
+  `aec_process_context_shared_far_from()` are removed.
+- **Views**: `aec_get_linear()` / `AecLinearView` (linear stage and its status scalars) and `aec_get_residual()` /
+  `AecResidualView` (formed hop, analysis spectra, `base_spec` and `guard_active`, `r2`, `comfort_noise`, `res_gain`, the flags the gain
+  stage was fed) replace `aec_get_linear_context()`, `aec_get_res_context()` and `aec_get_output_base()` (and `AecLinearContext`,
+  `AecResContext`, `AecOutputBase`). `struct_size` is validated as before. `aec_get_residual_gain()` returns the `G_res` buffer.
+- **Gain helpers**: `aec_apply_gain()` and `aec_apply_cng()` (generator inside the instance, reseeded by every hard post-chain reset),
+  the stateless `aec_apply_gain_spec()` / `aec_apply_cng_spec()`, and `AEC_CNG_NR_GAIN_FLOOR`. `AEC_OUTPUT_GUARD_API_VERSION` is now 2.
+  Migration steps: `docs/sdk_migration_output_guard.md`.
+- A hop may alternate between `aec_process()` and the split pair on one instance. The filter and detector state advance identically;
+  the library's own overlap-add tail and comfort-noise generator advance only in `aec_process()` and `aec_apply_cng()`.
+- `sizeof(Aec)` grows from 6352 to 6392 bytes and every `aec_get_mem_size()` by 48 bytes (the struct is carved 16-byte aligned) (balanced, default delay mode:
+  16k/256 366,048; 16k/512 494,768; 48k/1024 1,162,784; without the shadow filter 323,168 / 434,080 / 1,008,848).
+  `sizeof(AecConfig)` is 232 bytes.
+
+### Tests and docs
+- New `test/test_split_entry.c` (`make test-split-entry`, in the `make test` tier).
+- Every single-channel consumer in `c_impl/test`, `example/aec_wav.c` and `test/pyc_parity/aec_run.c` was converted. Where a test
+  compared `aec_process_context()` with `aec_process()` it now compares the split pair with `aec_process()` (views, byte for byte);
+  the flag-combination checks of `test_config_validation.c` became a range check plus the per-mode exposure of the views;
+  `test_guard_unify.c` gained a second split-driven lane rendered with `aec_apply_gain()` / `aec_apply_cng()` and compares it with
+  `aec_process()` bit for bit. `test/pyc_parity/aec_run.c` still takes the Python harness's `--no-res` / `--ctx`
+  switches and writes byte-identical output files (60 flag/grid combinations compared against a build of the previous commit; only the stderr text of the `--base` error path differs).
+  `test_memory_layout.c` pins the new sizes.
+- C rows of `docs/c_python_function_map.md`, the reference pages and the HTML pages follow the new names.
+
+
 ## [Unreleased] — 2026-11-02 — Delay matched filter and tests follow the shared 32-bit ARM NEON gate
 
 ### Changed

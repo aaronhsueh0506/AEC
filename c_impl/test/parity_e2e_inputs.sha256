@@ -4,6 +4,6 @@
 # wav/aec_challenge_blind/ is git-ignored (local dataset), so this pin is the only integrity link
 # between a checkout and the goldens the gate regenerates from it.
 # Format = `shasum -a 256 -c` format; paths are relative to <aec>/wav (run `cd wav && shasum -a 256 -c
-# ../c_impl/test/golden/parity_e2e_inputs.sha256`). A missing file or a hash mismatch fails the gate.
+# ../c_impl/test/parity_e2e_inputs.sha256`). A missing file or a hash mismatch fails the gate.
 6cf20f67e513e9d808f2902e52c17114498ec462d547247335e5f3313a74e2bc  aec_challenge_blind/doubletalk/0I0XMl3M0ECO0U1N0cJvpg_doubletalk_mic.wav
 ce474f3ba01de25e4b402947de2362791b4a59c45e80477eaaf29dc180450ad6  aec_challenge_blind/doubletalk/0I0XMl3M0ECO0U1N0cJvpg_doubletalk_lpb.wav

@@ -186,8 +186,8 @@ noise scaled by `sqrt(1 - G²)` to mask the suppressed spectrum. State:
 per-bin noise PSD EMA + smoothed cn gain (init in `AEC.__init__`).
 
 The numeric core is one function in each language: C `aec_cng_fill()`
-(`aec_res.c`, called by the post chain's own output stage and public for
-external synthesizers) and Python `modules/cng.py` (`cng_fill`, which
+(`aec.c`, declared in `aec_internal.h`, called by the post chain's own output stage; external
+synthesizers use the public `aec_apply_cng_spec()`, which fixes `nr_floor` at `AEC_CNG_NR_GAIN_FLOOR`) and Python `modules/cng.py` (`cng_fill`, which
 `_post_add_comfort_noise` shares through `cng_draw_indices` /
 `cng_noise_terms`). For bins `1 .. n-2` (DC and Nyquist get no noise and draw
 nothing) it adds, per component,
@@ -219,7 +219,9 @@ With `enable_res=False` the `_aec3_post` body is skipped and the linear residual
 is emitted straight from the refined filter; `eval_aec_challenge.py` writes
 that render as `_ours_nores.wav` next to the production render. The gate at
 `_aec3_post` block-open uses
-`self.config.enable_res or self.config.return_res_context`.
+`self.config.enable_res or self.config.return_res_context`. The C library has no such pair of flags: its
+`AecConfig.residual` (`AEC_RESIDUAL_OFF` = this bypass, `STATE`/`ESTIMATE`/`FULL` = the post chain run to different depths)
+replaces them (see `docs/reference/integration.md` §8.1).
 
 ### 3.8 Output guard, rendering base and post reset serial
 
@@ -232,7 +234,7 @@ hops where the guard fires, and the rendering base is not claimed to pair with
 `formed_hop`.
 
 **The guard.** It is evaluated exactly once per hop, in every mode (full,
-context-only, no-gain, linear-only), after this hop's usable-linear verdict is
+context-only, no-gain, linear-only; C `AecConfig.residual` `FULL`, `FULL` driven by the split entry points, `ESTIMATE`, `STATE`), after this hop's usable-linear verdict is
 final and before any context or early exit. With
 `output_capture_when_linear_unusable` set (default ON), the verdict false and
 `sum(|E|²) > sum(|Y|²)` (strict `>` over the windowed spectra, `E = error_spec`,
@@ -263,8 +265,8 @@ a stream.
 
 **Consumers.** Full mode renders `base * gain`, then CNG, IFFT, synthesis window
 and OLA. The context API publishes the base (`AecResContext.output_base_spec`
-and `guard_active` in Python; `aec_get_output_base()` returning an
-`AecOutputBase` in C) and a consumer that renders itself multiplies
+and `guard_active` in Python; `aec_get_residual()` returning an
+`AecResidualView` with `base_spec` and `guard_active` in C) and a consumer that renders itself multiplies
 `output_base_spec * gain(s)` — never `error_spec`. The C base aliases a
 dedicated buffer that CNG and other scratch never touch, valid until the next
 processing or reset call.

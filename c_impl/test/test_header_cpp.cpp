@@ -1,16 +1,14 @@
-/* C++ header check, compile only: aec.h must be usable from C++ with both spellings of the level. An enumerator
- * does not convert to an enum type of another declaration in C++, so every legacy AEC_PRESET_* name has to belong to
- * AecLevel itself. */
+/* C++ header check, compile only: aec.h and aec_internal.h must be usable from C++ with the level enumerators. */
 #include "aec.h"
+#include "aec_internal.h"
 
-static_assert(AEC_PRESET_MILD == AEC_LEVEL_MILD && AEC_PRESET_BALANCED == AEC_LEVEL_BALANCED &&
-              AEC_PRESET_AGGRESSIVE == AEC_LEVEL_AGGRESSIVE && AEC_PRESET_NO_FLOOR == AEC_LEVEL_NO_FLOOR,
-              "legacy AEC_PRESET_* values must equal AEC_LEVEL_*");
+static_assert(AEC_LEVEL_MILD == 0 && AEC_LEVEL_BALANCED == 1 && AEC_LEVEL_AGGRESSIVE == 2 && AEC_LEVEL_NO_FLOOR == 3,
+              "AEC_LEVEL_* are the CLI digits 0..3");
 
 int aec_header_cpp_check(Aec* a, AecConfig* cfg) {
-    AecLevel level = AEC_PRESET_BALANCED;
-    AecPreset preset = AEC_PRESET_BALANCED;
-    aec_config_from_level(cfg, AEC_PRESET_AGGRESSIVE, 16000);
-    return aec_set_level(a, level, 0.0f) + aec_set_level(a, preset, 0.0f) +
-           aec_set_level(a, AEC_PRESET_NO_FLOOR, 0.0f);
+    AecLevel level = AEC_LEVEL_BALANCED;
+    float db = 0.0f;
+    aec_config_from_level(cfg, AEC_LEVEL_AGGRESSIVE, 16000);
+    return aec_set_level(a, level) + aec_set_level(a, AEC_LEVEL_NO_FLOOR) +
+           aec_level_floor_db(AEC_LEVEL_MILD, &db);
 }

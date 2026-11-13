@@ -1,46 +1,54 @@
-# SDK 遷移清單：輸出守衛（output guard）
+# SDK 遷移清單：輸出守衛（output guard）與後級 API
 
-給**自己用 `AecResContext` 頻譜做渲染（合成時域輸出）**的既有 SDK 應用。只呼叫 `aec_process()` 並直接取
-`out` 的應用不受影響，不必看本文。
+給**自己用後級頻譜（`error_spec` 等）做渲染（合成時域輸出）**的既有 SDK 應用，以及用過舊版
+context API 的應用。只呼叫 `aec_process()`（`AecConfig.residual` 維持預設 `AEC_RESIDUAL_FULL`）並直接取
+`out` 的應用，輸出位元不變，不必看本文。
 
-相關文件：`reference/integration.md` §8.1（分析 seam 與渲染底座）、§8.3
-（`aec_get_output_base()`／`aec_post_reset_serial()` 的完整語意）、§8.7（單聲道整鏈）；
-公開宣告在 `c_impl/include/aec.h`（`AEC_OUTPUT_GUARD_API_VERSION`、`aec_get_output_base`、
-`aec_post_reset_serial`、`aec_synthesis_window`）與 `c_impl/include/aec_res.h`（`aec_cng_fill`）。
+> **本版是不相容的 API 變更（輸出位元不變）。** 舊版的 `aec_process_context()`、`aec_get_res_context()`、
+> `aec_get_output_base()`、`aec_get_linear_context()`、`AecResContext`、`AecOutputBase`、`AecLinearContext`，
+> 以及 `AecConfig` 的 `enable_res`／`return_res_context`／`spatial_linear_context` 三個旗標與 `AEC_CONTEXT_*` 常數都已移除，
+> 改為 `AecConfig.residual` 與 `aec_process_linear()`／`aec_process_residual()`／`aec_get_linear()`／`aec_get_residual()`。
+> 本文出現的上述**舊名**都只在對照表與「舊寫法」中，標明為舊名。
+
+相關文件：`reference/integration.md` §8.1（進入點與分析 seam／渲染底座）、§8.3
+（`aec_get_residual()`／`aec_apply_gain()`／`aec_post_reset_serial()` 的完整語意）、§8.7（單聲道整鏈）；
+公開宣告在 `c_impl/include/aec.h`（`AEC_OUTPUT_GUARD_API_VERSION`、`aec_get_residual`、`aec_apply_gain`、
+`aec_apply_cng`、`aec_apply_cng_spec`、`aec_post_reset_serial`、`aec_synthesis_window`）。
 
 ## 1. 先講結論：舊程式不會報錯，只會悄悄失去守衛
 
 輸出守衛的規則：本 hop 線性估計不可用，且 `sum|error_spec|²` 大於 `sum|error_spec + echo_spec|²`
 （殘差比擷取訊號還大）時，渲染的底座改用擷取訊號 `error_spec + echo_spec`，而不是 `error_spec`。
-`aec_process()` 內部一直是這樣做；現在 context 路徑也提供同一個底座。
+`aec_process()` 內部一直是這樣做；後級檢視也提供同一個底座（`aec_get_residual().base_spec`）。
 
-如果你的程式還是把 **`ctx.error_spec × 增益`** 送去反轉換：
+如果你的程式還是把 **`error_spec × 增益`** 送去反轉換：
 
-- 編譯照過、執行不報錯、也沒有任何回傳值或旗標會告訴你；
+- 這是**自己渲染頻譜**的程式碼，編譯過、執行不報錯、也沒有任何回傳值或旗標會告訴你；
 - 但守衛 hop 上你的輸出比 `aec_process()` 的輸出大聲（殘差比擷取還大）；
 - 另外你的合成視窗、舒適噪音種子、delay 硬重置時的 OLA／CNG 處理也可能和函式庫內部不同。
 
 新增的 getter 無法偵測「呼叫端還在用 `error_spec` 渲染」，所以這件事只能靠**你主動遷移**。
 `AEC_OUTPUT_GUARD_API_VERSION` 是給你放進自己建置的編譯期標記（見 §2），它不會強迫沒加檢查的舊程式中斷。
-`AecResContext.error_spec` 的名稱與語意沒有改（它仍是分析用的真實線性殘差），所以不會有舊程式因改名而編譯失敗。
+`AecResidualView.error_spec` 的名稱與語意沿用舊版（它仍是分析用的真實線性殘差），所以只改渲染的程式不會因改名而編譯失敗；
+但使用舊 context 型別與函式的程式會因這些名稱已移除而編譯失敗（這一項是明確的，照 §3 改寫即可）。
 
-不在守衛範圍內：時域 seam（`AecResContext.formed_hop`、`AecLinearContext.formed_linear_hop`）永遠是分析殘差，
+不在守衛範圍內：時域 seam（`AecResidualView.formed_hop`、`AecLinearView.linear_hop`）永遠是分析殘差，
 沒有時域渲染底座。直接播放或重新合成這兩個串流的應用拿不到輸出守衛，需要守衛就必須改走頻域路徑。
 
 ## 2. 版本旗標
 
-`aec.h` 定義 `#define AEC_OUTPUT_GUARD_API_VERSION 1`，代表下列五項同時存在：
-`aec_get_output_base()`、`aec_post_reset_serial()`、`aec_synthesis_window()`、
-`aec_cng_fill()`（`aec_res.h`）與 `AEC_CNG_SEED`（`aec_post.h`，由 `aec.h` 引入）。
-把下面幾行放進你渲染 context 頻譜的那個檔案；SDK 比這一版舊時會在編譯期停下來，而不是靜默通過：
+`aec.h` 定義 `#define AEC_OUTPUT_GUARD_API_VERSION 2`，代表下列同時存在：
+`aec_get_residual().base_spec`（舊版是 `aec_get_output_base()`）、`aec_apply_gain()`／`aec_apply_cng()`、
+`aec_post_reset_serial()`、`aec_synthesis_window()`、`aec_apply_cng_spec()` 與 `AEC_CNG_SEED`
+（`aec_post.h`，由 `aec.h` 引入）。版本 1 是舊的 `aec_get_output_base()` 形式。
+把下面幾行放進你渲染後級頻譜的那個檔案；SDK 比這一版舊時會在編譯期停下來，而不是靜默通過：
 
 ```c
 #include "aec.h"
-#include "aec_res.h"      /* aec_cng_fill */
 #include "audio_stft.h"   /* AcIstft */
 
-#if !defined(AEC_OUTPUT_GUARD_API_VERSION) || AEC_OUTPUT_GUARD_API_VERSION < 1
-#error "aec.h is older than the output-guard API: update the SDK before rendering context spectra"
+#if !defined(AEC_OUTPUT_GUARD_API_VERSION) || AEC_OUTPUT_GUARD_API_VERSION < 2
+#error "aec.h is older than the output-guard API 2: update the SDK before rendering residual spectra"
 #endif
 ```
 
@@ -49,21 +57,43 @@
 
 ## 3. 遷移步驟總表
 
+### 3.1 設定與進入點（舊名 → 新名）
+
+| 舊名（已移除） | 新寫法 |
+|---|---|
+| `enable_res = 0`、`return_res_context = 0` | `cfg.residual = AEC_RESIDUAL_OFF`，用 `aec_process()`（`out` 是線性殘差）或 `aec_process_linear()` |
+| `spatial_linear_context = AEC_CONTEXT_LINEAR_ONLY`（需 `enable_res = 0`、`return_res_context = 1`） | `AEC_RESIDUAL_STATE` |
+| `spatial_linear_context = AEC_CONTEXT_NO_GAIN`（同上） | `AEC_RESIDUAL_ESTIMATE` |
+| `enable_res = 0`、`return_res_context = 1`、`spatial_linear_context = 0`，用 `aec_process_context()` | `AEC_RESIDUAL_FULL`，用 `aec_process_linear()` + `aec_process_residual()` |
+| `enable_res = 1`，用 `aec_process()` | `AEC_RESIDUAL_FULL`（預設），用 `aec_process()` |
+| `aec_process_context_shared_far_from()` | `aec_process_linear_shared_far_from()`（`aec_internal.h`），之後 `aec_process_residual()` |
+| `aec_get_res_context()` → `AecResContext` | `aec_get_residual()` → `AecResidualView`（`struct_size` 要先設） |
+| `aec_get_output_base()` → `AecOutputBase`（`base_spec`、`guard_active`） | 同一個 `AecResidualView` 的 `base_spec`、`guard_active` |
+| `aec_get_linear_context()` → `AecLinearContext` | `aec_get_linear()` → `AecLinearView`（`formed_linear_hop` 改讀 `aec_get_residual().formed_hop`；未經 FORM 的線性輸出是 `AecLinearView.linear_hop`） |
+| `AecResContext` 的純量狀態（`far_power`、`erle_factor`、`dt_indicator`、`divergence`、`saturation_level`、`erl_estimate`、`shadow_dt`、`is_stationary_dt`、`filter_converged`、`filter_once_converged`、`epc_active`） | `AecLinearView` 的同名欄位；`res_floor_protect`、`usable_linear` 在 `AecResidualView` |
+| 舊的組合限制（`spatial_linear_context` 必須搭配 `enable_res = 0`、`return_res_context = 1`） | 取消；只剩 `residual` 必須在 `OFF`…`FULL` 範圍內 |
+| 回傳值：`aec_process()` 回 `void`，getter 回 `0`／`-1` | 回 `AecStatus`（`AEC_OK`＝0，錯誤為負值：`AEC_ERR_ARG`、`AEC_ERR_MODE`、`AEC_ERR_SEQUENCE`、`AEC_ERR_DSP`） |
+
+位元結果：同一份輸入、同樣的組態，新舊對應的模式輸出逐位元相同（函式庫端曾以 `make test-split-entry`、`make test-split-entry-2` 與 `make test-split-entry-3` 對舊 API 產生的
+雜湊逐行驗證；這些一次性的對照檔已於 2026-11-13 確認一致後除役，之後的改動由新版本取基準，見 `c_impl/README.md` 的 “Line-stream baselines”）。
+
+### 3.2 自己渲染的應用要做的事
+
 | # | 要做的事 | 舊寫法 | 新寫法 |
 |---|---|---|---|
-| 1 | 編譯期檢查 | 無 | §2 的 `#if`／`#error` |
-| 2 | 渲染底座 | `ctx.error_spec[k] × g[k]` | `ob.base_spec[k] × g[k]`，`ob` 來自 `aec_get_output_base()` |
-| 3 | reset serial | 無，或自己從 delay 變動推測 | 每 hop 比對 `aec_post_reset_serial()`，變了就清 OLA 尾巴並重設 CNG 種子（§5） |
+| 1 | 編譯期檢查 | 無（或版本 1） | §2 的 `#if`／`#error` |
+| 2 | 渲染底座 | `ctx.error_spec[k] × g[k]` | `aec_apply_gain(aec, extra_gain, out_spec)`，或自己乘：`rv.base_spec[k] × g[k]`，`rv` 來自 `aec_get_residual()` |
+| 3 | reset serial | 無，或自己從 delay 變動推測 | 每 hop 比對 `aec_post_reset_serial()`，變了就清 OLA 尾巴（§5） |
 | 4 | 合成視窗 | `AcIstft` 預設 sqrt-Hann | 向 `aec_synthesis_window()` 借表（§6） |
-| 5 | 舒適噪音 | 自己的 CNG，自選種子 | `aec_cng_fill()`，種子 `AEC_CNG_SEED`（§7） |
-| 6 | 驗收 | 與舊輸出比較 | 與同一份輸入下全模式 `aec_process()` 逐位元比較（§9） |
+| 5 | 舒適噪音 | 自己的 CNG，自選種子 | `aec_apply_cng()`（實例內產生器，函式庫自己重設），或自己持有狀態的 `aec_apply_cng_spec()`，種子 `AEC_CNG_SEED`（§7） |
+| 6 | 驗收 | 與舊輸出比較 | 與同一份輸入下 `aec_process()` 逐位元比較（§9） |
 
-分析用途（`r2`、`error_spec` 給 NR／`AecRes` 的輸入、ERLE 類統計、訓練特徵、需要與 `formed_hop` 配對的重建）
+分析用途（`r2`、`error_spec` 給 NR 或外部增益階段的輸入、ERLE 類統計、訓練特徵、需要與 `formed_hop` 配對的重建）
 **繼續讀 `error_spec`**，不要改成底座；底座只用來渲染。
 
 ## 4. 前後對照程式碼
 
-### 4.1 舊寫法（守衛消失）
+### 4.1 舊寫法（守衛消失；`AecResContext` 為舊名）
 
 ```c
 #include "aec.h"
@@ -71,7 +101,7 @@
 
 void my_comfort_noise(uint32_t* rng, Complex* spec, const AecResContext* ctx);
 
-/* BEFORE: renders error_spec, default-window AcIstft, own CNG with its own seed, no reset handling. */
+/* BEFORE (old API): renders error_spec, default-window AcIstft, own CNG with its own seed, no reset handling. */
 static void old_render_hop(AcIstft* istft, uint32_t* my_rng, Complex* spec,
                            const AecResContext* ctx, float* out) {
     int k;
@@ -86,10 +116,13 @@ static void old_render_hop(AcIstft* istft, uint32_t* my_rng, Complex* spec,
 
 ### 4.2 新寫法（單聲道與 lane 共用的渲染函式）
 
-單聲道：`enable_res = 0`、`return_res_context = 1` 建立 AEC，增益就是 `ctx.res_gain`，不接 NR。
-lane（`spatial_linear_context` 為 1 或 2）：`ctx.res_gain` 為 `NULL`，增益與 `comfort_noise` 由應用自己的來源提供
-（例如 `aec_res_process()` 的輸出），把它們傳進同一個函式即可；渲染的頻譜一樣是該 lane 的 `ob.base_spec`。
+單聲道：用預設的 `AEC_RESIDUAL_FULL` 建立 AEC，每 hop `aec_process_linear()` + `aec_process_residual()`，增益就是
+`rv.res_gain`，不接 NR 時 `aec_apply_gain(aec, NULL, spec)` 即「底座 × `res_gain`」。
+lane（`residual` 為 `STATE` 或 `ESTIMATE`）：`rv.res_gain` 為 `NULL`，增益與 `comfort_noise` 由應用自己的來源提供
+（例如外部另算的 `G_res`），把它們傳進同一個函式即可；渲染的頻譜一樣是該 lane 的 `rv.base_spec`。
 下面是單一渲染器，單聲道與 lane 各持有一份（每個要渲染的 `Aec` 各有自己的 `AcIstft`、`cng_rng` 與 `last_serial`）。
+`renderer_render_hop()` 對呼叫端給的增益做渲染；單聲道且增益就是 `res_gain` 時，`mono_render_hop()` 改走函式庫的
+`aec_apply_gain()`／`aec_apply_cng()`（兩者逐位元相同）。
 
 ```c
 #include <stdlib.h>
@@ -99,7 +132,7 @@ typedef struct OutputRenderer {
     AcIstft* istft;
     void*    istft_mem;
     Complex* spec;          /* n_freqs scratch */
-    uint32_t cng_rng;       /* comfort-noise LCG state, owned by the application */
+    uint32_t cng_rng;       /* comfort-noise LCG state, owned by the application (aec_apply_cng_spec form only) */
     uint32_t last_serial;   /* last aec_post_reset_serial() value this renderer has handled */
     int      n_freqs;
 } OutputRenderer;
@@ -131,49 +164,54 @@ static int renderer_init(OutputRenderer* r, const Aec* aec, int fft_size) {
     return 0;
 }
 
-/* One hop, called right after aec_process_context() on the same instance.
- *   gain     applied to the base (single-channel, NR off: ctx.res_gain; with NR: min(g_nr, g_res))
- *   g_res    the RES gain that decides how much comfort noise is added
- *   cn       comfort-noise PSD (int16^2 scale), NULL = comfort noise off
- *   g_nr     NR gain or NULL; nr_floor its floor (0.31622777f in the single-channel chain)
- * Returns 0, or -1 when the base is unavailable. *guard_active is optional. */
-static int renderer_render_hop(OutputRenderer* r, const Aec* aec, const float* gain, const float* g_res,
-                               const float* cn, const float* g_nr, float nr_floor, float* out,
-                               int* guard_active) {
-    AecOutputBase ob;
+/* The reset-serial step shared by both renderers: BEFORE the first CNG draw and BEFORE ac_istft_push of this hop.
+ * Never reset the AEC for this. */
+static void renderer_sync_serial(OutputRenderer* r, const Aec* aec) {
     uint32_t serial = aec_post_reset_serial(aec);
-    int k;
-
-    /* (1) BEFORE the first CNG draw and BEFORE ac_istft_push of this hop. Never reset the AEC for this. */
     if (serial != r->last_serial) {
         ac_istft_reset(r->istft);
         r->cng_rng = AEC_CNG_SEED;
         r->last_serial = serial;
     }
+}
 
-    memset(&ob, 0, sizeof ob);
-    ob.struct_size = sizeof ob;
-    if (aec_get_output_base(aec, &ob) != 0 || ob.n_freqs != r->n_freqs || !gain) return -1;
-    if (guard_active) *guard_active = ob.guard_active;
+/* One hop, called right after aec_process_linear() + aec_process_residual() on the same instance.
+ *   gain     applied to the base (single-channel, NR off: rv.res_gain; with NR: min(g_nr, g_res))
+ *   g_res    the RES gain that decides how much comfort noise is added
+ *   cn       comfort-noise PSD (int16^2 scale), NULL = comfort noise off
+ *   g_nr     NR gain or NULL; its floor in the noise is AEC_CNG_NR_GAIN_FLOOR
+ * Returns 0, or -1 when the view is unavailable. *guard_active is optional. */
+static int renderer_render_hop(OutputRenderer* r, const Aec* aec, const float* gain, const float* g_res,
+                               const float* cn, const float* g_nr, float* out,
+                               int* guard_active) {
+    AecResidualView rv;
+    int k;
+
+    renderer_sync_serial(r, aec);
+
+    memset(&rv, 0, sizeof rv);
+    rv.struct_size = sizeof rv;
+    if (aec_get_residual(aec, &rv) != AEC_OK || rv.n_freqs != r->n_freqs || !gain) return -1;
+    if (guard_active) *guard_active = rv.guard_active;
 
     /* (2) the rendering base, not error_spec */
     for (k = 0; k < r->n_freqs; ++k) {
-        r->spec[k].r = ob.base_spec[k].r * gain[k];
-        r->spec[k].i = ob.base_spec[k].i * gain[k];
+        r->spec[k].r = rv.base_spec[k].r * gain[k];
+        r->spec[k].i = rv.base_spec[k].i * gain[k];
     }
     /* (3) comfort noise with the library helper; seed and draw schedule match the internal stage */
-    if (cn && g_res) aec_cng_fill(&r->cng_rng, r->spec, cn, g_res, g_nr, nr_floor, r->n_freqs);
+    if (cn && g_res) aec_apply_cng_spec(&r->cng_rng, r->spec, cn, g_res, g_nr, r->n_freqs);
     ac_istft_push(r->istft, r->spec, out);
     return 0;
 }
 
-/* Single channel, NR off: the gain is ctx.res_gain and comfort noise follows cfg.enable_cng. */
-static int mono_render_hop(OutputRenderer* r, const Aec* aec, int use_cng, float* out) {
-    AecResContext ctx;
-    aec_get_res_context(aec, &ctx);
-    if (!ctx.res_gain) return -1;
-    return renderer_render_hop(r, aec, ctx.res_gain, ctx.res_gain,
-                               use_cng ? ctx.comfort_noise : NULL, NULL, 0.0f, out, NULL);
+/* Single channel, NR off, residual FULL: the library's own helpers do the gain and the comfort noise. */
+static int mono_render_hop(OutputRenderer* r, Aec* aec, int use_cng, float* out) {
+    renderer_sync_serial(r, aec);
+    if (aec_apply_gain(aec, NULL, r->spec) != AEC_OK) return -1;          /* base_spec * res_gain */
+    if (use_cng && aec_apply_cng(aec, NULL, r->spec) != AEC_OK) return -1;   /* instance generator */
+    ac_istft_push(r->istft, r->spec, out);
+    return 0;
 }
 ```
 
@@ -184,7 +222,8 @@ static void run_mono(Aec* aec, OutputRenderer* r, int use_cng, const float* mic,
                      float* out, int n_hops, int hop) {
     int h;
     for (h = 0; h < n_hops; ++h) {
-        aec_process_context(aec, mic + (size_t)h * hop, ref + (size_t)h * hop);
+        aec_process_linear(aec, mic + (size_t)h * hop, ref + (size_t)h * hop);
+        aec_process_residual(aec, NULL);
         mono_render_hop(r, aec, use_cng, out + (size_t)h * hop);
     }
 }
@@ -192,29 +231,30 @@ static void run_mono(Aec* aec, OutputRenderer* r, int use_cng, const float* mic,
 
 要點：
 
-- `use_cng` 就是你建立 `Aec` 時的 `cfg.enable_cng`。context 路徑本身不加舒適噪音，加不加由渲染器決定。
-- 有 NR 的單聲道鏈照 §8.7 的順序：增益取 `min(g_nr, res_gain)`，再傳 `g_nr` 與 `0.31622777f` 給
-  `renderer_render_hop()`；`gain` 傳 `g_total`，`g_res` 仍傳 `ctx.res_gain`。
-- `ob.base_spec` 指向函式庫內部緩衝區，只在下一次處理或 reset 呼叫前有效；`ob.struct_size` 是輸入，要先設。
-- `AecResContext` 與 `AecOutputBase` 內的指標都不要保存到下一次處理呼叫之後。
+- `use_cng` 就是你建立 `Aec` 時的 `cfg.enable_cng`。拆開的路徑本身不加舒適噪音，加不加由渲染器決定（`aec_apply_cng()` 不看 `enable_cng`，不要的話不呼叫）。
+- 有 NR 的單聲道鏈照 §8.7 的順序：`aec_apply_gain(aec, g_nr, spec)` 與 `aec_apply_cng(aec, g_nr, spec)` 傳同一個 `g_nr`
+  （舒適噪音的 NR 因子下限是 `AEC_CNG_NR_GAIN_FLOOR`）；改走 `renderer_render_hop()` 時 `gain` 傳 `g_total`，`g_res` 仍傳 `rv.res_gain`。
+- `rv.base_spec` 指向函式庫內部緩衝區，只在下一次處理或 reset 呼叫前有效；`rv.struct_size` 是輸入，要先設。
+- `AecResidualView` 內的指標都不要保存到下一次處理呼叫之後。
 
 ## 5. reset serial 協定（呼叫順序要一字不差）
 
 `aec_post_reset_serial()` 計數「硬 post 鏈 reset」：`aec_reset()`，以及處理呼叫內部的硬 delay 重啟
 （首次取得沒有 warm transfer 也沒有 DT-aware soft 取得，或確認位移沒有 DT-aware soft realign）。
 bad-relock 還原、warm transfer、soft 取得／realign、`aec_apply_external_realign()` **不會**使它移動。
-每次計數時函式庫都會清自己的 OLA 尾巴並把 CNG 種子設回 `AEC_CNG_SEED`；外部合成的應用必須做一樣的事。
+每次計數時函式庫都會清自己的 OLA 尾巴並把 CNG 種子設回 `AEC_CNG_SEED`；外部合成的應用必須做一樣的事
+（用 `aec_apply_cng()` 時，產生器在實例內，函式庫自己重設，應用只需要清自己的 OLA 尾巴）。
 
 每個 hop 的順序：
 
 ```text
-1. aec_process_context(aec, mic, ref)             處理這個 hop（內部若硬 reset，serial 已經加一）
+1. aec_process_linear(aec, mic, ref); aec_process_residual(aec, NULL)   處理這個 hop（內部若硬 reset，serial 已經加一）
 2. serial = aec_post_reset_serial(aec)
 3. serial != last_serial ?
      是 -> ac_istft_reset(istft); cng_rng = AEC_CNG_SEED; last_serial = serial
-4. aec_get_res_context / aec_get_output_base       取增益與底座
-5. spec = base_spec * gain; aec_cng_fill(...)      第一次 CNG 抽樣在步驟 3 之後
-6. ac_istft_push(istft, spec, out)                 這個 hop 的 OLA push 在步驟 3 之後
+4. aec_get_residual / aec_apply_gain                取增益與底座
+5. spec = base_spec * gain; aec_apply_cng / aec_apply_cng_spec(...)    第一次 CNG 抽樣在步驟 3 之後
+6. ac_istft_push(istft, spec, out)                  這個 hop 的 OLA push 在步驟 3 之後
 ```
 
 規則：
@@ -240,13 +280,14 @@ bad-relock 還原、warm transfer、soft 取得／realign、`aec_apply_external_
 
 ## 7. 舒適噪音函式與種子
 
-- 用 `aec_cng_fill(&rng, spec, cn, g_res, g_nr, nr_floor, n_freqs)`（`aec_res.h`），不要自己實作：
-  函式庫內部輸出階段呼叫的就是它（`g_nr == NULL` 時逐位元相同）。
-- `rng` 由呼叫端持有，起點是 `AEC_CNG_SEED`（42）；每個 hop 在 bin `1 … n-2` 各抽一次，bin 0 與 `n-1` 不抽。
-- `cn` 用 `ctx.comfort_noise`（int16² 尺度），`g_res` 用決定舒適噪音量的 RES 增益（不是取 min 之後的增益）。
-- 種子在兩個時機設回 `AEC_CNG_SEED`：建立時，以及每次 §5 的 serial 變動。其他時候**不要**重設，
-  包含 bad-relock 還原那一 hop（serial 沒動，CNG 照常延續）。
-- 不要在 `aec_cng_fill` 外再疊一層舒適噪音；`enable_cng = 0` 時不呼叫它。
+- 用 `aec_apply_cng()`，或 `aec_apply_cng_spec(&rng, spec, cn, g_res, g_nr, n_freqs)`（`aec.h`；`g_nr` 的下限固定為 `AEC_CNG_NR_GAIN_FLOOR`），不要自己實作：
+  函式庫內部輸出階段呼叫的就是同一個實作（`g_nr == NULL` 時逐位元相同）。`aec_apply_cng()` 是前者的實例形式
+  （產生器在 `Aec` 內）；`aec_apply_cng_spec()` 的 `rng` 由呼叫端持有。
+- `rng` 起點是 `AEC_CNG_SEED`（42）；每個 hop 在 bin `1 … n-2` 各抽一次，bin 0 與 `n-1` 不抽。
+- `cn` 用 `rv.comfort_noise`（int16² 尺度），`g_res` 用決定舒適噪音量的 RES 增益（不是取 min 之後的增益）。
+- 種子在兩個時機設回 `AEC_CNG_SEED`：建立時，以及每次 §5 的 serial 變動（`aec_apply_cng()` 由函式庫自己處理）。
+  其他時候**不要**重設，包含 bad-relock 還原那一 hop（serial 沒動，CNG 照常延續）。
+- 不要在 `aec_apply_cng()`／`aec_apply_cng_spec()` 外再疊一層舒適噪音；`enable_cng = 0` 時不呼叫它。
 
 ## 8. 輸出會怎麼變
 
@@ -262,20 +303,21 @@ bad-relock 還原、warm transfer、soft 取得／realign、`aec_apply_external_
   先前 C 走硬重置鏈），所以這類片段從還原那一 hop 起，輸出與舊版函式庫不同，不論你的應用有沒有遷移。
   遷移後的渲染器在還原那一 hop **不可**重設 OLA 或 CNG（不重設才與 `aec_process()` 一致）。沒有還原的片段不受這一項影響。
 - **合成視窗**：最後一個 float 位元差。
-- **不變**：`error_spec`／`echo_spec`／`near_spec`／`formed_hop`／`r2`／`res_gain` 等分析值，以及任何不渲染 context 頻譜的用法。
+- **不變**：`error_spec`／`echo_spec`／`near_spec`／`formed_hop`／`r2`／`res_gain` 等分析值，以及任何不渲染後級頻譜的用法；
+  API 改名本身不改任何輸出位元。
 
 因此**不要拿遷移後的輸出與舊版輸出做逐位元比較**當作驗收。驗收看 §9。
 
 ## 9. 驗收測試（可直接複製）
 
 做法：同一份輸入、同樣的 `AecConfig`（含 `fft_size`、`enable_cng`，RES 與 CNG 設定相同，不接 NR），
-建立兩個 `Aec`：
+建立兩個 `Aec`，兩者的 `residual` 都是 `AEC_RESIDUAL_FULL`：
 
-- 全模式實例 `enable_res = 1`、`return_res_context = 0`，用 `aec_process()` 取 `out`；
-- context 實例 `enable_res = 0`、`return_res_context = 1`，用 `aec_process_context()` 加 §4.2 的渲染器。
+- 一體實例用 `aec_process()` 取 `out`；
+- 拆開實例用 `aec_process_linear()` + `aec_process_residual()` 加 §4.2 的渲染器。
 
 每個 hop 的輸出必須**逐位元相同**，不接受容差。模型：`c_impl/test/test_guard_unify.c`
-（外部應用是 `app_init()`／`app_synth()`，雙實例組態在 `make_cfg()`，比對是 `run_stream()` 內的 `bits_eq_f()`；
+（外部應用是 `app_init()`／`app_synth()`，多實例組態在 `make_cfg()`，比對是 `run_stream()` 內的 `bits_eq_f()`；
 刺激訊號是 `gen_echo_stream()`、`gen_uncorrelated_stream()`；`make test-guard-unify` 執行）。
 
 ```c
@@ -284,7 +326,7 @@ bad-relock 還原、warm transfer、soft 取得／realign、`aec_apply_external_
 /* Returns 0: bit-identical and the stimulus exercised the guard and a reset; 1: output differs;
  * 2: identical but the stimulus never fired the guard or never moved the serial (the test proved nothing). */
 static int guard_acceptance(const float* mic, const float* ref, int n_hops, int sample_rate, int fft_size) {
-    AecConfig cf, ck;
+    AecConfig cfg;
     Aec* full = (Aec*)calloc(1, sizeof(Aec));
     Aec* split = (Aec*)calloc(1, sizeof(Aec));
     OutputRenderer r;
@@ -293,12 +335,10 @@ static int guard_acceptance(const float* mic, const float* ref, int n_hops, int 
     long diff_hops = 0, guard_hops = 0, serial_moves = 0;
     uint32_t prev_serial = 0;
 
-    aec_config_from_level(&cf, AEC_LEVEL_BALANCED, sample_rate);   /* use the level your product ships */
-    cf.fft_size = fft_size;
-    ck = cf;
-    cf.enable_res = 1; cf.return_res_context = 0;                  /* full mode */
-    ck.enable_res = 0; ck.return_res_context = 1;                  /* context mode, same CNG setting */
-    if (!full || !split || aec_create(full, &cf) != 0 || aec_create(split, &ck) != 0) return 1;
+    aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, sample_rate);   /* use the level your product ships */
+    cfg.fft_size = fft_size;
+    cfg.residual = AEC_RESIDUAL_FULL;                               /* both instances: same config */
+    if (!full || !split || aec_create(full, &cfg) != 0 || aec_create(split, &cfg) != 0) return 1;
     hop = aec_hop_size(full);
     out_full = (float*)calloc((size_t)hop, sizeof(float));
     out_split = (float*)calloc((size_t)hop, sizeof(float));
@@ -308,18 +348,19 @@ static int guard_acceptance(const float* mic, const float* ref, int n_hops, int 
     for (h = 0; h < n_hops; ++h) {
         const float* m = mic + (size_t)h * hop;
         const float* f = ref + (size_t)h * hop;
-        AecResContext ctx;
+        AecResidualView rv;
         int guard = 0;
         uint32_t s;
 
         if (h == n_hops / 2) { aec_reset(full); aec_reset(split); }   /* a reset in the middle of the stream */
 
-        aec_process(full, m, f, out_full);
-        aec_process_context(split, m, f);
-        aec_get_res_context(split, &ctx);
-        if (!ctx.res_gain ||
-            renderer_render_hop(&r, split, ctx.res_gain, ctx.res_gain,
-                                ck.enable_cng ? ctx.comfort_noise : NULL, NULL, 0.0f, out_split, &guard) != 0) {
+        if (aec_process(full, m, f, out_full) != AEC_OK) { rc = 1; break; }
+        if (aec_process_linear(split, m, f) != AEC_OK || aec_process_residual(split, NULL) != AEC_OK) { rc = 1; break; }
+        memset(&rv, 0, sizeof rv);
+        rv.struct_size = sizeof rv;
+        if (aec_get_residual(split, &rv) != AEC_OK || !rv.res_gain ||
+            renderer_render_hop(&r, split, rv.res_gain, rv.res_gain,
+                                cfg.enable_cng ? rv.comfort_noise : NULL, NULL, out_split, &guard) != 0) {
             rc = 1; break;
         }
         if (memcmp(out_full, out_split, (size_t)hop * sizeof(float)) != 0) diff_hops++;
@@ -346,23 +387,24 @@ static int guard_acceptance(const float* mic, const float* ref, int n_hops, int 
   遠端與近端不相關、線性濾波器只會加能量的訊號（`gen_uncorrelated_stream()` 那一類）會讓守衛一直觸發；
   含 delay 位移的回音串流會觸發硬 reset；中段的 `aec_reset()` 保證 serial 至少動一次。
   請用你產品實際的取樣率與 `fft_size`，至少各跑一個格點。
-- 組態要與產品一致（level、`enable_cng`、delay 模式）；全模式與 context 實例必須是同一份 `AecConfig`，只有
-  `enable_res`／`return_res_context` 不同。
+- 組態要與產品一致（level、`enable_cng`、delay 模式）；一體與拆開兩個實例必須是同一份 `AecConfig`，
+  差別只在使用哪組進入點。
 - **證明這個測試會紅**（做一次就好）：把渲染器故意弄壞，確認回傳 1。三種弄壞法各自對應一項遷移步驟：
-  1. `ob.base_spec` 換成 `ctx.error_spec`（步驟 2：守衛 hop 上會不同）；
+  1. `rv.base_spec` 換成 `rv.error_spec`（步驟 2：守衛 hop 上會不同）；
   2. 拿掉 serial 比對（步驟 3：`aec_reset()` 之後的 hop 會不同）；
   3. 不借 `aec_synthesis_window()` 的表，用 `AcIstft` 預設視窗（步驟 4：會差最後一個位元）；
   另可把 `cng_rng` 起點改成別的值（步驟 5：CNG 開啟時會不同）。
-- 有 NR 的產品：驗收仍只比 AEC-only 路徑（NR 關閉）。NR 之後的輸出沒有全模式的對照物。
+- 有 NR 的產品：驗收仍只比 AEC-only 路徑（NR 關閉）。NR 之後的輸出沒有一體實例的對照物。
 - 這個測試只確認「拆開渲染」與「函式庫內部渲染」一致；是否該用守衛的產品判斷不在它的範圍。
 
 ## 10. 清單
 
-- [ ] 渲染 context 頻譜的檔案加了 §2 的 `#if`／`#error`。
-- [ ] 渲染用 `ob.base_spec`；分析仍用 `error_spec`。
+- [ ] 設定改為 `AecConfig.residual`，進入點與檢視改為 §3.1 的新名；程式裡沒有任何已移除的舊名。
+- [ ] 渲染後級頻譜的檔案加了 §2 的 `#if`／`#error`（版本 2）。
+- [ ] 渲染用 `rv.base_spec`（或 `aec_apply_gain()`）；分析仍用 `error_spec`。
 - [ ] 每個要渲染的 `Aec` 都有 serial 比對，且順序在 CNG 抽樣與 `ac_istft_push` 之前；沒有因此呼叫 `aec_reset()`。
 - [ ] `AcIstft` 借 `aec_synthesis_window()` 的表，且先於 `Aec` 釋放。
-- [ ] 舒適噪音走 `aec_cng_fill()`，起點 `AEC_CNG_SEED`，只在建立與 serial 變動時重設。
-- [ ] 沒有直接播放或重新合成 `formed_hop`／`formed_linear_hop` 而期待有守衛。
+- [ ] 舒適噪音走 `aec_apply_cng()` 或 `aec_apply_cng_spec()`，起點 `AEC_CNG_SEED`，只在建立與 serial 變動時重設。
+- [ ] 沒有直接播放或重新合成 `formed_hop`／`linear_hop` 而期待有守衛。
 - [ ] §9 的驗收在你實際使用的每個格點回傳 0，且做過一次「故意弄壞會變紅」。
 - [ ] NR／NN 是否跟隨 serial 變動重設，已有應用層政策並寫在你自己的程式裡。

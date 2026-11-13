@@ -17,7 +17,7 @@ dl,dd { margin: 0; } dt { margin-top: .7rem; } a { color: #165c47; } pre { backg
 <p>將 <code>audiolib/</code> 放在本庫旁邊，從 AEC 根目錄執行。</p>
 <pre><code>make -C c_impl
 bin="$(make -s -C c_impl print-bin-dir)"
-"$bin/aec_wav" mic.wav ref.wav out.wav --level balanced</code></pre>
+"$bin/aec_wav" mic.wav ref.wav out.wav --level 1</code></pre>
 <section>
 <h2>使用 C 函式庫</h2>
 <dl>
@@ -32,7 +32,7 @@ bin="$(make -s -C c_impl print-bin-dir)"
 <section>
 <h2>串接後級與調整音訊</h2>
 <dl>
-<dt><a href="reference/aec_res.html">獨立 RES 與舒適噪音</a></dt>
+<dt><a href="reference/aec_res.html">RES 增益階段與舒適噪音</a></dt>
 <dd>在共享或 beamformed 頻譜上取得增益並合成。</dd>
 <dt><a href="reference/aec_params.html">參數與強度</a></dt>
 <dd>查設定範圍、HPF、level 與立即生效的控制。</dd>

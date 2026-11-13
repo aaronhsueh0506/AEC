@@ -5,14 +5,14 @@
  * The gate is byte identity of everything a caller can observe, over a run long enough for the filter to converge and the
  * delay estimator to lock:
  *   - out[hop]                    (aec_process; the audio a caller ships)
- *   - AecResContext.formed_hop    (the linear-AEC seam's time output)
- *   - AecResContext.error_spec    (its freq output, n_freqs Complex)
+ *   - AecResidualView.formed_hop  (the linear-AEC seam's time output)
+ *   - AecResidualView.error_spec  (its freq output, n_freqs Complex)
  * Reference instance: constructed, never warmed. Subject instance: constructed, warmed WARM_HOPS on an unrelated echo path,
  * then aec_reset(). Both are then fed the same TEST_HOPS of a second echo path and compared hop by hop. A residue that
  * steers any decision moves one of the three.
  *
  * Covered per run: the three product grids (16k/256, 16k/512, 48k/1024) x both consumption modes (full cascade, and the
- * enable_res=0 + return_res_context=1 seam an external RES drives). The kernel set is whatever the build selected, so
+ * split aec_process_linear() + aec_process_residual() seam an external gain stage drives). The kernel set is whatever the build selected, so
  * `make test-reset-parity` and `make SIMD=0 test-reset-parity` are two distinct runs of the gate. The caller-pool path needs
  * no separate case here: test_static_aec.c pins aec_init byte-equal to aec_create on a real recording.
  *
@@ -88,8 +88,21 @@ static void scene_hop(Scene* s, float* mic, float* ref, int hop, int h) {
     for (i = 0; i < hop; ++i) s->hist[hop - 1 - i] = ref[i];
 }
 
+/* One hop: aec_process(), or the split pair (the library then applies no gain and writes no out). */
+static void step(Aec* a, int split, const float* mic, const float* ref, float* out) {
+    int st = split ? aec_process_linear(a, mic, ref) : aec_process(a, mic, ref, out);
+    if (split && st == AEC_OK) st = aec_process_residual(a, NULL);
+    if (st != AEC_OK) { printf("FAIL: process status %d\n", st); g_fail++; }
+}
+
+static void view(const Aec* a, AecResidualView* v) {
+    memset(v, 0, sizeof *v);
+    v->struct_size = sizeof *v;
+    if (aec_get_residual(a, v) != AEC_OK) { printf("FAIL: aec_get_residual\n"); g_fail++; }
+}
+
 /* One (grid, mode) case. Returns 1 on byte identity. */
-static int case_run(int sr, int fft_size, int ctx_only) {
+static int case_run(int sr, int fft_size, int ctx_only) {   /* ctx_only: the split-entry consumption mode */
     AecConfig cfg;
     Aec fresh, warmed;
     Scene sc_warm, sc_a, sc_b;
@@ -101,7 +114,7 @@ static int case_run(int sr, int fft_size, int ctx_only) {
 
     aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, sr);
     cfg.fft_size = fft_size;
-    if (ctx_only) { cfg.enable_res = 0; cfg.return_res_context = 1; }
+    cfg.residual = AEC_RESIDUAL_FULL;
 
     if (aec_create(&fresh, &cfg) != 0 || aec_create(&warmed, &cfg) != 0) {
         printf("FAIL: aec_create sr=%d fft=%d\n", sr, fft_size);
@@ -123,8 +136,7 @@ static int case_run(int sr, int fft_size, int ctx_only) {
     scene_init(&sc_warm, 1234567u, 611, 0.65f);
     for (h = 0; h < WARM_HOPS; ++h) {
         scene_hop(&sc_warm, mic, ref, hop, h);
-        if (ctx_only) aec_process_context(&warmed, mic, ref);
-        else          aec_process(&warmed, mic, ref, out_b);
+        step(&warmed, ctx_only, mic, ref, out_b);
     }
     aec_reset(&warmed);
 
@@ -132,12 +144,11 @@ static int case_run(int sr, int fft_size, int ctx_only) {
     scene_init(&sc_a, 0x89abcdefu, 293, 0.5f);
     scene_init(&sc_b, 0x89abcdefu, 293, 0.5f);
     for (h = 0; h < TEST_HOPS; ++h) {
-        AecResContext ctx_a, ctx_b;
+        AecResidualView ctx_a, ctx_b;
 
         scene_hop(&sc_a, mic, ref, hop, h);
-        if (ctx_only) aec_process_context(&fresh, mic, ref);
-        else          aec_process(&fresh, mic, ref, out_a);
-        aec_get_res_context(&fresh, &ctx_a);
+        step(&fresh, ctx_only, mic, ref, out_a);
+        view(&fresh, &ctx_a);
         /* The context pointers alias per-hop internals both instances
          * overwrite, so snapshot the reference side before driving the
          * subject. */
@@ -145,9 +156,8 @@ static int case_run(int sr, int fft_size, int ctx_only) {
         memcpy(espec_a, ctx_a.error_spec, (size_t)n_freqs * sizeof(Complex));
 
         scene_hop(&sc_b, mic, ref, hop, h);
-        if (ctx_only) aec_process_context(&warmed, mic, ref);
-        else          aec_process(&warmed, mic, ref, out_b);
-        aec_get_res_context(&warmed, &ctx_b);
+        step(&warmed, ctx_only, mic, ref, out_b);
+        view(&warmed, &ctx_b);
 
         if (!ctx_only && memcmp(out_a, out_b, (size_t)hop * sizeof(float))) {
             d_out++; if (first_bad < 0) first_bad = h;

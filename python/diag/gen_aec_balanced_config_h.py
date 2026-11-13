@@ -70,6 +70,55 @@ def emit_array(name, arr):
     return 'static const float %s[%d] = { %s };\n' % (name, len(arr), vals)
 
 
+def _f32(arr):
+    return np.ascontiguousarray(arr, dtype=np.float32)
+
+
+def _is_prefix(short, long):
+    """True when `short` is bytewise the leading len(short) floats of `long`."""
+    a, b = _f32(short), _f32(long)
+    return len(a) <= len(b) and a.tobytes() == b[:len(a)].tobytes()
+
+
+EMR_COMMON = 'AECB_SG_EMR_TR_COMMON'
+
+
+def emit_array_or_alias(w, name, arr, bases):
+    """Emit `arr` as `name`, or as a macro naming an always-emitted table in `bases`
+    ([(macro, array)]) that starts with exactly these floats. A consumer reads only
+    the first len(arr) entries (table_len / block_size), so a longer table is safe."""
+    for base_name, base_arr in bases:
+        if _is_prefix(arr, base_arr):
+            w('#define %s %s /* first %d floats */\n' % (name, base_name, len(arr)))
+            return
+    w(emit_array(name, arr))
+
+
+def _plan_shared_tables(cap16, extra_caps):
+    """Tables emitted once and referenced by name from several grids.
+
+    emr: every *_EMR_TR table of every grid is a prefix of the longest one (they are the
+    constant 0.3); emitted unconditionally so the 16 kHz block never depends on a rate flag.
+    windows: extra-grid synthesis windows that are bytewise equal, emitted once under an
+    OR of their enable flags.
+    """
+    all_caps = [cap16] + [extra_caps[(sr, fs)] for sr, fs, _t, _f in EXTRA_GRIDS]
+    emr = [c['arrays'][n] for c in all_caps for n in ('SG_NEAREND_EMR_TR', 'SG_NORMAL_EMR_TR')]
+    emr_base = _f32(max(emr, key=len))
+    shared_emr = emr_base if all(_is_prefix(a, emr_base) for a in emr) else None
+
+    groups = {}
+    for sr, fs, tag, flag in EXTRA_GRIDS:
+        win = _f32(extra_caps[(sr, fs)]['arrays']['SYNTH_WINDOW'])
+        groups.setdefault(win.tobytes(), []).append((tag, flag, win))
+    shared_win = {}
+    for members in groups.values():
+        if len(members) > 1:
+            name = 'AECB_SYNTH_WINDOW_%d' % len(members[0][2])
+            shared_win[name] = (members[0][2], [m[1] for m in members], [m[0] for m in members])
+    return dict(emr=shared_emr, windows=shared_win)
+
+
 def _lf_clamp_comment(n_bins, sr, val):
     """lf_clamp_bin comment text for (n_bins, sr), e.g. n_bins=257, sr=16000 -> 8."""
     return ('/* hz_to_bin(250 Hz, n_bins=%d, sr=%d) = round(250*2*(%d-1)/%d) = %d */\n'
@@ -332,7 +381,20 @@ def _assert_cross_rate_invariance(captures):
         raise SystemExit('\n'.join(msg))
 
 
-def emit_legacy_block(w, cap):
+def _emr_bases(shared):
+    """The shared EMR table as an alias base ([] when the grids do not share one)."""
+    return [(EMR_COMMON, shared['emr'])] if shared['emr'] is not None else []
+
+
+def legacy_bases(cap, shared):
+    """Always-emitted tables a later grid may alias: the shared EMR table and the 16 kHz ENR tables."""
+    bases = _emr_bases(shared)
+    for n in ('SG_NEAREND_ENR_TR', 'SG_NEAREND_ENR_SU', 'SG_NORMAL_ENR_TR', 'SG_NORMAL_ENR_SU'):
+        bases.append(('AECB_' + n, cap['arrays'][n]))
+    return bases
+
+
+def emit_legacy_block(w, cap, shared):
     """Emits the unsuffixed (16 kHz) block."""
     v = cap['values']
 
@@ -463,23 +525,24 @@ def emit_legacy_block(w, cap):
     w('#define AECB_SG_DNE_LF_ENDPOINT_BIN %d\n\n' % v['SG_DNE_LF_ENDPOINT_BIN'])
 
     # ── per-bin tuning arrays ──
-    w('/* SuppressionGain per-bin tuning arrays (LF/HF interpolated). */\n')
-    w(emit_array('AECB_SG_NEAREND_ENR_TR', cap['arrays']['SG_NEAREND_ENR_TR']))
-    w(emit_array('AECB_SG_NEAREND_ENR_SU', cap['arrays']['SG_NEAREND_ENR_SU']))
-    w(emit_array('AECB_SG_NEAREND_EMR_TR', cap['arrays']['SG_NEAREND_EMR_TR']))
-    w(emit_array('AECB_SG_NORMAL_ENR_TR', cap['arrays']['SG_NORMAL_ENR_TR']))
-    w(emit_array('AECB_SG_NORMAL_ENR_SU', cap['arrays']['SG_NORMAL_ENR_SU']))
-    w(emit_array('AECB_SG_NORMAL_EMR_TR', cap['arrays']['SG_NORMAL_EMR_TR']))
+    w('/* SuppressionGain per-bin tuning arrays (LF/HF interpolated). The EMR threshold is the\n')
+    w(' * same constant for every table of every grid: one shared table sized for the longest grid. */\n')
+    emr_bases = _emr_bases(shared)
+    if emr_bases:
+        w(emit_array(EMR_COMMON, shared['emr']))
+    for n in ('SG_NEAREND_ENR_TR', 'SG_NEAREND_ENR_SU', 'SG_NEAREND_EMR_TR',
+              'SG_NORMAL_ENR_TR', 'SG_NORMAL_ENR_SU', 'SG_NORMAL_EMR_TR'):
+        emit_array_or_alias(w, 'AECB_' + n, cap['arrays'][n],
+                            emr_bases if n.endswith('EMR_TR') else [])
 
 
-def emit_rate_block(w, tag, enable_flag, cap):
+def emit_rate_block(w, tag, enable_flag, cap, bases, shared_win_name):
     """Emits the AECB_<tag>_* block for one extra rate (8k/48k): only the
     rate-varying subset, guarded by `enable_flag` so firmware can strip it.
     """
     v = cap['values']
     sr = cap['sr']
 
-    w('#ifndef %s\n#define %s 1\n#endif\n' % (enable_flag, enable_flag))
     w('#if %s\n' % enable_flag)
     w('/* ---- %d Hz rate block (AUTO-GENERATED) ----\n'
       % sr)
@@ -499,7 +562,10 @@ def emit_rate_block(w, tag, enable_flag, cap):
     w('#define AECB_%s_FILTER_TAPS_SIZE %d\n' % (tag, v['FILTER_TAPS_SIZE']))
     w('#define AECB_%s_FILTER_LENGTH %d\n\n' % (tag, v['FILTER_LENGTH']))
 
-    w(emit_array('AECB_%s_SYNTH_WINDOW' % tag, cap['arrays']['SYNTH_WINDOW']))
+    if shared_win_name:
+        w('#define AECB_%s_SYNTH_WINDOW %s\n' % (tag, shared_win_name))
+    else:
+        w(emit_array('AECB_%s_SYNTH_WINDOW' % tag, cap['arrays']['SYNTH_WINDOW']))
     w('#define AECB_%s_SYNTH_WINDOW_LEN %d\n\n' % (tag, len(cap['arrays']['SYNTH_WINDOW'])))
 
     w('#define AECB_%s_REE_HOP_SIZE %d\n\n' % (tag, v['REE_HOP_SIZE']))
@@ -540,13 +606,11 @@ def emit_rate_block(w, tag, enable_flag, cap):
         w('#define AECB_%s_%s (%s)\n' % (tag, name, f64(v[name])))
     w('\n')
 
-    w('/* SuppressionGain per-bin tuning arrays at %d Hz (length = n_bins). */\n' % sr)
-    w(emit_array('AECB_%s_SG_NEAREND_ENR_TR' % tag, cap['arrays']['SG_NEAREND_ENR_TR']))
-    w(emit_array('AECB_%s_SG_NEAREND_ENR_SU' % tag, cap['arrays']['SG_NEAREND_ENR_SU']))
-    w(emit_array('AECB_%s_SG_NEAREND_EMR_TR' % tag, cap['arrays']['SG_NEAREND_EMR_TR']))
-    w(emit_array('AECB_%s_SG_NORMAL_ENR_TR' % tag, cap['arrays']['SG_NORMAL_ENR_TR']))
-    w(emit_array('AECB_%s_SG_NORMAL_ENR_SU' % tag, cap['arrays']['SG_NORMAL_ENR_SU']))
-    w(emit_array('AECB_%s_SG_NORMAL_EMR_TR' % tag, cap['arrays']['SG_NORMAL_EMR_TR']))
+    w('/* SuppressionGain per-bin tuning arrays at %d Hz (length = n_bins; a #define names an\n' % sr)
+    w(' * earlier table that starts with the same floats). */\n')
+    for n in ('SG_NEAREND_ENR_TR', 'SG_NEAREND_ENR_SU', 'SG_NEAREND_EMR_TR',
+              'SG_NORMAL_ENR_TR', 'SG_NORMAL_ENR_SU', 'SG_NORMAL_EMR_TR'):
+        emit_array_or_alias(w, 'AECB_%s_%s' % (tag, n), cap['arrays'][n], bases)
     w('#define AECB_%s_SG_TABLE_LEN %d\n' % (tag, v['N_BINS']))
     w('#endif /* %s */\n\n' % enable_flag)
 
@@ -557,11 +621,8 @@ def emit_rate_table(w):
     macros/arrays directly.
     """
     w('/* ------------------------------------------------------------------\n')
-    w(' * Multi-rate lookup. Static/header-only, mirroring the existing\n')
-    w(' * pattern of this header (this file is included by exactly one TU\n')
-    w(' * today, c_impl/src/aec.c, so no cross-TU duplication concern yet;\n')
-    w(' * if a second TU ever includes this header, follow the same\n')
-    w(' * static-const-per-TU pattern already used for the arrays above).\n')
+    w(' * Multi-rate lookup. Static const per including TU, like the arrays\n')
+    w(' * above; what a TU does not use is discarded.\n')
     w(' * ------------------------------------------------------------------ */\n')
     w('typedef struct {\n')
     w('    int sample_rate;\n')
@@ -625,8 +686,7 @@ def emit_rate_table(w):
     w('} AecBalancedRateDims;\n\n')
 
     w('static const AecBalancedRateDims AECB_RATE_TABLE[] __attribute__((unused)) = {\n')
-    w('    { /* 16000 Hz -- the legacy unsuffixed block above (pointer/value\n')
-    w('       * identity with today\'s data; nothing re-derived). */\n')
+    w('    { /* 16000 Hz -- the unsuffixed block above. */\n')
     w('      16000,\n')
     w('      AECB_N_BINS, AECB_FFT_SIZE, AECB_BLOCK_SIZE, AECB_HOP_SIZE,\n')
     w('      AECB_N_PARTITIONS, AECB_FILTER_TAPS_SIZE, 832,\n')
@@ -728,11 +788,24 @@ def main():
     w(' */\n')
     w('#ifndef AEC_BALANCED_CONFIG_H\n#define AEC_BALANCED_CONFIG_H\n\n')
 
-    emit_legacy_block(w, cap16)
+    shared = _plan_shared_tables(cap16, extra_caps)
+    emit_legacy_block(w, cap16, shared)
     w('\n')
 
+    for _sr, _fs, _tag, flag in EXTRA_GRIDS:
+        w('#ifndef %s\n#define %s 1\n#endif\n' % (flag, flag))
+    w('\n')
+    win_of_tag = {}
+    for name, (win, flags, tags) in shared['windows'].items():
+        w('#if %s\n' % ' || '.join(flags))
+        w(emit_array(name, win))
+        w('#endif\n\n')
+        for t in tags:
+            win_of_tag[t] = name
+
+    bases = legacy_bases(cap16, shared)
     for sr, fft_size, tag, flag in EXTRA_GRIDS:
-        emit_rate_block(w, tag, flag, extra_caps[(sr, fft_size)])
+        emit_rate_block(w, tag, flag, extra_caps[(sr, fft_size)], bases, win_of_tag.get(tag))
 
     emit_rate_table(w)
 

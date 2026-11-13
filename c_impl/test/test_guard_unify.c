@@ -1,18 +1,19 @@
 /* test_guard_unify.c -- one AEC algorithm behind every API split.
  *
  * What it proves. Rendering, synthesis and every compared quantity go through the PUBLIC API only (aec_process,
- * aec_process_context, aec_get_res_context, aec_get_output_base, aec_post_reset_serial, aec_cng_fill, aec_debug_status,
- * audiolib ac_istft_*; no aec_post_apply_output, no private reset counter). Internal state is only READ, to classify
+ * aec_process_linear, aec_process_residual, aec_get_residual, aec_apply_gain, aec_apply_cng, aec_post_reset_serial,
+ * aec_cng_fill, aec_debug_status, audiolib ac_istft_*; no aec_post_apply_output, no private reset counter). Internal state is only READ, to classify
  * which branch decided a delay event (near-end-recent hold, inst-ERLE ring, reject list) and to check that the
  * comfort-noise LCG was not reseeded on a revert; the forced-verdict scenario (9) is the one place that WRITES internal
  * state (the filter-quality counters, the same way on every instance, like a patched verdict):
- *   1. Full mode == split mode, bit for bit. aec_process() (enable_res=1) against an external application that runs
- *      aec_process_context() and renders base_spec * res_gain (+ aec_cng_fill + ac_istft_push), clearing its OLA tail
- *      and reseeding its CNG to AEC_CNG_SEED BEFORE the CNG draw and the ac_istft_push of any hop on which
- *      aec_post_reset_serial() moved. Same for a full-config instance driven through aec_process_context(). No
+ *   1. Applied mode == split mode, bit for bit. aec_process() (residual FULL) against an external application that runs
+ *      aec_process_linear() + aec_process_residual() and renders base_spec * res_gain (+ aec_cng_fill + ac_istft_push),
+ *      clearing its OLA tail and reseeding its CNG to AEC_CNG_SEED BEFORE the CNG draw and the ac_istft_push of any hop
+ *      on which aec_post_reset_serial() moved. Same for a second split-driven FULL instance whose application renders with
+ *      the library's own aec_apply_gain() / aec_apply_cng() (the instance generator) instead of aec_cng_fill. No
  *      tolerance anywhere in this comparison.
- *   2. Every mode publishes the same analysis seam and the same rendering base: enable_res, return_res_context-only,
- *      AEC_CONTEXT_NO_GAIN and AEC_CONTEXT_LINEAR_ONLY lanes agree on error_spec / echo_spec / near_spec / formed_hop /
+ *   2. Every residual mode publishes the same analysis seam and the same rendering base: FULL (aec_process), FULL
+ *      (split), ESTIMATE and STATE instances agree on error_spec / echo_spec / near_spec / formed_hop /
  *      usable_linear / guard decision / base_spec / serial each hop.
  *   3. The rendering base obeys its definition (guard on: base_spec == near_spec; off: base_spec == error_spec) and the
  *      guard decision agrees with an independent double-precision recomputation, except inside a relative 1e-6 tie band
@@ -52,8 +53,8 @@
  *   GUARD_UNIFY_ALL=<cases.tsv> additionally runs every case of such a list (stem, bucket, mic, ref, sr columns) at the
  *   grid given by GUARD_UNIFY_ALL_FFT; there a missing wav is a failure. */
 #include "aec.h"
+#include "aec_internal.h"
 #include "aec_post.h"
-#include "aec_res.h"
 #include "aec_balanced_config.h"
 #include "audio_stft.h"
 #include "utility/fast_math.h"
@@ -178,12 +179,13 @@ typedef struct {
     uint32_t rng;
     uint32_t serial;
     int cng;
+    int lib;            /* 1: render with the library's aec_apply_gain() / aec_apply_cng() (its own generator) */
     Complex* spec;
 } App;
 
 /* The application synthesizes with the library's synthesis window (aec_synthesis_window), borrowed by ac_istft; the
  * audiolib default sqrt-Hann differs from that table in the last float bit. */
-static int app_init(App* ap, int fft, int cng, const Aec* a) {
+static int app_init(App* ap, int fft, int cng, int lib, const Aec* a) {
     AcStftConfig sc;
     size_t sz;
     const float* win = NULL;
@@ -198,6 +200,7 @@ static int app_init(App* ap, int fft, int cng, const Aec* a) {
     ap->rng = AEC_CNG_SEED;
     ap->serial = aec_post_reset_serial(a);
     ap->cng = cng;
+    ap->lib = lib;
     ap->spec = (Complex*)calloc((size_t)(fft / 2 + 1), sizeof(Complex));
     return 0;
 }
@@ -205,9 +208,8 @@ static void app_free(App* ap) { free(ap->mem); free(ap->spec); }
 
 /* One hop of external rendering. Only public getters. force_reset makes the application clear its OLA tail and reseed
  * its CNG on this hop although the serial did not move (the counterfactual of a hard reset). */
-static int app_synth(App* ap, const Aec* a, float* out, int force_reset) {
-    AecResContext c;
-    AecOutputBase ob;
+static int app_synth(App* ap, Aec* a, float* out, int force_reset) {
+    AecResidualView c;
     uint32_t s = aec_post_reset_serial(a);
     int k, n;
     if (s != ap->serial || force_reset) {   /* before the first CNG draw and before the ac_istft_push of this hop */
@@ -215,16 +217,21 @@ static int app_synth(App* ap, const Aec* a, float* out, int force_reset) {
         ap->rng = AEC_CNG_SEED;
         ap->serial = s;
     }
-    aec_get_res_context(a, &c);
-    memset(&ob, 0, sizeof ob);
-    ob.struct_size = sizeof ob;
-    if (aec_get_output_base(a, &ob) != 0) return -1;
-    n = ob.n_freqs;
-    for (k = 0; k < n; ++k) {
-        ap->spec[k].r = ob.base_spec[k].r * c.res_gain[k];
-        ap->spec[k].i = ob.base_spec[k].i * c.res_gain[k];
+    memset(&c, 0, sizeof c);
+    c.struct_size = sizeof c;
+    if (aec_get_residual(a, &c) != AEC_OK) return -1;
+    n = c.n_freqs;
+    if (ap->lib) {
+        /* the library's own helpers; its generator reseeds itself on a hard reset */
+        if (aec_apply_gain(a, NULL, ap->spec) != AEC_OK) return -1;
+        if (ap->cng && aec_apply_cng(a, NULL, ap->spec) != AEC_OK) return -1;
+    } else {
+        for (k = 0; k < n; ++k) {
+            ap->spec[k].r = c.base_spec[k].r * c.res_gain[k];
+            ap->spec[k].i = c.base_spec[k].i * c.res_gain[k];
+        }
+        if (ap->cng) aec_cng_fill(&ap->rng, ap->spec, c.comfort_noise, c.res_gain, NULL, 0.0f, n);
     }
-    if (ap->cng) aec_cng_fill(&ap->rng, ap->spec, c.comfort_noise, c.res_gain, NULL, 0.0f, n);
     ac_istft_push(ap->is, ap->spec, out);
     return 0;
 }
@@ -258,13 +265,13 @@ static void make_cfg(AecConfig* c, const Stream* s, int role) {
     c->fft_size = s->fft;
     c->enable_cng = s->enable_cng;
     if (s->warm_transfer_off) c->delay_acquire_warm_transfer = 0;
-    if (s->external_aligned) { c->delay_mode = AEC_DELAY_EXTERNAL_ALIGNED; c->enable_delay_est = 0; }
+    if (s->external_aligned) { c->delay_mode = AEC_DELAY_EXTERNAL_ALIGNED; }
     switch (role) {
-    case 0: c->enable_res = 1; c->return_res_context = 0; break;                       /* F: full */
-    case 1: c->enable_res = 0; c->return_res_context = 1; break;                       /* K: context only */
-    case 2: c->enable_res = 1; c->return_res_context = 1; break;                       /* N: full config, context API */
-    case 3: c->enable_res = 0; c->return_res_context = 1; c->spatial_linear_context = AEC_CONTEXT_NO_GAIN; break;
-    default: c->enable_res = 0; c->return_res_context = 1; c->spatial_linear_context = AEC_CONTEXT_LINEAR_ONLY; break;
+    case 0: c->residual = AEC_RESIDUAL_FULL; break;                                    /* F: aec_process */
+    case 1: c->residual = AEC_RESIDUAL_FULL; break;                                    /* K: split entry points */
+    case 2: c->residual = AEC_RESIDUAL_FULL; break;                                    /* N: split, rendered with aec_apply_* */
+    case 3: c->residual = AEC_RESIDUAL_ESTIMATE; break;                                /* G: no gain */
+    default: c->residual = AEC_RESIDUAL_STATE; break;                                  /* L: linear half only */
     }
 }
 
@@ -335,8 +342,8 @@ static void run_stream(const Stream* s, Stats* st) {
         if (aec_create(A[role], &c) != 0) { CHECK(0, "%s: create role %d", s->name, role); return; }
     }
     CHECK(aec_hop_size(A[0]) == hop, "%s: hop size", s->name);
-    if (app_init(&app_k, s->fft, s->enable_cng, A[1]) || app_init(&app_n, s->fft, s->enable_cng, A[2])
-        || app_init(&app_x, s->fft, s->enable_cng, A[1])) {
+    if (app_init(&app_k, s->fft, s->enable_cng, 0, A[1]) || app_init(&app_n, s->fft, s->enable_cng, 1, A[2])
+        || app_init(&app_x, s->fft, s->enable_cng, 0, A[1])) {
         CHECK(0, "%s: app init", s->name);
         return;
     }
@@ -357,8 +364,7 @@ static void run_stream(const Stream* s, Stats* st) {
     for (h = 0; h < s->nh + (s->replay_from >= 0 ? s->replay_len : 0); ++h) {
         const float* mic;
         const float* far;
-        AecResContext cF, cK, cN, cG, cL;
-        AecOutputBase oBF, oBK, oBN, oBG, oBL;
+        AecResidualView cF, cK, cN, cG, cL;
         AecDebugStatus ds;
         int src_h = h, bad = 0, d0, d1, rej0, warm_pred, revert_hop = 0;
         uint32_t s0, s1, cng0 = 0;
@@ -406,17 +412,17 @@ static void run_stream(const Stream* s, Stats* st) {
                         && span <= 4096;                    /* pbfdaf_warm_shift_ir refuses a span above its scratch */
             if (warm_pred) warm_pred = span;                /* the new delay must also be in (0, span): checked below */
         }
-        aec_process(A[0], mic, far, oF);
-        aec_process_context(A[1], mic, far);
-        aec_process_context(A[2], mic, far);
-        aec_process_context(A[3], mic, far);
-        aec_process_context(A[4], mic, far);
-        aec_get_res_context(A[0], &cF); aec_get_res_context(A[1], &cK); aec_get_res_context(A[2], &cN);
-        aec_get_res_context(A[3], &cG); aec_get_res_context(A[4], &cL);
-        memset(&oBF, 0, sizeof oBF); oBF.struct_size = sizeof oBF; oBK = oBN = oBG = oBL = oBF;
-        if (aec_get_output_base(A[0], &oBF) || aec_get_output_base(A[1], &oBK) || aec_get_output_base(A[2], &oBN)
-            || aec_get_output_base(A[3], &oBG) || aec_get_output_base(A[4], &oBL)) {
-            CHECK(0, "%s: aec_get_output_base failed", s->name);
+        if (aec_process(A[0], mic, far, oF) != AEC_OK) { CHECK(0, "%s: aec_process failed", s->name); break; }
+        for (role = 1; role < NROLE; ++role)
+            if (aec_process_linear(A[role], mic, far) != AEC_OK || aec_process_residual(A[role], NULL) != AEC_OK) {
+                CHECK(0, "%s: split process failed (role %d)", s->name, role);
+                break;
+            }
+        if (role < NROLE) break;
+        memset(&cF, 0, sizeof cF); cF.struct_size = sizeof cF; cK = cN = cG = cL = cF;
+        if (aec_get_residual(A[0], &cF) || aec_get_residual(A[1], &cK) || aec_get_residual(A[2], &cN)
+            || aec_get_residual(A[3], &cG) || aec_get_residual(A[4], &cL)) {
+            CHECK(0, "%s: aec_get_residual failed", s->name);
             break;
         }
 
@@ -492,10 +498,10 @@ static void run_stream(const Stream* s, Stats* st) {
             || !bits_eq_f(cF.r2, cK.r2, nb) || !bits_eq_f(cF.comfort_noise, cK.comfort_noise, nb)
             || !bits_eq_c(cN.error_spec, cK.error_spec, nb) || !bits_eq_c(cN.near_spec, cK.near_spec, nb)
             || !bits_eq_f(cN.formed_hop, cK.formed_hop, hop)) { st->seam_diff_hops++; bad = 1; }
-        if (oBF.guard_active != oBK.guard_active || oBN.guard_active != oBK.guard_active
-            || oBG.guard_active != oBK.guard_active || oBL.guard_active != oBK.guard_active
-            || !bits_eq_c(oBF.base_spec, oBK.base_spec, nb) || !bits_eq_c(oBN.base_spec, oBK.base_spec, nb)
-            || !bits_eq_c(oBG.base_spec, oBK.base_spec, nb) || !bits_eq_c(oBL.base_spec, oBK.base_spec, nb)
+        if (cF.guard_active != cK.guard_active || cN.guard_active != cK.guard_active
+            || cG.guard_active != cK.guard_active || cL.guard_active != cK.guard_active
+            || !bits_eq_c(cF.base_spec, cK.base_spec, nb) || !bits_eq_c(cN.base_spec, cK.base_spec, nb)
+            || !bits_eq_c(cG.base_spec, cK.base_spec, nb) || !bits_eq_c(cL.base_spec, cK.base_spec, nb)
             || !bits_eq_c(cG.error_spec, cK.error_spec, nb) || !bits_eq_f(cG.formed_hop, cK.formed_hop, hop)
             || !bits_eq_c(cG.near_spec, cK.near_spec, nb) || cG.usable_linear != cK.usable_linear
             || !bits_eq_c(cL.error_spec, cK.error_spec, nb) || !bits_eq_f(cL.formed_hop, cK.formed_hop, hop)
@@ -510,16 +516,16 @@ static void run_stream(const Stream* s, Stats* st) {
 
         /* 3. definition of the rendering base and independent guard decision (this hop's verdict) */
         {
-            int fired = oBK.guard_active;
+            int fired = cK.guard_active;
             long base_def_before = st->base_def_bad_hops;
             double se = energy_abs_sq(cK.error_spec, nb), sy = energy_abs_sq(cK.near_spec, nb);
             double gap = fabs(se - sy) / (se > sy ? se : sy > 0.0 ? sy : 1.0);
-            if (fired ? !bits_eq_c(oBK.base_spec, cK.near_spec, nb) : !bits_eq_c(oBK.base_spec, cK.error_spec, nb))
+            if (fired ? !bits_eq_c(cK.base_spec, cK.near_spec, nb) : !bits_eq_c(cK.base_spec, cK.error_spec, nb))
                 { st->base_def_bad_hops++; bad = 1; }
             if (cK.usable_linear && fired) { st->base_def_bad_hops++; bad = 1; }
             if (getenv("GU_DEBUG") && (st->base_def_bad_hops != base_def_before))
                 printf("DBG %s hop %d base def: fired %d usable %d base==near %d base==error %d\n", s->name, h, fired,
-                       cK.usable_linear, bits_eq_c(oBK.base_spec, cK.near_spec, nb), bits_eq_c(oBK.base_spec, cK.error_spec, nb));
+                       cK.usable_linear, bits_eq_c(cK.base_spec, cK.near_spec, nb), bits_eq_c(cK.base_spec, cK.error_spec, nb));
             if (!cK.usable_linear) {
                 int want = se > sy;
                 if (want != fired) { if (gap < 1e-6) st->oracle_ties++; else { st->oracle_mismatch++; bad = 1; } }
@@ -553,7 +559,7 @@ static void run_stream(const Stream* s, Stats* st) {
             }
             if (mx > st->probe_max_err) st->probe_max_err = mx;
             if (mx > PROBE_TOL || mx != mx) { st->probe_bad_hops++; bad = 1; }
-            if (oBK.guard_active) st->probe_guard_hops_checked++;
+            if (cK.guard_active) st->probe_guard_hops_checked++;
             memcpy(prev_formed, cK.formed_hop, (size_t)hop * sizeof(float));
         }
         st->hops++;
@@ -571,13 +577,13 @@ static void run_stream(const Stream* s, Stats* st) {
 /* ------------------------------------------------------------------------------------------------------------------ */
 
 static void report(const Stream* s, const Stats* st) {
-    CHECK(st->full_vs_split_diff_hops == 0, "%s: aec_process() vs context+getters+aec_cng_fill+ac_istft differs on %ld of %ld hops (first %ld)",
+    CHECK(st->full_vs_split_diff_hops == 0, "%s: aec_process() vs split entry+getters+aec_cng_fill+ac_istft differs on %ld of %ld hops (first %ld)",
           s->name, st->full_vs_split_diff_hops, st->hops, st->first_bad_hop);
-    CHECK(st->full_vs_ctxfull_diff_hops == 0, "%s: full config via aec_process_context() differs from aec_process() on %ld hops", s->name,
+    CHECK(st->full_vs_ctxfull_diff_hops == 0, "%s: split FULL lane rendered with aec_apply_gain()/aec_apply_cng() differs from aec_process() on %ld hops", s->name,
           st->full_vs_ctxfull_diff_hops);
     CHECK(st->seam_diff_hops == 0, "%s: analysis seam / gain / r2 / comfort noise differs between modes on %ld hops (first %ld)", s->name,
           st->seam_diff_hops, st->first_bad_hop);
-    CHECK(st->lane_diff_hops == 0, "%s: rendering base / guard / NO_GAIN / LINEAR_ONLY lanes differ on %ld hops (first %ld)", s->name,
+    CHECK(st->lane_diff_hops == 0, "%s: rendering base / guard / ESTIMATE / STATE lanes differ on %ld hops (first %ld)", s->name,
           st->lane_diff_hops, st->first_bad_hop);
     CHECK(st->base_def_bad_hops == 0, "%s: rendering base violates its definition on %ld hops", s->name, st->base_def_bad_hops);
     CHECK(st->oracle_mismatch == 0, "%s: guard decision disagrees with the independent recomputation on %ld hops outside the tie band", s->name,
@@ -971,7 +977,7 @@ static void test_guard_threshold_fixture(int sr, int fft) {
     const int want[3] = { 0, 1, 0 };            /* strict: equal energy does not fire; Y one ulp below fires */
     aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, sr);
     cfg.fft_size = fft;
-    cfg.enable_res = 0; cfg.return_res_context = 1;
+    cfg.residual = AEC_RESIDUAL_FULL;
     if (aec_create(&a, &cfg) != 0) { CHECK(0, "fixture: create"); return; }
     nb = a.n_freqs;
     for (mode = 0; mode < 4; ++mode) {          /* 0 normal, 1 usable, 2 flag off, 3 energies swapped (E one ulp below) */
@@ -1053,7 +1059,7 @@ static void test_guard_reduction_order(int sr, int fft) {
     float *e, *y, *e2, *y2;
     aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, sr);
     cfg.fft_size = fft;
-    cfg.enable_res = 0; cfg.return_res_context = 1;
+    cfg.residual = AEC_RESIDUAL_FULL;
     if (aec_create(&a, &cfg) != 0) { CHECK(0, "reduction fixture: create"); return; }
     nb = a.n_freqs;
     e = (float*)malloc((size_t)nb * sizeof(float)); y = (float*)malloc((size_t)nb * sizeof(float));
@@ -1108,48 +1114,57 @@ static void test_guard_reduction_order(int sr, int fft) {
 static void test_getter_contract(void) {
     AecConfig cfg;
     Aec a, b;
-    AecOutputBase ob;
+    AecResidualView ob;
     float mic[256], far[256];
     int i, h;
     aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, 16000);
-    cfg.enable_res = 0; cfg.return_res_context = 1;
+    cfg.residual = AEC_RESIDUAL_FULL;
     if (aec_create(&a, &cfg) != 0) { CHECK(0, "getter: create"); return; }
-    {   /* a caller struct declared smaller than AecOutputBase (an older two-size_t layout, 16 bytes on LP64 and 8 on
+    {   /* a caller struct declared smaller than AecResidualView (an older two-size_t layout, 16 bytes on LP64 and 8 on
          * 32-bit targets, and one byte short) sits in a canary-filled buffer: refused, and not one byte written, the
          * declared struct included */
-        static const size_t short_sizes[2] = { 2u * sizeof(size_t), sizeof(AecOutputBase) - 1u };
-        unsigned char buf[sizeof(AecOutputBase) + 64], ref[sizeof(AecOutputBase) + 64];
+        static const size_t short_sizes[2] = { 2u * sizeof(size_t), sizeof(AecResidualView) - 1u };
+        unsigned char buf[sizeof(AecResidualView) + 64], ref[sizeof(AecResidualView) + 64];
         int t;
         for (t = 0; t < 2; ++t) {
             size_t dsz = short_sizes[t];
             memset(buf, 0xAB, sizeof buf);
             memcpy(buf, &dsz, sizeof dsz);
             memcpy(ref, buf, sizeof buf);
-            CHECK(aec_get_output_base(&a, (AecOutputBase*)(void*)buf) == -1, "getter: struct_size %zu refused", dsz);
+            CHECK(aec_get_residual(&a, (AecResidualView*)(void*)buf) == AEC_ERR_ARG, "getter: struct_size %zu refused", dsz);
             CHECK(memcmp(buf, ref, sizeof buf) == 0, "getter: struct_size %zu: nothing written (declared struct and canary)",
                   dsz);
         }
-        /* a larger, newer caller struct: accepted, only the known prefix written, the rest of the declared size kept */
+        /* a larger, newer caller struct: accepted, only the known prefix written, the rest of the declared size kept
+         * (the view exists once a hop has completed) */
+        {
+            float warm_out[256];
+            memset(mic, 0, sizeof mic); memset(far, 0, sizeof far);
+            CHECK(aec_process(&a, mic, far, warm_out) == AEC_OK, "getter: one completed hop");
+        }
         memset(buf, 0xAB, sizeof buf);
         { size_t dsz = sizeof buf; memcpy(buf, &dsz, sizeof dsz); }
         memcpy(ref, buf, sizeof buf);
-        CHECK(aec_get_output_base(&a, (AecOutputBase*)(void*)buf) == 0, "getter: larger struct_size accepted");
-        CHECK(memcmp(buf + sizeof(AecOutputBase), ref + sizeof(AecOutputBase), sizeof buf - sizeof(AecOutputBase)) == 0,
-              "getter: larger struct_size: bytes past sizeof(AecOutputBase) untouched");
+        CHECK(aec_get_residual(&a, (AecResidualView*)(void*)buf) == AEC_OK, "getter: larger struct_size accepted");
+        CHECK(memcmp(buf + sizeof(AecResidualView), ref + sizeof(AecResidualView), sizeof buf - sizeof(AecResidualView)) == 0,
+              "getter: larger struct_size: bytes past sizeof(AecResidualView) untouched");
         memcpy(&ob, buf, sizeof ob);
         CHECK(ob.struct_size == sizeof ob && ob.n_freqs == a.n_freqs && ob.base_spec != NULL,
-              "getter: larger struct_size: prefix filled, struct_size reports sizeof(AecOutputBase)");
+              "getter: larger struct_size: prefix filled, struct_size reports sizeof(AecResidualView)");
     }
     memset(&ob, 0xAB, sizeof ob);
     ob.struct_size = sizeof ob;
-    CHECK(aec_get_output_base(NULL, &ob) == -1 && ob.base_spec == NULL && ob.n_freqs == 0 && ob.guard_active == 0
+    CHECK(aec_get_residual(NULL, &ob) == AEC_ERR_ARG && ob.base_spec == NULL && ob.n_freqs == 0 && ob.guard_active == 0
           && ob.struct_size == sizeof ob, "getter: NULL instance refused, prefix zeroed");
-    CHECK(aec_get_output_base(&a, NULL) == -1, "getter: NULL out refused");
+    CHECK(aec_get_residual(&a, NULL) == AEC_ERR_ARG, "getter: NULL out refused");
     CHECK(aec_post_reset_serial(NULL) == 0u && aec_post_reset_serial(&a) == 0u, "serial: 0 on NULL and on a fresh instance");
     g_rs = 5u;
     for (h = 0; h < 40; ++h) {
         for (i = 0; i < 256; ++i) { mic[i] = 0.1f * rnd(); far[i] = 0.3f * rnd(); }
-        aec_process_context(&a, mic, far);
+        if (aec_process_linear(&a, mic, far) != AEC_OK || aec_process_residual(&a, NULL) != AEC_OK) {
+            CHECK(0, "getter: split hop %d", h);
+            break;
+        }
     }
     {
         uint32_t s0 = aec_post_reset_serial(&a), s1, s2;
@@ -1161,12 +1176,14 @@ static void test_getter_contract(void) {
         CHECK(aec_post_reset_serial(&a) == s2, "serial: repeatable read after a reset");
     }
     aec_destroy(&a);
-    /* neither the post chain nor the context seam on: no base */
+    /* no residual stage: no base */
     aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, 16000);
-    cfg.enable_res = 0; cfg.return_res_context = 0;
+    cfg.residual = AEC_RESIDUAL_OFF;
     if (aec_create(&b, &cfg) == 0) {
+        memset(&ob, 0xAB, sizeof ob);
         ob.struct_size = sizeof ob;
-        CHECK(aec_get_output_base(&b, &ob) == -1 && ob.base_spec == NULL, "getter: refused when neither enable_res nor return_res_context");
+        CHECK(aec_get_residual(&b, &ob) == AEC_ERR_MODE && ob.base_spec == NULL && ob.struct_size == sizeof ob,
+              "getter: refused (AEC_ERR_MODE, view zeroed) when AecConfig.residual is OFF");
         aec_destroy(&b);
     }
 }

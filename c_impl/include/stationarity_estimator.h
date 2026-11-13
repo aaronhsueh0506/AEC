@@ -39,8 +39,11 @@ typedef struct {
     int           history_write;
 } StationarityEstimator;
 
+/* Rows of the render-PSD history ring on this grid: history_storage needs this many x n_freqs floats. */
+int stationarity_estimator_window_hops(int hop_samples, int sample_rate);
+
 /* Caller-provided storage: noise_storage (n_freqs floats), hangovers_storage (n_freqs int32_t),
- * flags_storage (n_freqs uchar), history_storage (window_hops x n_freqs floats). */
+ * flags_storage (n_freqs uchar), history_storage (stationarity_estimator_window_hops() x n_freqs floats). */
 void stationarity_estimator_init(StationarityEstimator *s,
                                  int n_freqs, int hop_samples, int sample_rate,
                                  float *noise_storage,

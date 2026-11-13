@@ -13,12 +13,12 @@ void reverb_freq_resp_init(ReverbFrequencyResponse *r, float *tail_storage,
     r->smoothing_base = smoothing_base;
     r->average_decay = 0.0;
     r->tail_response = tail_storage;
-    memset(r->tail_response, 0, (size_t)n_freqs * sizeof(float));
+    if (r->tail_response) memset(r->tail_response, 0, (size_t)n_freqs * sizeof(float));
 }
 
 void reverb_freq_resp_reset(ReverbFrequencyResponse *r) {
     r->average_decay = 0.0;
-    memset(r->tail_response, 0, (size_t)r->n_freqs * sizeof(float));
+    if (r->tail_response) memset(r->tail_response, 0, (size_t)r->n_freqs * sizeof(float));
 }
 
 void reverb_freq_resp_update(ReverbFrequencyResponse *r,

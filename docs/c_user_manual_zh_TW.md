@@ -8,16 +8,9 @@
 #include "aec.h"        /* c_impl/include/aec.h — 標準整合只需要這一個 */
 ```
 
-只要自己用 `aec_process()` 取得時域輸出，就只需要 `aec.h`。另有一個 header 屬於
-**對外公開、範圍較窄的介面**，在自己組合頻域後處理鏈時需要（單聲道整鏈；以及直接驅動多通道核心、
-在 beamformer 之後自備 `AecRes` 的呼叫端——Audio_ALG 的 4ch mcab flow 不含 RES，由應用在 mcab 之後自己建立，見 [§8.5](reference/integration.md#85-獨立的-res-級aec_resh)）：
-
-| Header | 何時需要 |
-|---|---|
-| `aec_res.h` | `aec_cng_fill()` 舒適噪音填補（單聲道、多通道兩種串接都用）；以及對 beamformer 之後的融合頻譜算 RES 增益的 `AecRes`（[§8.5](reference/integration.md#85-獨立的-res-級aec_resh)、[§8.6](reference/integration.md#86-線性對齊-contextaec_get_linear_context)） |
-
-`suppression_gain.h` 與 `aec_balanced_config.h` 是內部 header。Audio_ALG 的範例與多通道 flow（mcab）
-只 include `aec.h` 與 `aec_res.h`，不直接 include 這兩個。
+整合只需要 `aec.h`：它同時宣告單聲道與陣列實例的全部公開介面，包括 `aec_apply_cng_spec()` 舒適噪音填補
+（[§8.5](reference/integration.md#85-舒適噪音填補aec_apply_cng_spec)；自己組合頻域後處理鏈時用）。
+殘留回音抑制增益階段不是獨立的公開介面：單聲道的在 `Aec` 裡，四麥克風融合後的在陣列實例裡。
 
 `c_impl/include/` 底下其餘 27 個 header（`aec_post.h`、`pbfdkf.h`、`delay_aec.h`、`suppression_gain.h` 等）
 全部是**內部實作**用的，會隨版本改變，請勿直接 include，也不要依賴其中任何型別或函式。
@@ -31,7 +24,7 @@
 
 ## 1. 這個函式庫是什麼／不是什麼
 
-單聲道聲學回音消除（AEC）。每個 `Aec` 實例處理**一支麥克風 + 一路參考訊號**：
+聲學回音消除（AEC）。每個 `Aec` 實例處理**一支麥克風 + 一路參考訊號**（`AecConfig.n_mics = 4` 時是四支麥克風的陣列實例，見下方 §2 末的「四麥克風陣列實例」）：
 
 | 訊號 | 意義 |
 |---|---|
@@ -68,8 +61,8 @@
 查詢用 API：
 
 - `aec_resolve_signal_grid(sample_rate, fft_size, &grid)` —— 全函式庫唯一
-  的格點解析器。成功回傳 1 並填入 `AecSignalGrid{sample_rate, fft_size,
-  frame_size, hop_size, n_freqs, is_legacy}`；失敗回傳 0 且**不動** `*out`。
+  的格點解析器。成功回傳 `AEC_OK`（0）並填入 `AecSignalGrid{sample_rate, fft_size,
+  frame_size, hop_size, n_freqs, is_legacy}`；失敗回傳 `AEC_ERR_ARG` 且**不動** `*out`。
   驗證、`aec_get_mem_size()`、`aec_create()`、`aec_init()` 全部走這一支，
   所以「配記憶體時看到的格點」＝「init 看到的」＝「`aec_process()` 實際
   消耗的 hop」。`out` 可傳 NULL 當純檢查用。
@@ -84,14 +77,14 @@
 
 > 8 kHz 是 **legacy 格點**：本函式庫與 Audio_ALG 的 mono 範例支援它
 > （既有 8 kHz 測試路徑仍在用），但它不是產品正式格點，Audio_ALG 的
-> 4 聲道 mcab flow 也不支援（`mcab_get_mem_requirements()`／`mcab_init()` 只接受 16k/256、16k/512、48k/1024
-> 三個產品格點）。`AecSignalGrid.is_legacy` 會為它、且只為它設為 1。
+> 4 聲道範例也不支援；`n_mics = 4` 的陣列實例（`aec_get_mem_requirements()`／`aec_init_ex()`）只接受 16k/256、16k/512、48k/1024
+> 三個產品格點。`AecSignalGrid.is_legacy` 會為它、且只為它設為 1。
 
 ### 硬性限制
 
 | 限制 | 說明 |
 |---|---|
-| **只支援單聲道** | 一個實例 = 1 mic + 1 ref。沒有 mic array、沒有 stereo reference。多路訊號請各自建立獨立實例。 |
+| **麥克風數只有 1 或 4** | 一般實例 = 1 mic + 1 ref；`n_mics = 4` 的陣列實例 = 4 mic（交錯成 `float[hop][4]`）+ 1 ref，beamformer 在函式庫外（§8.8）。沒有其他麥克風數、沒有 stereo reference。其他路數請各自建立獨立實例。 |
 | **延遲只能是正的** | 回音必須**晚於**參考訊號抵達（`mic` 落後 `ref`）。內部是對參考訊號的環形緩衝做回看，負延遲無法表示，必須在上游先對齊。 |
 | **沒有非線性回音模型** | 只有線性 filter + 殘留回音抑制。喇叭嚴重失真、破音造成的非線性回音無法建模。 |
 | **取樣率限 8/16/48 kHz** | 其他取樣率請在外部先重新取樣。 |
@@ -160,7 +153,7 @@ int run_aec(int sample_rate)
 
     if (mic && ref && out) {
         while (app_read_hop(mic, ref, hop)) {
-            aec_process(&aec, mic, ref, out);        /* 回傳 void，不會失敗 */
+            aec_process(&aec, mic, ref, out);        /* 回傳 AecStatus；引數有效時為 AEC_OK */
             app_write_hop(out, hop);
         }
     }
@@ -170,6 +163,20 @@ int run_aec(int sample_rate)
     return (mic && ref && out) ? 0 : -1;
 }
 ```
+
+### 四麥克風陣列實例
+
+`cfg.n_mics = AEC_ARRAY_MICS`（4）時，一次 `aec_init()`／`aec_create()` 建出整條四麥克風線性流程（四條 lane、共用的 delay 估計器與對齊後 far、融合緩衝，同一塊記憶池）。
+Beamformer 與合成**不在函式庫內**，由呼叫端提供。建立與記憶池描述子用 `aec_get_mem_requirements()` + `aec_init_ex()`；每個 hop：
+
+1. `aec_process_linear(a, mics, ref)`：`mics` 是交錯的 `float[hop][4]`，`ref` 是 `float[hop]`；
+2. `aec_get_array(a, &av)`：各 lane 的 `error_spec` 給呼叫端的 beamformer；
+3. `aec_process_residual(a, &beam)`：`beam.weights` 是聲道優先的 `Complex[4][n_freqs]`（融合為 `Σ w · lane`，不取共軛），`beam.beamformed_error` 是同一次 beamformer 的頻譜或 `NULL`；
+4. `aec_get_residual()` 的 `res_gain`／`aec_apply_gain(a, g_nr, spec)`／`aec_apply_cng(a, g_nr, spec)`（`FULL`），再由呼叫端反轉換與 overlap-add；`aec_post_reset_serial()` 變動時先清自己的 OLA 尾巴。
+
+各 `residual` 模式的行為（`STATE` 的 `aec_process_residual()` 回 `AEC_ERR_MODE`、`FULL` 同 hop 第二次回 `AEC_ERR_SEQUENCE`、融合檢視的 `formed_hop`／`echo_spec` 為 `NULL`）、
+`aec_process()`／`aec_apply_external_realign()` 在陣列實例上被拒絕、可編譯的完整範例、記憶池大小與目前尚未做到的項目（遠端側歷史與狀態仍每條 lane 各一份（只依賴遠端的逐 hop 分析已由 lane 0 算一次、其餘沿用，不改記憶池）），見
+[§8.8](reference/integration.md#88-麥克風陣列實例n_mics--4) 與 [§4 陣列記憶池](reference/lifecycle.md#陣列實例的記憶池)。
 
 ---
 
@@ -212,12 +219,6 @@ instance 存活期間不可變）** 決定。這是唯一的真實來源：
 非 `MATCHED` 卻改了 `delay_num_filters`、以及任何模式下的
 `delay_num_filters = 0`，都會被擋下。
 
-> **`enable_delay_est` 已 deprecated。** 它現在只是 `delay_mode` 的相容
-> 轉譯層（`aec_config_resolve_delay()` 在驗證前跑一次）：`= 1`（預設）代表
-> 「沿用 `delay_mode`」；`= 0` 且 `fixed_delay_samples ≥ 0` → `FIXED`；
-> `= 0` 且沒帶 → `EXTERNAL_ALIGNED`。轉譯後只有 `delay_mode` 是真值，
-> 這個欄位會被改寫成對應的鏡像值。舊程式不需改動即可繼續運作，但新程式
-> 請直接寫 `delay_mode`；此欄位未來會移除。
 
 以下的可擷取上限**只適用於 `MATCHED`**（`FIXED` 沒有搜尋這回事，
 環形緩衝自動配置成剛好夠用的 `fixed_delay_samples + hop_size`，
@@ -259,14 +260,14 @@ max 923 ms、約 5% 超出 509 ms）與板端/離線的建議做法（系統延�
 送錯的 reference 訊號。這些必須在上游解決。
 
 離線處理且檔案已精準對齊時，可設
-`cfg.delay_mode = AEC_DELAY_EXTERNAL_ALIGNED`（舊寫法 `cfg.enable_delay_est = 0`
-效果相同）省掉首次擷取的擾動。線上產品請維持 `MATCHED`。
+`cfg.delay_mode = AEC_DELAY_EXTERNAL_ALIGNED`
+省掉首次擷取的擾動。線上產品請維持 `MATCHED`。
 
 ### 演算法延遲（實測）
 
 以脈衝訊號量測輸出峰值位移的結果：
 
-| 格點 | `enable_res = 1`（預設） | `enable_res = 0` |
+| 格點 | `residual = AEC_RESIDUAL_FULL`（預設） | `residual = AEC_RESIDUAL_OFF` |
 |---|---:|---:|
 | 8 kHz / 256 | 16.000 ms（1 hop） | 0 ms |
 | 16 kHz / 256 | 8.000 ms（1 hop） | 0 ms |

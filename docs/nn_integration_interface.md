@@ -9,8 +9,8 @@ sqrt-Hann periodic (COLA)**. Supported choices are 8k:256/128,
 selected instance grid; `n_freqs = fft/2+1` is therefore 129, 257, or 513.
 The grid cannot change mid-stream.
 
-## The seam: `AecResContext` (per-frame, frequency-domain)
-Enable with `AecConfig.return_res_context = True`; then `aec.process(mic_hop, ref_hop)` returns
+## The seam: `AecResContext` in Python, `AecResidualView` in C (per-frame, frequency-domain)
+Python: enable with `AecConfig.return_res_context = True`; then `aec.process(mic_hop, ref_hop)` returns
 `(time_out, AecResContext)`. The context IS the per-frame feature vector a model consumes:
 
 | field | shape / type | meaning (model input) |
@@ -24,7 +24,7 @@ Enable with `AecConfig.return_res_context = True`; then `aec.process(mic_hop, re
 | `erle_factor` | float [0,1] | linear convergence quality. |
 | `dt_indicator` | float [0,0.8] | double-talk confidence. |
 | `divergence` | float [0,1] | filter divergence indicator. |
-| `over_sub` | float | dynamic over-subtraction factor (Python only; equal to `erle_factor`, absent from the C `AecResContext`). |
+| `over_sub` | float | dynamic over-subtraction factor (Python only; equal to `erle_factor`, absent from the C `AecResidualView` and `AecLinearView`). |
 | `erl_estimate` | float | dynamic echo-return-loss (render-based residual). |
 | `raw_output` | (hop_size,) float | Refined PBFDKF output before output selection. This is also what the context-only entry point returns as its audio. It is not the formed seam and not the rendering base. |
 | `formed_output` | (hop_size,) float | Current selected/crossfaded hop underlying `error_spec`; use this when a downstream block performs its own STFT. Always the real linear residual. |
@@ -34,11 +34,14 @@ Enable with `AecConfig.return_res_context = True`; then `aec.process(mic_hop, re
 
 These are produced every hop by the production linear AEC with zero extra cost (already computed internally).
 
-**C names.** The C struct `AecResContext` (`c_impl/include/aec.h`) carries the same data under slightly
-different names: `raw_output` is `linear_hop`, `formed_output` is `formed_hop`; `res_gain`, `r2`,
-`comfort_noise`, `res_floor_protect` and `usable_linear` have the same names. `output_base_spec` / `guard_active` are the separate C getter `aec_get_output_base()` (`AecOutputBase`) and `post_reset_serial` is `aec_post_reset_serial()`; neither is a field of the C `AecResContext`. The C call sequence is
-`cfg.enable_res = 0; cfg.return_res_context = 1;` at construction, then per hop
-`aec_process_context()` followed by `aec_get_res_context()` (pointers valid until the next process or
+**C names.** The C struct `AecResidualView` (`c_impl/include/aec.h`, read with `aec_get_residual()`) carries the same data under slightly
+different names: `formed_output` is `formed_hop`; `res_gain`, `r2`, `comfort_noise`, `res_floor_protect`, `usable_linear`,
+`output_base_spec` (as `base_spec`), `guard_active` and `post_reset_serial` have the same meaning. `raw_output` is `linear_hop` of
+the separate `AecLinearView` (`aec_get_linear()`), which also carries the linear-stage status scalars (`far_power`, `erle_factor`,
+`dt_indicator`, `filter_converged`, ...). Which fields exist follows `AecConfig.residual`: `AEC_RESIDUAL_STATE` has the linear half and the
+rendering base (no `r2`, `comfort_noise`, `res_gain`), `ESTIMATE` adds `r2` and `comfort_noise`, `FULL` adds `res_gain`, `OFF` has no residual view.
+The C call sequence is `cfg.residual = AEC_RESIDUAL_FULL` (the default) at construction, then per hop
+`aec_process_linear()`, `aec_process_residual(a, NULL)`, `aec_get_residual()` and `aec_get_linear()` (pointers valid until the next process or
 reset call). See the [C integration example](html/reference/aec_usage.html).
 
 ### Analysis seam vs rendering base
@@ -47,16 +50,16 @@ Two groups of fields, never to be substituted for each other:
 
 - **Analysis seam** — `formed_output`, `error_spec`, `echo_spec`, `near_spec`.
   The real selected (refined or coarse) linear residual and its matched echo
-  estimate, identical in every API mode (full, context-only, no-gain,
-  linear-only). `error_spec` is the STFT of `[previous formed hop | current
+  estimate, identical in every API mode (full, split entry points, `ESTIMATE`,
+  `STATE`). `error_spec` is the STFT of `[previous formed hop | current
   formed hop]`, so a unity IFFT with overlap-add reproduces the previous formed
   hop one framing hop late on every hop. AecState, ERLE, R² and the PSDs read
   this seam, and so should anything that needs a pairable waveform or STFT: an
   AIAEC front end (`linear_error`), training features, a model with its own
   analysis window. The analysis residual can exceed the capture on a guard hop;
   the final audio is protected by the rendering guard below.
-- **Rendering base** — `output_base_spec` (C: `aec_get_output_base()` →
-  `AecOutputBase{struct_size, n_freqs, guard_active, base_spec}`). The output
+- **Rendering base** — `output_base_spec` (C: `aec_get_residual()` →
+  `AecResidualView.base_spec` and `guard_active`). The output
   guard is evaluated exactly once per hop, in every mode, after the hop's
   usable-linear verdict is final: when
   `output_capture_when_linear_unusable` is set (default ON), the verdict is
@@ -71,8 +74,8 @@ Two groups of fields, never to be substituted for each other:
   estimate is unusable, so it fires mostly before the first usable verdict but
   also on clips that never become usable; it is not confined to the first seconds.
 
-Python `AecConfig` rejects `return_formed_output` unless `enable_res` or
-`return_res_context` is set: the formed seam is produced by the post chain and
+Python `AecConfig` rejects `return_formed_output` unless its `enable_res` or
+`return_res_context` flag is set (the C `AecConfig` has no such flags; a residual stage is present unless `residual` is `AEC_RESIDUAL_OFF`): the formed seam is produced by the post chain and
 cannot be requested without it, and asking anyway raises at construction.
 
 The case the guard exists for: a loud far end whose echo never reaches the
@@ -81,8 +84,9 @@ the estimate usable, and an unguarded rendering would carry far-end energy that
 the capture never had. `echo_spec` is not altered by the guard.
 
 C minimum for rendering outside the library, per hop after
-`aec_process_context()`: `aec_get_res_context()`, `aec_get_output_base()`,
-`spec = base_spec * gain` (`res_gain`, times any NR gain), `aec_cng_fill()`,
+`aec_process_linear()` + `aec_process_residual()`: `aec_get_residual()`,
+`aec_apply_gain(aec, g_nr_or_NULL, spec)` (`spec = base_spec * min(res_gain, any NR gain)`),
+`aec_apply_cng()` (instance generator, same `g_nr`; or `aec_apply_cng_spec()` with a generator you own),
 then `ac_istft_push()` (audiolib), handling the reset serial below first. With
 NR/NN off, the same RES/CNG settings and the library's own synthesis window
 (`aec_synthesis_window(aec, &w, &n)`: read-only table of `n == fft_size` floats owned by the
@@ -96,15 +100,15 @@ bit-identical to `aec_process()`.
 - A frequency-domain consumer that still renders `error_spec` instead of the rendering
   base silently loses the guard: on guard hops its output carries the residual that is
   louder than the capture. This is a breaking change for renderers written before
-  `aec_get_output_base()` existed; switch them to `output_base_spec * gain`.
+  a rendering base was published (output-guard API version 1); switch them to `base_spec * gain` or `aec_apply_gain()` (see the migration guide).
 - Time-domain seam consumers (`formed_output` / C `formed_hop`, and
-  `AecLinearContext.formed_linear_hop`) are not guarded: those streams are the analysis
+  the C linear hop of `AecLinearView`) are not guarded: those streams are the analysis
   residual on every hop, guard hops included, and there is no time-domain rendering
   base. A consumer that plays or re-synthesizes them gets no output guard.
-- C `aec_get_output_base()` validates `AecOutputBase.struct_size` (input) before writing:
-  a value below `sizeof(AecOutputBase)` returns -1 and writes nothing, a larger value is
+- C `aec_get_residual()` validates `AecResidualView.struct_size` (input) before writing:
+  a value below `sizeof(AecResidualView)` returns `AEC_ERR_ARG` and writes nothing, a larger value is
   accepted and only the known prefix is written (`struct_size` comes back as
-  `sizeof(AecOutputBase)`).
+  `sizeof(AecResidualView)`).
 
 ### Reset serial
 
@@ -130,7 +134,7 @@ application's policy.
 
 ### Comfort noise
 
-`aec_cng_fill(&rng, spec, comfort_noise, g_res, g_nr, nr_floor, n)` adds, for
+`aec_apply_cng_spec(&rng, spec, comfort_noise, g_res, g_nr, n)` adds, for
 bins `1 .. n-2`, `ng * (sqrt(cn / 32768²) * table)` per component with
 `ng = sqrt(1 - g_res²)` times `max(g_nr, nr_floor)` when an NR gain is given.
 It draws one LCG step per bin in ascending order and is the same function the
@@ -138,14 +142,14 @@ library's own output stage calls (with `g_nr = NULL` and its total gain as
 `g_res`), so without an NR gain it reproduces the in-chain noise bit for bit.
 Python: `modules/cng.py:cng_fill`. Start the generator at `AEC_CNG_SEED`.
 
-## The time-domain seam: `AecLinearContext` (aligned far + delay status)
+## The time-domain seam: `AecLinearView` (aligned far + delay status)
 For post-filters that take the **time-domain aligned far-end** as a second input
 (e.g. an alignment-attention RES+NR model that performs its own sqrt-Hann STFT
-on both streams), `aec_get_linear_context()` exposes:
+on both streams), `aec_get_linear()` exposes:
 
 | field | type | meaning |
 |---|---|---|
-| `formed_linear_hop` | (hop,) float | formed linear output (the same hop `formed_output` reflects: the real linear residual, never the capture — see *Analysis seam vs rendering base*). |
+| `linear_hop` | (hop,) float | refined linear output before FORM selection; the formed hop (`AecResidualView.formed_hop`, the same hop `formed_output` reflects: the real linear residual, never the capture — see *Analysis seam vs rendering base*) is read with `aec_get_residual()`. |
 | `aligned_far_hop` | (hop,) float | **the exact time-domain far the PBFDKF consumed this hop** (aliases the internal buffer; valid until the next process/reset). NOT `far_spec`: that is a rectangular overlap-save FFT, unusable as a sqrt-Hann analysis frame. |
 | `delay_samples` | int | applied ring offset. Meaning depends on `delay_mode` — see below. |
 | `delay_confidence` | float | 0 / 0.5 / 1 under `MATCHED`; always 1.0 under `FIXED`/`EXTERNAL_ALIGNED` (an out-of-band or contractual alignment carries no estimator uncertainty to report). |
@@ -164,9 +168,7 @@ different hop:
 | `FIXED` | always `cfg.fixed_delay_samples` (never −1) | once the ring can serve the offset, not hop 0: the first `ceil(fixed_delay_samples / hop)` hops report `UNLOCKED` over RAW far, and the next process call reports `LOCKED` |
 | `EXTERNAL_ALIGNED` | always `0` | **hop 0** — the caller has contracted that `ref` is already aligned, so there is nothing to wait for |
 
-The legacy `enable_delay_est=0` toggle is a deprecated mirror of `delay_mode`,
-folded into it by `aec_config_resolve_delay()`; its equivalent is
-`AEC_DELAY_EXTERNAL_ALIGNED`, which reports `LOCKED` / `delay_samples=0` /
+A pre-aligned far end is `AEC_DELAY_EXTERNAL_ALIGNED`, which reports `LOCKED` / `delay_samples=0` /
 `delay_confidence=1.0` from the very first hop. A consumer that gates a
 far-conditioned NN post-filter on `delay_state == LOCKED` must account for
 this: under `EXTERNAL_ALIGNED` that gate is open immediately, with no
@@ -195,6 +197,6 @@ never a claim that the filter is broken.
 
 ## Connecting a model
 
-A model that accepts a time-domain residual can consume the floating-point formed hop directly. The C field is `AecResContext.formed_hop`. A caller using an aligned far signal can obtain its hop and alignment generation from `aec_get_linear_context()`. Follow the model's contract for far input: Align-ULCNet's PCM stream in Audio_ALG takes the formed error and **raw** far input.
+A model that accepts a time-domain residual can consume the floating-point formed hop directly. The C field is `AecResidualView.formed_hop`. A caller using an aligned far signal can obtain its hop and alignment generation from `aec_get_linear()`. Follow the model's contract for far input: Align-ULCNet's PCM stream in Audio_ALG takes the formed error and **raw** far input.
 
-A frequency-domain model can read `error_spec` for analysis. When rendering the guarded signal, obtain the base from `aec_get_output_base()`, apply the required gains, add comfort noise once if configured, then synthesize. Keep independent OLA and model state per stream and handle changes to `aec_post_reset_serial()` before synthesizing that hop. See the [output-guard integration guide](sdk_migration_output_guard.md).
+A frequency-domain model can read `error_spec` for analysis. When rendering the guarded signal, obtain the base from `aec_get_residual().base_spec` (or apply the gains with `aec_apply_gain()`), add comfort noise once if configured (`aec_apply_cng()`), then synthesize. Keep independent OLA and model state per stream and handle changes to `aec_post_reset_serial()` before synthesizing that hop. See the [output-guard integration guide](sdk_migration_output_guard.md).

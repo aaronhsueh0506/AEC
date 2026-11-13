@@ -1,12 +1,11 @@
-/* aec_res.h -- residual-echo suppression gain as a standalone stage, for callers that fuse several
- * linear AEC outputs and need one RES gain on the fused spectra, plus the matching comfort-noise
- * fill. Configuration comes from the same builder as the library's own lanes.
+/* aec_res_internal.h -- library-internal residual-echo suppression gain stage (the array instance's fused
+ * gain; aec_array.c). Not installed. Configuration comes from the same builder as the library's own lanes.
  * Memory: caller-owned 16-byte-aligned block (aec_res_get_mem_size / aec_res_init); no allocation
  * or global state; an instance is not thread-safe, distinct instances are independent.
  * Scales: error_spec and near_spec are audio scale ([-1, 1]); r2 and comfort_noise are int16^2
  * power; render_hop is audio-scale samples; the returned gain is an amplitude in [0, 1]. */
-#ifndef AEC_AEC_RES_H
-#define AEC_AEC_RES_H
+#ifndef AEC_AEC_RES_INTERNAL_H
+#define AEC_AEC_RES_INTERNAL_H
 
 #include <stddef.h>
 #include <stdint.h>
@@ -19,14 +18,33 @@ extern "C" {
 
 typedef struct AecRes AecRes;
 
+/* max_dt above this arms the gain stage's DT protection; the fused view reports the same decision. */
+#define AEC_RES_DT_PROTECT_THRESHOLD 0.2f
+
+/* Far-end statistics of one hop, in the form the suppressor consumes. */
+typedef struct AecRenderStats {
+    float sum_sq;    /* sum of squared render samples (int16 scale), pairwise float32 sum */
+    float peak_sq;   /* largest squared render sample (int16 scale) */
+} AecRenderStats;
+
+/* Statistics of the hop_size audio-scale samples `hop` (n of them), computed exactly as
+ * aec_res_process() does from render_hop (x32768, then the suppressor's own sum and peak), so
+ * feeding them via AecResInput.render_sum_sq / render_peak_sq gives the same gain as render_hop.
+ * Zeros for hop == NULL, n <= 0 or n > 1024; out is required (nothing is written if NULL). */
+void aec_render_stats(const float* hop, int n, AecRenderStats* out);
+
 /* One hop of inputs. All arrays have n_bins (= fft_size/2 + 1) elements except
- * render_hop, which has hop_size (= fft_size/2) elements. All are required. */
+ * render_hop, which has hop_size (= fft_size/2) elements. error_spec, near_spec, r2 and
+ * comfort_noise are required. The far end is given either as render_hop or, when render_hop is
+ * NULL, as render_sum_sq / render_peak_sq (from aec_render_stats()); render_hop wins if both are set. */
 typedef struct AecResInput {
     const Complex* error_spec;   /* linear-AEC residual E(f) */
     const Complex* near_spec;    /* capture spectrum matching error_spec */
     const float*   r2;           /* residual-echo PSD R^2(f), used as bounded and unbounded estimate */
     const float*   comfort_noise;/* comfort-noise PSD N^2(f) */
-    const float*   render_hop;   /* far-end samples of this hop */
+    const float*   render_hop;   /* far-end samples of this hop; NULL: use render_sum_sq / render_peak_sq */
+    float render_sum_sq;         /* used only when render_hop is NULL: AecRenderStats.sum_sq of this hop */
+    float render_peak_sq;        /* used only when render_hop is NULL: AecRenderStats.peak_sq of this hop */
     int   all_converged;         /* nonzero: every filter has converged (near power = min(|E|^2, |Y|^2); initial state left) */
     float max_dt;                /* worst double-talk indicator; above 0.2 the DT gain floor applies */
     float max_saturation;        /* worst saturation level; above 0.5 the echo is treated as saturated */
@@ -52,40 +70,25 @@ int aec_res_n_bins(const AecRes* r);
 int aec_res_hop_size(const AecRes* r);
 
 /* One hop. Returns the gain, n_bins floats owned by `r` and valid until the
- * next call on `r`; NULL if r or in is NULL or an input array is NULL. */
+ * next call on `r`; NULL if r or in is NULL or a required input array is NULL. */
 const float* aec_res_process(AecRes* r, const AecResInput* in);
 
-/* Retargets the far-end-active gain floor to the level's floor, reached after ramp_ms
- * (0: next hop), and the DT-lifted floor, which steps immediately. Same semantics as
- * aec_set_level(). Returns 0, or -1 for NULL, an unknown level or an out-of-range ramp
- * (nothing changes). */
-int aec_res_set_level(AecRes* r, AecLevel level, float ramp_ms);
+/* Time over which a level change walks the far-end-active floor (linear in dB); aec_set_level()
+ * and aec_res_set_level() use it, there is no per-call value. */
+#define AEC_LEVEL_RAMP_MS 100.0f
+
+/* Retargets the far-end-active gain floor to the level's floor, reached after AEC_LEVEL_RAMP_MS,
+ * and the DT-lifted floor, which steps immediately. Same semantics as aec_set_level(). Returns 0,
+ * or -1 for NULL or an unknown level (nothing changes). */
+int aec_res_set_level(AecRes* r, AecLevel level);
 
 /* Reads the far-end-active floor as a power ratio: `live` is the value in force
  * now, `target` the one it is heading to (kept across aec_res_reset). Either
  * pointer may be NULL. Returns 0, or -1 if r is NULL. */
 int aec_res_split_floor(const AecRes* r, float* live, float* target);
 
-/* Comfort-noise fill for the bins the suppressor cut. For k = 1 .. n-2 adds to spec[k]
- *   amplitude * (sqrt(2) * sin table entry)
- * with amplitude = sqrt(cn[k] / 32768^2) * sqrt(1 - g_res[k]^2) * max(g_nr[k], nr_floor), evaluated as
- * (sqrt(1 - g_res^2) * max(g_nr, nr_floor)) * (sqrt(cn / 32768^2) * table entry) (negative
- * radicands count as 0; the g_nr factor is omitted entirely when g_nr is NULL). The phase is one LCG step
- * per bin on *rng (seed = (seed * 69069 + 1) & 0x7FFFFFFF, table index = seed >> 26 for the real part and
- * (index + 8) & 31 for the imaginary part), drawn in bin order for bins 1 .. n-2 only; bins 0 and n-1 get
- * no noise and draw nothing.
- * The library's own output stage (aec_process() with enable_res and enable_cng) calls this function on
- * the gain-weighted base with g_res = its RES gain and g_nr = NULL, so with g_nr == NULL the result is
- * bit-identical to the internal comfort noise on the same inputs (same square roots, same product order
- * sqrt(1 - g^2) * (sqrt(cn / 32768^2) * table entry), same draw schedule). The seed of a fresh instance and after every
- * hard post-chain reset is AEC_CNG_SEED (aec.h); see aec_post_reset_serial().
- * cn, g_res, spec and rng are required; nothing is touched if any is NULL or n < 3. n is the number of
- * bins of the spectrum. NaN inputs are not supported. */
-void aec_cng_fill(uint32_t* rng, Complex* spec, const float* cn,
-                  const float* g_res, const float* g_nr, float nr_floor, int n);
-
 #ifdef __cplusplus
 }
 #endif
 
-#endif /* AEC_AEC_RES_H */
+#endif /* AEC_AEC_RES_INTERNAL_H */

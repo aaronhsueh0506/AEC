@@ -32,18 +32,19 @@
  *       $(find src -name '*.c') test/parity_aec_e2e.c \
  *       $(make -s -C ../../audiolib/common print-lib-path) -lm -o bin/p_e2e
  *   python3 ../python/diag/gen_aec_e2e_golden.py bin/aec_e2e_golden.bin balanced --sr 16000
- *   bin/p_e2e bin/aec_e2e_golden.bin [level]      # level: 1|0|2|3 or balanced|mild|aggressive|no_floor
+ *   bin/p_e2e bin/aec_e2e_golden.bin [level]      # level: 0 mild, 1 balanced, 2 aggressive, 3 no_floor (default 1)
  *   # 8k/48k: --sr 8000 / --sr 48000 on the generator; the checker reads sr back out of the golden header and applies the
  *   # matching tolerance, so no extra argv is needed.
  *   # Linear-filter-only case (no post-filter block on either side): pass --no-res to BOTH, or the golden and the replay
  *   # disagree about which branch produced it:
  *   python3 ../python/diag/gen_aec_e2e_golden.py bin/g.bin balanced --sr 16000 --no-res
- *   bin/p_e2e bin/g.bin balanced --no-res
+ *   bin/p_e2e bin/g.bin 1 --no-res
  *   # live observer (default off on either side): the same "pass to BOTH" rule, and it composes with --no-res:
  *   python3 ../python/diag/gen_aec_e2e_golden.py bin/g.bin balanced --sr 16000 --live-observer
- *   bin/p_e2e bin/g.bin balanced --live-observer
+ *   bin/p_e2e bin/g.bin 1 --live-observer
  */
 #include "aec.h"
+#include "cli_level.h"
 
 /* Max allowed |C - Python| per sample, per rate class (see the table in the
  * file header for the measured maxima each ceiling sits above). */
@@ -71,12 +72,8 @@ int main(int argc, char **argv) {
 
     AecLevel level = AEC_LEVEL_BALANCED;
     if (argc > 2) {
-        if (!strcmp(argv[2], "0") || !strcmp(argv[2], "mild")) level = AEC_LEVEL_MILD;
-        else if (!strcmp(argv[2], "2") || !strcmp(argv[2], "aggressive")) level = AEC_LEVEL_AGGRESSIVE;
-        else if (!strcmp(argv[2], "3") || !strcmp(argv[2], "no_floor")) level = AEC_LEVEL_NO_FLOOR;
-        else if (strcmp(argv[2], "1") != 0 && strcmp(argv[2], "balanced") != 0) {
-            fprintf(stderr, "unknown level '%s' (0|1|2|3 or "
-                            "mild|balanced|aggressive|no_floor)\n", argv[2]);
+        if (aec_cli_parse_level(argv[2], &level) != 0) {
+            fprintf(stderr, "unknown level '%s' (0 mild, 1 balanced, 2 aggressive, 3 no_floor)\n", argv[2]);
             return 2;
         }
     }
@@ -89,7 +86,7 @@ int main(int argc, char **argv) {
      * check silently drops a flag if the two are passed in the other order, e.g. `--live-observer
      * --no-res` (the generator's argparse is order-independent). */
     for (int ai = 3; ai < argc; ++ai) {
-        if (!strcmp(argv[ai], "--no-res")) cfg.enable_res = 0;
+        if (!strcmp(argv[ai], "--no-res")) cfg.residual = AEC_RESIDUAL_OFF;
         else if (!strcmp(argv[ai], "--live-observer")) cfg.live_observer_enabled = 1;
     }
     Aec aec;

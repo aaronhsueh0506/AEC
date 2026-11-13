@@ -26,7 +26,7 @@ extern "C" {
 #endif
 
 /* Seed of the comfort-noise generator after construction and after every hard post-chain reset.
- * Exported through aec.h; an external synthesizer that calls aec_cng_fill() reseeds with it. */
+ * Exported through aec.h; an external synthesizer that calls aec_apply_cng_spec() reseeds with it. */
 #define AEC_CNG_SEED 42u
 
 /* Driver config and wall-clock-rescaled CNG constants; pass the values computed at construction. */
@@ -110,7 +110,7 @@ typedef struct {
 
     ReverbModel avg_reverb;
 
-    float   *ola_buf;
+    float   *ola_buf;          /* NULL when aec_post_apply_output() is never called (context_only) */
 
     /* per-hop scratch (caller-owned) */
     float   *near_psd;
@@ -122,7 +122,7 @@ typedef struct {
     unsigned char *coh_gate_mask;
     float   *comfort_noise;
     float   *nf;
-    Complex *e_out_spec;
+    Complex *e_out_spec;       /* with e_out_full: NULL as ola_buf */
     float   *e_out_full;
 
     FftHandle *fft;
@@ -166,7 +166,7 @@ typedef struct {
     const float *abs_nsw_e1;
 } AecPostAbs;
 
-/* Stage 1-2: PSDs and capture_psd_win. */
+/* Stage 1-2: PSDs and capture_psd_win. A NULL mag->abs_far leaves p->far_psd untouched. */
 void aec_post_compute_psds(AecPost *p, const AecPostAbs *mag);
 
 /* Stage 3: avg-render-reverb -> p->x2_reverb_for_erle (only when x2_present). */
@@ -215,9 +215,8 @@ typedef struct {
     const Complex *error_spec_windowed;
     const Complex *W0;
     const Complex *W_all;
-    const Complex *X_buf;
-    const float   *x2_cache;             /* filter.x2_cache flat (n_part×nf): |X_buf|² row for
-                                          * row; NULL → derived from X_buf instead. */
+    const float   *x2_cache;             /* filter.x2_cache flat (n_part×nf): |X_buf|² per partition row;
+                                          * NULL → no render-reverb term this hop. */
     const float   *sqrt_hann;
     const float   *kalman_P;             /* filter Kalman P (bridge div);
                                           * NULL/0 → divergence_indicator 0 */
@@ -263,13 +262,18 @@ typedef struct {
                                              * or G_res: stop after the AecState
                                              * update (none of the skipped
                                              * state feeds the linear filter) */
-    int            spatial_linear_context; /* this lane's G_res is unused; keep the DominantNearend hold state advancing (needs context_only) */
+    int            hold_state_only; /* this lane's G_res is unused; keep the DominantNearend hold state advancing (needs context_only) */
     float          active_render_threshold;
 
     /* RenderActivityDetector verdict, updated by the caller before this call. */
     int            render_activity_is_active;
     /* Non-NULL iff the live observer is enabled and this hop's shifted ring read was valid. */
     const float   *observer_far_end;
+    /* Non-NULL: the far PSD and the scaled render block of another instance fed this same far spectrum and far hop, and
+     * its active-render verdict; they replace the computation here (and p->far_psd / render_block_scaled stay unwritten). */
+    const float   *shared_far_psd;
+    const float   *shared_render_block;
+    int            shared_far_active;
 } AecPostRunIn;
 
 /* Sub-module bundle the driver wires; caller-owned. */
@@ -291,7 +295,7 @@ typedef struct {
     Complex *nsw_e1;
     Complex *ybase;
     /* Dedicated rendering-base buffer (n_bins): error + echo, written only on hops where the output
-     * guard fires; the exposed base of aec_get_output_base() so that no other scratch can overwrite
+     * guard fires; the exposed aec_get_residual().base_spec so that no other scratch can overwrite
      * it before the caller reads it. */
     Complex *output_base;
     float   *abs_near;
@@ -302,7 +306,6 @@ typedef struct {
     float   *abs_nsw_e1;
     float   *abs_ybase;
     float   *x2_at_delay;
-    float   *x2_past;
     float   *w_mag2;
     float   *render_block_scaled;
     float   *r2;

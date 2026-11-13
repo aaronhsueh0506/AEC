@@ -1,11 +1,11 @@
 /* test_shared_far_spec.c -- far-end-FFT sharing regression test.
  *
- * aec_process_context_shared_far_from() lets one instance borrow another's already-computed far-end spectrum (and its squared
+ * aec_process_linear_shared_far_from() lets one instance borrow another's already-computed far-end spectrum (and its squared
  * magnitudes) instead of running its own FFT, for multi-instance callers (e.g. a 4-lane wrapper) whose instances see the
  * identical far-end signal every hop. This test proves:
- *   1. Borrowing produces BYTE-IDENTICAL AecResContext output to computing independently: two separately constructed,
- *      identically configured instances fed the identical mic/ref sequence, one via aec_process_context() (own far FFT), the
- *      other via aec_process_context_shared_far_from() borrowing the first instance's spectrum each hop, across shadow on/off
+ *   1. Borrowing produces BYTE-IDENTICAL AecResidualView output to computing independently: two separately constructed,
+ *      identically configured instances fed the identical mic/ref sequence, one via aec_process_linear() (own far FFT), the
+ *      other via aec_process_linear_shared_far_from() borrowing the first instance's spectrum each hop, across shadow on/off
  *      (the borrow insertion point differs: shadow.precomputed_far_spec when a shadow is present, main.precomputed_far_spec
  *      otherwise) and the three contracted grids.
  *   2. The shared spectrum is genuinely CONSUMED: borrowing from an owner that processed a DIFFERENT reference gives a
@@ -14,10 +14,9 @@
  *   3. aec_reset() on an instance that borrowed leaves no stale pointer behind (the pbfdaf_reset() defensive clear): the
  *      owner is destroyed after the reset and the instance keeps processing.
  *   4. aec_far_fft_real_compute_count() reflects "did this instance run its own far FFT this hop": it increments once per
- *      hop on an aec_process_context() instance and stays flat on an aec_process_context_shared_far_from()-only instance. A
- *      multi-lane caller (the mcab flow layer, Audio_ALG pipelines/4ch_aec_bf_nr_res/mcab.c) sums it over its four lanes
- *      (mcab_far_fft_real_compute_count()); the total rises by one per hop, not four, once lanes 1-3 share lane 0's
- *      spectrum (a hop that mixes warm and soft realignments computes on all four lanes).
+ *      hop on an aec_process_linear() instance and stays flat on an aec_process_linear_shared_far_from()-only instance. A
+ *      multi-lane caller (the array instance, aec_array.c) sums it over its four lanes; the total rises by one per
+ *      hop, not four, once lanes 1-3 share lane 0's spectrum (a hop that mixes warm and soft realignments computes on all four lanes).
  *   5. The hop counters (frame_count, shadow_frame_count) saturate at LONG_MAX, and a shadow hop count past INT_MAX still
  *      reads as past the shadow warm-up gate where the detectors narrow it to int.
  *
@@ -33,6 +32,7 @@
  *   ./bin/test_shared_far_spec
  */
 #include "aec.h"
+#include "aec_internal.h"
 #include <math.h>
 #include <limits.h>
 #include <stdio.h>
@@ -48,13 +48,35 @@ static int g_pass = 0;
         else         { printf("pass: %s\n", (msg)); g_pass++; } \
     } while (0)
 
+/* The split-entry configuration: residual FULL, driven by aec_process_linear() + aec_process_residual(). */
 static void context_only_config(AecConfig* cfg, int sample_rate, int fft_size,
                                  int enable_shadow) {
     aec_config_from_level(cfg, AEC_LEVEL_BALANCED, sample_rate);
-    cfg->enable_res = 0;
-    cfg->return_res_context = 1;
+    cfg->residual = AEC_RESIDUAL_FULL;
     if (fft_size > 0) cfg->fft_size = fft_size;
     cfg->enable_shadow = enable_shadow;
+}
+
+/* One hop of a split-entry instance: the linear stage (far spectrum local, or borrowed from `owner`), then the residual
+ * stage. */
+static void hop_local(Aec* a, const float* mic, const float* ref) {
+    if (aec_process_linear(a, mic, ref) != AEC_OK || aec_process_residual(a, NULL) != AEC_OK) {
+        printf("FAIL: split hop refused\n"); g_fail++;
+    }
+}
+
+static void hop_shared(Aec* a, const float* mic, const float* ref, const Aec* owner) {
+    if (aec_process_linear_shared_far_from(a, mic, ref, owner) != AEC_OK || aec_process_residual(a, NULL) != AEC_OK) {
+        printf("FAIL: shared split hop refused\n"); g_fail++;
+    }
+}
+
+static void get_views(const Aec* a, AecLinearView* lv, AecResidualView* rv) {
+    memset(lv, 0, sizeof *lv); lv->struct_size = sizeof *lv;
+    memset(rv, 0, sizeof *rv); rv->struct_size = sizeof *rv;
+    if (aec_get_linear(a, lv) != AEC_OK || aec_get_residual(a, rv) != AEC_OK) {
+        printf("FAIL: view refused\n"); g_fail++;
+    }
 }
 
 static unsigned g_rng_state = 0x6A5EC001u;
@@ -99,13 +121,13 @@ static void test_borrow_matches_compute(int sample_rate, int fft_size, int enabl
             mic_b[s] = rng_uniform(amp) + 0.3f * ref[s];
         }
 
-        aec_process_context(&source, mic_a, ref);
+        hop_local(&source, mic_a, ref);
 
-        aec_process_context_shared_far_from(&borrower, mic_b, ref, &source);
+        hop_shared(&borrower, mic_b, ref, &source);
     }
 
     /* Now verify: a FRESH pair, borrower this time computing its own
-     * far_spec (plain aec_process_context on the SAME mic_b/ref sequence),
+     * far_spec (plain aec_process_linear + aec_process_residual on the SAME mic_b/ref sequence),
      * must match the shared-far run above bin-for-bin. Re-run both from
      * scratch so this comparison is a clean, deterministic replay. */
     Aec borrower_reference;
@@ -125,25 +147,26 @@ static void test_borrow_matches_compute(int sample_rate, int fft_size, int enabl
             mic_b[s] = rng_uniform(amp) + 0.3f * ref[s];
         }
 
-        aec_process_context(&source2, mic_a, ref);
-        aec_process_context_shared_far_from(&borrower2, mic_b, ref, &source2);
+        hop_local(&source2, mic_a, ref);
+        hop_shared(&borrower2, mic_b, ref, &source2);
 
-        aec_process_context(&borrower_reference, mic_b, ref);
+        hop_local(&borrower_reference, mic_b, ref);
 
-        AecResContext bctx, rctx;
-        aec_get_res_context(&borrower2, &bctx);
-        aec_get_res_context(&borrower_reference, &rctx);
+        AecLinearView blv, rlv;
+        AecResidualView bctx, rctx;
+        get_views(&borrower2, &blv, &bctx);
+        get_views(&borrower_reference, &rlv, &rctx);
 
         int K = bctx.n_freqs;
         if (memcmp(bctx.formed_hop, rctx.formed_hop, (size_t)hop * sizeof(float)) != 0) { all_match = 0; break; }
         if (memcmp(bctx.error_spec, rctx.error_spec, (size_t)K * sizeof(Complex)) != 0) { all_match = 0; break; }
         if (memcmp(bctx.far_spec, rctx.far_spec, (size_t)K * sizeof(Complex)) != 0) { all_match = 0; break; }
-        if (bctx.filter_converged != rctx.filter_converged) { all_match = 0; break; }
+        if (blv.filter_converged != rlv.filter_converged) { all_match = 0; break; }
     }
 
     snprintf(label, sizeof(label),
              "borrow-parity sr=%d/fft=%d/shadow=%d: borrowed far_spec produces byte-identical "
-             "AecResContext to computing it independently",
+             "AecResidualView to computing it independently",
              sample_rate, cfg.fft_size, enable_shadow);
     CHECK(all_match, label);
 
@@ -156,7 +179,7 @@ static void test_borrow_matches_compute(int sample_rate, int fft_size, int enabl
 
 /* Negative control: borrowing the spectrum of an owner that processed a DIFFERENT
  * reference must change the result. Without this, test_borrow_matches_compute()
- * could pass vacuously if aec_process_context_shared_far_from() silently ignored
+ * could pass vacuously if aec_process_linear_shared_far_from() silently ignored
  * the owner and just computed its own spectrum regardless. */
 static void test_wrong_shared_spec_changes_result(void) {
     AecConfig cfg;
@@ -183,13 +206,14 @@ static void test_wrong_shared_spec_changes_result(void) {
             mic[s] = rng_uniform(0.3f) + 0.4f * ref[s];
         }
 
-        aec_process_context(&correct, mic, ref);
-        aec_process_context(&other_owner, mic, other_ref);
-        aec_process_context_shared_far_from(&wrong, mic, ref, &other_owner);
+        hop_local(&correct, mic, ref);
+        hop_local(&other_owner, mic, other_ref);
+        hop_shared(&wrong, mic, ref, &other_owner);
 
-        AecResContext cctx, wctx;
-        aec_get_res_context(&correct, &cctx);
-        aec_get_res_context(&wrong, &wctx);
+        AecLinearView clv, wlv;
+        AecResidualView cctx, wctx;
+        get_views(&correct, &clv, &cctx);
+        get_views(&wrong, &wlv, &wctx);
         if (memcmp(cctx.formed_hop, wctx.formed_hop, (size_t)hop * sizeof(float)) != 0) {
             saw_divergence = 1;
             break;
@@ -226,8 +250,8 @@ static void test_reset_after_shared_far_is_clean(void) {
     g_rng_state = 0xC1EA4001u;
     for (int s = 0; s < hop; ++s) { ref[s] = rng_uniform(0.3f); mic[s] = rng_uniform(0.3f); }
 
-    aec_process_context(&source, mic, ref);
-    aec_process_context_shared_far_from(&a, mic, ref, &source);
+    hop_local(&source, mic, ref);
+    hop_shared(&a, mic, ref, &source);
 
     /* The owner's pool is freed right after the reset -- if reset() (or anything else) kept a
      * stale reference to its spectrum, a subsequent dereference would be a use-after-free (would
@@ -238,7 +262,7 @@ static void test_reset_after_shared_far_is_clean(void) {
 
     for (int i = 0; i < 10; ++i) {
         for (int s = 0; s < hop; ++s) { ref[s] = rng_uniform(0.3f); mic[s] = rng_uniform(0.3f); }
-        aec_process_context(&a, mic, ref);
+        hop_local(&a, mic, ref);
     }
     CHECK(1, "reset-after-shared-far: instance keeps processing normally post-reset "
              "(no crash/UB from a stale borrowed pointer)");
@@ -248,8 +272,8 @@ static void test_reset_after_shared_far_is_clean(void) {
 
 /* aec_far_fft_real_compute_count(): the counter a multi-lane caller uses
  * to prove its total per-hop far-FFT count dropped. Proves both halves:
- * a plain aec_process_context() instance increments by exactly 1 every
- * hop, and an aec_process_context_shared_far_from()-only instance (given a
+ * a plain aec_process_linear() instance increments by exactly 1 every
+ * hop, and an aec_process_linear_shared_far_from()-only instance (given a
  * valid owner every hop) never increments at all. */
 static void test_far_fft_counter_reflects_actual_computation(void) {
     AecConfig cfg;
@@ -276,17 +300,17 @@ static void test_far_fft_counter_reflects_actual_computation(void) {
             mic_a[s] = rng_uniform(0.3f) + 0.4f * ref[s];
             mic_b[s] = rng_uniform(0.3f) + 0.2f * ref[s];
         }
-        aec_process_context(&computing, mic_a, ref);
-        aec_process_context_shared_far_from(&borrowing, mic_b, ref, &computing);
+        hop_local(&computing, mic_a, ref);
+        hop_shared(&borrowing, mic_b, ref, &computing);
     }
 
     char label[128];
     snprintf(label, sizeof(label),
-             "counter test: plain aec_process_context() increments by exactly %d after %d hops",
+             "counter test: plain aec_process_linear() increments by exactly %d after %d hops",
              n_hops, n_hops);
     CHECK(aec_far_fft_real_compute_count(&computing) == n_hops, label);
     snprintf(label, sizeof(label),
-             "counter test: aec_process_context_shared_far_from()-only instance stays at 0 after %d hops",
+             "counter test: aec_process_linear_shared_far_from()-only instance stays at 0 after %d hops",
              n_hops);
     CHECK(aec_far_fft_real_compute_count(&borrowing) == 0, label);
 
@@ -305,6 +329,7 @@ static void test_far_fft_counter_reflects_actual_computation(void) {
 static void test_far_fft_counter_saturation(void) {
     Aec a;
     memset(&a, 0, sizeof(a));
+    a.ready = 1;                    /* a hand-built handle: only a ready one is read */
     a.main_filter.base.far_fft_real_compute_count = 7;
     a.shadow_filter.far_fft_real_compute_count = 11;
     a.observer_filter.far_fft_real_compute_count = 13;
@@ -324,9 +349,9 @@ static void test_far_fft_counter_saturation(void) {
     if (aec_create(&a, &cfg) != 0) { CHECK(0, "counter saturation: create"); return; }
     float zero[4096] = {0};
     a.main_filter.base.far_fft_real_compute_count = LONG_MAX - 1;
-    aec_process_context(&a, zero, zero);
+    hop_local(&a, zero, zero);
     CHECK(a.main_filter.base.far_fft_real_compute_count == LONG_MAX, "counter increment reaches LONG_MAX");
-    aec_process_context(&a, zero, zero);
+    hop_local(&a, zero, zero);
     CHECK(a.main_filter.base.far_fft_real_compute_count == LONG_MAX, "counter increment stays at LONG_MAX");
     aec_reset(&a);
     CHECK(aec_far_fft_real_compute_count(&a) == 0, "saturated counter resets to zero");

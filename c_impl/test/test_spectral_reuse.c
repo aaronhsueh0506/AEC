@@ -1,5 +1,6 @@
 /* Exact paired far-spectrum/magnitude reuse, including silent and reset hops. */
 #include "aec.h"
+#include "aec_internal.h"
 #include "aec_pool_test_util.h"
 #include "utility/simd_aec.h"
 #include <math.h>
@@ -22,14 +23,16 @@ static void same_filter(const PBFDAF *a, const PBFDAF *b) {
     size_t k = (size_t)a->n_freqs, nk = k * a->n_partitions;
 #define ARRAY(field, count) same(a->field, b->field, (count) * sizeof(*a->field), #field)
 #define VALUE(field) same(&a->field, &b->field, sizeof(a->field), #field)
+#define ARRAY_IF(field, count) do { if (a->field) ARRAY(field, count); } while (0)   /* NULL in the shadow filter */
     ARRAY(W, nk); ARRAY(X_buf, nk); ARRAY(x2_cache, nk);
-    ARRAY(far_cmag2_hold, k); ARRAY(far_spec, k); ARRAY(near_spec, k);
-    ARRAY(error_spec, k); ARRAY(error_spec_windowed, k); ARRAY(echo_spec, k);
+    ARRAY(far_cmag2_hold, k); ARRAY(far_spec, k); ARRAY_IF(near_spec, k);
+    ARRAY(error_spec, k); ARRAY_IF(error_spec_windowed, k); ARRAY(echo_spec, k);
     ARRAY(near_buffer, (size_t)a->block_size); ARRAY(far_buffer, (size_t)a->block_size);
     VALUE(partition_idx); VALUE(call_counter); VALUE(poor_excitation_counter);
     VALUE(initial_state_active); VALUE(initial_state_active_render_hops);
     VALUE(partition_to_constrain); VALUE(last_s_max_abs); VALUE(w_dirty);
 #undef ARRAY
+#undef ARRAY_IF
 #undef VALUE
 }
 
@@ -45,21 +48,32 @@ static void same_aec(const Aec *a, const Aec *b) {
     /* The no-shadow path does not initialize this entire scratch array. */
     if (a->has_shadow)
         same(a->scr_e2ref_arr, b->scr_e2ref_arr, k * sizeof(float), "scr_e2ref_arr");
-    AecResContext ca, cb;
-    aec_get_res_context(a, &ca); aec_get_res_context(b, &cb);
+    AecResidualView ca, cb;
+    AecLinearView la, lb;
+    memset(&ca, 0, sizeof ca); ca.struct_size = sizeof ca; cb = ca;
+    memset(&la, 0, sizeof la); la.struct_size = sizeof la; lb = la;
+    if (aec_get_residual(a, &ca) != AEC_OK || aec_get_residual(b, &cb) != AEC_OK ||
+        aec_get_linear(a, &la) != AEC_OK || aec_get_linear(b, &lb) != AEC_OK) exit(2);
     same(ca.formed_hop, cb.formed_hop, (size_t)a->hop_size * sizeof(float), "formed_hop");
     same(ca.error_spec, cb.error_spec, k * sizeof(Complex), "context_error");
     if (ca.r2 && cb.r2) same(ca.r2, cb.r2, k * sizeof(float), "context_r2");
     if (ca.comfort_noise && cb.comfort_noise)
         same(ca.comfort_noise, cb.comfort_noise, k * sizeof(float), "context_comfort");
-#define CONTEXT(field) same(&ca.field, &cb.field, sizeof(ca.field), #field)
-    CONTEXT(far_power); CONTEXT(dt_indicator); CONTEXT(filter_converged);
-    CONTEXT(usable_linear); CONTEXT(saturation_level);
-#undef CONTEXT
+#define VIEW(v, field) same(&v##a.field, &v##b.field, sizeof(v##a.field), #field)
+    VIEW(l, far_power); VIEW(l, dt_indicator); VIEW(l, filter_converged);
+    VIEW(c, usable_linear); VIEW(l, saturation_level);
+#undef VIEW
 }
 
-static void shared(Aec *a, const float *mic, const float *far, const Aec *owner) {
-    aec_process_context_shared_far_from(a, mic, far, owner);
+/* One hop of an ESTIMATE-mode instance: the linear stage (far spectrum local or borrowed from `owner`) and the residual
+ * stage. */
+static void hop_shared(Aec *a, const float *mic, const float *far, const Aec *owner) {
+    if (aec_process_linear_shared_far_from(a, mic, far, owner) != AEC_OK ||
+        aec_process_residual(a, NULL) != AEC_OK) exit(2);
+}
+
+static void hop_local(Aec *a, const float *mic, const float *far) {
+    if (aec_process_linear(a, mic, far) != AEC_OK || aec_process_residual(a, NULL) != AEC_OK) exit(2);
 }
 
 static Aec *new_aec(const AecConfig *cfg) {
@@ -82,9 +96,8 @@ static void run_grid(int sr, int fft, int shadow) {
     AecConfig cfg;
     aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, sr);
     cfg.fft_size = fft; cfg.enable_shadow = shadow;
-    cfg.delay_mode = AEC_DELAY_EXTERNAL_ALIGNED; cfg.enable_delay_est = 0;
-    cfg.fixed_delay_samples = -1; cfg.enable_res = 0; cfg.return_res_context = 1;
-    cfg.spatial_linear_context = AEC_CONTEXT_NO_GAIN;
+    cfg.delay_mode = AEC_DELAY_EXTERNAL_ALIGNED;
+    cfg.fixed_delay_samples = -1; cfg.residual = AEC_RESIDUAL_ESTIMATE;
     Aec *owner = new_aec(&cfg), *ref = new_aec(&cfg), *borrower = new_aec(&cfg);
     Aec *fallback = new_aec(&cfg);
     if (!owner || !ref || !borrower || !fallback) exit(2);
@@ -110,14 +123,13 @@ static void run_grid(int sr, int fft, int shadow) {
         if (frame == 90) {
             aec_reset(owner); aec_reset(ref); aec_reset(borrower); aec_reset(fallback);
         }
-        aec_process_context(owner, owner_mic, far);
-        aec_process_context(ref, mic, far);
+        hop_local(owner, owner_mic, far);
+        hop_local(ref, mic, far);
         /* Mixed histories need one local hop before the half-overlap refills. */
-        if (frame == 60) aec_process_context(borrower, mic, far);
-        else shared(borrower, mic, far, owner);
+        if (frame == 60) hop_local(borrower, mic, far);
+        else hop_shared(borrower, mic, far, owner);
         /* NULL and self owners must both select the local path. */
-        aec_process_context_shared_far_from(fallback, mic, far,
-                                            frame & 1 ? fallback : NULL);
+        hop_shared(fallback, mic, far, frame & 1 ? fallback : NULL);
         same_aec(ref, borrower); same_aec(ref, fallback);
         sk_cmag2_np_f32(borrower->main_filter.base.far_spec, power, borrower->n_freqs);
         same(power, borrower->main_filter.base.far_cmag2_hold,
@@ -141,8 +153,8 @@ static void run_grid(int sr, int fft, int shadow) {
     if (sr == 48000) wrong_cfg.sample_rate = 16000;
     Aec *wrong = new_aec(&wrong_cfg);
     if (!wrong) exit(2);
-    aec_process_context(ref, mic, far);
-    aec_process_context_shared_far_from(fallback, mic, far, wrong);
+    hop_local(ref, mic, far);
+    hop_shared(fallback, mic, far, wrong);
     same_aec(ref, fallback);
     free_aec(wrong);
     free_aec(owner); free_aec(ref); free_aec(borrower); free_aec(fallback);

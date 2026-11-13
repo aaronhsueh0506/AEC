@@ -7,7 +7,8 @@
 #include "utility/fast_math.h"
 #include "utility/simd_aec.h"
 #include "aec_scale.h"
-#include "aec_res.h"
+#include "aec.h"
+#include "aec_internal.h"
 
 #define PSD_SCALE (32768.0 * 32768.0)   /* int16 max^2 */
 
@@ -88,7 +89,7 @@ void aec_post_reset(AecPost *p) {
     int k;
     int nb = p->cfg.n_bins;
     /* Reset: OLA, CNG, coherence and avg-reverb cleared. */
-    memset(p->ola_buf, 0, (size_t)p->cfg.block_size * sizeof(float));
+    if (p->ola_buf) memset(p->ola_buf, 0, (size_t)p->cfg.block_size * sizeof(float));
     /* The trace stash is restarted so a trace row after a reset does not show a pre-reset hop. */
     p->trace.aec_converged = 0;
     p->trace.far_active = 0;
@@ -98,10 +99,14 @@ void aec_post_reset(AecPost *p) {
     p->reset_serial += 1u;
     p->noise_initialized = 0;
     p->n2_counter = 0;
+    if (p->y2_smoothed) {   /* NULL on a STATE lane, which never runs the comfort-noise tracker */
+        for (k = 0; k < nb; ++k) {
+            p->y2_smoothed[k] = 0.0f;
+            p->n2[k] = 1.0e6f;
+            p->n2_initial[k] = 0.0f;
+        }
+    }
     for (k = 0; k < nb; ++k) {
-        p->y2_smoothed[k] = 0.0f;
-        p->n2[k] = 1.0e6f;
-        p->n2_initial[k] = 0.0f;
         p->coh_sye_re[k] = 0.0f;
         p->coh_sye_im[k] = 0.0f;
         p->coh_syy[k] = 1.0e-30f;
@@ -120,7 +125,7 @@ static void psd_from_abs(const float *mag, int n, float *out) {
 void aec_post_compute_psds(AecPost *p, const AecPostAbs *mag) {
     int nb = p->cfg.n_bins;
     psd_from_abs(mag->abs_near, nb, p->near_psd);
-    psd_from_abs(mag->abs_far, nb, p->far_psd);
+    if (mag->abs_far) psd_from_abs(mag->abs_far, nb, p->far_psd);
     psd_from_abs(mag->abs_sel_echo, nb, p->echo_psd);
     psd_from_abs(mag->abs_error, nb, p->error_psd);
     /* capture_psd_win is read by both erle_windowed_capture_psd and cng_n2_windowed_psd; form it
@@ -220,6 +225,7 @@ void aec_post_apply_output(AecPost *p,
     int hop = c->hop_size;
     int k;
 
+    assert(p->ola_buf && p->e_out_spec && p->e_out_full);
     sk_capply_gain_f32(p->e_out_spec, output_base, gain, nb);
 
     /* aec_cng_fill() is the single comfort-noise implementation (an external synthesizer calls the
@@ -333,6 +339,7 @@ int aec_post_run(AecPost *p,
     int k;
     AecPostAbs mag;
     int saturated_capture = (in->saturation_level > 0.5f);
+    const float *far_psd, *render_block;
     int output_usable;
     int pgc = in->pending_gain_change;
     int pdc = in->pending_delay_change;
@@ -358,13 +365,13 @@ int aec_post_run(AecPost *p,
     sk_cadd_f32(sc->ybase, sc->sel_esw, sc->sel_echo, nb);
 
     sk_cabs_np_f32(in->near_spec, sc->abs_near, nb);
-    sk_cabs_np_f32(in->far_spec, sc->abs_far, nb);
+    if (!in->shared_far_psd) sk_cabs_np_f32(in->far_spec, sc->abs_far, nb);
     sk_cabs_np_f32(sc->sel_echo, sc->abs_sel_echo, nb);
     sk_cabs_np_f32(sc->sel_esw, sc->abs_error, nb);
     sk_cabs_np_f32(in->echo_spec, sc->abs_echo_coh, nb);
     sk_cabs_np_f32(sc->nsw_e1, sc->abs_nsw_e1, nb);
     mag.abs_near = sc->abs_near;
-    mag.abs_far = sc->abs_far;
+    mag.abs_far = in->shared_far_psd ? NULL : sc->abs_far;
     mag.abs_sel_echo = sc->abs_sel_echo;
     mag.abs_error = sc->abs_error;
     mag.abs_echo_coh = sc->abs_echo_coh;
@@ -372,7 +379,9 @@ int aec_post_run(AecPost *p,
 
     aec_post_compute_psds(p, &mag);
 
-    sk_scale_f32(sc->render_block_scaled, in->far_end, 32768.0f, hop);
+    if (!in->shared_far_psd) sk_scale_f32(sc->render_block_scaled, in->far_end, 32768.0f, hop);
+    far_psd = in->shared_far_psd ? in->shared_far_psd : p->far_psd;
+    render_block = in->shared_far_psd ? in->shared_render_block : sc->render_block_scaled;
 
     {
         float y2_time = sum_sq_f32_pairwise(in->near_end, (size_t)hop);
@@ -432,22 +441,14 @@ int aec_post_run(AecPost *p,
                 float decay_steady = 0.0f;
                 int delay = aec_state_min_direct_path_filter_delay(obj->state);
                 int delay_idx = 0, past_idx = 0;
-                const float *x2d = sc->x2_at_delay, *x2p = sc->x2_past;
+                const float *x2d = NULL, *x2p = NULL;
                 if (n_part > 0)
                     aec_post_avg_reverb_slots(n_part, in->partition_idx, delay,
                                               &delay_idx, &past_idx);
-                if (in->X_buf != NULL && n_part > 0) {
-                    /* x2 = |X|^2 per bin. With the filter's x2_cache mirror both rows are read in
-                     * place; otherwise they are computed from X_buf into the scratch pair. */
-                    if (in->x2_cache != NULL) {
-                        x2d = in->x2_cache + (size_t)delay_idx * nb;
-                        x2p = in->x2_cache + (size_t)past_idx * nb;
-                    } else {
-                        const Complex *Xd = in->X_buf + (size_t)delay_idx * nb;
-                        const Complex *Xp = in->X_buf + (size_t)past_idx * nb;
-                        sk_cmag2_np_f32(Xd, sc->x2_at_delay, nb);
-                        sk_cmag2_np_f32(Xp, sc->x2_past, nb);
-                    }
+                if (in->x2_cache != NULL && n_part > 0) {
+                    /* x2 = |X|^2 per bin: both rows are read in place from the filter's x2_cache mirror. */
+                    x2d = in->x2_cache + (size_t)delay_idx * nb;
+                    x2p = in->x2_cache + (size_t)past_idx * nb;
                     x2_present = 1;
                 }
                 decay_steady = obj->ree->reverb_decay_per_hop;
@@ -460,20 +461,21 @@ int aec_post_run(AecPost *p,
             }
 
             {
-                float far_pwr = sum_sq_f32_pairwise(in->far_end, (size_t)hop) / (float)hop;
-                int active_render = (far_pwr > in->active_render_threshold);
+                int active_render = in->shared_far_psd
+                    ? in->shared_far_active
+                    : (sum_sq_f32_pairwise(in->far_end, (size_t)hop) / (float)hop > in->active_render_threshold);
                 p->trace.far_active = active_render;
                 int x2r_present_state =
-                    (in->X_buf != NULL && n_part > 0);
+                    (in->x2_cache != NULL && n_part > 0);
                 aec_state_update(obj->state,
                                  aec_converged,
                                  ext_p,
-                                 p->far_psd, p->near_psd, p->error_psd,
+                                 far_psd, p->near_psd, p->error_psd,
                                  p->echo_psd,
                                  active_render,
                                  in->s_ref_max, in->s_coa_max,
                                   1.0,
-                                 sc->render_block_scaled, hop,
+                                 render_block, hop,
                                  in->filter_taps_full, in->filter_taps_full_len,
                                  x2r_present_state ? p->x2_reverb_for_erle : NULL,
                                  c->erle_windowed_capture_psd ? p->capture_psd_win : NULL,
@@ -514,7 +516,7 @@ int aec_post_run(AecPost *p,
 
                     /* DT-gated min-gain floor lift (read when the gain is computed below). The
                      * energy-based near-recent latch decides it; the result is exported via
-                     * AecResContext so fused consumers do not derive a second rule. */
+                     * AecResidualView.res_floor_protect so fused consumers do not derive a second rule. */
                     obj->sg->dt_protect_active =
                         (in->dt_floor_enabled && in->nearend_recent) ? 1 : 0;
 
@@ -549,7 +551,7 @@ int aec_post_run(AecPost *p,
                         const float *erle_unb =
                             aec_state_erle_unbounded(obj->state);
                         ree_estimate(obj->ree,
-                                     p->far_psd, p->near_psd, p->echo_psd,
+                                     far_psd, p->near_psd, p->echo_psd,
                                      dominant_ne, usable, saturated, transparent,
                                      erle, erle_unb,
                                      delay_blocks, n_part,
@@ -595,7 +597,7 @@ int aec_post_run(AecPost *p,
                             {
                                 const float *gain;
                                 int sat_echo = saturated;
-                                if (in->spatial_linear_context) {
+                                if (in->hold_state_only) {
                                     /* G_res is unused in this mode (context_only is required), but
                                      * the DominantNearend hold state must keep advancing: the next
                                      * hop's ERLE onset flag and r2 depend on it. */
@@ -606,7 +608,7 @@ int aec_post_run(AecPost *p,
                                 } else {
                                     gain = suppression_gain_get_gain(
                                         obj->sg, sc->nearend_pwr, sc->r2, sc->r2_unb,
-                                        p->comfort_noise, sc->render_block_scaled,
+                                        p->comfort_noise, render_block,
                                         0, sat_echo);
 
                                     if (!in->context_only) {
@@ -616,10 +618,10 @@ int aec_post_run(AecPost *p,
                                     }
                                 }
 
-                                /* spatial_linear_context implies context_only
-                                 * (aec_validate_config()), so the NULL gain is never
+                                /* hold_state_only implies context_only
+                                 * (aec_resolve_valid_config()), so the NULL gain is never
                                  * dereferenced by aec_post_apply_output(). */
-                                assert(!in->spatial_linear_context ||
+                                assert(!in->hold_state_only ||
                                        in->context_only);
                                 if (in->context_only) {
                                     /* context_only: the external joint stage consumes E(f), gain,
