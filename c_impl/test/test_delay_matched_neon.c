@@ -419,7 +419,6 @@ static int run_estimator(int sample_rate, int hop, int n_hops, int delay) {
     {
         const DaMatchedFilter *mf = &d.est.matched_filter;
         dump_f(mf->filters, (size_t)mf->num_filters * DA_FILTER_SIZE);
-        dump_f(mf->accumulated_error, (size_t)mf->num_filters * DA_ACC_ERR_SIZE);
     }
     free(far); free(near); free(pool);
     return last;

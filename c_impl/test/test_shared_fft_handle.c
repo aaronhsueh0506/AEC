@@ -24,6 +24,8 @@
  * Also wired into the Makefile: `make test-shared-fft-handle`.
  */
 #include "aec.h"
+#include "aec_white_box.h"
+#include "aec_test_tuning.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -54,54 +56,54 @@ static void check_shared_identity(const Aec* a, int enable_shadow, const char* l
 /* aec_create() (heap arena) path, across the 3 contracted grids (see pipelines/README.md "Parameter
  * Alignment") x shadow on/off. */
 static void test_shared_identity_heap(int sample_rate, int fft_size, int enable_shadow) {
-    AecConfig cfg;
-    aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, sample_rate);
-    if (fft_size > 0) cfg.fft_size = fft_size;
-    cfg.enable_shadow = enable_shadow;
+    AecTestCfg cfg;
+    aec_tcfg_from_level(&cfg, AEC_LEVEL_BALANCED, sample_rate);
+    if (fft_size > 0) cfg.c.fft_size = fft_size;
+    cfg.t.enable_shadow = enable_shadow;
 
-    Aec a;
+    Aec *a = NULL;
     char label[128];
-    snprintf(label, sizeof(label), "heap sr=%d/fft=%d/shadow=%d", sample_rate, cfg.fft_size, enable_shadow);
+    snprintf(label, sizeof(label), "heap sr=%d/fft=%d/shadow=%d", sample_rate, cfg.c.fft_size, enable_shadow);
     char msg[192];
     snprintf(msg, sizeof(msg), "%s: aec_create()", label);
-    CHECK(aec_create(&a, &cfg) == 0, msg);
+    CHECK((a = aec_tcfg_create(&cfg)) != NULL, msg);
 
-    check_shared_identity(&a, enable_shadow, label);
+    check_shared_identity(a, enable_shadow, label);
 
     /* Survives a hop of real processing (nothing about normal use should
      * ever reassign a->post_fft or the sub-modules' fft pointers). */
-    int hop = aec_hop_size(&a);
+    int hop = aec_hop_size(a);
     if (hop > 0 && hop <= 4096) {
         float mic[4096] = {0}, ref[4096] = {0}, out[4096];
-        aec_process(&a, mic, ref, out);
+        aec_process(a, mic, ref, out);
         snprintf(msg, sizeof(msg), "%s: identity survives a real aec_process() hop", label);
-        CHECK(a.main_filter.base.fft == a.post_fft, msg);
+        CHECK(a->main_filter.base.fft == a->post_fft, msg);
     }
 
     /* Survives aec_reset(): reset clears state, never re-carves the arena,
      * so the handle pointers themselves must be untouched. */
-    aec_reset(&a);
+    aec_reset(a);
     snprintf(msg, sizeof(msg), "%s: identity survives aec_reset()", label);
-    CHECK(a.main_filter.base.fft == a.post_fft, msg);
+    CHECK(a->main_filter.base.fft == a->post_fft, msg);
     if (enable_shadow) {
         snprintf(msg, sizeof(msg), "%s: shadow identity survives aec_reset()", label);
-        CHECK(a.shadow_filter.fft == a.post_fft, msg);
+        CHECK(a->shadow_filter.fft == a->post_fft, msg);
     }
 
-    aec_destroy(&a);
+    aec_destroy(a);
 }
 
 /* aec_init() (caller-owned pool) path -- the sharing is not an accident of
  * the heap-arena construction path only. */
 static void test_shared_identity_static(int sample_rate, int fft_size, int enable_shadow) {
-    AecConfig cfg;
-    aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, sample_rate);
-    if (fft_size > 0) cfg.fft_size = fft_size;
-    cfg.enable_shadow = enable_shadow;
+    AecTestCfg cfg;
+    aec_tcfg_from_level(&cfg, AEC_LEVEL_BALANCED, sample_rate);
+    if (fft_size > 0) cfg.c.fft_size = fft_size;
+    cfg.t.enable_shadow = enable_shadow;
 
-    size_t need = aec_get_mem_size(&cfg);
+    size_t need = aec_tcfg_mem_size(&cfg);
     char label[128];
-    snprintf(label, sizeof(label), "static sr=%d/fft=%d/shadow=%d", sample_rate, cfg.fft_size, enable_shadow);
+    snprintf(label, sizeof(label), "static sr=%d/fft=%d/shadow=%d", sample_rate, cfg.c.fft_size, enable_shadow);
     char msg[192];
     snprintf(msg, sizeof(msg), "%s: aec_get_mem_size() > 0", label);
     CHECK(need > 0, msg);
@@ -114,7 +116,7 @@ static void test_shared_identity_static(int sample_rate, int fft_size, int enabl
         return;
     }
 
-    Aec* a = aec_init(pool, need, &cfg);
+    Aec* a = aec_tcfg_init(pool, need, &cfg);
     snprintf(msg, sizeof(msg), "%s: aec_init()", label);
     CHECK(a != NULL, msg);
     if (!a) { free(pool); return; }

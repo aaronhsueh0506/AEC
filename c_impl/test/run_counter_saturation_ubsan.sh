@@ -76,7 +76,7 @@ test -n "$COMMON_LIB" || { echo "FATAL: could not resolve audiolib archive path"
 
 echo "--- AEC test_counter_saturation UBSan build (COMMON_DIR=$COMMON_DIR EXTRA_CFLAGS=$EXTRA_CFLAGS) ---"
 # shellcheck disable=SC2046
-"$CC" -Wall -Wextra -O2 -std=gnu99 -I./include -I./example -I"$COMMON_DIR/include" -I"$COMMON_DIR" \
+"$CC" -Wall -Wextra -O2 -std=gnu99 -I./include -I./src -I./example -I"$COMMON_DIR/include" -I"$COMMON_DIR" \
     -ffp-contract=off -fno-math-errno $EXTRA_CFLAGS \
     -fsanitize=undefined -fno-sanitize-recover=all \
     -o "$BIN" test/test_counter_saturation.c $(find src -name '*.c') \

@@ -32,6 +32,9 @@
  * Also wired into the Makefile: `make test-process-context`.
  */
 #include "aec.h"
+#include "aec_white_box.h"
+#include "aec_test_tuning.h"
+#include "aec_pool_test_util.h"
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -48,8 +51,7 @@ static int g_pass = 0;
 
 /* Linear stage + residual stage of one hop, then both views. */
 static void split_hop(Aec* a, const float* mic, const float* ref) {
-    int st = aec_process_linear(a, mic, ref);
-    if (st == AEC_OK) st = aec_process_residual(a, NULL);
+    int st = aec_test_split_hop(a, mic, ref);
     if (st != AEC_OK) { printf("FAIL: split hop refused (%d)\n", st); g_fail++; }
 }
 
@@ -85,13 +87,7 @@ static int all_finite_complex(const Complex* buf, int n) {
 /* Deterministic pseudo-random hop generator (no <random.h> dependency,
  * matches this repo's existing xorshift-in-tests style). */
 static unsigned g_rng_state = 0x2AEC5EEDu;
-static float rng_uniform(float amp) {
-    g_rng_state ^= g_rng_state << 13;
-    g_rng_state ^= g_rng_state >> 17;
-    g_rng_state ^= g_rng_state << 5;
-    float u = (float)(g_rng_state & 0xFFFFFFu) / (float)0xFFFFFFu; /* [0,1) */
-    return amp * (2.0f * u - 1.0f);
-}
+static float rng_uniform(float amp) { return aec_test_rng_uniform(&g_rng_state, amp); }
 
 /* The two forms may be MIXED FREELY on one instance.
  *
@@ -105,13 +101,13 @@ static void test_entry_points_may_be_freely_interleaved(void) {
     AecConfig cfg;
     split_config(&cfg, 16000, AEC_RESIDUAL_FULL);
 
-    Aec ref_inst, mixed;
-    CHECK(aec_create(&ref_inst, &cfg) == 0, "free-mixing test: aec_create(reference instance)");
-    CHECK(aec_create(&mixed, &cfg) == 0, "free-mixing test: aec_create(interleaved instance)");
+    Aec *ref_inst = NULL, *mixed = NULL;
+    CHECK((ref_inst = aec_create(&cfg)) != NULL, "free-mixing test: aec_create(reference instance)");
+    CHECK((mixed = aec_create(&cfg)) != NULL, "free-mixing test: aec_create(interleaved instance)");
 
-    int hop = aec_hop_size(&ref_inst);
+    int hop = aec_hop_size(ref_inst);
     CHECK(hop > 0 && hop <= 4096, "free-mixing test: valid hop size");
-    if (hop <= 0 || hop > 4096) { aec_destroy(&ref_inst); aec_destroy(&mixed); return; }
+    if (hop <= 0 || hop > 4096) { aec_destroy(ref_inst); aec_destroy(mixed); return; }
 
     float mic[4096], ref[4096], out_ref[4096], out_mixed[4096];
     int mismatches = 0, compared = 0, saw_overshoot = 0;
@@ -128,16 +124,16 @@ static void test_entry_points_may_be_freely_interleaved(void) {
             float am = mic[s] < 0.0f ? -mic[s] : mic[s];
             if (am > near_peak) near_peak = am;
         }
-        if (aec_process(&ref_inst, mic, ref, out_ref) != AEC_OK) { printf("FAIL: aec_process\n"); g_fail++; }
+        if (aec_process(ref_inst, mic, ref, out_ref) != AEC_OK) { printf("FAIL: aec_process\n"); g_fail++; }
         if ((i & 1) == 0) {
-            if (aec_process(&mixed, mic, ref, out_mixed) != AEC_OK) { printf("FAIL: aec_process\n"); g_fail++; }
+            if (aec_process(mixed, mic, ref, out_mixed) != AEC_OK) { printf("FAIL: aec_process\n"); g_fail++; }
         } else {
-            split_hop(&mixed, mic, ref);
+            split_hop(mixed, mic, ref);
         }
         AecLinearView la, lb;
         AecResidualView ra, rb;
-        both_views(&ref_inst, &la, &ra);
-        both_views(&mixed, &lb, &rb);
+        both_views(ref_inst, &la, &ra);
+        both_views(mixed, &lb, &rb);
         compared++;
         if (memcmp(ra.formed_hop, rb.formed_hop, (size_t)hop * sizeof(float)) != 0 ||
             memcmp(ra.error_spec, rb.error_spec, (size_t)ra.n_freqs * sizeof(Complex)) != 0 ||
@@ -162,8 +158,8 @@ static void test_entry_points_may_be_freely_interleaved(void) {
           "free-mixing test: the signal actually reached the regime in which a stage would act "
           "(output peak above mic peak), so a re-introduced entry-point-specific stage would have been caught");
 
-    aec_destroy(&ref_inst);
-    aec_destroy(&mixed);
+    aec_destroy(ref_inst);
+    aec_destroy(mixed);
 }
 
 /* The same property where `out` IS comparable: below AEC_RESIDUAL_FULL the library applies and synthesizes nothing, so
@@ -174,13 +170,13 @@ static void test_entry_points_interleave_below_full(AecResidualMode mode) {
     AecConfig cfg;
     split_config(&cfg, 16000, mode);
 
-    Aec ref_inst, mixed;
+    Aec *ref_inst = NULL, *mixed = NULL;
     char label[160];
     snprintf(label, sizeof(label), "interleave mode=%d: aec_create", (int)mode);
-    CHECK(aec_create(&ref_inst, &cfg) == 0 && aec_create(&mixed, &cfg) == 0, label);
+    CHECK((ref_inst = aec_create(&cfg)) != NULL && (mixed = aec_create(&cfg)) != NULL, label);
 
-    int hop = aec_hop_size(&ref_inst);
-    if (hop <= 0 || hop > 4096) { aec_destroy(&ref_inst); aec_destroy(&mixed); return; }
+    int hop = aec_hop_size(ref_inst);
+    if (hop <= 0 || hop > 4096) { aec_destroy(ref_inst); aec_destroy(mixed); return; }
 
     float mic[4096], ref[4096], out_ref[4096], out_mixed[4096];
     int out_mismatch = 0, view_mismatch = 0, out_compared = 0;
@@ -191,18 +187,18 @@ static void test_entry_points_interleave_below_full(AecResidualMode mode) {
             mic[s] = rng_uniform(amp);
             ref[s] = 0.3f * rng_uniform(amp);
         }
-        if (aec_process(&ref_inst, mic, ref, out_ref) != AEC_OK) { printf("FAIL: aec_process\n"); g_fail++; }
+        if (aec_process(ref_inst, mic, ref, out_ref) != AEC_OK) { printf("FAIL: aec_process\n"); g_fail++; }
         if ((i & 1) == 0) {
-            if (aec_process(&mixed, mic, ref, out_mixed) != AEC_OK) { printf("FAIL: aec_process\n"); g_fail++; }
+            if (aec_process(mixed, mic, ref, out_mixed) != AEC_OK) { printf("FAIL: aec_process\n"); g_fail++; }
             out_compared++;
             if (memcmp(out_ref, out_mixed, (size_t)hop * sizeof(float)) != 0) out_mismatch++;
         } else {
-            split_hop(&mixed, mic, ref);
+            split_hop(mixed, mic, ref);
         }
         AecLinearView la, lb;
         AecResidualView ra, rb;
-        both_views(&ref_inst, &la, &ra);
-        both_views(&mixed, &lb, &rb);
+        both_views(ref_inst, &la, &ra);
+        both_views(mixed, &lb, &rb);
         if (memcmp(ra.formed_hop, rb.formed_hop, (size_t)hop * sizeof(float)) != 0 ||
             memcmp(ra.error_spec, rb.error_spec, (size_t)ra.n_freqs * sizeof(Complex)) != 0 ||
             memcmp(ra.base_spec, rb.base_spec, (size_t)ra.n_freqs * sizeof(Complex)) != 0 ||
@@ -216,8 +212,8 @@ static void test_entry_points_interleave_below_full(AecResidualMode mode) {
     snprintf(label, sizeof(label), "interleave mode=%d: views bit-identical on every hop", (int)mode);
     CHECK(view_mismatch == 0, label);
 
-    aec_destroy(&ref_inst);
-    aec_destroy(&mixed);
+    aec_destroy(ref_inst);
+    aec_destroy(mixed);
 }
 
 /* Two separately constructed, identically configured, identically fed instances, one driven exclusively by aec_process()
@@ -227,21 +223,23 @@ static void test_entry_points_interleave_below_full(AecResidualMode mode) {
 static void test_split_matches_full_process(
         int sample_rate, int fft_size, int enable_shadow, AecResidualMode mode) {
     AecConfig cfg;
+    AecTuning tn;
     split_config_grid(&cfg, sample_rate, fft_size, mode);
-    cfg.enable_shadow = enable_shadow;
+    aec_testing_tuning_defaults(&tn, &cfg);
+    tn.enable_shadow = enable_shadow;
     const int with_gain = (mode == AEC_RESIDUAL_FULL);
 
-    Aec via_full, via_split;
+    Aec *via_full = NULL, *via_split = NULL;
     char label[160];
     snprintf(label, sizeof(label), "split-parity sr=%d/fft=%d/shadow=%d/mode=%d: aec_create(via_full)",
              sample_rate, cfg.fft_size, enable_shadow, (int)mode);
-    CHECK(aec_create(&via_full, &cfg) == 0, label);
+    CHECK((via_full = aec_testing_create(&cfg, &tn)) != NULL, label);
     snprintf(label, sizeof(label), "split-parity sr=%d/fft=%d/shadow=%d/mode=%d: aec_create(via_split)",
              sample_rate, cfg.fft_size, enable_shadow, (int)mode);
-    CHECK(aec_create(&via_split, &cfg) == 0, label);
+    CHECK((via_split = aec_testing_create(&cfg, &tn)) != NULL, label);
 
-    int hop = aec_hop_size(&via_full);
-    if (hop <= 0 || hop > 4096) { aec_destroy(&via_full); aec_destroy(&via_split); return; }
+    int hop = aec_hop_size(via_full);
+    if (hop <= 0 || hop > 4096) { aec_destroy(via_full); aec_destroy(via_split); return; }
 
     float mic[4096], ref[4096], out[4096];
     g_rng_state = 0x51DEC0DEu;
@@ -255,13 +253,13 @@ static void test_split_matches_full_process(
             mic[s] = v;
             ref[s] = 0.6f * v;
         }
-        if (aec_process(&via_full, mic, ref, out) != AEC_OK) { printf("FAIL: aec_process\n"); g_fail++; }
-        split_hop(&via_split, mic, ref);
+        if (aec_process(via_full, mic, ref, out) != AEC_OK) { printf("FAIL: aec_process\n"); g_fail++; }
+        split_hop(via_split, mic, ref);
 
         AecLinearView la, lb;
         AecResidualView ca, cb;
-        both_views(&via_full, &la, &ca);
-        both_views(&via_split, &lb, &cb);
+        both_views(via_full, &la, &ca);
+        both_views(via_split, &lb, &cb);
 
         if (ca.n_freqs != cb.n_freqs || ca.hop_size != cb.hop_size) { all_match = 0; break; }
         int K = ca.n_freqs;
@@ -319,8 +317,8 @@ static void test_split_matches_full_process(
              sample_rate, cfg.fft_size, enable_shadow, (int)mode);
     CHECK(res_gain_null_as_expected, label);
 
-    aec_destroy(&via_full);
-    aec_destroy(&via_split);
+    aec_destroy(via_full);
+    aec_destroy(via_split);
 }
 
 /* AEC_RESIDUAL_STATE skips the residual-echo half of the post block (R^2, comfort noise,
@@ -333,22 +331,24 @@ static void test_split_matches_full_process(
 static void test_state_mode_matches_full(
         int sample_rate, int fft_size, int enable_shadow, AecResidualMode base_mode) {
     AecConfig cfg_full, cfg_lin;
+    AecTuning tn;
     split_config_grid(&cfg_full, sample_rate, fft_size, base_mode);
-    cfg_full.enable_shadow = enable_shadow;
+    aec_testing_tuning_defaults(&tn, &cfg_full);
+    tn.enable_shadow = enable_shadow;
     cfg_lin = cfg_full;
     cfg_lin.residual = AEC_RESIDUAL_STATE;
 
-    Aec full, lin;
+    Aec *full = NULL, *lin = NULL;
     char label[160];
     snprintf(label, sizeof(label), "state-mode sr=%d/fft=%d/shadow=%d/base=%d: aec_create(base)",
              sample_rate, cfg_full.fft_size, enable_shadow, (int)base_mode);
-    CHECK(aec_create(&full, &cfg_full) == 0, label);
+    CHECK((full = aec_testing_create(&cfg_full, &tn)) != NULL, label);
     snprintf(label, sizeof(label), "state-mode sr=%d/fft=%d/shadow=%d/base=%d: aec_create(STATE)",
              sample_rate, cfg_full.fft_size, enable_shadow, (int)base_mode);
-    CHECK(aec_create(&lin, &cfg_lin) == 0, label);
+    CHECK((lin = aec_testing_create(&cfg_lin, &tn)) != NULL, label);
 
-    int hop = aec_hop_size(&full);
-    if (hop <= 0 || hop > 1024) { aec_destroy(&full); aec_destroy(&lin); return; }
+    int hop = aec_hop_size(full);
+    if (hop <= 0 || hop > 1024) { aec_destroy(full); aec_destroy(lin); return; }
 
     enum { HOPS = 600, DELAY_HOPS = 3 };
     static float far_hist[DELAY_HOPS + 1][1024];
@@ -363,13 +363,13 @@ static void test_state_mode_matches_full(
         for (int s = 0; s < hop; ++s)
             mic[s] = 0.5f * far_hist[DELAY_HOPS][s] + rng_uniform(burst);
 
-        split_hop(&full, mic, far_now);
-        split_hop(&lin,  mic, far_now);
+        split_hop(full, mic, far_now);
+        split_hop(lin,  mic, far_now);
 
         AecLinearView la, lb;
         AecResidualView ca, cb;
-        both_views(&full, &la, &ca);
-        both_views(&lin, &lb, &cb);
+        both_views(full, &la, &ca);
+        both_views(lin, &lb, &cb);
         int K = ca.n_freqs;
 
         if (memcmp(ca.formed_hop, cb.formed_hop, (size_t)hop * sizeof(float)) != 0 ||
@@ -418,8 +418,8 @@ static void test_state_mode_matches_full(
              sample_rate, cfg_full.fft_size, enable_shadow, (int)base_mode);
     CHECK(usable_seen[0] && usable_seen[1], label);
 
-    aec_destroy(&full);
-    aec_destroy(&lin);
+    aec_destroy(full);
+    aec_destroy(lin);
 }
 
 /* The split pair must also work correctly across a reset (state fully re-zeroed, next hop behaves like a fresh
@@ -428,29 +428,29 @@ static void test_split_survives_reset(void) {
     AecConfig cfg;
     split_config(&cfg, 16000, AEC_RESIDUAL_FULL);
 
-    Aec a;
-    CHECK(aec_create(&a, &cfg) == 0, "reset test: aec_create()");
-    int hop = aec_hop_size(&a);
-    if (hop <= 0 || hop > 4096) { aec_destroy(&a); return; }
+    Aec *a = NULL;
+    CHECK((a = aec_create(&cfg)) != NULL, "reset test: aec_create()");
+    int hop = aec_hop_size(a);
+    if (hop <= 0 || hop > 4096) { aec_destroy(a); return; }
 
     float mic[4096], ref[4096];
     g_rng_state = 0x8ACE0001u;
     for (int i = 0; i < 30; ++i) {
         for (int s = 0; s < hop; ++s) { mic[s] = rng_uniform(0.3f); ref[s] = rng_uniform(0.2f); }
-        split_hop(&a, mic, ref);
+        split_hop(a, mic, ref);
     }
-    CHECK(a.frame_count == 30, "reset test: frame_count reaches 30 via the split pair alone");
+    CHECK(a->frame_count == 30, "reset test: frame_count reaches 30 via the split pair alone");
 
-    aec_reset(&a);
-    CHECK(a.frame_count == 0, "reset test: aec_reset() zeroes frame_count");
+    aec_reset(a);
+    CHECK(a->frame_count == 0, "reset test: aec_reset() zeroes frame_count");
 
     for (int i = 0; i < 5; ++i) {
         for (int s = 0; s < hop; ++s) { mic[s] = rng_uniform(0.3f); ref[s] = rng_uniform(0.2f); }
-        split_hop(&a, mic, ref);
+        split_hop(a, mic, ref);
     }
-    CHECK(a.frame_count == 5, "reset test: the split pair runs cleanly post-reset");
+    CHECK(a->frame_count == 5, "reset test: the split pair runs cleanly post-reset");
 
-    aec_destroy(&a);
+    aec_destroy(a);
 }
 
 int main(void) {

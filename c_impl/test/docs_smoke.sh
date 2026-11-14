@@ -8,16 +8,17 @@
 # helpers the snippet assumes (read_block/write_block), compiles it against the real AEC sources and the audiolib archive,
 # and runs it on about 1 second of silence.
 #
-# Not part of `make`; run by hand: cd c_impl/test && ./docs_smoke.sh   (paths resolve from the script's location).
+# Run by `make test-docs-smoke` (CC, CXX, BACKEND and COMMON_DIR come from the Makefile) or by hand: cd c_impl/test && ./docs_smoke.sh   (paths resolve
+# from the script's location).
 # Exit 0 and "docs_smoke: PASS" mean the sample compiles against the current aec.h and runs to completion.
 
 set -euo pipefail
 
-BACKEND=ne10
+BACKEND="${BACKEND:-ne10}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 C_IMPL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-COMMON_DIR="$(cd "$C_IMPL_DIR/../../audiolib/common" && pwd)"
+COMMON_DIR="$(cd "${COMMON_DIR:-$C_IMPL_DIR/../../audiolib/common}" && pwd)"
 DOC="$C_IMPL_DIR/STATIC_MEMORY.md"
 
 if [ ! -f "$DOC" ]; then
@@ -55,14 +56,14 @@ cat > "$WORK/docs_smoke_main.c" <<'HEADER_EOF'
 #include <stdlib.h>
 #include <string.h>
 
-static int g_frames_left;
+static int g_samples_left;
 
 /* Stand-ins for the doc's implied "your own audio I/O" callbacks. */
 static int read_block(float* mic, float* ref, int hop) {
-    if (g_frames_left <= 0) return 0;
+    if (g_samples_left <= 0) return 0;
     memset(mic, 0, sizeof(float) * (size_t)hop);
     memset(ref, 0, sizeof(float) * (size_t)hop);
-    g_frames_left--;
+    g_samples_left -= hop;
     return 1;
 }
 
@@ -71,8 +72,7 @@ static void write_block(const float* out, int hop) {
 }
 
 int main(void) {
-    const int sample_rate = 16000;
-    g_frames_left = sample_rate / 160; /* ~1s of silence at hop=160 @ 16 kHz */
+    g_samples_left = 16000;            /* about 1 s of silence at 16 kHz, whatever the hop */
 
 HEADER_EOF
 
@@ -80,8 +80,7 @@ cat "$WORK/sample.c.inc" >> "$WORK/docs_smoke_main.c"
 
 cat >> "$WORK/docs_smoke_main.c" <<'FOOTER_EOF'
 
-    printf("docs_smoke: PASS (%d frames processed, hop=%d)\n",
-           sample_rate / 160, hop);
+    printf("docs_smoke: PASS (hop=%d)\n", hop);
     return 0;
 }
 FOOTER_EOF
@@ -96,7 +95,7 @@ COMMON_LIB_PATH="$(make -s -C "$COMMON_DIR" BACKEND="$BACKEND" print-lib-path)"
 echo "== docs_smoke: compiling extracted sample against aec.h + libaudio_common ($BACKEND) =="
 # Compile as C, then link with the C++ driver: the NE10 archive carries one C++ TU, and the C++ driver supplies the C++
 # runtime without a hardcoded -lc++, like the Makefiles' LINK=$(CXX).
-LINK_DRV=c++
+LINK_DRV="${CXX:-c++}"
 
 SOURCES=("$WORK/docs_smoke_main.c")
 while IFS= read -r -d '' src; do
@@ -107,7 +106,7 @@ OBJ_LIST=()
 i=0
 for src in "${SOURCES[@]}"; do
     obj="$WORK/docs_smoke_obj_$i.o"
-    gcc -O2 -ffp-contract=off -fno-math-errno -std=gnu99 \
+    "${CC:-gcc}" -O2 -ffp-contract=off -fno-math-errno -std=gnu99 \
         -I"$C_IMPL_DIR/include" -I"$C_IMPL_DIR/example" -I"$COMMON_DIR/include" -I"$COMMON_DIR" \
         -c "$src" -o "$obj"
     OBJ_LIST+=("$obj")

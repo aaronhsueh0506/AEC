@@ -41,7 +41,7 @@ nonlinear envelope.
 API on top of the estimator; the orchestrator imports it via the public
 alias so external callers (`from aec import DelayEstimator`) work.
 
-The reference ring holds `max_delay_ms` (1024 ms by default) of skew; the
+The reference ring holds `max_delay_ms` (1024 ms by default) of skew (Python; the C single-channel `MATCHED` ring is sized to the estimator's reach plus one hop, the C array instance's shared ring uses its internal `max_delay_ms` of 1024 ms; see `docs/reference/lifecycle.md` §4); the
 matched filter's own reliable reach is about 509 ms (see
 [`delay_estimator_design_zh_TW.md`](../delay_estimator_design_zh_TW.md)). The
 estimate feeds the refined filter through a delay-line on the reference.
@@ -67,8 +67,9 @@ echo than that filter spans puts the echo it must cancel outside the filter,
 while confidence still reads 1.0 because confidence describes the dominant
 histogram and not the substituted delay. The product path therefore reports the
 dominant peak; the pre-echo histogram is still computed as the upstream
-reference and as a diagnostic. Pinned by `test_delay_dominant_selection`
-(Python and C).
+reference and as a diagnostic (Python only: the C estimator keeps neither the
+accumulated error nor the pre-echo histogram). Pinned by
+`test_delay_dominant_selection` (Python and C).
 
 The pre-echo locator (`_compute_pre_echo_lag`, after AEC3 `ComputePreEchoLag`)
 walks the per-tap-group **accumulated squared error of the filter PREFIX** and
@@ -102,8 +103,9 @@ of two of that (256 on the 16 kHz default grid), and
 coefficients `W[p, k]`, error covariance `P[k]`, process noise `Q[k]`.
 
 Convergence schedule: `Q` runs at `kalman_q_high` (1e-3) on start and after an
-EPC / delay change, and settles to `kalman_q_low` (1e-6) in steady state;
-`warmup_frames` (preset 100) forces the high-step startup window.
+EPC / delay change, and settles to `kalman_q_low` (1e-6) in steady state
+(Python only: the gain does not read `Q`, so the C filter keeps no `Q`, `R` or
+`kalman_q_*`); `warmup_frames` (preset 100) forces the high-step startup window.
 
 The refined filter consumes the `RenderSignalAnalyzer` per-bin mask
 (narrow-band tonal regions freeze the W update on those bins) and the

@@ -122,7 +122,8 @@ static void psd_from_abs(const float *mag, int n, float *out) {
     sk_sq_scale_f32(mag, (float)PSD_SCALE, out, n);
 }
 
-void aec_post_compute_psds(AecPost *p, const AecPostAbs *mag) {
+/* Stage 1-2: PSDs and capture_psd_win. A NULL mag->abs_far leaves p->far_psd untouched. */
+static void aec_post_compute_psds(AecPost *p, const AecPostAbs *mag) {
     int nb = p->cfg.n_bins;
     psd_from_abs(mag->abs_near, nb, p->near_psd);
     if (mag->abs_far) psd_from_abs(mag->abs_far, nb, p->far_psd);
@@ -144,9 +145,10 @@ void aec_post_avg_reverb_slots(int n_part, int partition_idx, int delay,
     *past_idx = ((curr_p - delay - 1) % n_part + n_part) % n_part;
 }
 
-void aec_post_compute_x2_reverb(AecPost *p, int x2_present,
-                                const float *x2_at_delay, const float *x2_past,
-                                float decay_steady) {
+/* Stage 3: avg-render-reverb -> p->x2_reverb_for_erle (only when x2_present). */
+static void aec_post_compute_x2_reverb(AecPost *p, int x2_present,
+                                       const float *x2_at_delay, const float *x2_past,
+                                       float decay_steady) {
     const AecPostConfig *c = &p->cfg;
     int nb = c->n_bins, k;
     if (!x2_present) return;
@@ -159,10 +161,11 @@ void aec_post_compute_x2_reverb(AecPost *p, int x2_present,
     }
 }
 
-void aec_post_compute_coherence(AecPost *p,
-                                const Complex *echo_spec_for_coh,
-                                const Complex *near_spec,
-                                const AecPostAbs *mag) {
+/* Stage 4: coherence EMA -> p->coh_gate_mask (when erle_coh_gate). */
+static void aec_post_compute_coherence(AecPost *p,
+                                       const Complex *echo_spec_for_coh,
+                                       const Complex *near_spec,
+                                       const AecPostAbs *mag) {
     const AecPostConfig *c = &p->cfg;
     int nb = c->n_bins;
     if (!c->erle_coh_gate_enabled) return;
@@ -174,7 +177,8 @@ void aec_post_compute_coherence(AecPost *p,
                               p->coh_gate_mask, nb);
 }
 
-void aec_post_compute_comfort_noise(AecPost *p, int saturated_capture) {
+/* Stage 5: CNG N2 tracking -> p->comfort_noise. */
+static void aec_post_compute_comfort_noise(AecPost *p, int saturated_capture) {
     const AecPostConfig *c = &p->cfg;
     int nb = c->n_bins;
     /* With cng_n2_windowed_psd, track the windowed capture PSD instead of the rectangular near_psd
@@ -215,10 +219,12 @@ void aec_post_compute_comfort_noise(AecPost *p, int saturated_capture) {
     }
 }
 
-void aec_post_apply_output(AecPost *p,
-                           const Complex *output_base,
-                           const float *gain,
-                           float *out) {
+/* Stage 6: gain apply on the rendering base, CNG inject (aec_cng_fill), irfft, OLA. output_base is the base chosen by this hop's
+ * output guard: the linear residual spectrum, or error + echo when p->output_guard_active. */
+static void aec_post_apply_output(AecPost *p,
+                                  const Complex *output_base,
+                                  const float *gain,
+                                  float *out) {
     const AecPostConfig *c = &p->cfg;
     int nb = c->n_bins;
     int bs = c->block_size;
@@ -416,7 +422,6 @@ int aec_post_run(AecPost *p,
             const FilterDelayEstimate *ext_p = NULL;
             if (in->delay_active && in->current_delay >= 0) {
                 ext.reported = 1;
-                ext.quality = AEC_POST_DELAY_QUALITY_REFINED;
                 ext.delay = in->current_delay;
                 ext_p = &ext;
             }
@@ -619,7 +624,7 @@ int aec_post_run(AecPost *p,
                                 }
 
                                 /* hold_state_only implies context_only
-                                 * (aec_resolve_valid_config()), so the NULL gain is never
+                                 * (aec_resolve()), so the NULL gain is never
                                  * dereferenced by aec_post_apply_output(). */
                                 assert(!in->hold_state_only ||
                                        in->context_only);

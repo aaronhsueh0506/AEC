@@ -16,6 +16,8 @@
  *     low-render detector and the far-active latch, on every grid).
  */
 #include "src/aec_res.c"
+#include "aec_white_box.h"
+#include "aec_ref_tables.h"
 
 #include "utility/simd_aec.h"
 
@@ -48,11 +50,31 @@ static AecConfig make_cfg(int g, int level) {
     return cfg;
 }
 
+/* The ENR/SU tables are decoded into each instance's pool, so two tunings are equal by content, not by address. */
 static int tun_equal(const SuppressionGainTuning* a, const SuppressionGainTuning* b) {
+    size_t bytes = (size_t)a->table_len * sizeof(float);
     return a->table_len == b->table_len &&
-           a->nearend_enr_tr == b->nearend_enr_tr && a->nearend_enr_su == b->nearend_enr_su &&
-           a->nearend_emr_tr == b->nearend_emr_tr && a->normal_enr_tr == b->normal_enr_tr &&
-           a->normal_enr_su == b->normal_enr_su && a->normal_emr_tr == b->normal_emr_tr;
+           memcmp(a->nearend_enr_tr, b->nearend_enr_tr, bytes) == 0 && memcmp(a->nearend_enr_su, b->nearend_enr_su, bytes) == 0 &&
+           memcmp(a->nearend_emr_tr, b->nearend_emr_tr, bytes) == 0 && memcmp(a->normal_enr_tr, b->normal_enr_tr, bytes) == 0 &&
+           memcmp(a->normal_enr_su, b->normal_enr_su, bytes) == 0 && memcmp(a->normal_emr_tr, b->normal_emr_tr, bytes) == 0;
+}
+
+/* The tuning's tables against the reference tables of aec_ref_tables.h (the twin's values, outside the decoder); the EMR
+ * thresholds are the constant 0.3f. */
+static int tun_matches_ref(const SuppressionGainTuning* t, int sr, int fft) {
+    int i, k;
+    for (i = 0; i < AECREF_N_GRIDS; ++i) {
+        const AecRefTables* r = &AECREF_GRIDS[i];
+        if (r->sample_rate != sr || r->fft_size != fft) continue;
+        if (t->table_len != r->n_bins) return 0;
+        for (k = 0; k < r->n_bins; ++k)
+            if (t->nearend_emr_tr[k] != 0.3f || t->normal_emr_tr[k] != 0.3f) return 0;
+        return t->nearend_enr_tr && memcmp(t->nearend_enr_tr, r->nearend_enr_tr, (size_t)r->n_bins * sizeof(float)) == 0 &&
+               memcmp(t->nearend_enr_su, r->nearend_enr_su, (size_t)r->n_bins * sizeof(float)) == 0 &&
+               memcmp(t->normal_enr_tr, r->normal_enr_tr, (size_t)r->n_bins * sizeof(float)) == 0 &&
+               memcmp(t->normal_enr_su, r->normal_enr_su, (size_t)r->n_bins * sizeof(float)) == 0;
+    }
+    return 0;
 }
 
 static void* aligned_block(size_t bytes) {
@@ -67,7 +89,7 @@ static void test_config(void) {
     for (g = 0; g < N_GRIDS; ++g) {
         for (p = 0; p < N_LEVELS; ++p) {
             AecConfig cfg = make_cfg(g, p);
-            Aec heap_lane;
+            Aec *heap_lane = NULL;
             Aec* pool_lane;
             void *pool, *res_mem;
             AecRes* r;
@@ -79,22 +101,31 @@ static void test_config(void) {
             res_mem = aligned_block(need);
             r = aec_res_init(res_mem, need, &cfg);
             CHECK(r != NULL, "%s: aec_res_init", id);
-            CHECK(aec_create(&heap_lane, &cfg) == 0, "%s: aec_create", id);
+            CHECK((heap_lane = aec_create(&cfg)) != NULL, "%s: aec_create", id);
             pool = aligned_block(aec_get_mem_size(&cfg));
             pool_lane = aec_init(pool, aec_get_mem_size(&cfg), &cfg);
             CHECK(pool_lane != NULL, "%s: aec_init", id);
             if (!r || !pool_lane) continue;
 
-            CHECK(memcmp(&heap_lane.a3_sg.cfg, &r->sg_cfg, sizeof r->sg_cfg) == 0,
+            CHECK(memcmp(&heap_lane->a3_sg.cfg, &r->sg_cfg, sizeof r->sg_cfg) == 0,
                   "%s: config bytes equal the heap lane's", id);
             CHECK(memcmp(&pool_lane->a3_sg.cfg, &r->sg_cfg, sizeof r->sg_cfg) == 0,
                   "%s: config bytes equal the pool lane's", id);
-            CHECK(tun_equal(&heap_lane.a3_sg.tun, &r->sg_tun), "%s: tuning tables are the lane's", id);
+            CHECK(tun_equal(&heap_lane->a3_sg.tun, &r->sg_tun), "%s: tuning tables equal the lane's", id);
+            CHECK(tun_matches_ref(&r->sg_tun, GRIDS[g][0], GRIDS[g][1]) && tun_matches_ref(&r->sg.tun, GRIDS[g][0], GRIDS[g][1]) &&
+                  tun_matches_ref(&heap_lane->a3_sg.tun, GRIDS[g][0], GRIDS[g][1]) &&
+                  tun_matches_ref(&pool_lane->a3_sg.tun, GRIDS[g][0], GRIDS[g][1]),
+                  "%s: decoded ENR/SU tables equal the reference tables (AecRes, heap and pool Aec)", id);
             CHECK(memcmp(&r->sg.cfg, &r->sg_cfg, sizeof r->sg_cfg) == 0, "%s: live config equals stored", id);
-            CHECK(r->n_bins == heap_lane.n_freqs && r->hop_size == heap_lane.hop_size,
+            CHECK(r->n_bins == heap_lane->n_freqs && r->hop_size == heap_lane->hop_size,
                   "%s: dimensions equal the lane's", id);
 
-            aec_destroy(&heap_lane);
+            aec_res_reset(r);
+            aec_res_set_level(r, AEC_LEVEL_AGGRESSIVE);
+            CHECK(tun_matches_ref(&r->sg.tun, GRIDS[g][0], GRIDS[g][1]),
+                  "%s: tables survive aec_res_reset and a level change", id);
+
+            aec_destroy(heap_lane);
             aec_destroy(pool_lane);
             free(pool);
             free(res_mem);
@@ -404,7 +435,7 @@ static void test_initial_phase(void) {
     int g;
     for (g = 0; g < N_GRIDS; ++g) {
         AecConfig cfg = make_cfg(g, 1);
-        Aec lane;
+        Aec *lane = NULL;
         size_t need = aec_res_get_mem_size(&cfg);
         void* mem = aligned_block(need);
         void* mem_on = aligned_block(need);
@@ -416,13 +447,13 @@ static void test_initial_phase(void) {
         AecResInput in;
         char id[32];
         snprintf(id, sizeof id, "%d/%d", GRIDS[g][0], GRIDS[g][1]);
-        if (!r || !r_on || aec_create(&lane, &cfg) != 0) { CHECK(0, "%s: setup", id); continue; }
+        if (!r || !r_on || (lane = aec_create(&cfg)) == NULL) { CHECK(0, "%s: setup", id); continue; }
 
         memset(&ref, 0, sizeof ref);
-        n = ref.n_freqs = lane.n_freqs;
-        hop = ref.hop_size = lane.hop_size;
-        ref.post_sg_cfg = lane.a3_sg.cfg;
-        ref.post_sg_tun = lane.a3_sg.tun;
+        n = ref.n_freqs = lane->n_freqs;
+        hop = ref.hop_size = lane->hop_size;
+        ref.post_sg_cfg = lane->a3_sg.cfg;
+        ref.post_sg_tun = lane->a3_sg.tun;
         ref.post_sg_cfg.dne_use_during_initial_phase = 0;
         ref.post_sg_cfg.lf_smoothing_during_initial_phase = 0;
         ref.post_sg_storage = (float*)calloc((size_t)(10 + ref.post_sg_cfg.nearend_smoother_n) * n,
@@ -474,7 +505,7 @@ static void test_initial_phase(void) {
         CHECK(r->sg.initial_state == 0 && ref.post_sg.initial_state == 0,
               "%s: the stage leaves the initial state when all filters converged", id);
 
-        aec_destroy(&lane);
+        aec_destroy(lane);
         free(ref.post_sg_storage); free(ref.post_near_power); free(ref.error_power);
         free(ref.render_i16); free(err); free(near); free(r2); free(cn); free(rend);
         free(mem); free(mem_on);

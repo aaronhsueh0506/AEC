@@ -11,6 +11,7 @@
 #include <stdint.h>
 
 #include "aec.h"
+#include "aec_tuning.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -51,14 +52,17 @@ typedef struct AecResInput {
     int   clock_drift;           /* nonzero: far/near clocks drift */
 } AecResInput;
 
-/* Bytes needed for `cfg`; 0 if cfg is NULL or invalid. Only sample_rate,
- * fft_size and the two minimum-gain floors of cfg influence the suppressor. */
+/* Bytes needed for `cfg`; 0 if cfg is NULL or invalid. Only sample_rate, fft_size and level of cfg influence the suppressor. */
 size_t aec_res_get_mem_size(const AecConfig* cfg);
 
 /* Builds an instance inside `mem` (16-byte aligned, at least
  * aec_res_get_mem_size(cfg) bytes). Returns NULL on invalid input. The memory
  * must stay valid while the instance is used; there is nothing to destroy. */
 AecRes* aec_res_init(void* mem, size_t bytes, const AecConfig* cfg);
+
+/* The same for an already-resolved configuration (the array instance passes its own tuning). */
+size_t  aec_res_get_mem_size_resolved(const AecResolved* resolved);
+AecRes* aec_res_init_resolved(void* mem, size_t bytes, const AecResolved* resolved);
 
 /* Clears all suppressor state. The configured floor (including one set by
  * aec_res_set_level) is kept. */

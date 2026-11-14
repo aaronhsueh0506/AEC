@@ -24,6 +24,12 @@ print-bin-dir` (same flags as your build) to get the exact path, or `make
 publish` to copy this build's artifacts to a stable `dist/<backend>/current/`
 handoff path.
 
+Headers. `include/` holds the four headers a caller sees: `aec.h` (the API; `Aec` is an opaque `typedef struct Aec Aec;`),
+`aec_internal.h` (library-internal API for pipelines), `aec_balanced_config.h` (generated per-rate tables) and `aec_debug.h`
+(trace). Everything else is in `src/`: the body of `struct Aec` (`src/aec_impl.h`) and the sub-module headers. White-box tests
+reach them through `test/aec_white_box.h` with `-I./src` (`TEST_INC` in the Makefile); the library, the CLI and the
+public-header checks never add it.
+
 Compile flags (already in the Makefile): `-O2 -I include -I example`, plus
 `-ffp-contract=off -fno-math-errno` appended **last** (see "FP-contraction
 policy" below). Both flags are required: no FMA fusion keeps results
@@ -92,9 +98,9 @@ stdio symbols, and runs the consumer.
 ### Single-channel library (`AEC_NO_ARRAY=1`)
 
 `make lib AEC_NO_ARRAY=1` builds a `libaec.a` without the four-microphone array instance: `src/aec_array.c` and `src/aec_res.c` are not compiled
-(`-DAEC_NO_ARRAY`), `AecConfig.n_mics` other than 1 is refused (`aec_get_mem_size()` 0, `aec_init()` NULL, `aec_create()` -1), and
+(`-DAEC_NO_ARRAY`), `AecConfig.n_mics` other than 1 is refused (`aec_get_mem_size()` 0, `aec_init()` NULL, `aec_create()` NULL), and
 `aec_get_array()` and the `aec_array_*()` diagnostics are not defined. Everything single-channel behaves byte for byte as in the full library. On the host
-the archive's `__TEXT` drops by about 21 kB at `SIMD=1` (184,765 -> 163,433 B) and 18 kB at `SIMD=0` (166,881 -> 148,721 B). The flag is part of the config hash, so the
+the archive's `__TEXT` drops by about 22 kB at `SIMD=1` (164,227 -> 142,015 B) and 19 kB at `SIMD=0` (145,667 -> 126,643 B); measured as `size "$(make -s print-lib-path [SIMD=0] [AEC_NO_ARRAY=1])" | awk 'NR>1{t+=$1} END{print t}'` after `make lib` with the same flags (Apple clang, arm64). The flag is part of the config hash, so the
 two builds keep separate `obj/` and `bin/` directories; the array-only test targets print "SKIPPED" under it. Consumers pass it through to this build
 (`make AEC_NO_ARRAY=1` in Audio_ALG/pipelines).
 
@@ -108,7 +114,7 @@ post/state modules, `residual_echo_estimator`, HPF). The Python reference
 **implementation**; Python↔C comparison is **tolerance-based**, never 0/0.
 
 The delay-estimator matched filter is float32/fast-math/duty-cycled
-unconditionally (see `include/delay_aec.h`).
+unconditionally (see `src/delay_aec.h`).
 
 The **FFT backend is NE10 (ARM NEON, float32)**; the FFT wrapper and the NE10
 backend live in the shared `audiolib` layer (a sibling repo). It is the only
@@ -130,7 +136,7 @@ caller-pool path (`aec_get_mem_size`/`aec_init`), and differs from numpy's fp64
   under `SIMD=1`. The complete default tier is therefore `make test SIMD=1`
   plus `make test SIMD=0`.
 - `make test-full` — the default tier plus what is slow or rarely changes: the
-  full parity matrix (`make test-pyc-parity PYC_ARGS=--full`, 62 scenes), the
+  full parity matrix (`make test-pyc-parity PYC_ARGS=--full`, every scene), the
   end-to-end gate `make test-parity-e2e`, the SIMD-independent targets under
   `SIMD=0` too, the UBSan `--use-standard-math` variants,
   `test/run_fp_flag_policy_test.sh` (negative cases of the Makefile flag policy)
@@ -138,9 +144,7 @@ caller-pool path (`aec_get_mem_size`/`aec_init`), and differs from numpy's fp64
   wrappers). Under `SIMD=0` it does not repeat the members that take no SIMD
   input.
 - Not in either tier, still runnable on their own: `test-detectors-parity`
-  (single grid; `test-detectors-parity-all` is a superset), `test/docs_smoke.sh`,
-  `test/test_lifecycle.c` and `test/test_wav_io_shim.c` (these two have no
-  Makefile target; their build lines are in the files).
+  (single grid; `test-detectors-parity-all` is a superset).
 
 **Regression gates:**
 
@@ -249,12 +253,13 @@ The beamformer and the synthesis stay with the caller. Per hop: `aec_process_lin
 `aec_get_array()`, the caller's beamformer, `aec_process_residual(a, &beam)`, then `aec_get_residual()` /
 `aec_apply_gain()` / `aec_apply_cng()`. Query the pool with `aec_get_mem_requirements()` and build with
 `aec_init_ex()`; the pool size depends on `residual` (see `STATIC_MEMORY.md`). Not done yet: the far-side state is
-still per lane (only the delay estimator, the aligned far and the far FFT result are shared), and each lane still
-carves a full single-channel pool. Contract and example:
+still per lane (only the delay estimator, the aligned far and the far FFT result are shared). A lane omits what its
+contract never runs: at 16 kHz / 256 a lane pool is 142,880 B against 177,568 B for a stand-alone
+`EXTERNAL_ALIGNED` instance. Contract and example:
 [../docs/reference/integration.md](../docs/reference/integration.md) §8.8.
 
 Full CLI options, C API reference, integration rules, runtime resource
 notes, and validation steps:
 [../docs/c_user_manual_zh_TW.md](../docs/c_user_manual_zh_TW.md). HTML pages (call order with a
 compile-checked example, sequence diagrams, external/internal parameter tables):
-[../docs/html/aec_usage.html](../docs/html/reference/aec_usage.html).
+[../docs/html/reference/aec_usage.html](../docs/html/reference/aec_usage.html).

@@ -1,5 +1,6 @@
 /* Top-level PBFDKF AEC orchestration with the post-filter chain. */
 #include "aec.h"
+#include "aec_impl.h"
 #include "aec_internal.h"
 #include "aec_config_build.h"
 #include "aec_debug.h"
@@ -12,6 +13,7 @@
 #include "utility/fast_math.h"
 #include "aec_array_internal.h"      /* array dispatch */
 #include "aec_res_internal.h"        /* AEC_LEVEL_RAMP_MS */
+#include <assert.h>
 #include <stdint.h>
 #include <limits.h>
 #include <stdlib.h>
@@ -60,77 +62,7 @@ static float aec_legacy10ms_rate(float legacy_per_hop, int hop,
 }
 
 void aec_config_defaults(AecConfig* cfg, int sr) {
-    memset(cfg, 0, sizeof(*cfg));
-    cfg->sample_rate = sr;
-    /* Only place a default fft_size is applied (0 for an unsupported rate,
-     * which the validator rejects). */
-    cfg->fft_size = aec_default_fft_size(sr);
-    /* filter_length: 64 ms at sr >= 44100, 52 ms otherwise; 0 for an
-     * unsupported rate (like fft_size, rejected by the validator), so the
-     * millisecond product is never formed from an arbitrary int. */
-    cfg->filter_length = !aec_is_valid_sample_rate(sr) ? 0
-                        : (sr >= 44100) ? (sr * 64 / 1000)
-                                        : (sr * 52 / 1000);
-    cfg->n_partitions = 0;
-    cfg->mu = 0.3f;
-    cfg->delta = 1e-8f;
-    cfg->enable_cng = 1;
-    /* MATCHED with 5 filters is the default; fixed_delay_samples must be -1
-     * (0 is a legal FIXED delay). */
-    cfg->delay_mode = AEC_DELAY_MATCHED;
-    cfg->fixed_delay_samples = -1;
-    cfg->enable_highpass = 1;
-    cfg->enable_saturation = 1;
-    cfg->enable_shadow = 1;
-    cfg->residual = AEC_RESIDUAL_FULL;
-    cfg->n_mics = 1;
-    cfg->capture_proxy_channel = 0;
-    cfg->delay_backward_quarantine_enabled = 0;
-    cfg->delay_backward_quarantine_s = 1.0f;
-    cfg->saturation_softclip_ref = 1;
-    /* Frame-count fields are 16 kHz / 10 ms reference-grid values, retimed in
-     * aec_carve(). */
-    cfg->shadow_err_alpha = 0.80f;
-    cfg->shadow_mu_min = 0.5f;
-    cfg->shadow_mu_nlms = 0.5f;
-    cfg->warmup_frames = 100;
-    cfg->epc_hangover = 20;
-    cfg->epc_total_rise = 1.5f;
-    cfg->epc_delta_threshold = 0.3f;
-    cfg->epc_mu_floor = 0.5f;
-    cfg->max_delay_ms = 1024.0f;
-    cfg->delay_buffer_ms = 2048.0f;
-    cfg->delay_est_init_s = 0.3f;
-    cfg->delay_est_period_s = 0.0f;
-    cfg->delay_num_filters = DA_NUM_FILTERS;
-    cfg->highpass_cutoff_hz = 80.0f;
-    cfg->saturation_threshold = 0.95f;
-    cfg->kalman_q_high = 1e-3f;
-    cfg->kalman_q_low = 1e-6f;
-    cfg->delay_acquire_protect_converged = 1;
-    cfg->delay_acquire_warm_transfer = 1;
-    cfg->delay_acquire_inst_erle_db = 4.0f;
-    cfg->dt_aware_recovery_soft = 1;
-    cfg->dt_aware_res_floor_enabled = 1;
-    /* -20 dB: recovers residual-echo suppression when the near-recent latch
-     * false-arms in far-end single talk, at a small double-talk cost. */
-    cfg->min_gain_floor_dt_db = -20.0f;
-    cfg->ne_recent_threshold = 0.3f;
-    cfg->ne_recent_hold = 150;
-    cfg->ne_recent_sustain = 3;
-    cfg->min_gain_floor_far_active_db = -28.0f;
-    cfg->filter_misadjustment_stable_frames = 30;
-    cfg->filter_misadjustment_hangover_frames = 100;
-    cfg->filter_misadjustment_scale_min = 0.5f;
-    cfg->filter_misadjustment_scale_max = 2.0f;
-    cfg->live_observer_enabled = 0;
-    cfg->live_observer_shift_ms = 24.0f;
-    cfg->live_observer_max_hz = 1000.0f;
-    cfg->live_observer_mu = 0.3f;
-    cfg->live_observer_corrob_ms = 100.0f;
-    cfg->live_observer_corrob_margin_db = 0.0f;
-    /* Default on, so a config that skips aec_config_from_level keeps the split floor. */
-    cfg->min_gain_split_floor_enabled = 1;
+    aec_config_from_level(cfg, AEC_LEVEL_BALANCED, sr);
 }
 
 /* Level strength table in AecLevel order; NO_FLOOR repeats balanced's
@@ -147,6 +79,16 @@ static const AecLevelFloors AEC_LEVEL_FLOORS[] = {
 static const AecLevelFloors* aec_level_row(AecLevel p) {
     return ((unsigned)p < sizeof(AEC_LEVEL_FLOORS) / sizeof(AEC_LEVEL_FLOORS[0]))
                ? &AEC_LEVEL_FLOORS[p] : NULL;
+}
+
+const char* aec_level_name(AecLevel p) {
+    static const char* const names[] = {
+        [AEC_LEVEL_MILD]       = "mild",
+        [AEC_LEVEL_BALANCED]   = "balanced",
+        [AEC_LEVEL_AGGRESSIVE] = "aggressive",
+        [AEC_LEVEL_NO_FLOOR]   = "no_floor",
+    };
+    return aec_level_row(p) ? names[p] : "balanced";
 }
 
 int aec_level_floor_db(AecLevel p, float* db_out) {
@@ -171,15 +113,21 @@ int aec_level_split_floor_enabled(AecLevel p, int* enabled_out) {
 }
 
 void aec_config_from_level(AecConfig* cfg, AecLevel p, int sr) {
-    float db, dt_db;
-    int en;
-    aec_config_defaults(cfg, sr);
-    cfg->min_gain_floor_far_active_db =
-        (aec_level_floor_db(p, &db) == 0) ? db : -28.0f;
-    cfg->min_gain_floor_dt_db =
-        (aec_level_dt_floor_db(p, &dt_db) == 0) ? dt_db : -20.0f;
-    cfg->min_gain_split_floor_enabled =
-        (aec_level_split_floor_enabled(p, &en) == 0) ? en : 1;
+    memset(cfg, 0, sizeof(*cfg));
+    cfg->sample_rate = sr;
+    /* The only place a default fft_size is applied (0 for an unsupported rate, which the validator rejects). */
+    cfg->fft_size = aec_default_fft_size(sr);
+    cfg->n_mics = 1;
+    cfg->level = aec_level_row(p) ? p : AEC_LEVEL_BALANCED;
+    cfg->residual = AEC_RESIDUAL_FULL;
+    /* MATCHED with 5 filters is the default; fixed_delay_samples must be -1 (0 is a legal FIXED delay). */
+    cfg->delay_mode = AEC_DELAY_MATCHED;
+    cfg->fixed_delay_samples = -1;
+    cfg->delay_num_filters = AEC_DELAY_NUM_FILTERS_MAX;
+    cfg->enable_cng = 1;
+    cfg->capture_proxy_channel = 0;
+    cfg->delay_backward_quarantine_enabled = 0;
+    cfg->delay_backward_quarantine_s = 1.0f;
 }
 
 /* Signal-grid table: admissible (sample_rate, fft_size) pairs and their
@@ -191,31 +139,32 @@ static const AecSignalGrid AEC_GRID_TABLE[] = {
     {  8000,  256,   256,  128,     129, 1 },
 };
 
-int aec_resolve_signal_grid(int sample_rate, int fft_size, AecSignalGrid* out) {
-    if (fft_size <= 0) return AEC_ERR_ARG;
+/* First table row for sample_rate whose fft_size matches (fft_size <= 0: any), or NULL. */
+static const AecSignalGrid* aec_find_grid(int sample_rate, int fft_size) {
     for (size_t i = 0; i < sizeof(AEC_GRID_TABLE) / sizeof(AEC_GRID_TABLE[0]); ++i) {
         if (AEC_GRID_TABLE[i].sample_rate == sample_rate &&
-            AEC_GRID_TABLE[i].fft_size == fft_size) {
-            if (out) *out = AEC_GRID_TABLE[i];
-            return AEC_OK;
-        }
+            (fft_size <= 0 || AEC_GRID_TABLE[i].fft_size == fft_size))
+            return &AEC_GRID_TABLE[i];
     }
-    return AEC_ERR_ARG;
+    return NULL;
+}
+
+int aec_resolve_signal_grid(int sample_rate, int fft_size, AecSignalGrid* out) {
+    const AecSignalGrid* g;
+    if (fft_size <= 0) return AEC_ERR_ARG;
+    g = aec_find_grid(sample_rate, fft_size);
+    if (!g) return AEC_ERR_ARG;
+    if (out) *out = *g;
+    return AEC_OK;
 }
 
 int aec_is_valid_sample_rate(int sample_rate) {
-    for (size_t i = 0; i < sizeof(AEC_GRID_TABLE) / sizeof(AEC_GRID_TABLE[0]); ++i) {
-        if (AEC_GRID_TABLE[i].sample_rate == sample_rate) return 1;
-    }
-    return 0;
+    return aec_find_grid(sample_rate, 0) != NULL;
 }
 
 int aec_default_fft_size(int sample_rate) {
-    for (size_t i = 0; i < sizeof(AEC_GRID_TABLE) / sizeof(AEC_GRID_TABLE[0]); ++i) {
-        if (AEC_GRID_TABLE[i].sample_rate == sample_rate)
-            return AEC_GRID_TABLE[i].fft_size;
-    }
-    return 0;
+    const AecSignalGrid* g = aec_find_grid(sample_rate, 0);
+    return g ? g->fft_size : 0;
 }
 
 /* True when a reference ring exists (MATCHED, FIXED); Aec::has_delay is the
@@ -224,83 +173,19 @@ static inline int aec_ring_active(const AecConfig* cfg) {
     return cfg->delay_mode != AEC_DELAY_EXTERNAL_ALIGNED;
 }
 
-/* Bounds-checks an AecConfig (finite, generous ranges around each default) before any derived size or state is touched.
- * 1 = acceptable. */
-static int aec_config_valid_resolved(const AecConfig* cfg) {
+/* The caller's fields, the tuning, and the delay-mode / array rules. 1 = acceptable. */
+static int aec_resolved_valid(const AecResolved* r) {
+    const AecConfig* cfg = &r->cfg;
     if (aec_resolve_signal_grid(cfg->sample_rate, cfg->fft_size, NULL) != AEC_OK) return 0;
-    if (cfg->filter_length <= 0 || cfg->filter_length > 4096) return 0;
-    if (cfg->n_partitions != 0 &&
-        (cfg->n_partitions < 1 || cfg->n_partitions > 256)) return 0;
+    if (cfg->enable_cng != 0 && cfg->enable_cng != 1) return 0;
+    if ((unsigned)cfg->level > (unsigned)AEC_LEVEL_NO_FLOOR) return 0;
+    if (cfg->residual < AEC_RESIDUAL_OFF || cfg->residual > AEC_RESIDUAL_FULL) return 0;
+    /* Hard bound: AEC_DELAY_NUM_FILTERS_MAX is the static array extent; 0 filters is invalid. */
+    if (cfg->delay_num_filters < 1 || cfg->delay_num_filters > AEC_DELAY_NUM_FILTERS_MAX) return 0;
+    if (!aec_tuning_valid(&r->tun, cfg)) return 0;
 
-#define AEC_CK_BOOL(field) \
-    do { if (cfg->field != 0 && cfg->field != 1) return 0; } while (0)
-#define AEC_CK_RANGE_F(field, lo, hi) \
-    do { if (!isfinite(cfg->field) || cfg->field < (lo) || cfg->field > (hi)) return 0; } while (0)
-#define AEC_CK_RANGE_I(field, lo, hi) \
-    do { if (cfg->field < (lo) || cfg->field > (hi)) return 0; } while (0)
-
-    AEC_CK_BOOL(enable_cng);
-    AEC_CK_BOOL(cng_n2_windowed_psd);
-    AEC_CK_BOOL(enable_highpass);
-    AEC_CK_BOOL(enable_saturation);
-    AEC_CK_BOOL(enable_shadow);
-    AEC_CK_BOOL(saturation_softclip_ref);
-    AEC_CK_RANGE_I(residual, AEC_RESIDUAL_OFF, AEC_RESIDUAL_FULL);
-    AEC_CK_BOOL(delay_acquire_protect_converged);
-    AEC_CK_BOOL(delay_acquire_warm_transfer);
-    AEC_CK_BOOL(dt_aware_recovery_soft);
-    AEC_CK_BOOL(dt_aware_res_floor_enabled);
-
-    AEC_CK_RANGE_F(mu,                          0.0f,    10.0f);
-    AEC_CK_RANGE_F(delta,                       0.0f,     1.0f);
-    AEC_CK_RANGE_F(shadow_err_alpha,            0.0f,     1.0f);
-    AEC_CK_RANGE_F(shadow_mu_min,               0.0f,    10.0f);
-    AEC_CK_RANGE_F(shadow_mu_nlms,              0.0f,    10.0f);
-    AEC_CK_RANGE_F(epc_total_rise,              0.0f,  1000.0f);
-    AEC_CK_RANGE_F(epc_delta_threshold,         0.0f,  1000.0f);
-    AEC_CK_RANGE_F(epc_mu_floor,                0.0f,    10.0f);
-    AEC_CK_RANGE_F(max_delay_ms,                0.0f, 60000.0f);
-    AEC_CK_RANGE_F(delay_buffer_ms,             0.0f,120000.0f);
-    AEC_CK_RANGE_F(delay_est_init_s,            0.0f,  3600.0f);
-    AEC_CK_RANGE_F(delay_est_period_s,          0.0f,  3600.0f);
-    /* With enable_highpass the cutoff must satisfy hpf_params_valid(): 0 <
-     * cutoff < 0.45 * sample_rate. */
-    if (cfg->enable_highpass) {
-        if (!isfinite(cfg->highpass_cutoff_hz) || cfg->highpass_cutoff_hz <= 0.0f) return 0;
-        if ((double)cfg->highpass_cutoff_hz >= 0.45 * (double)cfg->sample_rate) return 0;
-    } else {
-        AEC_CK_RANGE_F(highpass_cutoff_hz,      0.0f, 20000.0f);
-    }
-    AEC_CK_RANGE_F(saturation_threshold,        0.0f,    10.0f);
-    AEC_CK_RANGE_F(kalman_q_high,               0.0f,     1.0f);
-    AEC_CK_RANGE_F(kalman_q_low,                0.0f,     1.0f);
-    AEC_CK_RANGE_F(delay_acquire_inst_erle_db,-100.0f,   100.0f);
-    AEC_CK_RANGE_F(min_gain_floor_dt_db,     -300.0f,    50.0f);
-    AEC_CK_RANGE_F(ne_recent_threshold,          0.0f,  1000.0f);
-    AEC_CK_RANGE_F(min_gain_floor_far_active_db,-300.0f,  50.0f);
-    AEC_CK_RANGE_F(filter_misadjustment_scale_min, 0.0f, 1000.0f);
-    AEC_CK_RANGE_F(filter_misadjustment_scale_max, 0.0f, 1000.0f);
-
-    AEC_CK_RANGE_I(warmup_frames,                       0, 1000000);
-    AEC_CK_RANGE_I(epc_hangover,                         0, 1000000);
-    AEC_CK_RANGE_I(ne_recent_hold,                       0, 1000000);
-    AEC_CK_RANGE_I(ne_recent_sustain,                    0, 1000000);
-    AEC_CK_RANGE_I(filter_misadjustment_stable_frames,   0, 1000000);
-    AEC_CK_RANGE_I(filter_misadjustment_hangover_frames, 0, 1000000);
-    /* Hard bound: DA_NUM_FILTERS is the static array extent; 0 filters is invalid. */
-    AEC_CK_RANGE_I(delay_num_filters,                    1, DA_NUM_FILTERS);
-
-    AEC_CK_BOOL(live_observer_enabled);
-    AEC_CK_BOOL(min_gain_split_floor_enabled);
-    AEC_CK_RANGE_F(live_observer_shift_ms,       0.0f, 1.0e9f);
-    AEC_CK_RANGE_F(live_observer_max_hz,         0.0f, 1.0e9f);
-    AEC_CK_RANGE_F(live_observer_corrob_ms,      0.0f, 1.0e9f);
-    if (!(cfg->live_observer_mu > 0.0f) || cfg->live_observer_mu > 2.0f) return 0;
-    if (!isfinite(cfg->live_observer_corrob_margin_db)) return 0;
-
-    /* Delay mode x field compatibility: MATCHED and EXTERNAL_ALIGNED need
-     * fixed_delay_samples == -1; delay_num_filters must stay at its default
-     * outside MATCHED. */
+    /* Delay mode x field compatibility: MATCHED and EXTERNAL_ALIGNED need fixed_delay_samples == -1; delay_num_filters must stay
+     * at its default outside MATCHED. */
     switch (cfg->delay_mode) {
         case AEC_DELAY_MATCHED:
             if (cfg->fixed_delay_samples != -1) return 0;
@@ -309,19 +194,15 @@ static int aec_config_valid_resolved(const AecConfig* cfg) {
             if (cfg->fixed_delay_samples < 0) return 0;
             /* Bound on the reference-ring size (fixed_delay_samples + hop): 120 s. */
             if ((long)cfg->fixed_delay_samples > 120L * (long)cfg->sample_rate) return 0;
-            if (cfg->delay_num_filters != DA_NUM_FILTERS) return 0;
+            if (cfg->delay_num_filters != AEC_DELAY_NUM_FILTERS_MAX) return 0;
             break;
         case AEC_DELAY_EXTERNAL_ALIGNED:
             if (cfg->fixed_delay_samples != -1) return 0;
-            if (cfg->delay_num_filters != DA_NUM_FILTERS) return 0;
+            if (cfg->delay_num_filters != AEC_DELAY_NUM_FILTERS_MAX) return 0;
             break;
         default:
             return 0;
     }
-
-#undef AEC_CK_BOOL
-#undef AEC_CK_RANGE_F
-#undef AEC_CK_RANGE_I
 
     /* The quarantine fields are inert on a single-channel instance, which must not request them. */
     if (cfg->delay_backward_quarantine_enabled != 0 && cfg->delay_backward_quarantine_enabled != 1) return 0;
@@ -331,8 +212,22 @@ static int aec_config_valid_resolved(const AecConfig* cfg) {
 #ifdef AEC_NO_ARRAY
     return cfg->n_mics == 1 && cfg->capture_proxy_channel == 0 && cfg->delay_backward_quarantine_enabled == 0;
 #else
-    return aec_array_impl_config_ok(cfg);
+    return aec_array_impl_config_ok(r);
 #endif
+}
+
+int aec_resolve_tuned(const AecConfig* in, const AecTuning* tun, AecResolved* out) {
+    AecResolved r;
+    if (!in || !out) return 0;
+    r.cfg = *in;
+    if (tun) r.tun = *tun; else aec_tuning_defaults(&r.tun, in);
+    if (!aec_resolved_valid(&r)) return 0;
+    *out = r;
+    return 1;
+}
+
+int aec_resolve(const AecConfig* in, AecResolved* out) {
+    return aec_resolve_tuned(in, NULL, out);
 }
 
 /* ───────────────────────── helpers ─────────────────────────────────────── */
@@ -344,11 +239,6 @@ static float mean_sq(const float* x, int n, float* scratch) {
     return s / (float)n;
 }
 
-
-static void filter_q_high(PBFDKF* f) {
-    int K = f->base.n_freqs;
-    for (int k = 0; k < K; ++k) f->Q[k] = f->Q_high[k];
-}
 
 /* Counters saturate at LONG_MAX (32-bit long on some targets). */
 static inline void aec_counter_bump(long* c) {
@@ -401,8 +291,7 @@ static void aec_reset_filter_latches(Aec* a) {
     a->coarse_reset_hangover = 0;
     a->leakage_div_sustained_counter = 0;
 
-    filter_q_high(&a->main_filter);
-    int half = a->cfg.warmup_frames / 2;
+    int half = a->tun.warmup_frames / 2;
     if (a->warmup_frames_remaining < half) a->warmup_frames_remaining = half;
     a->warmup_far_active = 0;
 
@@ -442,7 +331,6 @@ static void aec_apply_delay_shift_hard_reset(Aec* a, int target_delay) {
     a->current_delay = target_delay;
     aec_reset_filter_derived_state(a);
     epc_force_delay(&a->epc);
-    filter_q_high(&a->main_filter);
     if (a->has_shadow) aec_rearm_excitation(&a->shadow_filter);
     if (a->has_observer) aec_rearm_excitation(&a->observer_filter);
     filter_convergence_mark_diverged(&a->convergence);
@@ -452,7 +340,7 @@ static void aec_apply_delay_shift_hard_reset(Aec* a, int target_delay) {
 
 /* Bad-relock revert to target_delay (the pre-shift delay) with the tap / H_error
  * snapshot taken at the shift, without the hard-reset chain: the post chain
- * (OLA, CNG, AecState, suppressor), EPC, convergence and Kalman Q state are kept,
+ * (OLA, CNG, AecState, suppressor), EPC and convergence state are kept,
  * so aec_post_reset_serial() does not move. A retard (target < bad) clears the
  * far history, an advance keeps it (the pbfdaf_warm_shift_ir sign rule). The
  * windowed-ERLE accumulators, the main / shadow error EMAs and any pending delay
@@ -514,7 +402,7 @@ static void aec_reset_filter_for_realign(Aec* a) {
 /* Per-bin mu scale into a->per_bin_mu_scale when active, else a scalar; sets
  * *out_is_array. */
 static float get_simple_mu_scale(Aec* a, int* out_is_array) {
-    float mu_min = a->cfg.shadow_mu_min;
+    float mu_min = a->tun.shadow_mu_min;
     *out_is_array = 0;
     if (a->warmup_frames_remaining > 0) {
         if (a->warmup_far_active) a->warmup_frames_remaining--;
@@ -731,7 +619,7 @@ static void aec_post_chain_reset(Aec* a) {
     }
 }
 
-static void aec_derive_dims(const AecConfig* cfg,
+static void aec_derive_dims(const AecResolved* rs,
                             int* o_hop, int* o_blk, int* o_fft, int* o_K,
                             int* o_nparts, int* o_buf_samp);
 /* Carve options. lane = 1 builds a lane of the array flow (EXTERNAL_ALIGNED, residual below FULL): the pool omits what that
@@ -742,60 +630,47 @@ typedef struct AecCarveOpt {
     FftHandle* shared_fft;
 } AecCarveOpt;
 
-static int aec_carve(Aec* a, uint8_t* ptr, const AecConfig* cfg,
+static int aec_carve(Aec* a, uint8_t* ptr, const AecResolved* rs,
                       int hop, int blk, int fft, int K, int np,
-                      int buf_samp, int is_static, const AecCarveOpt* opt);
-static size_t aec_mem_size_impl(const AecConfig* cfg, int lane);
+                      int buf_samp, const AecCarveOpt* opt);
+static size_t aec_mem_size_impl(const AecResolved* rs, int lane);
 /* A STATE lane stops after the AecState update (linear_context_only): nothing reads its residual-echo estimator or its
  * comfort-noise arrays, so the carve omits them. */
 static inline int aec_state_lane(const AecConfig* cfg, int lane) {
     return lane && cfg->residual == AEC_RESIDUAL_STATE;
 }
 
-int aec_create(Aec* a, const AecConfig* cfg_in) {
-    AecConfig cfg_resolved;
-    if (!a || !aec_resolve_valid_config(cfg_in, &cfg_resolved)) return -1;
-    const AecConfig* cfg = &cfg_resolved;
-    if (AEC_CFG_IS_ARRAY(cfg)) return aec_array_impl_create(a, cfg);
+static size_t aec_mem_size_resolved(const AecResolved* rs);
+static Aec* aec_init_resolved(void* mem, size_t mem_size, const AecResolved* rs);
 
-    int hop, blk, fft, K, np, buf_samp;
-    aec_derive_dims(cfg, &hop, &blk, &fft, &K, &np, &buf_samp);
-
-    /* One arena (aec_get_mem_size() minus the Aec struct), carved like
-     * aec_init(). */
-    size_t total = aec_get_mem_size(cfg);
-    if (total == 0) return -1;
-    size_t arena_sz = total - ALIGN16(sizeof(Aec));
-
+static Aec* aec_create_resolved(const AecResolved* rs) {
+    void* block = NULL;
+    Aec*  a;
+    size_t size = aec_mem_size_resolved(rs);
+    if (size == 0) return NULL;
     /* 16-byte base required by the carved FFT and static sub-objects. */
-    void* arena_mem = NULL;
-    if (posix_memalign(&arena_mem, 16u, arena_sz) != 0) return -1;
-    uint8_t* arena = (uint8_t*)arena_mem;
+    if (posix_memalign(&block, 16u, size) != 0 || !block) return NULL;
+    a = aec_init_resolved(block, size, rs);
+    if (!a) { free(block); return NULL; }
+    a->is_static = 0;
+    a->heap_arena = block;
+    return a;
+}
 
-    memset(a, 0, sizeof(*a));
-    if (aec_carve(a, arena, cfg, hop, blk, fft, K, np, buf_samp,
-                  /*is_static=*/0, &(const AecCarveOpt){0, NULL}) != 0) {
-        /* aec_carve() failed: no unwinding; every handle lives in the arena freed below. */
-        free(arena);
-        memset(a, 0, sizeof(*a));
-        return -1;
-    }
-    a->heap_arena = arena;
-    a->ready = 1;
-    return 0;
+Aec* aec_create(const AecConfig* cfg) {
+    AecResolved rs;
+    return aec_resolve(cfg, &rs) ? aec_create_resolved(&rs) : NULL;
 }
 
 /* ── reference alignment ring sizing ─────────────────────────────────────── */
 
-/* Hop-boundary headroom (samples) of the MATCHED search ring; also bounds
- * which delay estimates are eligible. */
-#define AEC_REF_RING_MATCHED_HEADROOM 4096
-
 /* Reference ring capacity in samples (shared by aec_get_mem_size() and
- * aec_carve()): MATCHED max(delay_buffer_ms, max_delay_ms + headroom); FIXED
- * fixed_delay_samples + hop_size (tight); EXTERNAL_ALIGNED 0. Returns 0 for
- * EXTERNAL_ALIGNED or an int overflow. */
-static int aec_ref_ring_samples(const AecConfig* cfg, int hop) {
+ * aec_carve()): MATCHED the estimator's largest reportable delay + hop_size (a
+ * delay is eligible only up to capacity - hop_size); FIXED fixed_delay_samples
+ * + hop_size; EXTERNAL_ALIGNED 0. Returns 0 for EXTERNAL_ALIGNED or an int
+ * overflow. */
+static int aec_ref_ring_samples(const AecResolved* rs, int hop) {
+    const AecConfig* cfg = &rs->cfg;
     if (cfg->delay_mode == AEC_DELAY_EXTERNAL_ALIGNED) return 0;
     if (hop <= 0) return 0;
     if (cfg->delay_mode == AEC_DELAY_FIXED) {
@@ -804,11 +679,8 @@ static int aec_ref_ring_samples(const AecConfig* cfg, int hop) {
         return (int)need;
     }
     {
-        int max_d = (int)(cfg->max_delay_ms * cfg->sample_rate / 1000.0f);
-        int buf   = (int)(cfg->delay_buffer_ms * cfg->sample_rate / 1000.0f);
-        if (buf < max_d + AEC_REF_RING_MATCHED_HEADROOM)
-            buf = max_d + AEC_REF_RING_MATCHED_HEADROOM;
-        return buf;
+        int reach = delay_aec_max_delay_samples(cfg->sample_rate, cfg->delay_num_filters);
+        return reach > 0 ? reach + hop : 0;
     }
 }
 
@@ -816,9 +688,11 @@ static int aec_ref_ring_samples(const AecConfig* cfg, int hop) {
 
 /* Frame dimensions: geometry from the shared resolver, partitions / ring
  * length from cfg; zero-filled on an unresolvable grid. */
-static void aec_derive_dims(const AecConfig* cfg,
+static void aec_derive_dims(const AecResolved* rs,
                             int* o_hop, int* o_blk, int* o_fft, int* o_K,
                             int* o_nparts, int* o_buf_samp) {
+    const AecConfig* cfg = &rs->cfg;
+    const AecTuning* tn = &rs->tun;
     AecSignalGrid g;
     if (aec_resolve_signal_grid(cfg->sample_rate, cfg->fft_size, &g) != AEC_OK) {
         *o_hop = 0; *o_blk = 0; *o_fft = 0; *o_K = 0;
@@ -829,18 +703,20 @@ static void aec_derive_dims(const AecConfig* cfg,
     int blk = g.frame_size;
     int hop = g.hop_size;
     *o_hop = hop; *o_blk = blk; *o_fft = fft; *o_K = g.n_freqs;
-    int n = cfg->n_partitions;
-    if (n <= 0) { n = (cfg->filter_length + hop - 1) / hop; if (n < 1) n = 1; }
+    int n = tn->n_partitions;
+    if (n <= 0) { n = (tn->filter_length + hop - 1) / hop; if (n < 1) n = 1; }
     *o_nparts = n;
-    *o_buf_samp = aec_ref_ring_samples(cfg, hop);
+    *o_buf_samp = aec_ref_ring_samples(rs, hop);
+}
+
+static size_t aec_mem_size_resolved(const AecResolved* rs) {
+    if (AEC_CFG_IS_ARRAY(&rs->cfg)) return aec_array_impl_get_mem_size(rs);
+    return aec_mem_size_impl(rs, 0);
 }
 
 size_t aec_get_mem_size(const AecConfig* cfg_in) {
-    AecConfig cfg_resolved;
-    if (!aec_resolve_valid_config(cfg_in, &cfg_resolved)) return 0;
-    const AecConfig* cfg = &cfg_resolved;
-    if (AEC_CFG_IS_ARRAY(cfg)) return aec_array_impl_get_mem_size(cfg);
-    return aec_mem_size_impl(cfg, 0);
+    AecResolved rs;
+    return aec_resolve(cfg_in, &rs) ? aec_mem_size_resolved(&rs) : 0;
 }
 
 #ifndef AEC_NO_ARRAY
@@ -850,19 +726,19 @@ static int aec_lane_contract_ok(const AecConfig* cfg) {
            (cfg->residual == AEC_RESIDUAL_STATE || cfg->residual == AEC_RESIDUAL_ESTIMATE);
 }
 
-size_t aec_lane_get_mem_size(const AecConfig* lane_cfg) {
-    AecConfig cfg;
-    if (!aec_resolve_valid_config(lane_cfg, &cfg)) return 0;
-    if (!aec_lane_contract_ok(&cfg)) return 0;
-    return aec_mem_size_impl(&cfg, 1);
+size_t aec_lane_get_mem_size(const AecResolved* lane) {
+    if (!lane || !aec_resolved_valid(lane) || !aec_lane_contract_ok(&lane->cfg)) return 0;
+    return aec_mem_size_impl(lane, 1);
 }
 #endif
 
 /* Pool bytes of a validated, resolved single-channel cfg; lane selects the lean lane carve. Field order must match
  * aec_carve(). */
-static size_t aec_mem_size_impl(const AecConfig* cfg, int lane) {
+static size_t aec_mem_size_impl(const AecResolved* rs, int lane) {
+    const AecConfig* cfg = &rs->cfg;
+    const AecTuning* tn = &rs->tun;
     int hop, blk, fft, K, np, buf;
-    aec_derive_dims(cfg, &hop, &blk, &fft, &K, &np, &buf);
+    aec_derive_dims(rs, &hop, &blk, &fft, &K, &np, &buf);
 
     const int ncc  = AECB_ST_NUM_CAPTURE_CHANNELS;
     const int state_lane = aec_state_lane(cfg, lane);
@@ -895,12 +771,12 @@ static size_t aec_mem_size_impl(const AecConfig* cfg, int lane) {
         if (kf_sz == 0) return 0;
         t = ck_add_size(t, kf_sz);
     }
-    if (cfg->enable_shadow) {
+    if (tn->enable_shadow) {
         size_t af_sz = pbfdaf_get_mem_size_follower(blk, np, hop);
         if (af_sz == 0) return 0;
         t = ck_add_size(t, af_sz);
     }
-    if (cfg->live_observer_enabled) {
+    if (tn->live_observer_enabled) {
         size_t obs_sz = pbfdaf_get_mem_size(blk, np, hop, 1);
         if (obs_sz == 0) return 0;
         t = ck_add_size(t, obs_sz);
@@ -913,13 +789,14 @@ static size_t aec_mem_size_impl(const AecConfig* cfg, int lane) {
      * enable_shadow) and the main filter's H_error snapshot; only the MATCHED estimator takes them, so a lane has none. */
     if (!lane) {
         t = ck_field_size(t, ck_mul_size((size_t)np, Kz), sizeof(Complex));
-        if (cfg->enable_shadow)
+        if (tn->enable_shadow)
             t = ck_field_size(t, ck_mul_size((size_t)np, Kz), sizeof(Complex));
         t = ck_field_size(t, Kz, sizeof(float));            /* pre-shift main H_error snapshot */
     }
     t = ck_field_size(t, (size_t)((hop + 7) / 8), sizeof(float));
     t = ck_field_size_reps(t, Kz, sizeof(float), state_lane ? 3 : 6);   /* avg_rev sye_re sye_im; y2s n2 n2i with the comfort noise */
     t = ck_field_size_reps(t, Kz, sizeof(float), 2);   /* syy see */
+    if (!lane) t = ck_field_size(t, (size_t)blk, sizeof(float));  /* swin: the synthesis window, built by aec_init */
     if (!lane) t = ck_field_size(t, (size_t)blk, sizeof(float));  /* ola: only aec_post_apply_output() (FULL) uses it */
     t = ck_field_size_reps(t, Kz, sizeof(float), state_lane ? 7 : 8);   /* np_ fp_ ep_ erp_ cpe x2r nf; cn */
     t = ck_field_size(t, Kz, sizeof(unsigned char));   /* cgm */
@@ -949,6 +826,7 @@ static size_t aec_mem_size_impl(const AecConfig* cfg, int lane) {
         t = ck_field_size_reps(t, Kz, sizeof(float), 3);   /* ld_st lr_st scr_st */
     }
     if (!lane) {   /* the gain arrays: only suppression_gain_get_gain() (FULL) reads them */
+        t = ck_add_size(t, aec_sg_tables_bytes(K));        /* the four decoded ENR/SU tables */
         t = ck_field_size_reps(t, Kz, sizeof(float), 3);   /* last_gain/ne/echo */
         t = ck_field_size(t, ck_mul_size((size_t)sg_n, Kz), sizeof(float)); /* ma */
         t = ck_field_size_reps(t, Kz, sizeof(float), 7);   /* ne wr ming maxg graw gout gsum */
@@ -962,7 +840,6 @@ static size_t aec_mem_size_impl(const AecConfig* cfg, int lane) {
         t = ck_field_size(t, ck_mul_size((size_t)rows, Kz), sizeof(float)); /* stat_hist */
     }
     t = ck_field_size_reps(t, (size_t)hop, sizeof(float), 2); /* prev_output_time e_form */
-    t = ck_field_size(t, (size_t)blk, sizeof(float));  /* block_win */
     t = ck_field_size(t, Kz, sizeof(Complex));         /* lfs sel_esw */
     t = ck_field_size_reps(t, (size_t)hop, sizeof(float), 3); /* scr_sq scr_sref scr_scoa */
     t = ck_field_size(t, (size_t)fft, sizeof(float));  /* scr_tin */
@@ -977,28 +854,21 @@ static size_t aec_mem_size_impl(const AecConfig* cfg, int lane) {
     t = ck_field_size(t, ck_mul_size((size_t)np, (size_t)hop), sizeof(float)); /* filter_taps_full */
     t = ck_field_size(t, (size_t)hop, sizeof(float));  /* scr_sq */
     t = ck_field_size_reps(t, Kz, sizeof(float), 6);   /* scr_e2_echo .. scr_e2ref_arr */
-    if (cfg->enable_highpass) t = ck_field_size(t, 1, hpf_get_mem_size()); /* mic-path HPF */
+    if (tn->enable_highpass) t = ck_field_size(t, 1, hpf_get_mem_size()); /* mic-path HPF */
 
     if (MEM_SIZE_INVALID(t)) return 0;
     return t;
 }
 
 /* Static-pool memory breakdown; total_bytes is aec_get_mem_size(). */
-int aec_get_mem_breakdown(const AecConfig* cfg_in, AecMemBreakdown* out) {
-    if (!out) return AEC_ERR_ARG;
-    memset(out, 0, sizeof(*out));
-    if (!cfg_in) return AEC_ERR_ARG;
-
-    size_t total = aec_get_mem_size(cfg_in);
+static int aec_mem_breakdown_resolved(const AecResolved* rs, AecMemBreakdown* out) {
+    const AecConfig* cfg = &rs->cfg;
+    size_t total = aec_mem_size_resolved(rs);
     if (total == 0) return AEC_ERR_ARG;
-
-    AecConfig cfg_resolved;
-    if (!aec_resolve_valid_config(cfg_in, &cfg_resolved)) return AEC_ERR_ARG;
-    const AecConfig* cfg = &cfg_resolved;
-    if (AEC_CFG_IS_ARRAY(cfg)) return aec_array_impl_get_mem_breakdown(cfg, out);
+    if (AEC_CFG_IS_ARRAY(cfg)) return aec_array_impl_get_mem_breakdown(rs, out);
 
     int hop, blk, fft, K, np, buf;
-    aec_derive_dims(cfg, &hop, &blk, &fft, &K, &np, &buf);
+    aec_derive_dims(rs, &hop, &blk, &fft, &K, &np, &buf);
 
     size_t est = 0;
     if (cfg->delay_mode == AEC_DELAY_MATCHED) {
@@ -1013,10 +883,16 @@ int aec_get_mem_breakdown(const AecConfig* cfg_in, AecMemBreakdown* out) {
     return AEC_OK;
 }
 
-/* Shared carve for aec_init() (Aec at mem[0]) and aec_create() (caller-owned
- * Aec plus one arena): same buffers, same order. `a` must be zeroed;
- * is_static tells aec_destroy() the caller owns the memory. Returns 0, or -1
- * if a stage refused (no unwinding: every handle lives in the carved memory). */
+int aec_get_mem_breakdown(const AecConfig* cfg_in, AecMemBreakdown* out) {
+    AecResolved rs;
+    if (!out) return AEC_ERR_ARG;
+    memset(out, 0, sizeof(*out));
+    if (!cfg_in || !aec_resolve(cfg_in, &rs)) return AEC_ERR_ARG;
+    return aec_mem_breakdown_resolved(&rs, out);
+}
+
+/* Carve of an instance whose Aec sits at the start of its pool (aec_init() and aec_create()). `a` must be zeroed. Returns 0,
+ * or -1 if a stage refused (no unwinding: every handle lives in the carved memory). */
 
 /* Wall-clock-preserving counter thresholds shared by aec_carve() and
  * aec_reset(). */
@@ -1027,17 +903,59 @@ static void aec_recompute_wallclock_thresholds(Aec* a, int hop, int sample_rate)
     a->stat_dt_hangover_hops = aec_ms_to_hops(800.0f, hop, sample_rate);
 }
 
-/* Suppression-gain config and tuning for a validated, resolved cfg; shared by
- * Aec and standalone RES instances. Tuning tables are static per-rate.
- * Returns 0, or -1 without a signal grid or rate row. */
-int aec_build_sg_config(const AecConfig* cfg, SuppressionGainConfig* out_cfg,
+/* Synthesis window of length n (a power of two that divides AECB_SYNTH_HALF_N), rebuilt bit for bit from the half table. */
+void aec_synth_window_build(float* w, int n) {
+    const int stride = AECB_SYNTH_HALF_N / n;
+    int i;
+    assert(n >= 2 && AECB_SYNTH_HALF_N % n == 0);
+    for (i = 0; i < n; ++i) w[i] = AECB_SYNTH_WINDOW_HALF[(i <= n / 2 ? i : n - i) * stride];
+}
+
+size_t aec_sg_tables_bytes(int n_bins) {
+    return ck_mul_size(4, ck_align16_size((size_t)n_bins * sizeof(float)));
+}
+
+/* Expands the row's run-length ENR/SU tables into `mem`: four tables, each padded to 16 bytes and zero in the padding. */
+static void aec_sg_tables_expand(const AecBalancedRateDims* rd, void* mem, SuppressionGainTuning* tun) {
+    const int n = rd->sg_table_len;
+    const size_t stride = ALIGN16((size_t)n * sizeof(float)) / sizeof(float);
+    float* const dst = (float*)mem;
+    int t, r = 0, k;
+    assert(rd->sg_runs >= 1 && rd->sg_run_end[rd->sg_runs - 1] >= n);
+    for (k = 0; k < n; ++k) {
+        while (k >= rd->sg_run_end[r]) ++r;
+        for (t = 0; t < 4; ++t) dst[(size_t)t * stride + (size_t)k] = rd->sg_run_val[(size_t)t * (size_t)rd->sg_runs + (size_t)r];
+    }
+    for (t = 0; t < 4; ++t)
+        for (k = n; (size_t)k < stride; ++k) dst[(size_t)t * stride + (size_t)k] = 0.0f;
+    tun->nearend_enr_tr = dst;                tun->nearend_enr_su = dst + stride;
+    tun->normal_enr_tr  = dst + 2 * stride;   tun->normal_enr_su  = dst + 3 * stride;
+}
+
+int aec_sg_tables_decode(const AecResolved* rs, void* mem, SuppressionGainTuning* tun) {
+    const AecBalancedRateDims* rd;
+    if (!rs || !mem || !tun) return -1;
+    rd = aecb_rate_cfg(rs->cfg.sample_rate, rs->cfg.fft_size);
+    if (!rd) return -1;
+    aec_sg_tables_expand(rd, mem, tun);
+    return 0;
+}
+
+/* Suppression-gain config and tuning for a resolved configuration; shared by
+ * Aec and standalone RES instances. The ENR/SU tables of the tuning stay NULL (aec_sg_tables_decode() fills them) and the
+ * EMR tables point at static data. Returns 0, or -1 without a signal grid or rate row. */
+int aec_build_sg_config(const AecResolved* rs, SuppressionGainConfig* out_cfg,
                         SuppressionGainTuning* out_tun) {
+    const AecConfig* cfg;
+    const AecTuning* tn;
     AecSignalGrid grid;
     const AecBalancedRateDims* rd;
     SuppressionGainConfig scfg;
     SuppressionGainTuning stun;
     int hop, K;
-    if (!cfg || !out_cfg || !out_tun) return -1;
+    if (!rs || !out_cfg || !out_tun) return -1;
+    cfg = &rs->cfg;
+    tn = &rs->tun;
     if (aec_resolve_signal_grid(cfg->sample_rate, cfg->fft_size, &grid) != AEC_OK) return -1;
     rd = aecb_rate_cfg(cfg->sample_rate, cfg->fft_size);
     if (!rd) return -1;
@@ -1045,8 +963,6 @@ int aec_build_sg_config(const AecConfig* cfg, SuppressionGainConfig* out_cfg,
     K = grid.n_freqs;
     memset(&scfg, 0, sizeof(scfg));
     scfg.n_bins = K; scfg.sr = cfg->sample_rate; scfg.hop_size = hop;
-    scfg.last_lf_band = rd->sg_last_lf_band;
-    scfg.first_hf_band = rd->sg_first_hf_band;
     scfg.last_lf_smoothing_band = rd->sg_last_lf_smoothing_band;
     scfg.last_permanent_lf_smoothing_band = AECB_SG_LAST_PERMANENT;
     scfg.lf_smoothing_during_initial_phase = AECB_SG_LF_SMOOTHING_INITIAL;
@@ -1067,13 +983,13 @@ int aec_build_sg_config(const AecConfig* cfg, SuppressionGainConfig* out_cfg,
     scfg.max_dec_lf_nearend = rd->sg_max_dec_lf;
     scfg.floor_first_increase = 0.00001f;
     scfg.low_render_threshold = rd->sg_low_render_threshold;
-    /* From AecConfig, so NO_FLOOR reaches the suppressor at construction. */
-    scfg.split_floor_enabled = cfg->min_gain_split_floor_enabled;
+    /* From the level, so NO_FLOOR reaches the suppressor at construction. */
+    scfg.split_floor_enabled = tn->min_gain_split_floor_enabled;
     scfg.split_floor_far_active =
-        powf(10.0f, cfg->min_gain_floor_far_active_db / 10.0f);
+        powf(10.0f, tn->min_gain_floor_far_active_db / 10.0f);
     scfg.split_floor_far_silent = AECB_SG_SPLIT_FLOOR_FAR_SILENT;
     scfg.split_floor_dt =
-        powf(10.0f, cfg->min_gain_floor_dt_db / 10.0f);
+        powf(10.0f, tn->min_gain_floor_dt_db / 10.0f);
     scfg.split_floor_latch_power = AECB_SG_SPLIT_FLOOR_LATCH_POWER;
     scfg.soft_blend_enabled = AECB_SG_SOFT_BLEND_ENABLED;
     scfg.soft_blend_per_bin = AECB_SG_SOFT_BLEND_PER_BIN;
@@ -1088,9 +1004,8 @@ int aec_build_sg_config(const AecConfig* cfg, SuppressionGainConfig* out_cfg,
     scfg.dne_trigger_threshold_hops = rd->sg_trigger_threshold_hops;
     scfg.dne_hold_duration_hops = rd->sg_hold_duration_hops;
     scfg.stat_aware_ne_proxy_enabled = 0; scfg.stat_aware_ne_proxy_threshold = 0.10f;
-    stun.nearend_enr_tr = rd->sg_nearend_enr_tr; stun.nearend_enr_su = rd->sg_nearend_enr_su;
+    /* The ENR/SU tables are decoded into the pool (aec_sg_tables_decode()); only the EMR tables are static. */
     stun.nearend_emr_tr = rd->sg_nearend_emr_tr;
-    stun.normal_enr_tr  = rd->sg_normal_enr_tr;  stun.normal_enr_su  = rd->sg_normal_enr_su;
     stun.normal_emr_tr  = rd->sg_normal_emr_tr;
     stun.table_len      = rd->sg_table_len;
     *out_cfg = scfg;
@@ -1098,31 +1013,25 @@ int aec_build_sg_config(const AecConfig* cfg, SuppressionGainConfig* out_cfg,
     return 0;
 }
 
-/* Validates the caller's config and returns a copy, once, so size query and carve agree; in is not mutated. Failure follows
- * each caller's convention (aec_create nonzero, aec_get_mem_size 0, aec_init NULL). */
-int aec_resolve_valid_config(const AecConfig* in, AecConfig* out) {
-    if (!in || !out) return 0;
-    if (!aec_config_valid_resolved(in)) return 0;
-    *out = *in;
-    return 1;
-}
-
-static void aec_init_config_state(Aec* a, const AecConfig* cfg, int hop, int blk,
+static void aec_init_config_state(Aec* a, const AecResolved* rs, int hop, int blk,
                                   int fft, int K, int np) {
+    const AecConfig* cfg = &rs->cfg;
+    const AecTuning* tn = &rs->tun;
     a->cfg = *cfg;
+    a->tun = *tn;
     a->hop_size = hop; a->block_size = blk; a->fft_size = fft;
     a->n_freqs = K; a->n_partitions = np;
 
     /* Retimes wall-clock-authored constants to the resolved grid (only
-     * a->cfg, the instance copy). */
-    a->cfg.shadow_err_alpha = aec_legacy10ms_alpha(cfg->shadow_err_alpha, hop, cfg->sample_rate);
-    a->cfg.warmup_frames = aec_legacy10ms_hops((float)cfg->warmup_frames * 10.0f, hop, cfg->sample_rate);
-    a->cfg.epc_hangover = aec_legacy10ms_hops((float)cfg->epc_hangover * 10.0f, hop, cfg->sample_rate);
-    a->cfg.ne_recent_hold = aec_legacy10ms_hops((float)cfg->ne_recent_hold * 10.0f, hop, cfg->sample_rate);
-    a->cfg.filter_misadjustment_stable_frames = aec_legacy10ms_hops(
-        (float)cfg->filter_misadjustment_stable_frames * 10.0f, hop, cfg->sample_rate);
-    a->cfg.filter_misadjustment_hangover_frames = aec_legacy10ms_hops(
-        (float)cfg->filter_misadjustment_hangover_frames * 10.0f, hop, cfg->sample_rate);
+     * a->tun, the instance copy). */
+    a->tun.shadow_err_alpha = aec_legacy10ms_alpha(tn->shadow_err_alpha, hop, cfg->sample_rate);
+    a->tun.warmup_frames = aec_legacy10ms_hops((float)tn->warmup_frames * 10.0f, hop, cfg->sample_rate);
+    a->tun.epc_hangover = aec_legacy10ms_hops((float)tn->epc_hangover * 10.0f, hop, cfg->sample_rate);
+    a->tun.ne_recent_hold = aec_legacy10ms_hops((float)tn->ne_recent_hold * 10.0f, hop, cfg->sample_rate);
+    a->tun.filter_misadjustment_stable_frames = aec_legacy10ms_hops(
+        (float)tn->filter_misadjustment_stable_frames * 10.0f, hop, cfg->sample_rate);
+    a->tun.filter_misadjustment_hangover_frames = aec_legacy10ms_hops(
+        (float)tn->filter_misadjustment_hangover_frames * 10.0f, hop, cfg->sample_rate);
 
     {
         int _sn = (int)(0.5f * (float)cfg->sample_rate / (float)(hop > 0 ? hop : 1));
@@ -1134,17 +1043,18 @@ static void aec_init_config_state(Aec* a, const AecConfig* cfg, int hop, int blk
         a->erle_slope_head = 0;
     }
 
-    if (cfg->enable_saturation) {
-        saturation_init(&a->sat_ref, cfg->saturation_threshold,
+    if (tn->enable_saturation) {
+        saturation_init(&a->sat_ref, tn->saturation_threshold,
                         hop, cfg->sample_rate);
-        saturation_init(&a->sat_mic, cfg->saturation_threshold,
+        saturation_init(&a->sat_mic, tn->saturation_threshold,
                         hop, cfg->sample_rate);
         a->has_sat = 1;
     }
 }
 
-static uint8_t* aec_carve_delay_ring(Aec* a, uint8_t* ptr, const AecConfig* cfg,
+static uint8_t* aec_carve_delay_ring(Aec* a, uint8_t* ptr, const AecResolved* rs,
                                  int hop, int K, int buf_samp) {
+    const AecConfig* cfg = &rs->cfg;
     /* Delay ring: MATCHED estimator + ring; FIXED
      * ring only; EXTERNAL_ALIGNED neither. buf_samp is the capacity
      * aec_get_mem_size() budgeted. */
@@ -1177,8 +1087,10 @@ static uint8_t* aec_carve_delay_ring(Aec* a, uint8_t* ptr, const AecConfig* cfg,
     return ptr;
 }
 
-static uint8_t* aec_carve_filters(Aec* a, uint8_t* ptr, const AecConfig* cfg,
+static uint8_t* aec_carve_filters(Aec* a, uint8_t* ptr, const AecResolved* rs,
                               int hop, int blk, int fft, int K, int np, const AecCarveOpt* opt) {
+    const AecConfig* cfg = &rs->cfg;
+    const AecTuning* tn = &rs->tun;
     /* Shared FFT handle: one per instance, borrowed by the main filter, shadow filter and aec_post; a lane borrows the
      * array's instead. A failure here needs no unwind. */
     if (opt->lane) {
@@ -1192,24 +1104,19 @@ static uint8_t* aec_carve_filters(Aec* a, uint8_t* ptr, const AecConfig* cfg,
     }
 
     size_t kf_sz = pbfdkf_get_mem_size(blk, np, hop);
-    if (pbfdkf_init_static(&a->main_filter, ptr, kf_sz, blk, np, cfg->mu, cfg->delta, hop, cfg->sample_rate, a->post_fft) != 0) {
+    if (pbfdkf_init_static(&a->main_filter, ptr, kf_sz, blk, np, tn->mu, tn->delta, hop, cfg->sample_rate, a->post_fft) != 0) {
         fft_destroy(a->post_fft); a->post_fft = NULL;
         return NULL;
-    }
-    for (int k = 0; k < K; ++k) {
-        a->main_filter.Q_high[k] = cfg->kalman_q_high;
-        a->main_filter.Q_low[k]  = cfg->kalman_q_low;
-        a->main_filter.Q[k]      = cfg->kalman_q_high;
     }
     a->main_filter.base.poor_excitation_counter = aec_blocks_to_hops(1000, hop, cfg->sample_rate);
     a->main_filter.base.constraint_round_robin = 1;
     ptr += kf_sz;
 
-    if (cfg->enable_shadow) {
+    if (tn->enable_shadow) {
         /* The shadow follows the main filter: same far input, same clears and partition steps, so it shares the main
          * filter's far history and skips the spectra its lightweight frontend never forms. */
         size_t af_sz = pbfdaf_get_mem_size_follower(blk, np, hop);
-        if (pbfdaf_init_static_follower(&a->shadow_filter, ptr, af_sz, blk, np, cfg->shadow_mu_nlms, cfg->delta, hop,
+        if (pbfdaf_init_static_follower(&a->shadow_filter, ptr, af_sz, blk, np, tn->shadow_mu_nlms, tn->delta, hop,
                                         cfg->sample_rate, a->post_fft, &a->main_filter.base) != 0) {
             pbfdkf_free(&a->main_filter);
             fft_destroy(a->post_fft); a->post_fft = NULL;
@@ -1226,10 +1133,10 @@ static uint8_t* aec_carve_filters(Aec* a, uint8_t* ptr, const AecConfig* cfg,
     /* Live observer: PBFDAF like the shadow with mu = live_observer_mu and
      * the same excitation seeding; it does not mirror the soft-realign IR
      * shift, the RSA mask or the tap snapshot. */
-    if (cfg->live_observer_enabled) {
+    if (tn->live_observer_enabled) {
         size_t obs_sz = pbfdaf_get_mem_size(blk, np, hop, 1);
         if (pbfdaf_init_static(&a->observer_filter, ptr, obs_sz, blk, np,
-                               cfg->live_observer_mu, cfg->delta, hop, 1,
+                               tn->live_observer_mu, tn->delta, hop, 1,
                                cfg->sample_rate, a->post_fft) != 0) {
             if (a->has_shadow) pbfdaf_free(&a->shadow_filter);
             pbfdkf_free(&a->main_filter);
@@ -1244,7 +1151,7 @@ static uint8_t* aec_carve_filters(Aec* a, uint8_t* ptr, const AecConfig* cfg,
         ptr += obs_sz;
         a->observer_far_hop = (float*)ptr; ptr += ALIGN16((size_t)hop * sizeof(float));
         a->observer_far_hop_valid = 0;
-        a->observer_shift_hops = aec_ms_to_hops(cfg->live_observer_shift_ms, hop, cfg->sample_rate);
+        a->observer_shift_hops = aec_ms_to_hops(tn->live_observer_shift_ms, hop, cfg->sample_rate);
     }
 
     if (opt->lane) {
@@ -1255,7 +1162,7 @@ static uint8_t* aec_carve_filters(Aec* a, uint8_t* ptr, const AecConfig* cfg,
     } else {
         size_t w_snap_sz = ALIGN16(ck_mul_size((size_t)np, (size_t)K) * sizeof(Complex));
         a->delay_shift_judgment_pre_W = (Complex*)ptr; ptr += w_snap_sz;
-        if (cfg->enable_shadow) {
+        if (tn->enable_shadow) {
             a->delay_shift_judgment_pre_shadow_W = (Complex*)ptr; ptr += w_snap_sz;
         } else {
             a->delay_shift_judgment_pre_shadow_W = NULL;
@@ -1272,26 +1179,30 @@ static uint8_t* aec_carve_filters(Aec* a, uint8_t* ptr, const AecConfig* cfg,
     return ptr;
 }
 
-static uint8_t* aec_carve_detectors(Aec* a, uint8_t* ptr, const AecConfig* cfg,
+static uint8_t* aec_carve_detectors(Aec* a, uint8_t* ptr, const AecResolved* rs,
                                     int hop, int K, int np) {
+    const AecConfig* cfg = &rs->cfg;
+    const AecTuning* tn = &rs->tun;
     a->ra_pairwise_scratch = (float*)ptr;
     ptr += ALIGN16((size_t)((hop + 7) / 8) * sizeof(float));
     render_activity_init(&a->render_activity, a->ra_pairwise_scratch, (hop + 7) / 8,
                          hop, cfg->sample_rate);
     filter_convergence_init(&a->convergence, hop, cfg->sample_rate);
     doubletalk_init(&a->dt_analyzer, 1.5, 3.0, hop, cfg->sample_rate);
-    epc_init(&a->epc, a->cfg.epc_hangover, cfg->epc_total_rise, cfg->epc_delta_threshold,
+    epc_init(&a->epc, a->tun.epc_hangover, tn->epc_total_rise, tn->epc_delta_threshold,
              hop, cfg->sample_rate);
     shadow_copy_init_for_grid(&a->regime, SC_GATE_ENERGY, 0.65, 3,
-                              a->cfg.epc_hangover, hop, cfg->sample_rate);
+                              a->tun.epc_hangover, hop, cfg->sample_rate);
     rsa_init(&a->rsa, a->rsa_counters, K, np);
 
     return ptr;
 }
 
-static uint8_t* aec_carve_post_backing(Aec* a, uint8_t* ptr, const AecConfig* cfg,
+static uint8_t* aec_carve_post_backing(Aec* a, uint8_t* ptr, const AecResolved* rs,
                                        const AecBalancedRateDims* rd,
                                        int hop, int blk, int fft, int K, int lane) {
+    const AecConfig* cfg = &rs->cfg;
+    const AecTuning* tn = &rs->tun;
     const int state_lane = aec_state_lane(cfg, lane);
     {
         AecPostConfig pcfg;
@@ -1303,7 +1214,7 @@ static uint8_t* aec_carve_post_backing(Aec* a, uint8_t* ptr, const AecConfig* cf
         pcfg.erle_render_x2_psd_scale    = AECB_ERLE_RENDER_X2_PSD_SCALE;
         pcfg.output_capture_when_linear_unusable = AECB_OUTPUT_CAPTURE_WHEN_LINEAR_UNUSABLE;
         pcfg.enable_cng                  = cfg->enable_cng;
-        pcfg.cng_n2_windowed_psd         = cfg->cng_n2_windowed_psd;
+        pcfg.cng_n2_windowed_psd         = tn->cng_n2_windowed_psd;
         pcfg.cng_n2_update_onset_hops    = rd->cng_n2_update_onset_hops;
         pcfg.cng_n2_initial_duration_hops = rd->cng_n2_initial_duration_hops;
         pcfg.cng_y2_alpha                = rd->cng_y2_alpha;
@@ -1318,17 +1229,17 @@ static uint8_t* aec_carve_post_backing(Aec* a, uint8_t* ptr, const AecConfig* cf
         /* Live observer scalars: max_bin = ceil(max_hz / bin_hz);
          * err_ema_alpha and corrob_margin stay double (double-precision
          * per-hop recursion). */
-        pcfg.observer_enabled = cfg->live_observer_enabled;
-        if (cfg->live_observer_enabled) {
+        pcfg.observer_enabled = tn->live_observer_enabled;
+        if (tn->live_observer_enabled) {
             float bin_hz = (float)cfg->sample_rate / (float)fft;
-            pcfg.observer_max_bin = (int)ceilf((float)cfg->live_observer_max_hz / bin_hz);
+            pcfg.observer_max_bin = (int)ceilf((float)tn->live_observer_max_hz / bin_hz);
             double hop_ms = 1000.0 * (double)hop / (double)cfg->sample_rate;
-            double corrob_ms = (double)cfg->live_observer_corrob_ms;
+            double corrob_ms = (double)tn->live_observer_corrob_ms;
             if (corrob_ms < 1e-6) corrob_ms = 1e-6;
             pcfg.observer_err_ema_alpha =
                 aec_ema_alpha_from_tau_ms(corrob_ms, hop_ms);
             pcfg.observer_corrob_margin =
-                aec_db_to_linear((double)cfg->live_observer_corrob_margin_db);
+                aec_db_to_linear((double)tn->live_observer_corrob_margin_db);
         }
 
 #define P_FSLICE(n) ((float*)(ptr));    ptr += ALIGN16(K * sizeof(float));    (void)(n)
@@ -1340,8 +1251,13 @@ static uint8_t* aec_carve_post_backing(Aec* a, uint8_t* ptr, const AecConfig* cf
         float        *sye_re   = P_FSLICE(0); float *sye_im = P_FSLICE(0);
         float        *syy      = P_FSLICE(0); float *see    = P_FSLICE(0);
         /* ola, eout and eout_full serve aec_post_apply_output() only (FULL); a lane never synthesizes. */
+        float        *swin     = NULL;   /* the synthesis window, rebuilt from the half table; a lane never synthesizes */
         float        *ola      = NULL;
-        if (!lane) { ola = (float*)ptr; ptr += ALIGN16((size_t)blk * sizeof(float)); }
+        if (!lane) {
+            swin = (float*)ptr; ptr += ALIGN16((size_t)blk * sizeof(float));
+            aec_synth_window_build(swin, blk);
+            ola = (float*)ptr; ptr += ALIGN16((size_t)blk * sizeof(float));
+        }
         float        *np_      = P_FSLICE(0); float *fp_    = P_FSLICE(0);
         float        *ep_      = P_FSLICE(0); float *erp_   = P_FSLICE(0);
         float        *cpe      = P_FSLICE(0); float *x2r    = P_FSLICE(0);
@@ -1357,7 +1273,7 @@ static uint8_t* aec_carve_post_backing(Aec* a, uint8_t* ptr, const AecConfig* cf
         }
         memset(syy, 0, K * sizeof(float)); memset(see, 0, K * sizeof(float));
         aec_post_init(&a->post, &pcfg, a->post_fft,
-                      rd->synth_window, avg_rev,
+                      swin, avg_rev,
                       y2s, n2, n2i, sye_re, sye_im, syy, see, ola,
                       np_, fp_, ep_, erp_, cpe, x2r, cgm, cn, nf_,
                       eout, eout_full);
@@ -1366,8 +1282,9 @@ static uint8_t* aec_carve_post_backing(Aec* a, uint8_t* ptr, const AecConfig* cf
     return ptr;
 }
 
-static uint8_t* aec_carve_state(Aec* a, uint8_t* ptr, const AecConfig* cfg,
+static uint8_t* aec_carve_state(Aec* a, uint8_t* ptr, const AecResolved* rs,
                                 int hop, int K, int np) {
+    const AecConfig* cfg = &rs->cfg;
     {
         AecStateStorage* s = &a->a3_state_st;
         s->erle_max           = P_FSLICE(0); s->erle            = P_FSLICE(0);
@@ -1389,8 +1306,9 @@ static uint8_t* aec_carve_state(Aec* a, uint8_t* ptr, const AecConfig* cfg,
     return ptr;
 }
 
-static uint8_t* aec_carve_residual(Aec* a, uint8_t* ptr, const AecConfig* cfg,
+static uint8_t* aec_carve_residual(Aec* a, uint8_t* ptr, const AecResolved* rs,
                                    const AecBalancedRateDims* rd, int hop, int K, int lane) {
+    const AecConfig* cfg = &rs->cfg;
     {
         int rh = (AECB_REE_USE_AEC_ECHO_GEN_WINDOW ? 1 : 0) + 2;
         float *x2_nf = NULL, *rm_st = NULL, *rt_st = NULL, *rh_st = NULL, *drd_st = NULL, *rrd_st = NULL;
@@ -1414,28 +1332,32 @@ static uint8_t* aec_carve_residual(Aec* a, uint8_t* ptr, const AecConfig* cfg,
 
 static uint8_t* aec_carve_suppression(Aec* a, uint8_t* ptr, const AecBalancedRateDims* rd,
                                       const SuppressionGainConfig* scfg,
-                                      const SuppressionGainTuning* stun, int K, int lane) {
+                                      const SuppressionGainTuning* stun_in, int K, int lane) {
     {
         SuppressionGain* sg = &a->a3_sg;
+        SuppressionGainTuning stun = *stun_in;
         /* A lane never computes a gain (residual below FULL): only the DominantNearend state of sg runs, so the arrays stay
          * NULL (suppression_gain_init() accepts that). */
         float *last_gain = NULL, *last_ne = NULL, *last_echo = NULL, *ma = NULL, *ne_s = NULL, *wr_s = NULL;
         float *ming = NULL, *maxg = NULL, *graw = NULL, *gout = NULL, *gsum = NULL;
         if (!lane) {
+            aec_sg_tables_expand(rd, ptr, &stun);
+            ptr += aec_sg_tables_bytes(K);
             last_gain = P_FSLICE(0); last_ne = P_FSLICE(0); last_echo = P_FSLICE(0);
             ma   = (float*)ptr; ptr += ALIGN16((size_t)rd->sg_nearend_smoother_n * K * sizeof(float));
             ne_s = P_FSLICE(0); wr_s = P_FSLICE(0);
             ming = P_FSLICE(0); maxg = P_FSLICE(0);
             graw = P_FSLICE(0); gout = P_FSLICE(0); gsum = P_FSLICE(0);
         }
-        suppression_gain_init(sg, scfg, stun, last_gain, last_ne, last_echo,
+        suppression_gain_init(sg, scfg, &stun, last_gain, last_ne, last_echo,
                               ma, ne_s, wr_s, ming, maxg, graw, gout, gsum);
     }
 
     return ptr;
 }
 
-static uint8_t* aec_carve_stationarity(Aec* a, uint8_t* ptr, const AecConfig* cfg, int hop, int K) {
+static uint8_t* aec_carve_stationarity(Aec* a, uint8_t* ptr, const AecResolved* rs, int hop, int K) {
+    const AecConfig* cfg = &rs->cfg;
     {
         float        *st_noise = P_FSLICE(0);
         int32_t      *st_hang  = (int32_t*)ptr; ptr += ALIGN16(K * sizeof(int32_t));
@@ -1458,7 +1380,6 @@ static uint8_t* aec_carve_linear_select(Aec* a, uint8_t* ptr, int hop, int blk, 
         a->a3_lfs.n_freqs    = K;
         a->a3_lfs.prev_output_time = (float*)ptr; ptr += ALIGN16((size_t)hop * sizeof(float));
         a->a3_lfs.e_form           = (float*)ptr; ptr += ALIGN16((size_t)hop * sizeof(float));
-        a->a3_lfs.block_win        = (float*)ptr; ptr += ALIGN16((size_t)blk * sizeof(float));
         a->a3_lfs.sel_esw          = (Complex*)ptr; ptr += ALIGN16(K * sizeof(Complex));
         a->a3_lfs.scr_sq   = (float*)ptr; ptr += ALIGN16((size_t)hop * sizeof(float));
         a->a3_lfs.scr_sref = (float*)ptr; ptr += ALIGN16((size_t)hop * sizeof(float));
@@ -1470,8 +1391,9 @@ static uint8_t* aec_carve_linear_select(Aec* a, uint8_t* ptr, int hop, int blk, 
     return ptr;
 }
 
-static uint8_t* aec_carve_post_scratch(Aec* a, uint8_t* ptr, const AecConfig* cfg,
+static uint8_t* aec_carve_post_scratch(Aec* a, uint8_t* ptr, const AecResolved* rs,
                                        int hop, int K, int np) {
+    const AecTuning* tn = &rs->tun;
     {
         AecPostRunScratch* sc = &a->a3_sc;
         sc->sel_esw  = P_CSLICE(0); sc->sel_echo = P_CSLICE(0);
@@ -1488,7 +1410,7 @@ static uint8_t* aec_carve_post_scratch(Aec* a, uint8_t* ptr, const AecConfig* cf
         sc->stat_mask   = P_BSLICE(0);
         sc->observer_out = NULL; sc->observer_diff_spec = NULL;
         sc->observer_diff_mag2 = NULL; sc->observer_cap_mag2 = NULL;
-        if (cfg->live_observer_enabled) {
+        if (tn->live_observer_enabled) {
             sc->observer_out = (float*)ptr; ptr += ALIGN16((size_t)hop * sizeof(float));
             sc->observer_diff_spec = P_CSLICE(0);
             sc->observer_diff_mag2 = P_FSLICE(0);
@@ -1502,8 +1424,10 @@ static uint8_t* aec_carve_post_scratch(Aec* a, uint8_t* ptr, const AecConfig* cf
     return ptr;
 }
 
-static uint8_t* aec_carve_hop_scratch(Aec* a, uint8_t* ptr, const AecConfig* cfg,
+static uint8_t* aec_carve_hop_scratch(Aec* a, uint8_t* ptr, const AecResolved* rs,
                                   int hop, int K, int np) {
+    const AecConfig* cfg = &rs->cfg;
+    const AecTuning* tn = &rs->tun;
     a->per_bin_mu_scale = (float*)ptr; ptr += ALIGN16(K * sizeof(float));
     a->near_hop   = (float*)ptr; ptr += ALIGN16((size_t)hop * sizeof(float));
     a->far_hop    = (float*)ptr; ptr += ALIGN16((size_t)hop * sizeof(float));
@@ -1520,9 +1444,9 @@ static uint8_t* aec_carve_hop_scratch(Aec* a, uint8_t* ptr, const AecConfig* cfg
     a->scr_mu_buf    = (float*)ptr; ptr += ALIGN16((size_t)K   * sizeof(float));
     a->scr_e2ref_arr = (float*)ptr; ptr += ALIGN16((size_t)K   * sizeof(float));
     /* Mic-path HPF; hpf_init() failure unwinds the earlier allocations. */
-    if (cfg->enable_highpass) {
+    if (tn->enable_highpass) {
         a->hp_mic = hpf_init(ptr, hpf_get_mem_size(),
-                             cfg->highpass_cutoff_hz, cfg->sample_rate);
+                             tn->highpass_cutoff_hz, cfg->sample_rate);
         if (!a->hp_mic) {
             fft_destroy(a->post_fft); a->post_fft = NULL;
             if (a->has_observer) pbfdaf_free(&a->observer_filter);
@@ -1536,80 +1460,82 @@ static uint8_t* aec_carve_hop_scratch(Aec* a, uint8_t* ptr, const AecConfig* cfg
     return ptr;
 }
 
-static void aec_init_scalar_state(Aec* a, const AecConfig* cfg, const AecBalancedRateDims* rd,
-                                  int hop, int is_static) {
+/* Per-hop scalar state a fresh instance and aec_reset() both start from. The Aec is zeroed before the carve, so the fields only
+ * a reset has to clear store zero again at init. */
+static void aec_reset_scalar_state(Aec* a, int hop, int sample_rate) {
     a->pending_gain_change = 0; a->pending_delay_change = -1;
     a->stationarity_active_hops = 0; a->non_zero_render_seen = 0;
-    a->render_peak_floor = 10.0f / 32768.0f;
     a->block_stationary_next = 0;
-    a->stationarity_converge_hops = rd->stationarity_converge_hops;
     a->saturation_level = 0.0f; a->erl_estimate = 0.1f;
     a->main_err_smooth = 0.0f; a->shadow_err_smooth = 0.0f;
     a->shadow_frame_count = 0; a->epc_render_forced_remaining = 0;
     a->erle_window_near = 1e-10f; a->erle_window_err = 1e-10f;
     a->erle_factor_prev = 0.0f; a->inst_erle_smooth = 1.0f;
+    a->erle_slope_len = 0; a->erle_slope_head = 0;
     a->wn_err_baseline = 1e-8f; a->stat_dt_hangover = 0;
-    a->warmup_frames_remaining = a->cfg.warmup_frames; a->warmup_far_active = 0;
+    a->warmup_frames_remaining = a->tun.warmup_frames; a->warmup_far_active = 0;
     a->simple_mu_ratio = 1.0f; a->simple_mu_holdoff = 0; a->has_per_bin_mu = 0;
-    a->near_power = 0.0f; a->raw_error_power = 0.0f; a->alpha_pow = powf(0.95f, 16000.0f / (float)a->cfg.sample_rate);
-    a->alpha_erl_tracking  = aec_growth_rehop(0.99f,  160, 16000,
-                                              a->hop_size, a->cfg.sample_rate);
-    a->alpha_erl_converged = aec_growth_rehop(0.999f, 160, 16000,
-                                              a->hop_size, a->cfg.sample_rate);
-    /* Duty-cycle ERLE watchdog leak: 0.001 dB per 10 ms hop (0.1 dB/s),
-     * converted once. */
-    a->duty.erle_leak_db = aec_duty_leak_db(hop, cfg->sample_rate);
-    a->frame_count = 0; a->poor_coarse_counter = 0; a->coarse_reset_hangover = 0;
+    a->near_power = 0.0f; a->raw_error_power = 0.0f;
+    a->frame_count = 0;
+    a->ne_above = 0; a->ne_recent_frames = 0;
+    a->poor_coarse_counter = 0; a->coarse_reset_hangover = 0;
     a->leakage_div_sustained_counter = 0;
-    aec_recompute_wallclock_thresholds(a, hop, cfg->sample_rate);
-    {
-        /* Matched-delay duty gate hold / period in hops, cached at carve
-         * time. */
-        float hop_s = (float)hop / (float)cfg->sample_rate;
-        a->duty.hold_hops = (int)lrintf(a->cfg.delay_est_init_s / hop_s);
-        a->duty.period_hops = (int)lrintf(a->cfg.delay_est_period_s / hop_s) / AEC_DUTY_PERIOD_DIVISOR;
-        if (a->duty.hold_hops < 1) a->duty.hold_hops = 1;
-        if (a->duty.period_hops < 1) a->duty.period_hops = 1;
-    }
+    aec_recompute_wallclock_thresholds(a, hop, sample_rate);
     a->misadj_e2_acum = 0.0f; a->misadj_y2_acum = 0.0f; a->misadj_n_acum = 0;
     a->misadj_inv = 0.0f; a->misadj_overhang = 0;
     a->misadj_stable_count = 0; a->misadj_hangover_remaining = 0;
     a->last_erle_windowed = 0.0f;
-    filter_q_high(&a->main_filter);
-    a->is_static = is_static;
+    /* The RES-context stash reads what a fresh instance publishes. */
+    a->last_far_power = 0.0f; a->last_shadow_dt = 0.0f;
+    a->last_dt_indicator = 0.0f; a->last_is_stationary_dt = 0;
 }
 
-static int aec_carve(Aec* a, uint8_t* ptr, const AecConfig* cfg,
+static void aec_init_scalar_state(Aec* a, const AecResolved* rs, const AecBalancedRateDims* rd, int hop) {
+    const AecConfig* cfg = &rs->cfg;
+    aec_reset_scalar_state(a, hop, cfg->sample_rate);
+    a->render_peak_floor = 10.0f / 32768.0f;
+    a->stationarity_converge_hops = rd->stationarity_converge_hops;
+    a->alpha_pow = powf(0.95f, 16000.0f / (float)a->cfg.sample_rate);
+    a->alpha_erl_tracking  = aec_growth_rehop(0.99f,  160, 16000,
+                                              a->hop_size, a->cfg.sample_rate);
+    a->alpha_erl_converged = aec_growth_rehop(0.999f, 160, 16000,
+                                              a->hop_size, a->cfg.sample_rate);
+    aec_duty_configure(&a->duty, a->tun.delay_est_init_s, a->tun.delay_est_period_s, hop, cfg->sample_rate);
+    a->is_static = 1;
+}
+
+static int aec_carve(Aec* a, uint8_t* ptr, const AecResolved* rs,
                       int hop, int blk, int fft, int K, int np,
-                      int buf_samp, int is_static, const AecCarveOpt* opt) {
-    /* Per-rate row (a hit is guaranteed by aec_resolve_valid_config). */
+                      int buf_samp, const AecCarveOpt* opt) {
+    const AecConfig* cfg = &rs->cfg;
+    /* Per-rate row (a hit is guaranteed by aec_resolve). */
     const AecBalancedRateDims* rd = aecb_rate_cfg(
         cfg->sample_rate, cfg->fft_size);
     if (!rd) return -1;
     SuppressionGainConfig scfg;
     SuppressionGainTuning stun;
-    if (aec_build_sg_config(cfg, &scfg, &stun) != 0) return -1;
+    if (aec_build_sg_config(rs, &scfg, &stun) != 0) return -1;
 
     uint8_t* const start = ptr;
-    aec_init_config_state(a, cfg, hop, blk, fft, K, np);
-    ptr = aec_carve_delay_ring(a, ptr, cfg, hop, K, buf_samp);
+    aec_init_config_state(a, rs, hop, blk, fft, K, np);
+    ptr = aec_carve_delay_ring(a, ptr, rs, hop, K, buf_samp);
     if (!ptr) return -1;
-    ptr = aec_carve_filters(a, ptr, cfg, hop, blk, fft, K, np, opt);
+    ptr = aec_carve_filters(a, ptr, rs, hop, blk, fft, K, np, opt);
     if (!ptr) return -1;
-    ptr = aec_carve_detectors(a, ptr, cfg, hop, K, np);
-    ptr = aec_carve_post_backing(a, ptr, cfg, rd, hop, blk, fft, K, opt->lane);
-    ptr = aec_carve_state(a, ptr, cfg, hop, K, np);
-    ptr = aec_carve_residual(a, ptr, cfg, rd, hop, K, opt->lane);
+    ptr = aec_carve_detectors(a, ptr, rs, hop, K, np);
+    ptr = aec_carve_post_backing(a, ptr, rs, rd, hop, blk, fft, K, opt->lane);
+    ptr = aec_carve_state(a, ptr, rs, hop, K, np);
+    ptr = aec_carve_residual(a, ptr, rs, rd, hop, K, opt->lane);
     ptr = aec_carve_suppression(a, ptr, rd, &scfg, &stun, K, opt->lane);
-    ptr = aec_carve_stationarity(a, ptr, cfg, hop, K);
+    ptr = aec_carve_stationarity(a, ptr, rs, hop, K);
     ptr = aec_carve_linear_select(a, ptr, hop, blk, fft, K);
-    ptr = aec_carve_post_scratch(a, ptr, cfg, hop, K, np);
-    ptr = aec_carve_hop_scratch(a, ptr, cfg, hop, K, np);
+    ptr = aec_carve_post_scratch(a, ptr, rs, hop, K, np);
+    ptr = aec_carve_hop_scratch(a, ptr, rs, hop, K, np);
     if (!ptr) return -1;
     /* The carve must end exactly where aec_mem_size_impl() said (a lane sits back to back with its neighbours; a single-channel
      * pool would otherwise be overrun, or over-sized, without a sign). */
-    if ((size_t)(ptr - start) + ALIGN16(sizeof(Aec)) != aec_mem_size_impl(cfg, opt->lane)) return -1;
-    aec_init_scalar_state(a, cfg, rd, hop, is_static);
+    if ((size_t)(ptr - start) + ALIGN16(sizeof(Aec)) != aec_mem_size_impl(rs, opt->lane)) return -1;
+    aec_init_scalar_state(a, rs, rd, hop);
     return 0;
 }
 
@@ -1618,8 +1544,8 @@ static int aec_carve(Aec* a, uint8_t* ptr, const AecConfig* cfg,
 static uint32_t aec_build_flags_hash(void) {
     static const char* const parts[] = {
         "ne10",
-        "|carve:aec(cfg-v1),single(aec,delay?,ring?,filters(shadow-follows-main),detectors,post,state,residual,suppression,stationarity(window-rows),lfs,scratch,hpf?)",
-        "|array(aec,ctl,mic,aligned,fuse?(complex5,float2),ring?,delay?,res?,fft,lane4(shared-fft,lean,state-lane-no-ree-cng))",
+        "|carve:aec(cfg-v2),single(aec,delay?,ring?,filters(shadow-follows-main),detectors,post(swin,ola),state,residual,suppression(tables),stationarity(window-rows),lfs,scratch,hpf?)",
+        "|array(aec,ctl,swin,mic,aligned,fuse?(complex5,float2),ring?,delay?,res?(tables),fft,lane4(shared-fft,lean,state-lane-no-ree-cng))",
         "|align16"
     };
     uint32_t hash = 2166136261u;
@@ -1634,12 +1560,9 @@ static uint32_t aec_build_flags_hash(void) {
     return ac_memreq_abi_hash(hash);
 }
 
-int aec_get_mem_requirements(const AecConfig* cfg, AecMemReq* out) {
-    size_t bytes;
-    if (!out) return -1;
+static int aec_mem_requirements_resolved(const AecResolved* rs, AecMemReq* out) {
+    size_t bytes = aec_mem_size_resolved(rs);
     memset(out, 0, sizeof(*out));
-    if (!cfg) return -1;
-    bytes = aec_get_mem_size(cfg);
     if (bytes == 0) return -1;
     out->descriptor_version = AEC_DESCRIPTOR_VERSION;
     out->layout_version = AEC_LAYOUT_VERSION;
@@ -1650,21 +1573,28 @@ int aec_get_mem_requirements(const AecConfig* cfg, AecMemReq* out) {
     return 0;
 }
 
+int aec_get_mem_requirements(const AecConfig* cfg, AecMemReq* out) {
+    AecResolved rs;
+    if (!out) return -1;
+    memset(out, 0, sizeof(*out));
+    if (!cfg || !aec_resolve(cfg, &rs)) return -1;
+    return aec_mem_requirements_resolved(&rs, out);
+}
+
 /* Single-channel construction in `mem`; opt->lane builds a lane (see AecCarveOpt). */
-static Aec* aec_init_single(void* mem, size_t mem_size, const AecConfig* cfg, const AecCarveOpt* opt) {
+static Aec* aec_init_single(void* mem, size_t mem_size, const AecResolved* rs, const AecCarveOpt* opt) {
     {
-        size_t need = aec_mem_size_impl(cfg, opt->lane);
+        size_t need = aec_mem_size_impl(rs, opt->lane);
         if (need == 0 || mem_size < need) return NULL;
     }
 
     int hop, blk, fft, K, np, buf_samp;
-    aec_derive_dims(cfg, &hop, &blk, &fft, &K, &np, &buf_samp);
+    aec_derive_dims(rs, &hop, &blk, &fft, &K, &np, &buf_samp);
 
     Aec* a = (Aec*)mem;
     memset(a, 0, sizeof(Aec));
     uint8_t* ptr = (uint8_t*)mem + ALIGN16(sizeof(Aec));
-    if (aec_carve(a, ptr, cfg, hop, blk, fft, K, np, buf_samp,
-                  /*is_static=*/1, opt) != 0) {
+    if (aec_carve(a, ptr, rs, hop, blk, fft, K, np, buf_samp, opt) != 0) {
         /* aec_carve() failed: no unwinding; every handle lives in the caller's memory. */
         return NULL;
     }
@@ -1673,33 +1603,28 @@ static Aec* aec_init_single(void* mem, size_t mem_size, const AecConfig* cfg, co
     return a;
 }
 
-static Aec* aec_init_pool(void* mem, size_t mem_size, const AecConfig* cfg_in) {
+static Aec* aec_init_resolved(void* mem, size_t mem_size, const AecResolved* rs) {
     static const AecCarveOpt plain = { 0, NULL };
-    AecConfig cfg_resolved;
-    if (!mem || !aec_resolve_valid_config(cfg_in, &cfg_resolved)) return NULL;
-    const AecConfig* cfg = &cfg_resolved;
-    if (!MEM_IS_ALIGNED16(mem)) return NULL;
-    if (AEC_CFG_IS_ARRAY(cfg)) return aec_array_impl_init(mem, mem_size, cfg);
-    return aec_init_single(mem, mem_size, cfg, &plain);
+    if (!mem || !MEM_IS_ALIGNED16(mem)) return NULL;
+    if (AEC_CFG_IS_ARRAY(&rs->cfg)) return aec_array_impl_init(mem, mem_size, rs);
+    return aec_init_single(mem, mem_size, rs, &plain);
 }
 
 #ifndef AEC_NO_ARRAY
-Aec* aec_lane_init(void* mem, size_t mem_size, const AecConfig* lane_cfg, FftHandle* shared_fft) {
+Aec* aec_lane_init(void* mem, size_t mem_size, const AecResolved* lane, FftHandle* shared_fft) {
     AecCarveOpt opt;
-    if (!mem || !lane_cfg || !shared_fft || !MEM_IS_ALIGNED16(mem)) return NULL;
-    AecConfig cfg;
-    if (!aec_resolve_valid_config(lane_cfg, &cfg)) return NULL;
-    if (!aec_lane_contract_ok(&cfg)) return NULL;
+    if (!mem || !lane || !shared_fft || !MEM_IS_ALIGNED16(mem)) return NULL;
+    if (!aec_resolved_valid(lane) || !aec_lane_contract_ok(&lane->cfg)) return NULL;
     opt.lane = 1;
     opt.shared_fft = shared_fft;
-    return aec_init_single(mem, mem_size, &cfg, &opt);
+    return aec_init_single(mem, mem_size, lane, &opt);
 }
 #endif
 
-Aec* aec_init_ex(void* mem, size_t mem_size, const AecConfig* cfg, const AecMemReq* expected) {
+static Aec* aec_init_ex_resolved(void* mem, size_t mem_size, const AecResolved* rs, const AecMemReq* expected) {
     if (expected) {
         AecMemReq current;
-        if (!cfg || aec_get_mem_requirements(cfg, &current) != 0) return NULL;
+        if (aec_mem_requirements_resolved(rs, &current) != 0) return NULL;
         if (expected->descriptor_version != current.descriptor_version ||
             expected->layout_version != current.layout_version ||
             expected->backend_id != current.backend_id ||
@@ -1709,7 +1634,13 @@ Aec* aec_init_ex(void* mem, size_t mem_size, const AecConfig* cfg, const AecMemR
             expected->bytes < current.bytes ||
             (uint64_t)mem_size < current.bytes) return NULL;
     }
-    return aec_init_pool(mem, mem_size, cfg);
+    return aec_init_resolved(mem, mem_size, rs);
+}
+
+Aec* aec_init_ex(void* mem, size_t mem_size, const AecConfig* cfg, const AecMemReq* expected) {
+    AecResolved rs;
+    if (!cfg || !aec_resolve(cfg, &rs)) return NULL;
+    return aec_init_ex_resolved(mem, mem_size, &rs, expected);
 }
 
 Aec* aec_init(void* mem, size_t mem_size, const AecConfig* cfg_in) {
@@ -1717,23 +1648,19 @@ Aec* aec_init(void* mem, size_t mem_size, const AecConfig* cfg_in) {
 }
 
 void aec_destroy(Aec* a) {
+    void* heap;
     if (aec_unusable(a)) return;
     if (AEC_IS_ARRAY(a)) { aec_array_impl_destroy(a); return; }
-    /* The FFT handle, high-pass filter and filters all live in the arena or
-     * pool, so these only drop references. NULLed so a repeated destroy is
-     * safe. */
+    /* The FFT handle, high-pass filter and filters all live in the instance's pool, so these only drop references. */
     if (a->post_fft) { fft_destroy(a->post_fft); a->post_fft = NULL; }
     if (a->hp_mic) { hpf_destroy(a->hp_mic); a->hp_mic = NULL; }
     pbfdkf_free(&a->main_filter);
     if (a->has_shadow) pbfdaf_free(&a->shadow_filter);
     if (a->has_observer) pbfdaf_free(&a->observer_filter);
 
-    if (!a->is_static) {
-        /* All other storage is in the single arena; one free() reclaims it. */
-        free(a->heap_arena);
-        memset(a, 0, sizeof(*a));
-    }
+    heap = a->is_static ? NULL : a->heap_arena;
     a->ready = 0;
+    if (heap) free(heap);       /* aec_create(): the block that holds *a; nothing touches *a after this */
 }
 
 int aec_hop_size(const Aec* a) {
@@ -1773,7 +1700,7 @@ int aec_set_level(Aec* a, AecLevel level) {
     if (aec_level_dt_floor_db(level, &dt_db) != 0) return -1;
     if (AEC_IS_ARRAY(a)) return aec_array_impl_set_level(a, level);
     /* Lookups are validated before any write; the suppressor applies first
-     * and refuses without writing, leaving a->cfg unchanged. */
+     * and refuses without writing, leaving the instance's level unchanged. */
     if (aec_level_split_floor_enabled(level, &en) != 0) return -1;
     if (suppression_gain_set_split_floor_far_active_db(&a->a3_sg, db,
                                                        AEC_LEVEL_RAMP_MS) != 0) {
@@ -1785,10 +1712,7 @@ int aec_set_level(Aec* a, AecLevel level) {
     if (suppression_gain_set_split_floor_enabled(&a->a3_sg, en) != 0) {
         return -1;
     }
-    a->cfg.min_gain_floor_far_active_db = db;
-    a->cfg.min_gain_floor_dt_db = dt_db;
-    a->cfg.min_gain_split_floor_enabled = en;
-    return 0;
+    return aec_apply_level(&a->cfg, &a->tun, level);
 }
 
 int aec_apply_external_realign(Aec* a, int delta_samples) {
@@ -1798,7 +1722,7 @@ int aec_apply_external_realign(Aec* a, int delta_samples) {
     /* Warm transfer needs aec_linear_is_cancelling() and a shift that fits
      * the tap span. */
     int warm_ok = 0;
-    if (a->cfg.delay_acquire_warm_transfer) {
+    if (a->tun.delay_acquire_warm_transfer) {
         int reach = pbfdaf_tap_span(&a->main_filter.base);
         int magnitude = delta_samples == INT_MIN ? INT_MAX
                       : (delta_samples > 0 ? delta_samples : -delta_samples);
@@ -1854,38 +1778,8 @@ void aec_reset(Aec* a) {
     shadow_copy_reset(&a->regime);
     rsa_reset(&a->rsa);
     stationarity_estimator_reset(&a->a3_stat);
-    a->stationarity_active_hops = 0;
-    a->non_zero_render_seen = 0;
-    a->block_stationary_next = 0;
     aec_post_chain_reset(a);
-    a->pending_gain_change = 0;
-    a->pending_delay_change = -1;
-    a->saturation_level = 0.0f;
-    a->erl_estimate = 0.1f;
-    a->main_err_smooth = 0.0f; a->shadow_err_smooth = 0.0f;
-    a->shadow_frame_count = 0;
-    a->epc_render_forced_remaining = 0;
-    a->erle_window_near = 1e-10f; a->erle_window_err = 1e-10f;
-    a->erle_factor_prev = 0.0f; a->inst_erle_smooth = 1.0f;
-    a->erle_slope_len = 0; a->erle_slope_head = 0;
-    a->wn_err_baseline = 1e-8f; a->stat_dt_hangover = 0;
-    a->warmup_frames_remaining = a->cfg.warmup_frames;
-    a->warmup_far_active = 0;
-    a->simple_mu_ratio = 1.0f; a->simple_mu_holdoff = 0; a->has_per_bin_mu = 0;
-    a->near_power = 0.0f; a->raw_error_power = 0.0f;
-    a->frame_count = 0;
-    a->ne_above = 0; a->ne_recent_frames = 0;
-    a->poor_coarse_counter = 0; a->coarse_reset_hangover = 0;
-    a->leakage_div_sustained_counter = 0;
-    aec_recompute_wallclock_thresholds(a, a->hop_size, a->cfg.sample_rate);
-    a->misadj_e2_acum = 0.0f; a->misadj_y2_acum = 0.0f; a->misadj_n_acum = 0;
-    a->misadj_inv = 0.0f; a->misadj_overhang = 0;
-    a->misadj_stable_count = 0; a->misadj_hangover_remaining = 0;
-    a->last_erle_windowed = 0.0f;
-    /* After a reset the RES-context stash must read what a fresh instance
-     * publishes. */
-    a->last_far_power = 0.0f; a->last_shadow_dt = 0.0f;
-    a->last_dt_indicator = 0.0f; a->last_is_stationary_dt = 0;
+    aec_reset_scalar_state(a, a->hop_size, a->cfg.sample_rate);
 }
 
 /* ───────────────────────── misadjustment estimator ─────────────────────── */
@@ -1924,18 +1818,18 @@ static void misadj_fire(Aec* a) {
     if (!stable) { a->misadj_stable_count = 0; return; }
     /* stable_count saturates at filter_misadjustment_stable_frames (avoids
      * overflow). */
-    if (a->misadj_stable_count < a->cfg.filter_misadjustment_stable_frames)
+    if (a->misadj_stable_count < a->tun.filter_misadjustment_stable_frames)
         a->misadj_stable_count++;
-    if (a->misadj_stable_count < a->cfg.filter_misadjustment_stable_frames) return;
+    if (a->misadj_stable_count < a->tun.filter_misadjustment_stable_frames) return;
     if (a->misadj_inv <= 10.0f) return;
     float base = a->misadj_inv > 1e-6f ? a->misadj_inv : 1e-6f;
     float scale_raw = 2.0f / sqrtf(base);
     float scale = scale_raw;
-    if (scale < a->cfg.filter_misadjustment_scale_min) scale = a->cfg.filter_misadjustment_scale_min;
-    if (scale > a->cfg.filter_misadjustment_scale_max) scale = a->cfg.filter_misadjustment_scale_max;
+    if (scale < a->tun.filter_misadjustment_scale_min) scale = a->tun.filter_misadjustment_scale_min;
+    if (scale > a->tun.filter_misadjustment_scale_max) scale = a->tun.filter_misadjustment_scale_max;
     pbfdkf_scale_filter(&a->main_filter, scale);
     a->misadj_inv = 0.0f; a->misadj_overhang = 0;
-    a->misadj_hangover_remaining = a->cfg.filter_misadjustment_hangover_frames;
+    a->misadj_hangover_remaining = a->tun.filter_misadjustment_hangover_frames;
 }
 
 /* Max of the last 15 inst-ERLE ring entries (0.0 when empty): the
@@ -1959,7 +1853,7 @@ int aec_linear_is_cancelling(const Aec* a) {
     if (aec_unusable(a)) return 0;
     if (AEC_IS_ARRAY(a)) return aec_array_impl_is_cancelling(a);
     return (a->last_erle_windowed > 2.5f)
-           || (aec_erle_ring_max_last15(a) > a->cfg.delay_acquire_inst_erle_db);
+           || (aec_erle_ring_max_last15(a) > a->tun.delay_acquire_inst_erle_db);
 }
 
 /* ───────────────────────── process ─────────────────────────────────────── */
@@ -1977,6 +1871,15 @@ void aec_get_last_timing(const Aec* a, AecStageTiming* out) {
  * a drop of more than AEC_DUTY_ERLE_COLLAPSE_DB resumes full-rate analysis, armed once the peak exceeds it. */
 float aec_duty_leak_db(int hop_size, int sample_rate) {
     return aec_legacy10ms_rate(0.001f, hop_size, sample_rate);
+}
+
+void aec_duty_configure(AecDutyGate* g, float hold_s, float period_s, int hop_size, int sample_rate) {
+    const float hop_s = (float)hop_size / (float)sample_rate;
+    const int hold = (int)lrintf(hold_s / hop_s);
+    const int period = (int)lrintf(period_s / hop_s) / AEC_DUTY_PERIOD_DIVISOR;
+    g->hold_hops = hold < 1 ? 1 : hold;
+    g->period_hops = period < 1 ? 1 : period;
+    g->erle_leak_db = aec_duty_leak_db(hop_size, sample_rate);
 }
 
 void aec_duty_reset(AecDutyGate* g) {
@@ -2063,7 +1966,7 @@ static void aec_judge_delay_shift(Aec* a) {
 
 static void aec_acquire_delay(Aec* a, int new_delay, int eligible) {
     /* Path A: first acquisition. */
-    int already_cancelling = a->cfg.delay_acquire_protect_converged
+    int already_cancelling = a->tun.delay_acquire_protect_converged
                              && (a->last_erle_windowed > 2.5f);
     if (eligible && a->current_delay < 0 && delay_aec_is_solid(&a->delay)
             && !already_cancelling) {
@@ -2073,10 +1976,10 @@ static void aec_acquire_delay(Aec* a, int new_delay, int eligible) {
          * the delay fits the tap reach, shift the learned IR instead of
          * zeroing it. */
         int warm_ok = 0;
-        if (a->cfg.delay_acquire_warm_transfer) {
+        if (a->tun.delay_acquire_warm_transfer) {
             float wpk = aec_erle_ring_max_last15(a);
             int reach = pbfdaf_tap_span(&a->main_filter.base);
-            warm_ok = (wpk > a->cfg.delay_acquire_inst_erle_db)
+            warm_ok = (wpk > a->tun.delay_acquire_inst_erle_db)
                       && (new_delay > 0) && (new_delay < reach);
         }
         /* A refused shift leaves the taps in place: fall through to the soft
@@ -2084,7 +1987,7 @@ static void aec_acquire_delay(Aec* a, int new_delay, int eligible) {
         if (warm_ok
             && pbfdaf_warm_shift_ir(&a->main_filter.base, new_delay) == 0) {
             if (a->has_shadow) pbfdaf_warm_shift_ir(&a->shadow_filter, new_delay);
-        } else if (a->cfg.dt_aware_recovery_soft && a->ne_recent_frames > 0) {
+        } else if (a->tun.dt_aware_recovery_soft && a->ne_recent_frames > 0) {
             /* Soft acquisition: apply the ring alignment and reset excitation
              * counters only; converged taps are kept. */
             pbfdkf_handle_echo_path_change(&a->main_filter, 1, 0);
@@ -2132,7 +2035,7 @@ static void aec_track_delay_shift(Aec* a, int new_delay, int eligible) {
             a->current_delay = new_delay;
             aec_bump_delay_generation(a);
             a->has_pending = 0; a->pending_delay = -1; a->pending_delay_ttl = 0;
-            if (a->cfg.dt_aware_recovery_soft && a->ne_recent_frames > 0) {
+            if (a->tun.dt_aware_recovery_soft && a->ne_recent_frames > 0) {
                 /* Soft realign: converged filter kept, IR shifted by the
                  * applied delta (pbfdaf_warm_shift_ir) instead of a wipe. */
                 int soft_delta = new_delay - old_current_delay;
@@ -2233,13 +2136,13 @@ static void aec_prepare_capture_hop(Aec* a, const float* mic_in, const float* re
      * false-arm it. */
     {
         float ne_ind = a->dt_analyzer.dt_from_energy;
-        if (ne_ind > a->cfg.ne_recent_threshold) {
-            if (a->ne_above < a->cfg.ne_recent_sustain)
+        if (ne_ind > a->tun.ne_recent_threshold) {
+            if (a->ne_above < a->tun.ne_recent_sustain)
                 a->ne_above += 1;
         } else
             a->ne_above = 0;
-        if (a->ne_above >= a->cfg.ne_recent_sustain)
-            a->ne_recent_frames = a->cfg.ne_recent_hold;
+        if (a->ne_above >= a->tun.ne_recent_sustain)
+            a->ne_recent_frames = a->tun.ne_recent_hold;
         else if (a->ne_recent_frames > 0)
             a->ne_recent_frames -= 1;
         else
@@ -2257,7 +2160,7 @@ static void aec_prepare_capture_hop(Aec* a, const float* mic_in, const float* re
         if (out) out->sat_ref = sat_ref;
         float sat_mic = saturation_detect(&a->sat_mic, a->near_hop, hop);
         a->saturation_level = (sat_ref > sat_mic * 0.5f) ? sat_ref : sat_mic * 0.5f;
-        if (a->cfg.saturation_softclip_ref && sat_ref > 0.1f) {
+        if (a->tun.saturation_softclip_ref && sat_ref > 0.1f) {
             if (ana) memcpy(a->far_hop, ana->donor->far_hop, (size_t)hop * sizeof(float));
             else saturation_soft_clip(a->far_hop, a->far_hop, hop, 0.8);
         }
@@ -2516,7 +2419,7 @@ static void aec_update_shadow_dt(Aec* a, float far_hop_mean_sq, int far_excited)
          * tail-fold sum that rounds differently from the pairwise sums. */
         float main_err   = sk_pairwise_sum_tailfold_f32(a->scr_e2ref_arr, (size_t)K);
         float shadow_err = sk_pairwise_sum_tailfold_f32(a->main_filter.e2_coarse_per_bin, (size_t)K);
-        float as = a->cfg.shadow_err_alpha, oas = 1.0f - as;
+        float as = a->tun.shadow_err_alpha, oas = 1.0f - as;
         a->main_err_smooth   = as * a->main_err_smooth   + oas * main_err;
         a->shadow_err_smooth = as * a->shadow_err_smooth + oas * shadow_err;
         doubletalk_update_shadow_dt(&a->dt_analyzer, aec_count_as_int(a->shadow_frame_count),
@@ -2525,13 +2428,12 @@ static void aec_update_shadow_dt(Aec* a, float far_hop_mean_sq, int far_excited)
         /* Shadow-copy warm-up is a 500 ms wall-clock guard, converted per grid. */
         int shadow_warmup_hops =
             aec_ms_to_hops(500.0f, hop, a->cfg.sample_rate);
-        ShadowCopyDecision dec = shadow_copy_update(
+        (void)shadow_copy_update(
             &a->regime, aec_count_as_int(a->shadow_frame_count), shadow_warmup_hops,
             far_hop_mean_sq,
             a->main_err_smooth, a->shadow_err_smooth,
             a->epc.active, a->saturation_level,
             a->dt_analyzer.dt_from_energy, 0.0, delay_reliable);
-        if (dec.boost_q) filter_q_high(&a->main_filter);
     }
 
 }
@@ -2541,9 +2443,8 @@ static void aec_update_shadow_dt(Aec* a, float far_hop_mean_sq, int far_excited)
 static void aec_epc_gain_change_recovery(Aec* a) {
     a->pending_gain_change = 1;
     pbfdkf_handle_echo_path_change(&a->main_filter, 1, 0);
-    filter_q_high(&a->main_filter);
     filter_convergence_mark_diverged(&a->convergence);
-    a->epc_render_forced_remaining = a->cfg.epc_hangover;
+    a->epc_render_forced_remaining = a->tun.epc_hangover;
     if (a->erl_estimate > 0.3f) a->erl_estimate = 0.3f;
 }
 
@@ -2551,7 +2452,7 @@ static void aec_update_echo_path(Aec* a, float far_pwr_global) {
     /* EPV trigger. */
     EpcEvent epv = epc_update_epv(&a->epc, far_pwr_global,
                                   a->convergence.converged, a->regime.main_paused);
-    if (epv.fired && a->cfg.dt_aware_recovery_soft && a->ne_recent_frames > 0) {
+    if (epv.fired && a->tun.dt_aware_recovery_soft && a->ne_recent_frames > 0) {
         /* Soft: EPV recovery is double-talk-blind; while near-end is recently
          * present the aggressive re-adapt, mark_diverged and ERLE reset are
          * skipped. */
@@ -2563,7 +2464,7 @@ static void aec_update_echo_path(Aec* a, float far_pwr_global) {
         EpcEvent rise = epc_update_shadow_rise(&a->epc, a->main_err_smooth,
                                                a->shadow_err_smooth,
                                                a->render_activity.is_stationary);
-        if (rise.fired && a->cfg.dt_aware_recovery_soft && a->ne_recent_frames > 0) {
+        if (rise.fired && a->tun.dt_aware_recovery_soft && a->ne_recent_frames > 0) {
         } else if (rise.fired) {
             aec_epc_gain_change_recovery(a);
         } else {
@@ -2628,11 +2529,9 @@ static void aec_run_post_chain(Aec* a, int stationarity_block_for_post, int rend
         in.far_spec  = a->main_filter.base.far_spec;
         in.echo_spec = a->main_filter.base.echo_spec;
         in.error_spec_windowed = a->main_filter.base.error_spec_windowed;
-        in.W0 = a->main_filter.base.W;
         in.W_all = a->main_filter.base.W;
         in.x2_cache = a->main_filter.base.x2_cache;
         in.sqrt_hann = a->main_filter.base.sqrt_hann;
-        in.kalman_P = NULL; in.kalman_P_len = 0;
         in.partition_idx = a->main_filter.base.partition_idx;
         in.n_partitions = N;
         in.filter_taps_full = a->filter_taps_full;
@@ -2642,7 +2541,6 @@ static void aec_run_post_chain(Aec* a, int stationarity_block_for_post, int rend
         in.last_shadow_output_time = a->has_shadow ? a->shadow_out : NULL;
         in.s_ref_max = a->main_filter.base.last_s_max_abs * 32768.0f;
         in.s_coa_max = a->has_shadow ? a->shadow_filter.last_s_max_abs * 32768.0f : 0.0f;
-        /* main_error_energy / shadow_error_energy stay zero (unread). */
         in.raw_output = a->raw_output;
         in.near_end = a->near_hop;
         in.far_end = a->far_hop;
@@ -2670,7 +2568,7 @@ static void aec_run_post_chain(Aec* a, int stationarity_block_for_post, int rend
         obj.stationarity = &a->a3_stat; obj.lfs = &a->a3_lfs; obj.fft = a->post_fft;
 
         /* DT-gated min-gain floor lift: aec_post_run owns the final decision. */
-        in.dt_floor_enabled = a->cfg.dt_aware_res_floor_enabled;
+        in.dt_floor_enabled = a->tun.dt_aware_res_floor_enabled;
         in.nearend_recent = a->ne_recent_frames > 0;
 
         /* Live observer: obj.observer_filter runs inside aec_post_run, which
@@ -2783,7 +2681,7 @@ static int aec_prepare_post_dt(Aec* a, float far_hop_mean_sq, float _ei,
 static void aec_update_post_mu(Aec* a, int is_stationary_dt) {
     const int hop = a->hop_size, K = a->n_freqs;
     if (a->convergence.converged) {
-        float mu_min = a->cfg.shadow_mu_min;
+        float mu_min = a->tun.shadow_mu_min;
         for (int k = 0; k < K; ++k) a->per_bin_mu_scale[k] = mu_min;
         a->simple_mu_ratio = 0.0f;
         if (is_stationary_dt) {
@@ -2803,7 +2701,7 @@ static void aec_update_linear_only_steering(Aec* a, float far_hop_mean_sq, int r
     if (a->cfg.residual == AEC_RESIDUAL_OFF) {
         if (a->convergence.converged) {
             int k;
-            float mu_min = a->cfg.shadow_mu_min;
+            float mu_min = a->tun.shadow_mu_min;
             for (k = 0; k < a->n_freqs; ++k) a->per_bin_mu_scale[k] = mu_min;
             a->has_per_bin_mu = 1;
             a->simple_mu_ratio = 0.0f;
@@ -2834,13 +2732,9 @@ static void aec_finish_hop(Aec* a, float far_hop_mean_sq) {
 
     {
         int far_active = (far_hop_mean_sq > 1e-4f);
-        int just_converged = filter_convergence_update_convergence(
+        (void)filter_convergence_update_convergence(
             &a->convergence, a->near_power, a->raw_error_power,
             far_active, a->warmup_frames_remaining <= 0);
-        if (just_converged) {
-            int Kk = a->main_filter.base.n_freqs;
-            for (int k = 0; k < Kk; ++k) a->main_filter.Q[k] = a->main_filter.Q_low[k];
-        }
     }
 
     aec_counter_bump(&a->frame_count);
@@ -3292,6 +3186,9 @@ void aec_debug_status(const Aec* a, AecDebugStatus* out) {
 
     out->duty_hops_total = a->duty_hops_total;
     out->duty_hops_run   = a->duty.hops_run;
+
+    out->n_partitions       = a->n_partitions;
+    out->delay_period_hops  = a->duty.period_hops;
 }
 
 /* Read-only AecLinearView; pointers alias per-hop buffers, valid
@@ -3345,3 +3242,50 @@ int aec_get_linear(const Aec* a, AecLinearView* out) {
         out->delay_state = AEC_LINEAR_DELAY_LOCKED;
     return AEC_OK;
 }
+
+/* ---- test-only hooks (test/aec_test_hooks.h; compiled only under -DAEC_TESTING): the entry points with a caller-built tuning -- */
+#ifdef AEC_TESTING
+void aec_testing_tuning_defaults(AecTuning* tun, const AecConfig* cfg) {
+    aec_tuning_defaults(tun, cfg);
+}
+
+int aec_testing_tuning_valid(const AecTuning* tun, const AecConfig* cfg) {
+    return aec_tuning_valid(tun, cfg);
+}
+
+size_t aec_testing_get_mem_size(const AecConfig* cfg, const AecTuning* tun) {
+    AecResolved rs;
+    return aec_resolve_tuned(cfg, tun, &rs) ? aec_mem_size_resolved(&rs) : 0;
+}
+
+int aec_testing_get_mem_breakdown(const AecConfig* cfg, const AecTuning* tun, AecMemBreakdown* out) {
+    AecResolved rs;
+    if (!out) return AEC_ERR_ARG;
+    memset(out, 0, sizeof(*out));
+    if (!cfg || !aec_resolve_tuned(cfg, tun, &rs)) return AEC_ERR_ARG;
+    return aec_mem_breakdown_resolved(&rs, out);
+}
+
+int aec_testing_get_mem_requirements(const AecConfig* cfg, const AecTuning* tun, AecMemReq* out) {
+    AecResolved rs;
+    if (!out) return -1;
+    memset(out, 0, sizeof(*out));
+    if (!cfg || !aec_resolve_tuned(cfg, tun, &rs)) return -1;
+    return aec_mem_requirements_resolved(&rs, out);
+}
+
+Aec* aec_testing_init(void* mem, size_t mem_size, const AecConfig* cfg, const AecTuning* tun) {
+    AecResolved rs;
+    return aec_resolve_tuned(cfg, tun, &rs) ? aec_init_resolved(mem, mem_size, &rs) : NULL;
+}
+
+Aec* aec_testing_init_ex(void* mem, size_t mem_size, const AecConfig* cfg, const AecTuning* tun, const AecMemReq* expected) {
+    AecResolved rs;
+    return aec_resolve_tuned(cfg, tun, &rs) ? aec_init_ex_resolved(mem, mem_size, &rs, expected) : NULL;
+}
+
+Aec* aec_testing_create(const AecConfig* cfg, const AecTuning* tun) {
+    AecResolved rs;
+    return aec_resolve_tuned(cfg, tun, &rs) ? aec_create_resolved(&rs) : NULL;
+}
+#endif

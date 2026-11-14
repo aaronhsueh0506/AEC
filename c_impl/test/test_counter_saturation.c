@@ -17,6 +17,7 @@
  * -fno-sanitize-recover=all and must exit 0 with no diagnostic.
  */
 #include "aec.h"
+#include "aec_white_box.h"
 #include "aec_scale.h"
 #include "delay_pool_test_util.h"
 #include "wav_io.h"
@@ -47,13 +48,13 @@ static long g_fails  = 0;
  * ════════════════════════════════════════════════════════════════════ */
 static void section_aec_level(void) {
     AecConfig cfg;
-    Aec a;
+    Aec *a = NULL;
     int hop, i;
     float *mic, *ref, *out;
 
     aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, 16000);
-    CHECK(aec_create(&a, &cfg) == 0, "aec_create succeeds");
-    hop = aec_hop_size(&a);
+    CHECK((a = aec_create(&cfg)) != NULL, "aec_create succeeds");
+    hop = aec_hop_size(a);
     mic = (float*)calloc((size_t)hop, sizeof(float));
     ref = (float*)calloc((size_t)hop, sizeof(float));
     out = (float*)calloc((size_t)hop, sizeof(float));
@@ -64,22 +65,22 @@ static void section_aec_level(void) {
      * counters under test. */
     for (i = 0; i < hop; i++) ref[i] = 0.05f * ((i % 7) - 3);
 
-    /* --- ref_ring_filled: cap = ref_ring_size (frozen at capacity in aec_process_core's ring-write
+    /* --- ref_ring_filled: cap = ref_ring_size (frozen at capacity in aec_align_reference's ring-write
      * step). The sole reader is `>= current_delay + hop` and current_delay is capped at rs - hop,
      * so rs is the largest value ever meaningful. An unbounded counter would be signed-overflow UB
      * after ~37 h of 16 kHz audio. The guard runs BEFORE the increment, so a value already at/above
      * the cap is frozen rather than incremented, which keeps the INT_MAX seed below UB-free (the
      * UBSan wrapper of this binary proves it). */
     {
-        int rs = a.ref_ring_size;
-        a.ref_ring_filled = rs - 1;
-        aec_process(&a, mic, ref, out);
-        CHECK(a.ref_ring_filled == rs, "ref_ring_filled: rs-1 -> rs (clamped)");
-        aec_process(&a, mic, ref, out);
-        CHECK(a.ref_ring_filled == rs, "ref_ring_filled: rs -> rs (frozen)");
-        a.ref_ring_filled = INT_MAX - 1;
-        for (i = 0; i < 500; i++) aec_process(&a, mic, ref, out);
-        CHECK(a.ref_ring_filled == INT_MAX - 1,
+        int rs = a->ref_ring_size;
+        a->ref_ring_filled = rs - 1;
+        aec_process(a, mic, ref, out);
+        CHECK(a->ref_ring_filled == rs, "ref_ring_filled: rs-1 -> rs (clamped)");
+        aec_process(a, mic, ref, out);
+        CHECK(a->ref_ring_filled == rs, "ref_ring_filled: rs -> rs (frozen)");
+        a->ref_ring_filled = INT_MAX - 1;
+        for (i = 0; i < 500; i++) aec_process(a, mic, ref, out);
+        CHECK(a->ref_ring_filled == INT_MAX - 1,
               "ref_ring_filled: INT_MAX-1 stays frozen over 500 real hops (no wrap, no UB)");
         {
             int d = 1600;
@@ -88,28 +89,28 @@ static void section_aec_level(void) {
             CHECK(at_cap == at_huge,
                   "ref_ring_filled: '>= delay+hop' decision identical at rs vs INT_MAX-1");
         }
-        a.ref_ring_filled = rs;  /* leave a sane value for later sections */
+        a->ref_ring_filled = rs;  /* leave a sane value for later sections */
     }
 
-    /* --- misadj_stable_count: cap = cfg.filter_misadjustment_stable_frames, sole reader `< cap`
+    /* --- misadj_stable_count: cap = tun.filter_misadjustment_stable_frames, sole reader `< cap`
      * (misadj_fire). The "stable" precondition (converged && !epc.active && !regime.main_paused) is
      * forced before every call, because aec_process()'s own EPC/regime logic is free to touch these
      * fields. */
     {
-        int cap = a.cfg.filter_misadjustment_stable_frames;
-        a.misadj_hangover_remaining = 0;
-        a.misadj_stable_count = cap - 1;
-        a.convergence.converged = 1; a.epc.active = 0; a.regime.main_paused = 0;
-        aec_process(&a, mic, ref, out);
-        CHECK(a.misadj_stable_count == cap, "misadj_stable_count: cap-1 -> cap");
-        a.convergence.converged = 1; a.epc.active = 0; a.regime.main_paused = 0;
-        aec_process(&a, mic, ref, out);
-        CHECK(a.misadj_stable_count == cap, "misadj_stable_count: cap -> cap (no-op)");
+        int cap = a->tun.filter_misadjustment_stable_frames;
+        a->misadj_hangover_remaining = 0;
+        a->misadj_stable_count = cap - 1;
+        a->convergence.converged = 1; a->epc.active = 0; a->regime.main_paused = 0;
+        aec_process(a, mic, ref, out);
+        CHECK(a->misadj_stable_count == cap, "misadj_stable_count: cap-1 -> cap");
+        a->convergence.converged = 1; a->epc.active = 0; a->regime.main_paused = 0;
+        aec_process(a, mic, ref, out);
+        CHECK(a->misadj_stable_count == cap, "misadj_stable_count: cap -> cap (no-op)");
         for (i = 0; i < 2000; i++) {
-            a.convergence.converged = 1; a.epc.active = 0; a.regime.main_paused = 0;
-            aec_process(&a, mic, ref, out);
+            a->convergence.converged = 1; a->epc.active = 0; a->regime.main_paused = 0;
+            aec_process(a, mic, ref, out);
         }
-        CHECK(a.misadj_stable_count == cap,
+        CHECK(a->misadj_stable_count == cap,
               "misadj_stable_count: still at cap after 2000 more calls (runaway-proof)");
         /* decision-invariance: the sole reader is "< cap". Two distinct
          * (non-tautological) locals standing in for "counter currently at
@@ -124,24 +125,24 @@ static void section_aec_level(void) {
         }
     }
 
-    /* --- ne_above: cap = cfg.ne_recent_sustain, sole reader `>= cap` (aec_process, held
+    /* --- ne_above: cap = tun.ne_recent_sustain, sole reader `>= cap` (aec_process, held
      * near-end-energy gate). dt_from_energy is forced above ne_recent_threshold before every call,
      * because aec_process's DT analyzer recomputes it later in the same hop from the near-silent
      * signal and decays it. */
     {
-        int cap = a.cfg.ne_recent_sustain;
-        a.ne_above = cap - 1;
-        a.dt_analyzer.dt_from_energy = a.cfg.ne_recent_threshold + 1.0f;
-        aec_process(&a, mic, ref, out);
-        CHECK(a.ne_above == cap, "ne_above: cap-1 -> cap");
-        a.dt_analyzer.dt_from_energy = a.cfg.ne_recent_threshold + 1.0f;
-        aec_process(&a, mic, ref, out);
-        CHECK(a.ne_above == cap, "ne_above: cap -> cap (no-op)");
+        int cap = a->tun.ne_recent_sustain;
+        a->ne_above = cap - 1;
+        a->dt_analyzer.dt_from_energy = a->tun.ne_recent_threshold + 1.0f;
+        aec_process(a, mic, ref, out);
+        CHECK(a->ne_above == cap, "ne_above: cap-1 -> cap");
+        a->dt_analyzer.dt_from_energy = a->tun.ne_recent_threshold + 1.0f;
+        aec_process(a, mic, ref, out);
+        CHECK(a->ne_above == cap, "ne_above: cap -> cap (no-op)");
         for (i = 0; i < 2000; i++) {
-            a.dt_analyzer.dt_from_energy = a.cfg.ne_recent_threshold + 1.0f;
-            aec_process(&a, mic, ref, out);
+            a->dt_analyzer.dt_from_energy = a->tun.ne_recent_threshold + 1.0f;
+            aec_process(a, mic, ref, out);
         }
-        CHECK(a.ne_above == cap, "ne_above: still at cap after 2000 more calls (runaway-proof)");
+        CHECK(a->ne_above == cap, "ne_above: still at cap after 2000 more calls (runaway-proof)");
         {
             int counter_at_cap = cap, counter_at_huge = cap + 1000000;
             int at_cap  = (counter_at_cap  >= cap);
@@ -155,18 +156,18 @@ static void section_aec_level(void) {
      * non_zero_render_seen latches permanently once set, so the branch runs on every subsequent hop
      * without re-poking. */
     {
-        int cap = a.stationarity_converge_hops;
+        int cap = a->stationarity_converge_hops;
         CHECK(cap > 0, "stationarity_converge_hops is a sane positive value");
-        a.non_zero_render_seen = 1;
-        a.stationarity_active_hops = cap - 1;
-        aec_process(&a, mic, ref, out);
-        CHECK(a.stationarity_active_hops == cap,
+        a->non_zero_render_seen = 1;
+        a->stationarity_active_hops = cap - 1;
+        aec_process(a, mic, ref, out);
+        CHECK(a->stationarity_active_hops == cap,
               "stationarity_active_hops: cap-1 -> cap (settles at EXACTLY converge_hops)");
-        aec_process(&a, mic, ref, out);
-        CHECK(a.stationarity_active_hops == cap,
+        aec_process(a, mic, ref, out);
+        CHECK(a->stationarity_active_hops == cap,
               "stationarity_active_hops: cap -> cap (no-op)");
-        for (i = 0; i < 2000; i++) aec_process(&a, mic, ref, out);
-        CHECK(a.stationarity_active_hops == cap,
+        for (i = 0; i < 2000; i++) aec_process(a, mic, ref, out);
+        CHECK(a->stationarity_active_hops == cap,
               "stationarity_active_hops: still at cap after 2000 more calls (runaway-proof)");
         {
             int counter_at_cap = cap, counter_at_huge = cap + 1000000;
@@ -187,17 +188,17 @@ static void section_aec_level(void) {
         /* active_render_blocks / filter_adaptation_threshold_hops are
          * live-computed per instance, not compile-time constants -- read
          * them off the already-constructed `a` instance. */
-        int active_render_blocks = a.a3_state.active_render_blocks;
+        int active_render_blocks = a->a3_state.active_render_blocks;
         int filter_adaptation_threshold_hops =
-            a.a3_state.delay_state.filter_adaptation_threshold_hops;
+            a->a3_state.delay_state.filter_adaptation_threshold_hops;
         int cap1 = active_render_blocks + 1;
         int cap2 = filter_adaptation_threshold_hops;
-        a.a3_state.blocks_with_active_render = cap1;
-        a.a3_state.strong_not_saturated_render_blocks = cap2;
-        for (i = 0; i < 500; i++) aec_process(&a, mic, ref, out);
-        CHECK(a.a3_state.blocks_with_active_render <= cap1,
+        a->a3_state.blocks_with_active_render = cap1;
+        a->a3_state.strong_not_saturated_render_blocks = cap2;
+        for (i = 0; i < 500; i++) aec_process(a, mic, ref, out);
+        CHECK(a->a3_state.blocks_with_active_render <= cap1,
               "aec_state.blocks_with_active_render: never exceeds cap over 500 real hops");
-        CHECK(a.a3_state.strong_not_saturated_render_blocks <= cap2,
+        CHECK(a->a3_state.strong_not_saturated_render_blocks <= cap2,
               "aec_state.strong_not_saturated_render_blocks: never exceeds cap over 500 real hops");
         {
             int at_cap1  = (cap1 > active_render_blocks);
@@ -211,24 +212,23 @@ static void section_aec_level(void) {
 
     /* --- pbfdkf.c (LONG_MAX-guarded): main_filter.base.call_counter. */
     {
-        a.main_filter.base.call_counter = LONG_MAX - 1;
-        aec_process(&a, mic, ref, out);
-        CHECK(a.main_filter.base.call_counter == LONG_MAX,
+        a->main_filter.base.call_counter = LONG_MAX - 1;
+        aec_process(a, mic, ref, out);
+        CHECK(a->main_filter.base.call_counter == LONG_MAX,
               "pbfdkf call_counter: LONG_MAX-1 -> LONG_MAX");
-        aec_process(&a, mic, ref, out);
-        CHECK(a.main_filter.base.call_counter == LONG_MAX,
+        aec_process(a, mic, ref, out);
+        CHECK(a->main_filter.base.call_counter == LONG_MAX,
               "pbfdkf call_counter: LONG_MAX -> LONG_MAX (no-op, no wrap)");
     }
 
-    aec_destroy(&a);
+    aec_destroy(a);
     free(mic); free(ref); free(out);
     printf("section_aec_level: done (%ld checks so far, %ld fails)\n", g_checks, g_fails);
 }
 
 /* ════════════════════════════════════════════════════════════════════
- * delay_aec.c: number_pre_echo_updates driven through the real production per-hop API with a
- * checked-in real audio fixture (not a synthetic reimplementation), plus an invariant check on
- * pending_count (a cyclic counter) in the same loop.
+ * delay_aec.c: pending_count (a cyclic counter) checked every hop through the real production
+ * per-hop API with a checked-in real audio fixture (not a synthetic reimplementation).
  * ════════════════════════════════════════════════════════════════════ */
 static void section_delay_aec(void) {
     const char *mic_path = "../wav/aec_record/aec_record_mic_10s.wav";
@@ -239,7 +239,6 @@ static void section_delay_aec(void) {
     void *delay_pool = NULL;
     int hop = 160;
     float mic[160], ref[160];
-    int reached_cap = 0;
     long hops_read = 0;
     long expected_min_hops;
 
@@ -295,15 +294,9 @@ static void section_delay_aec(void) {
     for (;;) {
         int gm = wav_read_float(mr, mic, hop);
         int gr = wav_read_float(rr, ref, hop);
-        int n_pre;
         if (gm < hop || gr < hop) break;
         hops_read++;
         delay_aec_accumulate_ex(&d, mic, ref, hop, 1);
-
-        n_pre = d.est.matched_filter.number_pre_echo_updates;
-        CHECK(n_pre >= 0 && n_pre <= DA_PRE_ECHO_UPDATES_TO_REPORT,
-              "number_pre_echo_updates: never exceeds DA_PRE_ECHO_UPDATES_TO_REPORT");
-        if (n_pre == DA_PRE_ECHO_UPDATES_TO_REPORT) reached_cap = 1;
 
         CHECK(d.est.pending_count >= 0 && d.est.pending_count < DA_BLOCK_SIZE,
               "pending_count: stays inside [0, DA_BLOCK_SIZE) every hop");
@@ -316,20 +309,6 @@ static void section_delay_aec(void) {
           " implies -- a truncated/short-read fixture must fail loudly here, not"
           " silently pass by running fewer loop iterations");
 
-    CHECK(reached_cap,
-          "number_pre_echo_updates: this real fixture actually DRIVES the counter up to"
-          " the cap at some point (proves the cap is exercised, not vacuously true)");
-    CHECK(d.est.matched_filter.number_pre_echo_updates == DA_PRE_ECHO_UPDATES_TO_REPORT,
-          "number_pre_echo_updates: settles at the cap by end of a real 10s fixture and stays");
-
-    /* decision-invariance for completeness (sole reader is ">="). */
-    {
-        int cap = DA_PRE_ECHO_UPDATES_TO_REPORT;
-        int counter_at_cap = cap, counter_at_huge = cap + 1000000;
-        int at_cap  = (counter_at_cap  >= cap);
-        int at_huge = (counter_at_huge >= cap);
-        CHECK(at_cap == at_huge, "number_pre_echo_updates: '>=' decision identical at cap vs cap+1e6");
-    }
     free(delay_pool);
     printf("section_delay_aec: done (%ld checks so far, %ld fails)\n", g_checks, g_fails);
 }
@@ -495,8 +474,8 @@ static void section_epc_shadow(void) {
                     ShadowCopyDecision d = shadow_copy_update(
                         live, 200 + i, 50, 1e-2f, 1e-3f, 1e-7f,
                         0, 0.0f, 0.0f, 0.0f, 1);
-                    CHECK(d.boost_q == (i == fire_hops[grid] - 1),
-                          "ShadowCopy: the 10-hop streak minimum decides the live boost hop");
+                    CHECK(d.pause_main == (i == fire_hops[grid] - 1),
+                          "ShadowCopy: the 10-hop streak minimum decides the live pause hop");
                 }
 
                 shadow_copy_reset(live);
@@ -553,7 +532,7 @@ static void section_fullband_erle(void) {
     float x2[8], y2[8], e2[8];
     int i, k;
 
-    fb_erle_init(&s, nf, 0.001f, 1000.0f, 160, 16000);
+    fb_erle_init(&s, nf, 0.001f, 160, 16000);
     for (k = 0; k < nf; k++) { x2[k] = 1.0e9f; y2[k] = 1.0e6f; e2[k] = 1.0e3f; }
 
     for (i = 0; i < 6 * 20; i++) {

@@ -45,8 +45,7 @@ void add_comfort_noise(uint32_t *rng, Complex *spec, const float *cn, const floa
 }</pre>
 <div class="tblwrap"><table>
 <tr><th>函式</th><th>語意</th><th>回傳</th></tr>
-<tr><td><code>aec_apply_cng_spec(&amp;rng, spec, cn, g_res, g_nr, n)</code></td><td>在 bin 1…n−2 加上舒適噪音,見 §3</td><td>void;任一必要指標為 NULL 或 n&lt;3 則什麼都不動</td></tr>
-<tr><td><code>aec_apply_cng_spec(&amp;rng, spec, cn, g_res, g_extra, n)</code></td><td>同上,<code>nr_floor</code> 固定為 <code>AEC_CNG_NR_GAIN_FLOOR</code></td><td>void</td></tr>
+<tr><td><code>aec_apply_cng_spec(&amp;rng, spec, cn, g_res, g_nr, n)</code></td><td>在 bin 1…n−2 加上舒適噪音,見 §3;<code>g_nr</code>(宣告中的 <code>g_extra</code>)可為 NULL,<code>nr_floor</code> 固定為 <code>AEC_CNG_NR_GAIN_FLOOR</code></td><td>void;任一必要指標為 NULL 或 n&lt;3 則什麼都不動</td></tr>
 <tr><td><code>aec_apply_cng(a, extra_gain, spec)</code></td><td>實例形式:用實例內的產生器(種子 <code>AEC_CNG_SEED</code>,硬 post 鏈 reset 時重設)</td><td><code>AEC_OK</code>／<code>AEC_ERR_*</code></td></tr>
 </table></div>
 
@@ -54,7 +53,7 @@ void add_comfort_noise(uint32_t *rng, Complex *spec, const float *cn, const floa
 <div class="tblwrap"><table>
 <tr><th>類別</th><th>內容</th><th>出處</th></tr>
 <tr><td><b>外部(可調)</b></td><td>強度只有 <code>aec_set_level(a, level)</code>(level 四選一;地板固定 100 ms ramp),陣列實例上它重設融合後增益階段的強度</td><td><code>aec.h</code></td></tr>
-<tr><td><b>內部(不開放)</b></td><td><code>SuppressionGainConfig</code> 48 欄與 tuning 表(由 <code>aec_build_sg_config</code> 依格點查表)、DominantNearend、ratchet、audibility 門檻;<code>aec_config_build.h</code> 為庫內部</td><td><code>suppression_gain.h</code>;<code>aec_config_build.h</code></td></tr>
+<tr><td><b>內部(不開放)</b></td><td><code>SuppressionGainConfig</code> 與 tuning 表(由 <code>aec_build_sg_config</code> 依格點查表)、DominantNearend、ratchet、audibility 門檻;ENR／SU 門檻表在 init 時由 run-length 碼解碼進實例的 pool(陣列的在 <code>AecRes</code> 區塊)</td><td><code>src/suppression_gain.h</code>;<code>src/aec_config_build.h</code></td></tr>
 <tr><td>公開函式</td><td><code>aec_apply_cng_spec</code>、<code>aec_apply_cng</code>、<code>aec_apply_gain_spec</code>、<code>aec_apply_gain</code></td><td><code>aec.h</code></td></tr>
 </table></div>
 
@@ -131,7 +130,7 @@ t              各 lane 線性 AEC 完成
 <tr><td>近端功率／縮放後參考暫存</td><td>n_bins + hop_size floats</td><td>RES 階段</td><td>每 hop 覆寫</td></tr>
 <tr><td><code>aec_cng_fill</code> 的亂數狀態 <code>rng</code></td><td>uint32_t</td><td><b>實例或呼叫端</b></td><td>實例形式(<code>aec_apply_cng</code>)由實例持有;<code>aec_apply_cng_spec</code> 由呼叫端持有,起點是 <code>AEC_CNG_SEED</code>(42,與 <code>aec_process()</code> 內部相同);<code>aec_post_reset_serial()</code> 改變時於該 hop 第一次抽樣前設回</td></tr>
 </table></div>
-<p class="small">記憶體(balanced):16k/256 = 7,904 B、16k/512 = 14,048 B、48k/1024 = 29,408 B、8k/256 = 7,392 B(內部 <code>aec_res_get_mem_size()</code> 實測;不隨 BACKEND／SIMD 改變;陣列的 <code>aec_get_mem_breakdown()</code> 的 <code>fusion_bytes</code> 含它)。</p>
+<p class="small">記憶體(balanced):16k/256 = 10,000 B、16k/512 = 18,192 B、48k/1024 = 37,648 B、8k/256 = 9,488 B(內部 <code>aec_res_get_mem_size()</code> 實測;不隨 BACKEND／SIMD 改變;陣列的 <code>aec_get_mem_breakdown()</code> 的 <code>fusion_bytes</code> 含它)。</p>
 
 <h2>7. 延遲與 warm-up</h2>
 <p>無演算法延遲(同 hop 內回傳)。實例以 <code>initial_state = 1</code> 起始:初始階段是否啟用 DominantNearend 觸發與低頻平滑,由設定中的 <code>dne_use_during_initial_phase</code>／<code>lf_smoothing_during_initial_phase</code> 決定;第一次 <code>all_converged</code> 為真的 hop 離開初始狀態,之後不會回去,直到 <code>aec_reset()</code>。設定來自 <code>AecConfig</code> 的共同建構函式,其中這兩個旗標固定為 1,所以經由本介面,初始狀態對增益沒有影響;離開初始狀態的判斷與狀態仍保留,供旗標被關閉的設定使用。</p>

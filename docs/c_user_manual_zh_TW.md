@@ -12,13 +12,12 @@
 （[§8.5](reference/integration.md#85-舒適噪音填補aec_apply_cng_spec)；自己組合頻域後處理鏈時用）。
 殘留回音抑制增益階段不是獨立的公開介面：單聲道的在 `Aec` 裡，四麥克風融合後的在陣列實例裡。
 
-`c_impl/include/` 底下其餘 27 個 header（`aec_post.h`、`pbfdkf.h`、`delay_aec.h`、`suppression_gain.h` 等）
-全部是**內部實作**用的，會隨版本改變，請勿直接 include，也不要依賴其中任何型別或函式。
-注意 `aec.h` 目前會把 `struct Aec` 完整攤開，因此它們仍必須留在 include 路徑上
-才能編譯——「留在路徑上」不等於「可以使用」。
+`c_impl/include/` 只放四個 header：`aec.h`、`aec_internal.h`（給 pipeline 用的函式庫內部介面）、
+`aec_balanced_config.h`（產生的各取樣率表）與 `aec_debug.h`（trace）。`aec_post.h`、`pbfdkf.h`、`delay_aec.h`、
+`suppression_gain.h` 等內部實作 header 在 `c_impl/src/`，不屬於公開介面；`Aec` 是不透明型別
+（`typedef struct Aec Aec;`），呼叫端拿不到結構內容，也不能以值持有或取 `sizeof(Aec)`。
 
-`aec.h` 本身會 include 共用 DSP 函式庫（`audiolib`）的 `fft_wrapper.h` 與 `hpf.h`，
-所以編譯時兩個 include 路徑都要給（見 §2）。
+`aec.h` 本身會 include 共用 DSP 函式庫（`audiolib`）的 `fft_wrapper.h`，所以編譯時兩個 include 路徑都要給（見 §2）。
 
 ---
 
@@ -51,7 +50,7 @@
 `aec_create()` / `aec_init()` / `aec_get_mem_size()` 拒絕（和任何不成對的
 組合一樣）。
 
-填值的正確做法只有一條鏈：`aec_config_defaults()` / `aec_config_from_level()`
+填值的正確做法只有一條鏈：`aec_config_from_level()`
 是**唯一**會替你填預設格點的地方（8k→256、16k→256、48k→1024，同
 `aec_default_fft_size()`），填完之後核心不再猜第二次。要用 16 kHz 的 512
 格點，就在 `aec_create()` 前自行覆寫 `cfg.fft_size = 512`。CLI／上層應用
@@ -124,7 +123,9 @@ cc -std=c99 -O2 -ffp-contract=off app.c \
 
 `-ffp-contract=off` 是**必要**的：允許 FMA 合併會改變遞迴狀態（HPF、偵測器累加器）
 的數值，導致行為與驗證過的版本不一致。`libaec.a` 不含共用 DSP 的目的檔，
-`libaudio_common.a` 一定要一起連結。
+`libaudio_common.a` 一定要一起連結。`libaudio_common.a` 含一個 C++ 翻譯單元（NE10 的 generic-radix kernel），
+所以 Makefile 以 C++ driver 連結（`LINK = $(CXX)`）；用 `cc` 連結時，若出現 C++ runtime 的未定義符號，
+改用 `c++`／`g++` 當連結器，或補上該工具鏈的 C++ runtime 函式庫。
 
 ### 最小可用範例
 
@@ -139,27 +140,28 @@ extern void app_write_hop(const float *out, int hop);
 int run_aec(int sample_rate)
 {
     AecConfig cfg;
-    Aec       aec;
+    Aec      *aec;
     float    *mic, *ref, *out;
     int       hop;
 
     aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, sample_rate);
-    if (aec_create(&aec, &cfg) != 0) return -1;      /* 0 = 成功，-1 = 失敗 */
+    aec = aec_create(&cfg);                          /* NULL = 設定無效或記憶體不足 */
+    if (!aec) return -1;
 
-    hop = aec_hop_size(&aec);                        /* 每次剛好餵這麼多 sample */
+    hop = aec_hop_size(aec);                         /* 每次剛好餵這麼多 sample */
     mic = (float *)malloc((size_t)hop * sizeof *mic);
     ref = (float *)malloc((size_t)hop * sizeof *ref);
     out = (float *)malloc((size_t)hop * sizeof *out);
 
     if (mic && ref && out) {
         while (app_read_hop(mic, ref, hop)) {
-            aec_process(&aec, mic, ref, out);        /* 回傳 AecStatus；引數有效時為 AEC_OK */
+            aec_process(aec, mic, ref, out);         /* 回傳 AecStatus；引數有效時為 AEC_OK */
             app_write_hop(out, hop);
         }
     }
 
     free(mic); free(ref); free(out);
-    aec_destroy(&aec);                               /* heap 實例必須剛好呼叫一次 */
+    aec_destroy(aec);                                /* heap 實例必須剛好呼叫一次，之後指標失效，不可再 free */
     return (mic && ref && out) ? 0 : -1;
 }
 ```
@@ -186,7 +188,7 @@ Beamformer 與合成**不在函式庫內**，由呼叫端提供。建立與記�
 
 - 型別一律是 `float`（32-bit），**不是** `int16`。
 - 標稱範圍是 **[-1.0, +1.0]**。從 PCM16 轉入時除以 32768。
-- 超出 [-1, 1] 不會被拒絕，但飽和偵測（`saturation_threshold`，預設 0.95）會判定為削波。
+- 超出 [-1, 1] 不會被拒絕，但內部的飽和偵測（門檻 0.95）會判定為削波。
 - AEC 不做輸出 peak limiting；`out` 可能短暫超過 [-1, 1]。需要限制峰值時，
   請在整條 AEC/beamforming/NR 流程的最後加 AGC/DRC/limiter；轉成 PCM 時仍須飽和裁切。
 
@@ -220,30 +222,35 @@ instance 存活期間不可變）** 決定。這是唯一的真實來源：
 `delay_num_filters = 0`，都會被擋下。
 
 
-以下的可擷取上限**只適用於 `MATCHED`**（`FIXED` 沒有搜尋這回事，
+以下的延遲範圍**只適用於 `MATCHED`**（`FIXED` 沒有搜尋這回事，
 環形緩衝自動配置成剛好夠用的 `fixed_delay_samples + hop_size`，
 上限只受 `fixed_delay_samples` 的 `120 × sample_rate` 驗證上界限制）。
 
-**可擷取的延遲上限由 `delay_num_filters` 決定，不是 `max_delay_ms`。**
-這點容易誤解。下表是預設 `delay_num_filters = 5`：
+**可擷取的延遲範圍由 `delay_num_filters` 決定，與環形緩衝大小無關。**
+這點容易誤解。下表是預設 `delay_num_filters = 5` 時搜尋範圍的幾何全 span：
 
-| 取樣率 | 可擷取上限 |
+| 取樣率 | 搜尋範圍的幾何全 span |
 |---:|---:|
 | 8 kHz | 1216 ms |
 | 16 kHz | **608 ms** |
 | 48 kHz | **608 ms** |
 
-上限來自 matched filter 的搜尋長度（`delay_aec.h` 的
+單聲道 `MATCHED` 的參考環是依 estimator 實際能回報的最大延遲配置的（`delay_aec_max_delay_samples()`，n = 5 時 8,148 sample，
+`make test-delay-num-filters` 釘住）：8 kHz 約 1,018 ms，16 kHz 與 48 kHz 約 509 ms，也就是下文的「可靠上界」。
+
+範圍來自 matched filter 的搜尋長度（內部 `delay_aec.h` 的
 `DA_MAX_FILTER_LAG_FOR(n)` × 4 倍降取樣，n = `delay_num_filters`）。
 48 kHz 輸入會先抗混疊降到 16 kHz，
 估計結果再乘 3 回傳 native-rate samples，所以 wall-clock 範圍仍為
-約 608 ms，不是把 9728 直接除以 48 kHz。此上限與設定無關，
-**調 `max_delay_ms` 不會提高它**。（608 ms 是幾何全 span；若再計入
+約 608 ms，不是把 9728 直接除以 48 kHz。此範圍與環形緩衝大小無關，
+**環形緩衝的大小不會提高它**。（608 ms 是幾何全 span；若再計入
 matched filter 的 reliability 條件 `lag < FILTER_SIZE-10`，實際可靠取得
 peak 的上界約 509 ms——`nn_integration_interface.md` 引用的就是後者，兩
 個數字定義不同、不矛盾。）
-`max_delay_ms`（預設 1024 ms）只決定參考訊號環形緩衝要開多大；調大只是多花記憶體。
-超過上表的延遲請在上游先粗對齊，實機仍應先量測總延遲。
+參考訊號環形緩衝的大小是內部決定的，只影響記憶體：單聲道 `MATCHED` 取 estimator 可回報的最大延遲加 `hop_size`
+（`4 × ((n−1) × 384 + 501) + hop_size` sample，n = `delay_num_filters`；48 kHz 的第一項乘 3），所以它永遠放得下 estimator 報得出的延遲；
+陣列實例的共用環取 `max_delay_ms`（內部值，1024 ms）換算的 sample 加 `2 × hop + 1`（[§4](reference/lifecycle.md#環形緩衝大小公式)）。
+超過約 509 ms（8 kHz 約 1,018 ms）的延遲請在上游先粗對齊，實機仍應先量測總延遲。
 
 **超出可靠上界（~509 ms）的真延遲不會「估不到」，而是可能在範圍內
 高信心誤鎖**（confidence 只量 histogram 一致性、不量匹配品質）——機制
@@ -275,6 +282,9 @@ max 923 ms、約 5% 超出 509 ms）與板端/離線的建議做法（系統延�
 | 48 kHz / 1024 | 10.667 ms（1 hop） | 0 ms |
 
 開啟殘留回音抑制時固定多一個 hop 的延遲；關閉後線性路徑沒有額外延遲。
+`residual = FULL` 用 `aec_process()` 時，建立或 `aec_reset()` 之後的**第一個輸出 hop 全是 0**（OLA 尾巴是空的，輸入從第二個 hop 才出現；
+16 kHz／256、0.3 振幅正弦輸入、無參考的實測：第一個 hop 的輸出 rms 為 0，第二個 hop 起接上輸入）。`aec_reset()` 之後重現與剛建立時完全相同的起頭。
+引數被拒絕的呼叫（NULL、非有限的輸入樣本）回負值 `AecStatus`、完全不寫 `out`——呼叫端要自己決定那個 hop 播什麼（例如重送上一個 hop 或靜音）。
 沒有任何 look-ahead。若外部要把 dry／linear 路徑與抑制後的輸出混合，必須先補償
 這一個 hop（16 kHz／256 為 128 個樣本、8 ms），否則會聽成額外的回音。
 

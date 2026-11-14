@@ -51,9 +51,8 @@ Resolution (measured 2026-10-20 by planting constant changes in scratch copies; 
 
 Guard seam cells (section G of build_scenarios; --base on both drivers). C and Python dump, per hop, the output guard's decision
 (guard_active), the hard post-chain reset counter (post_reset_serial), the rendering base spectrum (output_base_spec /
-aec_get_output_base), the formed hop and the delay state (current delay, bad-relock reject count), next to the analysis seam already
-compared (error_spec, echo_spec). Gates: guard_active identical on every hop outside the tie band GUARD_TIE_BAND (spec section 8.2;
-derivation at the constant: a mismatch is excused only when both sides' relative energy margin |sum|E|^2 - sum|Y|^2| / sum|E|^2 is
+aec_get_residual().base_spec), the formed hop and the delay state (current delay, bad-relock reject count), next to the analysis seam already
+compared (error_spec, echo_spec). Gates: guard_active identical on every hop outside the tie band GUARD_TIE_BAND (derivation at the constant: a mismatch is excused only when both sides' relative energy margin |sum|E|^2 - sum|Y|^2| / sum|E|^2 is
 <= 1e-6 on a hop unusable on both sides; tie-band hops and in-band mismatches are counted and printed per cell); post_reset_serial
 identical on every hop; current delay identical on every hop and the bad-relock reverts at the same hops (the guard.revert.* cells
 also require at least one revert in each language); base_spec (all hops, and the hops where either side's guard fired) within
@@ -143,7 +142,7 @@ L2_PROBE_EPS = 1e-4           # relative mic nudge used to ask 'is this scene ch
 L2_PROBE_SEED = 11
 
 # ----------------------------------------------------------------------------------------------
-# Known Python<->C gaps that survive wave 1 (PY_C_SYNC_AUDIT.md). Keyed by the S-id used in scenario
+# Known Python<->C gaps (registered in docs/c_python_function_map.md, appendix A). Keyed by the S-id used in scenario
 # definitions; the text is what the table prints.
 # ----------------------------------------------------------------------------------------------
 EXPECTED_RED_INFO = {
@@ -205,7 +204,7 @@ CLIPS = {
     '6V90tmuaRkG0luLY5iAwTw_farend-singletalk': _clip(_BLIND48, '6V90tmuaRkG0luLY5iAwTw_farend-singletalk', 48000),
     # 48 kHz, hard post-chain resets and firing after the first usable verdict
     '16970455-e9f7-42ec-b668-3ab3f79ff1de_farend-singletalk': _clip(_BLIND48, '16970455-e9f7-42ec-b668-3ab3f79ff1de_farend-singletalk', 48000),
-    # bad-relock soft revert on both 16 kHz grids (round7/relock/RELOCK.md section 3b): far-end single talk, moving / static
+    # bad-relock soft revert on both 16 kHz grids: far-end single talk, moving / static
     'Y91uE2tRg0SUB2a9XjT30w_farend_singletalk_with_movement': _clip(_BLIND16_FS, 'Y91uE2tRg0SUB2a9XjT30w_farend_singletalk_with_movement', 16000),
     'IUp2c0A4yEyttmLfJ3t0Xw_farend_singletalk': _clip(_BLIND16_FS, 'IUp2c0A4yEyttmLfJ3t0Xw_farend_singletalk', 16000),
     # bad-relock revert, double talk (static): the two clips whose post-revert C-vs-Python difference was the largest
@@ -412,7 +411,7 @@ def build_scenarios():
     add(Scn('dtb.48k1024.bal.ctx', 'dtb', '48k1024', ctx=True))
     add(Scn('speechdt.16k256.bal.ctx_nores', 'speechdt', '16k256', ctx=True, res=False))
     # F. NO_FLOOR (AecPreset value 3 / "no_floor"): construction-time-only on both sides today (the
-    # C-side runtime aec_set_preset()/aec_res_set_preset() retarget to/from NO_FLOOR added alongside this
+    # C-side runtime aec_set_level()/aec_res_set_level() retarget to/from NO_FLOOR added alongside this
     # row is NOT exercised by this driver -- it constructs fresh per scenario, same as every other preset
     # row here). min_gain_split_floor_enabled=False removes all three suppression-gain floor variants, so
     # this is the deepest point on the strength axis and the one most likely to separate from balanced;
@@ -816,7 +815,7 @@ def ctx_spectra(ctx, K):
     return e[..., 0] + 1j * e[..., 1], o[..., 0] + 1j * o[..., 1], x[:, 8]
 
 
-# Guard decision tie band (GUARD_UNIFY_SPEC.md section 8.2). The per-hop rule is a strict '>' between two float32 energy sums,
+# Guard decision tie band (the guard checks of c_impl/test/test_guard_unify.c). The per-hop rule is a strict '>' between two float32 energy sums,
 # sum|E|^2 > sum|Y|^2 (Y = E + echo), and the two languages' upstream spectra legitimately differ by ~1e-7 relative, so a hop whose
 # relative margin m = (sum|E|^2 - sum|Y|^2) / sum|E|^2 is that close to 0 can be decided either way. Measured 2026-10-29 on the
 # guard cells (16 cells, each side's own dumped float32 spectra, margin in float64), restricted to hops unusable on both sides:
@@ -1163,8 +1162,8 @@ def hpf_fidelity(R, a):
 
 
 def s03_cell(a):
-    """Regenerate aec_balanced_config.h from a scratch copy of the Python tree and diff it against the
-    checked-in header -- the two must always be identical (S-03, fixed 2026-10-20: the header is
+    """Regenerate aec_balanced_config.h (and the test-only reference tables test/aec_ref_tables.h) from a scratch copy of
+    the Python tree and diff them against the checked-in files -- the two must always be identical (S-03, fixed 2026-10-20: the header is
     regenerated alongside any change to the balanced config or the generator; make test-header-fresh
     covers this same check on an ordinary build without needing the Python<->C parity harness)."""
     root = a.aec_root
@@ -1185,6 +1184,9 @@ def s03_cell(a):
         return cell_
     old = open(old_p).read().split('\n')
     new = open(new_p).read().split('\n')
+    ref_new = os.path.join(d, 'c_impl', 'test', 'aec_ref_tables.h')
+    ref_old = os.path.join(root, 'c_impl', 'test', 'aec_ref_tables.h')
+    ref_stale = not (os.path.exists(ref_new) and os.path.exists(ref_old) and open(ref_new).read() == open(ref_old).read())
 
     def key(line):
         t = line.split()
@@ -1197,7 +1199,7 @@ def s03_cell(a):
     cell_.update({'differing_constants': [{'name': k, 'checked_in': od.get(k, '').split(None, 2)[-1] if k in od else None,
                                            'regenerated': nd.get(k, '').split(None, 2)[-1] if k in nd else None} for k in diff_names],
                   'n_differing': len(diff_names), 'non_define_lines_differ': bool(other_lines)})
-    if diff_names or other_lines:
+    if diff_names or other_lines or ref_stale:
         cell_['status'] = 'FAIL: checked-in header is stale against its generator (re-run gen_aec_balanced_config_h.py)'
     else:
         cell_['status'] = 'PASS'
@@ -1434,7 +1436,7 @@ def main():
             f.write('\n')
     print()
     print('summary: %s' % json.dumps(summ, sort_keys=True))
-    print('registry of known gaps and observations (S-ids are PY_C_SYNC_AUDIT.md ids; marker => allowed to be red, must stay red):')
+    print('registry of known gaps and observations (S-ids are the appendix A ids of docs/c_python_function_map.md; marker => allowed to be red, must stay red):')
     for k in sorted(EXPECTED_RED_INFO):
         print('  %s(%s): %s' % ('INFO' if EXPECTED_RED_INFO[k].startswith('INFO') else 'EXPECTED_RED', k, EXPECTED_RED_INFO[k]))
     print('RESULT: %s' % ('FAIL' if fails else 'PASS'))

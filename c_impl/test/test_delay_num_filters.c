@@ -13,7 +13,7 @@
  *      350 ms echo does not lock at n=2 (outside 221 ms) but does lock at n=5 (inside 509 ms), the control that makes the
  *      previous assertion meaningful. Mutations that must fail: reverting the loop bound in da_matched_filter_update() to
  *      DA_NUM_FILTERS, or hardcoding DA_NUM_FILTERS in aec.c's delay_aec_init() call (the n=2 / 350 ms case then locks).
- *   3. Out-of-range config values are rejected by aec_resolve_valid_config (aec_create fails) rather than silently normalised.
+ *   3. Out-of-range config values are rejected by aec_resolve (aec_create fails) rather than silently normalised.
  *   4. delay_aec_get_mem_size()/delay_aec_init() reject out-of-range n too (get_mem_size -> 0, init -> nonzero; a silent
  *      clamp would run a different bank than requested), plus the pool rejection contract (NULL / misaligned base / one
  *      byte short).
@@ -34,6 +34,8 @@
  * Also wired into the Makefile: `make test-delay-num-filters`.
  */
 #include "aec.h"
+#include "aec_white_box.h"
+#include "aec_pool_test_util.h"
 #include "utility/mem_align.h"   /* ALIGN16 */
 #include "delay_pool_test_util.h"
 #include <math.h>
@@ -71,13 +73,7 @@ static float g_out[HOP];
 
 /* Deterministic xorshift noise, same style as the sibling tests. */
 static unsigned g_rng_state = 0x5EED1234u;
-static float rng_uniform(float amp) {
-    g_rng_state ^= g_rng_state << 13;
-    g_rng_state ^= g_rng_state >> 17;
-    g_rng_state ^= g_rng_state << 5;
-    float u = (float)(g_rng_state & 0xFFFFFFu) / (float)0xFFFFFFu;
-    return amp * (2.0f * u - 1.0f);
-}
+static float rng_uniform(float amp) { return aec_test_rng_uniform(&g_rng_state, amp); }
 
 /* far = white noise; near = far delayed by `delay` and attenuated. */
 static void build_signals(int delay) {
@@ -93,21 +89,21 @@ static void build_signals(int delay) {
  * writes the bank size the engine actually built into *bank_out. */
 static int run_case(int num_filters, int delay, int *bank_out) {
     AecConfig cfg;
-    Aec a;
+    Aec *a = NULL;
     int i, n_hops = N_SAMPLES / HOP;
 
     aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, SR);
     cfg.delay_num_filters = num_filters;
-    if (aec_create(&a, &cfg) != 0) {
+    if ((a = aec_create(&cfg)) == NULL) {
         *bank_out = -1;
         return -2;   /* distinct from "no estimate" so a failure is visible */
     }
     build_signals(delay);
     for (i = 0; i < n_hops; ++i)
-        aec_process(&a, g_near + i * HOP, g_far + i * HOP, g_out);
-    *bank_out = a.delay.est.matched_filter.num_filters;
-    int got = delay_aec_estimated_delay(&a.delay);
-    aec_destroy(&a);
+        aec_process(a, g_near + i * HOP, g_far + i * HOP, g_out);
+    *bank_out = a->delay.est.matched_filter.num_filters;
+    int got = delay_aec_estimated_delay(&a->delay);
+    aec_destroy(a);
     return got;
 }
 
@@ -115,7 +111,7 @@ static int run_case(int num_filters, int delay, int *bank_out) {
 
 static void test_default_is_five(void) {
     AecConfig cfg;
-    Aec a;
+    Aec *a = NULL;
     int bank;
 
     aec_config_defaults(&cfg, SR);
@@ -131,9 +127,9 @@ static void test_default_is_five(void) {
     CHECK(cfg.delay_num_filters == 5, "level aggressive: delay_num_filters == 5");
 
     aec_config_defaults(&cfg, SR);
-    CHECK(aec_create(&a, &cfg) == 0, "default cfg: aec_create");
-    bank = a.delay.est.matched_filter.num_filters;
-    aec_destroy(&a);
+    CHECK((a = aec_create(&cfg)) != NULL, "default cfg: aec_create");
+    bank = a->delay.est.matched_filter.num_filters;
+    aec_destroy(a);
     CHECK(bank == 5, "default cfg builds a 5-filter bank");
 }
 
@@ -175,30 +171,30 @@ static void test_geometry(void) {
 
 static void test_config_validation(void) {
     AecConfig cfg;
-    Aec a;
+    Aec *a = NULL;
     int n;
     char msg[96];
 
     aec_config_defaults(&cfg, SR);
     cfg.delay_num_filters = 0;
-    CHECK(aec_create(&a, &cfg) != 0, "delay_num_filters=0 is rejected");
+    CHECK((a = aec_create(&cfg)) == NULL, "delay_num_filters=0 is rejected");
     CHECK(aec_get_mem_size(&cfg) == 0, "delay_num_filters=0 -> mem_size 0");
 
     aec_config_defaults(&cfg, SR);
     cfg.delay_num_filters = DA_NUM_FILTERS + 1;
-    CHECK(aec_create(&a, &cfg) != 0, "delay_num_filters=6 is rejected");
+    CHECK((a = aec_create(&cfg)) == NULL, "delay_num_filters=6 is rejected");
 
     aec_config_defaults(&cfg, SR);
     cfg.delay_num_filters = -1;
-    CHECK(aec_create(&a, &cfg) != 0, "delay_num_filters=-1 is rejected");
+    CHECK((a = aec_create(&cfg)) == NULL, "delay_num_filters=-1 is rejected");
 
     for (n = 1; n <= DA_NUM_FILTERS; ++n) {
         aec_config_defaults(&cfg, SR);
         cfg.delay_num_filters = n;
         snprintf(msg, sizeof msg, "delay_num_filters=%d is accepted and honoured", n);
-        if (aec_create(&a, &cfg) != 0) { CHECK(0, msg); continue; }
-        CHECK(a.delay.est.matched_filter.num_filters == n, msg);
-        aec_destroy(&a);
+        if ((a = aec_create(&cfg)) == NULL) { CHECK(0, msg); continue; }
+        CHECK(a->delay.est.matched_filter.num_filters == n, msg);
+        aec_destroy(a);
     }
 }
 
@@ -255,12 +251,10 @@ static void test_low_level_init_contract(void) {
     if (pool) {
         int cap = d.est.render_ring.capacity;
         int hpn = d.est.aggregator.highest_peak.hist_size;
-        int pen = d.est.aggregator.pre_echo.hist_size;
         delay_aec_reset(&d);
         CHECK(d.est.matched_filter.num_filters == 2, "bank size survives delay_aec_reset()");
         CHECK(d.est.render_ring.capacity == cap &&
-              d.est.aggregator.highest_peak.hist_size == hpn &&
-              d.est.aggregator.pre_echo.hist_size == pen,
+              d.est.aggregator.highest_peak.hist_size == hpn,
               "pool geometry survives delay_aec_reset()");
         free(pool);
     }
@@ -300,10 +294,10 @@ static void test_low_level_init_contract(void) {
         unsigned g;
         for (g = 0; g < sizeof grids / sizeof grids[0]; ++g) {
             AecConfig cfg;
-            Aec a;
+            Aec *a = NULL;
             aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, grids[g].sr);
             cfg.fft_size = grids[g].fft;
-            if (aec_create(&a, &cfg) != 0) {
+            if ((a = aec_create(&cfg)) == NULL) {
                 snprintf(msg, sizeof msg, "sr=%d fft=%d: aec_create",
                          grids[g].sr, grids[g].fft);
                 CHECK(0, msg);
@@ -313,14 +307,14 @@ static void test_low_level_init_contract(void) {
                      "sr=%d fft=%d: estimator sized off the RESOLVED hop %d "
                      "(resample_cap %d, expected %d)",
                      grids[g].sr, grids[g].fft, grids[g].hop,
-                     a.delay.resample_cap, grids[g].cap);
-            CHECK(a.delay.resample_cap == grids[g].cap, msg);
+                     a->delay.resample_cap, grids[g].cap);
+            CHECK(a->delay.resample_cap == grids[g].cap, msg);
             snprintf(msg, sizeof msg,
                      "sr=%d fft=%d: 48 kHz sidechain scratch present iff 48 kHz",
                      grids[g].sr, grids[g].fft);
-            CHECK((a.delay.near16_scratch != NULL) == (grids[g].cap > 0) &&
-                  (a.delay.far16_scratch != NULL) == (grids[g].cap > 0), msg);
-            aec_destroy(&a);
+            CHECK((a->delay.near16_scratch != NULL) == (grids[g].cap > 0) &&
+                  (a->delay.far16_scratch != NULL) == (grids[g].cap > 0), msg);
+            aec_destroy(a);
         }
     }
 
@@ -340,48 +334,125 @@ static void test_low_level_init_contract(void) {
 
 /* ------------------------------------------- pool geometry, HAND-COMPUTED */
 
-/* The three n-dependent array lengths, pinned against literals derived by hand from the reference geometry, not against
- * DA_*_FOR(n), which is the thing under test (reading the macros back would make every row a tautology):
- *   ring capacity = (32 + 24*(n-1) + 1) * 16;  highest-peak bins = n*384 + 512 + 1;  pre-echo bins = ((n*384 + 513) * 4) >> 6
- * The pool cost of ONE extra filter is a constant 5728 B at every grid: coefficients 512 f32 = 2048 B, accumulated error
- * 128 f32 = 512 B, render ring 384 f32 = 1536 B, highest-peak 384 int = 1536 B, pre-echo 24 int = 96 B. Each term is a
- * multiple of 16, so the per-field ALIGN16 padding is identical at every n and the delta is exact. */
-#define DA_STEP_BYTES 5728
+/* The two n-dependent array lengths of the estimator, pinned against literals derived by hand from the reference geometry,
+ * not against DA_*_FOR(n), which is the thing under test (reading the macros back would make every row a tautology):
+ *   ring capacity = (32 + 24*(n-1) + 1) * 16;  highest-peak bins = n*384 + 512 + 1
+ * The pool cost of ONE extra filter is a constant per rate: coefficients 512 f32 = 2048 B, render ring 384 f32 = 1536 B,
+ * highest-peak 384 int = 1536 B (5120 B), plus the MATCHED reference ring, whose reach grows by 4 * 384 = 1536 samples
+ * (three times that at 48 kHz): 6144 B (18432 B at 48 kHz). Each term is a multiple of 16, so the per-field ALIGN16
+ * padding is identical at every n and the delta is exact. */
+#define DA_STEP_BYTES(sr) (5120 + 6144 * ((sr) == 48000 ? 3 : 1))
 
 static void test_pool_geometry_literals(void) {
-    static const struct { int n, ring, hp, pe; } expect[] = {
-        { 1,  528,  897,  56 },
-        { 2,  912, 1281,  80 },
-        { 3, 1296, 1665, 104 },
-        { 4, 1680, 2049, 128 },
-        { 5, 2064, 2433, 152 },
+    static const struct { int n, ring, hp; } expect[] = {
+        { 1,   528,   897 },
+        { 2,   912,  1281 },
+        { 3,  1296,  1665 },
+        { 4,  1680,  2049 },
+        { 5,  2064,  2433 },
     };
     char msg[192];
     unsigned i;
 
     for (i = 0; i < sizeof expect / sizeof expect[0]; ++i) {
         AecConfig cfg;
-        Aec a;
+        Aec *a = NULL;
         aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, SR);
         cfg.delay_num_filters = expect[i].n;
-        if (aec_create(&a, &cfg) != 0) {
+        if ((a = aec_create(&cfg)) == NULL) {
             snprintf(msg, sizeof msg, "n=%d: aec_create for geometry check", expect[i].n);
             CHECK(0, msg);
             continue;
         }
         snprintf(msg, sizeof msg,
                  "n=%d: render ring carved to %d samples (hand-computed %d)",
-                 expect[i].n, a.delay.est.render_ring.capacity, expect[i].ring);
-        CHECK(a.delay.est.render_ring.capacity == expect[i].ring, msg);
+                 expect[i].n, a->delay.est.render_ring.capacity, expect[i].ring);
+        CHECK(a->delay.est.render_ring.capacity == expect[i].ring, msg);
         snprintf(msg, sizeof msg,
                  "n=%d: highest-peak histogram carved to %d bins (hand-computed %d)",
-                 expect[i].n, a.delay.est.aggregator.highest_peak.hist_size, expect[i].hp);
-        CHECK(a.delay.est.aggregator.highest_peak.hist_size == expect[i].hp, msg);
-        snprintf(msg, sizeof msg,
-                 "n=%d: pre-echo histogram carved to %d bins (hand-computed %d)",
-                 expect[i].n, a.delay.est.aggregator.pre_echo.hist_size, expect[i].pe);
-        CHECK(a.delay.est.aggregator.pre_echo.hist_size == expect[i].pe, msg);
-        aec_destroy(&a);
+                 expect[i].n, a->delay.est.aggregator.highest_peak.hist_size, expect[i].hp);
+        CHECK(a->delay.est.aggregator.highest_peak.hist_size == expect[i].hp, msg);
+        aec_destroy(a);
+    }
+}
+
+/* ----------------------------------------- the MATCHED ring is sized from the reach */
+
+/* The MATCHED reference ring is the estimator's reach plus one hop (aec_ref_ring_samples), not a search budget, and a delay is
+ * eligible up to ring - hop. Claims: a) the reach is the hand-computed literal 4 * ((n-1)*384 + 501) samples at 16 kHz and
+ * three times that at 48 kHz, the ring is reach + hop on every grid and bank size; b) an echo at the reach (the edge of the
+ * bank) is reported 32 samples low, 4 * ((n-1)*384 + 493), the largest value the estimator can report; that delay is
+ * accepted and applied exactly at every bank size, so the ring never refuses a reportable delay; c) the ring is what admits it: the same scene with the eligibility bound moved
+ * 160 samples down (white-box) is refused. */
+static void test_matched_ring_is_the_reach(void) {
+    static const int reach16[5] = { 2004, 3540, 5076, 6612, 8148 };
+    static const struct { int sr, fft; } grids[] = { {16000, 256}, {16000, 512}, {48000, 1024}, {8000, 256} };
+    char msg[192];
+    int g, n;
+
+    for (g = 0; g < 4; ++g) {
+        for (n = 1; n <= 5; ++n) {
+            AecConfig cfg;
+            Aec *a;
+            int want = reach16[n - 1] * (grids[g].sr == 48000 ? 3 : 1);
+            aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, grids[g].sr);
+            cfg.fft_size = grids[g].fft;
+            cfg.delay_num_filters = n;
+            snprintf(msg, sizeof msg, "%d/%d n=%d: reach is %d samples", grids[g].sr, grids[g].fft, n, want);
+            CHECK(delay_aec_max_delay_samples(grids[g].sr, n) == want, msg);
+            if ((a = aec_create(&cfg)) == NULL) { CHECK(0, "aec_create for ring size"); continue; }
+            snprintf(msg, sizeof msg, "%d/%d n=%d: MATCHED ring is reach + hop (%d, got %d)",
+                     grids[g].sr, grids[g].fft, n, want + a->hop_size, a->ref_ring_size);
+            CHECK(a->ref_ring_size == want + a->hop_size, msg);
+            aec_destroy(a);
+        }
+    }
+    snprintf(msg, sizeof msg, "reach is 0 for n=0, n=6 and a non-positive rate");
+    CHECK(delay_aec_max_delay_samples(16000, 0) == 0 && delay_aec_max_delay_samples(16000, 6) == 0 &&
+          delay_aec_max_delay_samples(0, 5) == 0, msg);
+
+    for (g = 0; g < 3; ++g) {
+        static const struct { int sr, fft; } edge[] = { {16000, 256}, {48000, 1024}, {8000, 256} };
+        const int sr = edge[g].sr, rf = sr == 48000 ? 3 : 1;
+        for (n = 1; n <= 5; ++n) {
+            const int d_true = reach16[n - 1] * rf, d_max = (reach16[n - 1] - 32) * rf;
+            const int hop = edge[g].fft / 2, seconds = 8, total = sr * seconds + d_true;
+            const int n_hops = sr * seconds / hop;
+            AecConfig cfg;
+            Aec *a;
+            float *far_sig = (float *)malloc((size_t)total * sizeof(float));
+            float *near_sig = (float *)calloc((size_t)total, sizeof(float));
+            float *out_hop = (float *)malloc((size_t)hop * sizeof(float));
+            int i, applied_ok, applied_bad;
+            if (!far_sig || !near_sig || !out_hop) {
+                CHECK(0, "edge scene alloc"); free(far_sig); free(near_sig); free(out_hop); continue;
+            }
+            g_rng_state = 0x5EED1234u;
+            for (i = 0; i < total; ++i) far_sig[i] = rng_uniform(0.35f);
+            for (i = d_true; i < total; ++i) near_sig[i] = 0.5f * far_sig[i - d_true];
+
+            aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, sr);
+            cfg.fft_size = edge[g].fft;
+            cfg.delay_num_filters = n;
+            a = aec_create(&cfg);
+            if (!a) { CHECK(0, "edge scene aec_create"); free(far_sig); free(near_sig); free(out_hop); continue; }
+            for (i = 0; i < n_hops; ++i) aec_process(a, near_sig + i * hop, far_sig + i * hop, out_hop);
+            applied_ok = a->current_delay;
+            snprintf(msg, sizeof msg, "%d/%d n=%d: the largest reportable delay %d is applied exactly (applied %d, estimate %d)",
+                     sr, edge[g].fft, n, d_max, applied_ok, delay_aec_estimated_delay(&a->delay));
+            CHECK(applied_ok == d_max && delay_aec_estimated_delay(&a->delay) == d_max, msg);
+            aec_destroy(a);
+
+            a = aec_create(&cfg);
+            a->ref_ring_size -= 160;
+            for (i = 0; i < n_hops; ++i) aec_process(a, near_sig + i * hop, far_sig + i * hop, out_hop);
+            applied_bad = a->current_delay;
+            snprintf(msg, sizeof msg, "%d/%d n=%d: with the ring 160 samples short the same delay is not applied (applied %d)",
+                     sr, edge[g].fft, n, applied_bad);
+            CHECK(applied_bad != d_max, msg);
+            aec_destroy(a);
+            free(far_sig); free(near_sig); free(out_hop);
+        }
     }
 }
 
@@ -420,8 +491,8 @@ static void test_mem_size_shrinks_with_bank(void) {
                  * n-dependent arrays actually shrank. */
                 snprintf(msg, sizeof msg,
                          "%s: mem(n=%d) - mem(n=%d) == %d B exactly (%zu - %zu = %zu)",
-                         grids[g].tag, n, n - 1, DA_STEP_BYTES, got, prev, got - prev);
-                CHECK(got > prev && got - prev == (size_t)DA_STEP_BYTES, msg);
+                         grids[g].tag, n, n - 1, DA_STEP_BYTES(grids[g].sr), got, prev, got - prev);
+                CHECK(got > prev && got - prev == (size_t)DA_STEP_BYTES(grids[g].sr), msg);
             }
             prev = got;
         }
@@ -452,10 +523,10 @@ static void test_mem_size_shrinks_with_bank(void) {
 }
 
 /* The FIXED pool is a function of fixed_delay_samples, not one flat number for the mode (a ring sized from the MATCHED
- * search budget, max(delay_buffer_ms, max_delay_ms + 4096), would give identical rows). Three claims:
+ * reach would give identical rows). Three claims:
  *   a) strictly monotonic in the delay, by the exact ALIGN16 ring step ("> prev" alone would pass if the ring shrank by
  *      the wrong term);
- *   b) a small fixed delay is far cheaper than search-ring sizing, pinned as a hard ratio against the MATCHED n=5 pool;
+ *   b) a small fixed delay is cheaper than the MATCHED n=5 pool (no estimator, a smaller ring), pinned as a hard ratio;
  *   c) the whole difference between EXTERNAL_ALIGNED and FIXED(d) is the ring array itself.
  * The printed table is the source of the manual's per-mode byte figures. */
 /* The FIXED ring as aec_carve() lays it out: ALIGN16((fixed + hop) * 4). Spelled once so the
@@ -528,7 +599,7 @@ static void test_fixed_pool_scales_with_the_delay(void) {
             prev = got; prev_fixed = fixed;
         }
 
-        /* (b) a 25 ms fixed delay costs a small fraction of the MATCHED n=5 pool. */
+        /* (b) a 25 ms fixed delay costs under 90% of the MATCHED n=5 pool. */
         {
             AecConfig cf = cm;
             size_t got;
@@ -536,9 +607,9 @@ static void test_fixed_pool_scales_with_the_delay(void) {
             cf.fixed_delay_samples = (int)(25.0f * (float)grids[g].sr / 1000.0f);
             got = aec_get_mem_size(&cf);
             snprintf(msg, sizeof msg,
-                     "%s: FIXED(25 ms) is under 70%% of MATCHED n=5 "
+                     "%s: FIXED(25 ms) is under 90%% of MATCHED n=5 "
                      "(%zu vs %zu)", grids[g].tag, got, m5);
-            CHECK(got * 10 < m5 * 7, msg);
+            CHECK(got * 10 < m5 * 9, msg);
         }
     }
 }
@@ -555,7 +626,7 @@ static void test_heap_vs_pool_parity_every_n(void) {
 
     for (n = 1; n <= DA_NUM_FILTERS; ++n) {
         AecConfig cfg;
-        Aec heap_inst;
+        Aec *heap_inst = NULL;
         Aec *pool_inst;
         void *pool = NULL;
         size_t need;
@@ -565,26 +636,26 @@ static void test_heap_vs_pool_parity_every_n(void) {
         aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, SR);
         cfg.delay_num_filters = n;
         need = aec_get_mem_size(&cfg);
-        if (need == 0 || aec_create(&heap_inst, &cfg) != 0) {
+        if (need == 0 || (heap_inst = aec_create(&cfg)) == NULL) {
             snprintf(msg, sizeof msg, "n=%d: heap/pool parity setup", n);
             CHECK(0, msg);
             continue;
         }
         if (posix_memalign(&pool, 16, need) != 0 || !pool) {
             snprintf(msg, sizeof msg, "n=%d: pool alloc", n);
-            CHECK(0, msg); aec_destroy(&heap_inst); continue;
+            CHECK(0, msg); aec_destroy(heap_inst); continue;
         }
         memset(pool, 0xA5, need);   /* dirty: init must not rely on zeros */
         pool_inst = aec_init(pool, need, &cfg);
         if (!pool_inst) {
             snprintf(msg, sizeof msg, "n=%d: aec_init on a caller pool", n);
-            CHECK(0, msg); aec_destroy(&heap_inst); free(pool); continue;
+            CHECK(0, msg); aec_destroy(heap_inst); free(pool); continue;
         }
 
         build_signals(DELAY_NEAR);
         for (i = 0; i < n_hops; ++i) {
             int k;
-            aec_process(&heap_inst, g_near + i * HOP, g_far + i * HOP, out_heap);
+            aec_process(heap_inst, g_near + i * HOP, g_far + i * HOP, out_heap);
             aec_process(pool_inst,  g_near + i * HOP, g_far + i * HOP, out_pool);
             for (k = 0; k < HOP; ++k) if (out_heap[k] != out_pool[k]) diffs++;
         }
@@ -593,7 +664,7 @@ static void test_heap_vs_pool_parity_every_n(void) {
                  n, n_hops, diffs);
         CHECK(diffs == 0, msg);
 
-        aec_destroy(&heap_inst);
+        aec_destroy(heap_inst);
         aec_destroy(pool_inst);
         free(pool);
     }
@@ -606,6 +677,7 @@ int main(void) {
     test_config_validation();
     test_low_level_init_contract();
     test_pool_geometry_literals();
+    test_matched_ring_is_the_reach();
     test_mem_size_shrinks_with_bank();
     test_fixed_pool_scales_with_the_delay();
     test_heap_vs_pool_parity_every_n();

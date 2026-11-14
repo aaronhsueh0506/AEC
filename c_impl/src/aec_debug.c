@@ -3,14 +3,10 @@
 #include "aec_debug.h"
 #include <stdio.h>
 
-static int   g_level         = 0;
-static FILE* g_fp            = NULL;
 static int   g_frame_idx     = 0;
 static FILE* g_trace_fp      = NULL;
 static int   g_trace_header  = 0;      /* header written for the current stream */
 
-void aec_debug_set_level(int level) { g_level = level; }
-void aec_debug_set_log(FILE* fp)    { g_fp = fp; }
 void aec_debug_set_trace(FILE* fp)  { g_trace_fp = fp; g_trace_header = 0; }
 int  aec_debug_trace_active(void)   { return g_trace_fp != NULL; }
 

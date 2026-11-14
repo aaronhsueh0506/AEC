@@ -53,6 +53,8 @@
  *   GUARD_UNIFY_ALL=<cases.tsv> additionally runs every case of such a list (stem, bucket, mic, ref, sr columns) at the
  *   grid given by GUARD_UNIFY_ALL_FFT; there a missing wav is a failure. */
 #include "aec.h"
+#include "aec_white_box.h"
+#include "aec_test_tuning.h"
 #include "aec_internal.h"
 #include "aec_post.h"
 #include "aec_balanced_config.h"
@@ -260,11 +262,12 @@ typedef struct {
     long verdict_flips_e_gt_y;     /* hops whose usable verdict differs from the previous hop's while E > Y (oracle) */
 } Stats;
 
-static void make_cfg(AecConfig* c, const Stream* s, int role) {
-    aec_config_from_level(c, AEC_LEVEL_BALANCED, s->sr);
+static void make_cfg(AecTestCfg* tc, const Stream* s, int role) {
+    AecConfig* c = &tc->c;
+    aec_tcfg_from_level(tc, AEC_LEVEL_BALANCED, s->sr);
     c->fft_size = s->fft;
     c->enable_cng = s->enable_cng;
-    if (s->warm_transfer_off) c->delay_acquire_warm_transfer = 0;
+    if (s->warm_transfer_off) tc->t.delay_acquire_warm_transfer = 0;
     if (s->external_aligned) { c->delay_mode = AEC_DELAY_EXTERNAL_ALIGNED; }
     switch (role) {
     case 0: c->residual = AEC_RESIDUAL_FULL; break;                                    /* F: aec_process */
@@ -336,10 +339,10 @@ static void run_stream(const Stream* s, Stats* st) {
     st->first_bad_hop = -1;
     st->first_revert_hop = -1;
     for (role = 0; role < NROLE; ++role) {
-        AecConfig c;
+        AecTestCfg c;
         make_cfg(&c, s, role);
-        A[role] = (Aec*)calloc(1, sizeof(Aec));
-        if (aec_create(A[role], &c) != 0) { CHECK(0, "%s: create role %d", s->name, role); return; }
+        A[role] = aec_tcfg_create(&c);
+        if (!A[role]) { CHECK(0, "%s: create role %d", s->name, role); return; }
     }
     CHECK(aec_hop_size(A[0]) == hop, "%s: hop size", s->name);
     if (app_init(&app_k, s->fft, s->enable_cng, 0, A[1]) || app_init(&app_n, s->fft, s->enable_cng, 1, A[2])
@@ -407,8 +410,8 @@ static void run_stream(const Stream* s, Stats* st) {
         {
             const Aec* a1 = A[1];
             int span = pbfdaf_tap_span(&a1->main_filter.base);
-            warm_pred = a1->cfg.delay_acquire_warm_transfer
-                        && erle_ring_peak15(a1) > a1->cfg.delay_acquire_inst_erle_db
+            warm_pred = a1->tun.delay_acquire_warm_transfer
+                        && erle_ring_peak15(a1) > a1->tun.delay_acquire_inst_erle_db
                         && span <= 4096;                    /* pbfdaf_warm_shift_ir refuses a span above its scratch */
             if (warm_pred) warm_pred = span;                /* the new delay must also be in (0, span): checked below */
         }
@@ -431,7 +434,7 @@ static void run_stream(const Stream* s, Stats* st) {
         d1 = ds.delay_samples;
         s1 = aec_post_reset_serial(A[1]);
         {
-            int ne_soft = A[1]->cfg.dt_aware_recovery_soft && A[1]->ne_recent_frames > 0;
+            int ne_soft = A[1]->tun.dt_aware_recovery_soft && A[1]->ne_recent_frames > 0;
             int rej = A[1]->delay_reject_count > rej0;
             uint32_t want_delta = 0u;
             int event = 1;
@@ -567,7 +570,7 @@ static void run_stream(const Stream* s, Stats* st) {
     }
     app_free(&app_k); app_free(&app_n); app_free(&app_x);
     free(probe_mem);
-    for (role = 0; role < NROLE; ++role) { aec_destroy(A[role]); free(A[role]); }
+    for (role = 0; role < NROLE; ++role) aec_destroy(A[role]);
     free(oF); free(oK); free(oN); free(oP); free(oX); free(prev_formed); free(pass1);
 }
 
@@ -970,7 +973,7 @@ static void test_cng_reference(void) {
  * arithmetic in this file, not from the code under test. */
 static void test_guard_threshold_fixture(int sr, int fft) {
     AecConfig cfg;
-    Aec a;
+    Aec *a = NULL;
     int nb, k, c, mode;
     const float one = 1.0f;
     const float ys[3] = { 1.0f, nextafterf(one, 0.0f), nextafterf(one, 2.0f) };
@@ -978,11 +981,11 @@ static void test_guard_threshold_fixture(int sr, int fft) {
     aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, sr);
     cfg.fft_size = fft;
     cfg.residual = AEC_RESIDUAL_FULL;
-    if (aec_create(&a, &cfg) != 0) { CHECK(0, "fixture: create"); return; }
-    nb = a.n_freqs;
+    if ((a = aec_create(&cfg)) == NULL) { CHECK(0, "fixture: create"); return; }
+    nb = a->n_freqs;
     for (mode = 0; mode < 4; ++mode) {          /* 0 normal, 1 usable, 2 flag off, 3 energies swapped (E one ulp below) */
         for (c = 0; c < 3; ++c) {
-            AecPostRunScratch* sc = &a.a3_sc;
+            AecPostRunScratch* sc = &a->a3_sc;
             float e = one, y = ys[c];
             int expect = want[c], got;
             float se_ref, sy_ref;
@@ -1001,9 +1004,9 @@ static void test_guard_threshold_fixture(int sr, int fft) {
             sc->abs_error[5] = e;
             se_ref = e * e; sy_ref = sqrtf(y * y); sy_ref = sy_ref * sy_ref;
             if (mode == 0 || mode == 3) CHECK((se_ref > sy_ref) == expect, "fixture reference sanity (c=%d mode=%d)", c, mode);
-            a.post.cfg.output_capture_when_linear_unusable = (mode != 2);
-            aec_post_eval_output_guard(&a.post, sc, mode == 1);
-            got = a.post.output_guard_active;
+            a->post.cfg.output_capture_when_linear_unusable = (mode != 2);
+            aec_post_eval_output_guard(&a->post, sc, mode == 1);
+            got = a->post.output_guard_active;
             if (mode == 1 || mode == 2) expect = 0;
             CHECK(got == expect, "fixture %d/%d c=%d mode=%d: guard %d, expected %d", sr / 1000, fft, c, mode, got, expect);
             if (got) CHECK(sc->output_base[5].r == y && sc->output_base[4].r == 0.0f && sc->output_base[5].i == 0.0f,
@@ -1011,8 +1014,8 @@ static void test_guard_threshold_fixture(int sr, int fft) {
             else CHECK(sc->output_base[5].r == -7.0f, "fixture: an unfired guard leaves the dedicated base untouched");
         }
     }
-    a.post.cfg.output_capture_when_linear_unusable = 1;
-    aec_destroy(&a);
+    a->post.cfg.output_capture_when_linear_unusable = 1;
+    aec_destroy(a);
 }
 
 /* Reduction-order fixtures. The decision is specified on the float32 pairwise reduction (numpy's pairwise sum: n <= 8
@@ -1053,22 +1056,22 @@ static float sequential_ref(const float* a, size_t n) {
 
 static void test_guard_reduction_order(int sr, int fft) {
     AecConfig cfg;
-    Aec a;
+    Aec *a = NULL;
     int nb, k, trial, kept[2] = {0, 0}, bad = 0, premise_bad = 0;
     const int want_each = 16;
     float *e, *y, *e2, *y2;
     aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, sr);
     cfg.fft_size = fft;
     cfg.residual = AEC_RESIDUAL_FULL;
-    if (aec_create(&a, &cfg) != 0) { CHECK(0, "reduction fixture: create"); return; }
-    nb = a.n_freqs;
+    if ((a = aec_create(&cfg)) == NULL) { CHECK(0, "reduction fixture: create"); return; }
+    nb = a->n_freqs;
     e = (float*)malloc((size_t)nb * sizeof(float)); y = (float*)malloc((size_t)nb * sizeof(float));
     e2 = (float*)malloc((size_t)nb * sizeof(float)); y2 = (float*)malloc((size_t)nb * sizeof(float));
-    a.post.cfg.output_capture_when_linear_unusable = 1;
+    a->post.cfg.output_capture_when_linear_unusable = 1;
     g_rs = 0x5EED0000u + (uint32_t)fft;
     for (trial = 0; trial < 200000 && (kept[0] < want_each || kept[1] < want_each); ++trial) {
         int dp, ds, got;
-        AecPostRunScratch* sc = &a.a3_sc;
+        AecPostRunScratch* sc = &a->a3_sc;
         for (k = 0; k < nb; ++k) {
             float u = 0.5f * (rnd() + 1.0f), v = 0.5f * (rnd() + 1.0f);
             e[k] = ldexpf(1.0f + 0.5f * v, -(int)(14.0f * u));
@@ -1091,9 +1094,9 @@ static void test_guard_reduction_order(int sr, int fft) {
             sc->ybase[k].r = y[k]; sc->ybase[k].i = 0.0f;
             sc->abs_error[k] = e[k];
         }
-        aec_post_eval_output_guard(&a.post, sc, 0);
+        aec_post_eval_output_guard(&a->post, sc, 0);
         for (k = 0; k < nb; ++k) if (sc->abs_ybase[k] != y[k]) { premise_bad++; break; }
-        got = a.post.output_guard_active;
+        got = a->post.output_guard_active;
         if (got != dp) bad++;
     }
     printf("  reduction-order fixture %d/%d: %d trials kept (pairwise fires %d, sequential fires %d) of %d drawn\n",
@@ -1104,7 +1107,7 @@ static void test_guard_reduction_order(int sr, int fft) {
     CHECK(bad == 0, "reduction fixture %d/%d: guard decision differs from the float32 pairwise reduction on %d of %d trials",
           sr / 1000, fft, bad, kept[0] + kept[1]);
     free(e); free(y); free(e2); free(y2);
-    aec_destroy(&a);
+    aec_destroy(a);
 }
 
 /* ------------------------------------------------------------------------------------------------------------------ */
@@ -1113,13 +1116,13 @@ static void test_guard_reduction_order(int sr, int fft) {
 
 static void test_getter_contract(void) {
     AecConfig cfg;
-    Aec a, b;
+    Aec *a = NULL, *b = NULL;
     AecResidualView ob;
     float mic[256], far[256];
     int i, h;
     aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, 16000);
     cfg.residual = AEC_RESIDUAL_FULL;
-    if (aec_create(&a, &cfg) != 0) { CHECK(0, "getter: create"); return; }
+    if ((a = aec_create(&cfg)) == NULL) { CHECK(0, "getter: create"); return; }
     {   /* a caller struct declared smaller than AecResidualView (an older two-size_t layout, 16 bytes on LP64 and 8 on
          * 32-bit targets, and one byte short) sits in a canary-filled buffer: refused, and not one byte written, the
          * declared struct included */
@@ -1131,7 +1134,7 @@ static void test_getter_contract(void) {
             memset(buf, 0xAB, sizeof buf);
             memcpy(buf, &dsz, sizeof dsz);
             memcpy(ref, buf, sizeof buf);
-            CHECK(aec_get_residual(&a, (AecResidualView*)(void*)buf) == AEC_ERR_ARG, "getter: struct_size %zu refused", dsz);
+            CHECK(aec_get_residual(a, (AecResidualView*)(void*)buf) == AEC_ERR_ARG, "getter: struct_size %zu refused", dsz);
             CHECK(memcmp(buf, ref, sizeof buf) == 0, "getter: struct_size %zu: nothing written (declared struct and canary)",
                   dsz);
         }
@@ -1140,51 +1143,51 @@ static void test_getter_contract(void) {
         {
             float warm_out[256];
             memset(mic, 0, sizeof mic); memset(far, 0, sizeof far);
-            CHECK(aec_process(&a, mic, far, warm_out) == AEC_OK, "getter: one completed hop");
+            CHECK(aec_process(a, mic, far, warm_out) == AEC_OK, "getter: one completed hop");
         }
         memset(buf, 0xAB, sizeof buf);
         { size_t dsz = sizeof buf; memcpy(buf, &dsz, sizeof dsz); }
         memcpy(ref, buf, sizeof buf);
-        CHECK(aec_get_residual(&a, (AecResidualView*)(void*)buf) == AEC_OK, "getter: larger struct_size accepted");
+        CHECK(aec_get_residual(a, (AecResidualView*)(void*)buf) == AEC_OK, "getter: larger struct_size accepted");
         CHECK(memcmp(buf + sizeof(AecResidualView), ref + sizeof(AecResidualView), sizeof buf - sizeof(AecResidualView)) == 0,
               "getter: larger struct_size: bytes past sizeof(AecResidualView) untouched");
         memcpy(&ob, buf, sizeof ob);
-        CHECK(ob.struct_size == sizeof ob && ob.n_freqs == a.n_freqs && ob.base_spec != NULL,
+        CHECK(ob.struct_size == sizeof ob && ob.n_freqs == a->n_freqs && ob.base_spec != NULL,
               "getter: larger struct_size: prefix filled, struct_size reports sizeof(AecResidualView)");
     }
     memset(&ob, 0xAB, sizeof ob);
     ob.struct_size = sizeof ob;
     CHECK(aec_get_residual(NULL, &ob) == AEC_ERR_ARG && ob.base_spec == NULL && ob.n_freqs == 0 && ob.guard_active == 0
           && ob.struct_size == sizeof ob, "getter: NULL instance refused, prefix zeroed");
-    CHECK(aec_get_residual(&a, NULL) == AEC_ERR_ARG, "getter: NULL out refused");
-    CHECK(aec_post_reset_serial(NULL) == 0u && aec_post_reset_serial(&a) == 0u, "serial: 0 on NULL and on a fresh instance");
+    CHECK(aec_get_residual(a, NULL) == AEC_ERR_ARG, "getter: NULL out refused");
+    CHECK(aec_post_reset_serial(NULL) == 0u && aec_post_reset_serial(a) == 0u, "serial: 0 on NULL and on a fresh instance");
     g_rs = 5u;
     for (h = 0; h < 40; ++h) {
         for (i = 0; i < 256; ++i) { mic[i] = 0.1f * rnd(); far[i] = 0.3f * rnd(); }
-        if (aec_process_linear(&a, mic, far) != AEC_OK || aec_process_residual(&a, NULL) != AEC_OK) {
+        if (aec_process_linear(a, mic, far) != AEC_OK || aec_process_residual(a, NULL) != AEC_OK) {
             CHECK(0, "getter: split hop %d", h);
             break;
         }
     }
     {
-        uint32_t s0 = aec_post_reset_serial(&a), s1, s2;
-        s1 = aec_post_reset_serial(&a);
+        uint32_t s0 = aec_post_reset_serial(a), s1, s2;
+        s1 = aec_post_reset_serial(a);
         CHECK(s0 == s1, "serial: reading does not consume it");
-        aec_reset(&a);
-        s2 = aec_post_reset_serial(&a);
+        aec_reset(a);
+        s2 = aec_post_reset_serial(a);
         CHECK(s2 == s0 + 1u, "serial: aec_reset advances it by one");
-        CHECK(aec_post_reset_serial(&a) == s2, "serial: repeatable read after a reset");
+        CHECK(aec_post_reset_serial(a) == s2, "serial: repeatable read after a reset");
     }
-    aec_destroy(&a);
+    aec_destroy(a);
     /* no residual stage: no base */
     aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, 16000);
     cfg.residual = AEC_RESIDUAL_OFF;
-    if (aec_create(&b, &cfg) == 0) {
+    if ((b = aec_create(&cfg)) != NULL) {
         memset(&ob, 0xAB, sizeof ob);
         ob.struct_size = sizeof ob;
-        CHECK(aec_get_residual(&b, &ob) == AEC_ERR_MODE && ob.base_spec == NULL && ob.struct_size == sizeof ob,
+        CHECK(aec_get_residual(b, &ob) == AEC_ERR_MODE && ob.base_spec == NULL && ob.struct_size == sizeof ob,
               "getter: refused (AEC_ERR_MODE, view zeroed) when AecConfig.residual is OFF");
-        aec_destroy(&b);
+        aec_destroy(b);
     }
 }
 

@@ -25,9 +25,7 @@
 extern "C" {
 #endif
 
-/* Seed of the comfort-noise generator after construction and after every hard post-chain reset.
- * Exported through aec.h; an external synthesizer that calls aec_apply_cng_spec() reseeds with it. */
-#define AEC_CNG_SEED 42u
+/* The comfort-noise generator starts from AEC_CNG_SEED (aec.h) after construction and after every hard post-chain reset. */
 
 /* Driver config and wall-clock-rescaled CNG constants; pass the values computed at construction. */
 typedef struct {
@@ -110,7 +108,7 @@ typedef struct {
 
     ReverbModel avg_reverb;
 
-    float   *ola_buf;          /* NULL when aec_post_apply_output() is never called (context_only) */
+    float   *ola_buf;          /* NULL when no hop synthesizes (context_only) */
 
     /* per-hop scratch (caller-owned) */
     float   *near_psd;
@@ -166,46 +164,17 @@ typedef struct {
     const float *abs_nsw_e1;
 } AecPostAbs;
 
-/* Stage 1-2: PSDs and capture_psd_win. A NULL mag->abs_far leaves p->far_psd untouched. */
-void aec_post_compute_psds(AecPost *p, const AecPostAbs *mag);
-
-/* Stage 3: avg-render-reverb -> p->x2_reverb_for_erle (only when x2_present). */
-void aec_post_compute_x2_reverb(AecPost *p, int x2_present,
-                                const float *x2_at_delay, const float *x2_past,
-                                float decay_steady);
-
 /* Ring slots the average-render reverb reads: delay_idx is the partition `delay` blocks older
  * than the newest, past_idx the one just older; delay is clamped to [0, n_part - 2]. Requires
  * n_part >= 1. */
 void aec_post_avg_reverb_slots(int n_part, int partition_idx, int delay,
                                int *delay_idx, int *past_idx);
 
-/* Stage 4: coherence EMA -> p->coh_gate_mask (when erle_coh_gate). */
-void aec_post_compute_coherence(AecPost *p,
-                                const Complex *echo_spec_for_coh,
-                                const Complex *near_spec,
-                                const AecPostAbs *mag);
-
-/* Stage 5: CNG N2 tracking -> p->comfort_noise. */
-void aec_post_compute_comfort_noise(AecPost *p, int saturated_capture);
-
-/* Stage 6: gain apply on the rendering base, CNG inject (aec_cng_fill), irfft, OLA. output_base is
- * the base chosen by this hop's output guard (aec_post_run): the linear residual spectrum, or
- * error + echo when p->output_guard_active; nothing is re-derived here. */
-void aec_post_apply_output(AecPost *p,
-                           const Complex *output_base,
-                           const float *gain,
-                           float *out);
-
 /* aec_post_run drives AecState, ResidualEchoEstimator, SuppressionGain, StationarityEstimator
  * and LinearFilterSelect for one hop. The caller must advance the stationarity estimator for this
  * hop first. */
 
 #define AEC_POST_DELAY_ADJ_NONE          0
-#define AEC_POST_DELAY_ADJ_BUFFER_FLUSH  1
-#define AEC_POST_DELAY_ADJ_NEW_DETECTED  2
-
-#define AEC_POST_DELAY_QUALITY_REFINED   2
 
 /* Per-hop inputs and persistent objects for aec_post_run; pointers are caller-owned. */
 typedef struct {
@@ -213,14 +182,10 @@ typedef struct {
     const Complex *far_spec;
     const Complex *echo_spec;
     const Complex *error_spec_windowed;
-    const Complex *W0;
     const Complex *W_all;
     const float   *x2_cache;             /* filter.x2_cache flat (n_part×nf): |X_buf|² per partition row;
                                           * NULL → no render-reverb term this hop. */
     const float   *sqrt_hann;
-    const float   *kalman_P;             /* filter Kalman P (bridge div);
-                                          * NULL/0 → divergence_indicator 0 */
-    size_t         kalman_P_len;
     int            partition_idx;
     int            n_partitions;
     const float   *filter_taps_full;
@@ -232,8 +197,6 @@ typedef struct {
                                              * NULL → not available        */
     float          s_ref_max;
     float          s_coa_max;
-    float          main_error_energy;
-    float          shadow_error_energy;
 
     const float   *raw_output;
     const float   *near_end;

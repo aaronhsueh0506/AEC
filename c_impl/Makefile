@@ -64,6 +64,9 @@ endif
 
 CFLAGS  = -Wall -Wextra -O2 -std=gnu99
 CFLAGS += -I./include -I./example
+# White-box tests (struct Aec, the library-internal headers) add -I./src through TEST_INC; the library, the CLI and the public-header
+# checks see only include/.
+TEST_INC = -I./src
 CFLAGS += $(EXTRA_CFLAGS)
 CFLAGS += $(SIMD_CFLAGS)
 CFLAGS += $(PROFILE_CFLAGS)
@@ -108,7 +111,17 @@ endif
 # observe and must not ship. It is appended to CFLAGS before CFG_SIG is computed, so a testing build never shares objects
 # with a production build; `make test-no-testing-symbols` checks the key isolation and the symbols' absence from, and
 # presence in, each archive.
+# The goals whose programs construct an instance with a test-built AecTuning (test/aec_test_tuning.h) run against the testing
+# library: naming one of them as a goal sets AEC_TESTING=1 (a command-line AEC_TESTING wins), so the dispatch and the
+# aggregators need no per-goal recursion. test-rate-structural and the three test-aec-array* goals re-invoke make themselves.
+AEC_HOOK_GOALS := \
+  test-split-entry-2 test-split-entry-3 test-config-validation test-process-context test-duty-census \
+  test-external-realign test-guard-unify test-handle-ready test-linear-context test-memory-layout test-shared-far-spec \
+  test-shared-fft-handle test-spectral-reuse test-synthesis-window test-parity-e2e pyc-parity-driver
 AEC_TESTING ?= 0
+ifneq ($(filter $(AEC_HOOK_GOALS),$(MAKECMDGOALS)),)
+  AEC_TESTING := 1
+endif
 ifeq ($(AEC_TESTING),1)
   CFLAGS += -DAEC_TESTING
 endif
@@ -122,7 +135,7 @@ ifeq ($(NO_STDIO),1)
 endif
 
 # AEC_NO_ARRAY=1 builds the single-channel library: -DAEC_NO_ARRAY, no src/aec_array.c and no src/aec_res.c (the four-microphone
-# array instance and its gain stage), and AecConfig.n_mics other than 1 is rejected by aec_resolve_valid_config() / aec_init() /
+# array instance and its gain stage), and AecConfig.n_mics other than 1 is rejected by aec_resolve() / aec_init() /
 # aec_create(). aec_get_array(), the aec_array_*() diagnostics and the lane entry points are then not defined. The array-only test
 # targets (test-aec-array, test-aec-array-2, test-aec-array-flow, test-aec-res) are skipped with a message. Set before CFG_SIG is
 # computed so it keys its own obj/bin directory.
@@ -213,9 +226,19 @@ CFLAGS    += $(FP_POLICY)
 # Under `make -n` the dispatch recipe still runs its sub-makes (it mentions $(MAKE)); they inherit -n, so no file is created.
 COMMON_FWD = BACKEND=$(BACKEND) SIMD=$(SIMD) WERROR=$(WERROR) CC='$(CC)' CXX='$(CXX)' EXTRA_CFLAGS='$(EXTRA_CFLAGS)' NO_STDIO=$(NO_STDIO) TOOLCHAIN_CHECK=$(TOOLCHAIN_CHECK)
 
+# Goals dispatched through the two-phase audiolib resolution below; the phase-2 .PHONY list names the same goals.
+AEC_COMMON_GOALS := \
+  all bench test test-full test-counter-saturation test-rate-structural test-config-validation test-process-context \
+  test-split-entry test-split-entry-2 test-split-entry-3 test-aec-array test-aec-array-2 test-aec-array-flow \
+  test-avg-reverb-slots test-linear-context test-guard-unify test-res-nearend-gate test-runtime-preset \
+  test-delay-num-filters test-duty-census test-external-realign test-cli-delay-flags test-shared-far-spec \
+  test-spectral-reuse test-heap-alignment test-lifecycle test-shared-fft-handle test-synthesis-window test-static-aec \
+  test-memory-layout test-handle-ready test-reset-parity test-zero-heap test-aec-res test-detectors-parity \
+  test-detectors-parity-all test-parity-e2e pyc-parity-driver
+
 ifeq ($(COMMON_LIB),)
-.PHONY: all bench test test-full test-counter-saturation test-rate-structural test-config-validation test-process-context test-split-entry test-split-entry-2 test-split-entry-3 test-aec-array test-aec-array-2 test-aec-array-flow test-avg-reverb-slots test-linear-context test-guard-unify test-res-nearend-gate test-runtime-preset test-delay-num-filters test-duty-census test-external-realign test-cli-delay-flags test-shared-far-spec test-spectral-reuse test-heap-alignment test-shared-fft-handle test-synthesis-window test-static-aec test-memory-layout test-handle-ready test-reset-parity test-zero-heap test-aec-res test-detectors-parity test-detectors-parity-all test-parity-e2e pyc-parity-driver
-all bench test test-full test-counter-saturation test-rate-structural test-config-validation test-process-context test-split-entry test-split-entry-2 test-split-entry-3 test-aec-array test-aec-array-2 test-aec-array-flow test-avg-reverb-slots test-linear-context test-guard-unify test-res-nearend-gate test-runtime-preset test-delay-num-filters test-duty-census test-external-realign test-cli-delay-flags test-shared-far-spec test-spectral-reuse test-heap-alignment test-shared-fft-handle test-synthesis-window test-static-aec test-memory-layout test-handle-ready test-reset-parity test-zero-heap test-aec-res test-detectors-parity test-detectors-parity-all test-parity-e2e pyc-parity-driver:
+.PHONY: $(AEC_COMMON_GOALS)
+$(AEC_COMMON_GOALS):
 	+@ac="$$($(MAKE) -s --no-print-directory -C $(COMMON_DIR) $(COMMON_FWD) print-lib-path)"; \
 	 test -n "$$ac" || { echo "FATAL: could not resolve audiolib archive path (COMMON_DIR=$(COMMON_DIR) -- is audiolib present as a sibling of this repo?)" >&2; exit 1; }; \
 	 $(MAKE) --no-print-directory $@ COMMON_LIB="$$ac"
@@ -312,7 +335,7 @@ TEST_RP_TARGET = $(BIN_DIR)/test_runtime_preset
 
 # Matched-filter bank size (AecConfig.delay_num_filters -> delay_aec_get_mem_size/delay_aec_init): the default is the
 # 5-filter geometry, a shorter bank loses reach, the pool scales with n, and out-of-range values are rejected at every layer
-# (aec_resolve_valid_config and the pool-first delay_aec_get_mem_size/delay_aec_init, which do not clamp). Needs the full Aec
+# (aec_resolve and the pool-first delay_aec_get_mem_size/delay_aec_init, which do not clamp). Needs the full Aec
 # type.
 TEST_DNF_SRCS   = $(TEST_DIR)/test_delay_num_filters.c
 TEST_DNF_OBJS   = $(patsubst $(TEST_DIR)/%.c,$(OBJ_DIR)/%.o,$(TEST_DNF_SRCS))
@@ -403,6 +426,10 @@ TEST_SRU_SRCS   = $(TEST_DIR)/test_spectral_reuse.c
 TEST_SRU_OBJS   = $(patsubst $(TEST_DIR)/%.c,$(OBJ_DIR)/%.o,$(TEST_SRU_SRCS))
 TEST_SRU_TARGET = $(BIN_DIR)/test_spectral_reuse
 
+TEST_LIF_SRCS   = $(TEST_DIR)/test_lifecycle.c
+TEST_LIF_OBJS   = $(patsubst $(TEST_DIR)/%.c,$(OBJ_DIR)/%.o,$(TEST_LIF_SRCS))
+TEST_LIF_TARGET = $(BIN_DIR)/test_lifecycle
+
 TEST_HAL_TARGET = $(BIN_DIR)/test_heap_alignment
 TEST_HAL_OBJ = $(OBJ_DIR)/test_heap_alignment.o
 
@@ -470,7 +497,7 @@ PYC_RUN_OBJ    = $(OBJ_DIR)/pyc_aec_run.o
 PYC_RUN_TARGET = $(BIN_DIR)/pyc_aec_run
 
 $(PYC_RUN_OBJ): $(PYC_DIR)/aec_run.c | _cfg_guard
-	$(CC) $(CFLAGS) -MD -MP -c -o $@ $<
+	$(CC) $(CFLAGS) $(TEST_INC) -MD -MP -c -o $@ $<
 
 # Does its own builds (one std-math, one ship) through `make pyc-parity-driver`, so it needs no
 # audiolib dispatch of its own.
@@ -557,13 +584,13 @@ $(OBJ_DIR)/%.o: $(EXAMPLE_DIR)/%.c | _cfg_guard
 	$(CC) $(CFLAGS) -MD -MP -c -o $@ $<
 
 $(OBJ_DIR)/test_aec_res.o: $(TEST_DIR)/test_aec_res.c | _cfg_guard
-	$(CC) $(CFLAGS) -I. -MD -MP -c -o $@ $<
+	$(CC) $(CFLAGS) $(TEST_INC) -I. -MD -MP -c -o $@ $<
 
 $(OBJ_DIR)/test_zero_heap_aec.o: $(TEST_DIR)/test_zero_heap_aec.c | _cfg_guard
-	$(CC) $(CFLAGS) -fno-builtin -I$(COMMON_DIR)/test -MD -MP -c -o $@ $<
+	$(CC) $(CFLAGS) $(TEST_INC) -fno-builtin -I$(COMMON_DIR)/test -MD -MP -c -o $@ $<
 
 $(OBJ_DIR)/%.o: $(TEST_DIR)/%.c | _cfg_guard
-	$(CC) $(CFLAGS) -MD -MP -c -o $@ $<
+	$(CC) $(CFLAGS) $(TEST_INC) -MD -MP -c -o $@ $<
 
 .PHONY: lib
 lib: $(LIB_TARGET)
@@ -587,33 +614,45 @@ $(SELFTEST_TARGET): $(SELFTEST_SRC) | _cfg_guard
 
 -include $(OBJ_DIR)/simd_selftest_aec.d
 
-# Regenerates include/aec_balanced_config.h (python/diag/gen_aec_balanced_config_h.py) into a throwaway copy of python/ and
-# diffs it against the checked-in header; a FAIL means the header was hand-edited or is stale. It needs no audiolib archive,
+# Regenerates include/aec_balanced_config.h and test/aec_ref_tables.h (python/diag/gen_aec_balanced_config_h.py) into a throwaway
+# copy of python/ and diffs them against the checked-in files; a FAIL means the header was hand-edited or is stale. It needs no audiolib archive,
 # so it sits outside the COMMON_LIB dispatch. PYTHON is declared further down; recipe variables expand when the recipe runs.
 .PHONY: test-header-fresh
 test-header-fresh:
 	@set -e; \
 	d="$$(mktemp -d "$${TMPDIR:-/tmp}/aec_header_fresh.XXXXXX")"; \
 	trap 'rm -rf "$$d"' EXIT INT TERM; \
-	mkdir -p "$$d/c_impl/include"; \
+	mkdir -p "$$d/c_impl/include" "$$d/c_impl/test"; \
 	cp -R "$(CURDIR)/../python" "$$d/python"; \
 	find "$$d/python" \( -name __pycache__ -prune -o -name '*.pyc' \) -exec rm -rf {} +; \
 	"$(PYTHON)" "$$d/python/diag/gen_aec_balanced_config_h.py" >/dev/null; \
-	if cmp -s "$$d/c_impl/include/aec_balanced_config.h" "$(CURDIR)/include/aec_balanced_config.h"; then \
-	  echo "test-header-fresh: include/aec_balanced_config.h is fresh against its generator"; \
-	else \
-	  echo "FAIL: include/aec_balanced_config.h is STALE against python/diag/gen_aec_balanced_config_h.py -- re-run the generator:" >&2; \
-	  diff -u "$(CURDIR)/include/aec_balanced_config.h" "$$d/c_impl/include/aec_balanced_config.h" >&2 || true; \
-	  exit 1; \
-	fi
+	for f in include/aec_balanced_config.h test/aec_ref_tables.h; do \
+	  if cmp -s "$$d/c_impl/$$f" "$(CURDIR)/$$f"; then \
+	    echo "test-header-fresh: $$f is fresh against its generator"; \
+	  else \
+	    echo "FAIL: $$f is STALE against python/diag/gen_aec_balanced_config_h.py -- re-run the generator:" >&2; \
+	    diff -u "$(CURDIR)/$$f" "$$d/c_impl/$$f" >&2 || true; \
+	    exit 1; \
+	  fi; \
+	done
 
-# Compile-only C++ check of include/aec.h and include/aec_internal.h (the library itself has no C++ TU): the AEC_LEVEL_*
-# enumerators must be accepted by aec_config_from_level(), aec_set_level() and the level lookups. It needs no audiolib
-# archive, so it sits outside the COMMON_LIB dispatch like test-header-fresh.
+# Compile-only checks of the public headers with include/ alone on the path (never -I./src): each of aec.h, aec_internal.h
+# and aec_debug.h compiles by itself as C, and together they compile as C++11 with the AEC_LEVEL_* enumerators accepted by
+# aec_config_from_level(), aec_set_level() and the level lookups. A public header that starts including a src/ header fails
+# here. It needs no audiolib archive, so it sits outside the COMMON_LIB dispatch like test-header-fresh.
 .PHONY: test-header-cpp
 test-header-cpp:
+	@for h in aec.h aec_internal.h aec_debug.h; do \
+	  printf '#include "%s"\n' "$$h" | $(CC) -x c -std=gnu99 -fsyntax-only -Wall -Wextra -Werror -I./include -I$(COMMON_DIR)/include -I$(COMMON_DIR) - || exit 1; \
+	done
 	$(CXX) -std=c++11 -fsyntax-only -Wall -Wextra -Werror -I./include -I$(COMMON_DIR)/include -I$(COMMON_DIR) $(TEST_DIR)/test_header_cpp.cpp
-	@echo "test-header-cpp: aec.h and aec_internal.h compile as C++11 and the AEC_LEVEL_* enumerators convert"
+	@echo "test-header-cpp: aec.h, aec_internal.h and aec_debug.h compile alone as C and together as C++11, the AEC_LEVEL_* enumerators convert"
+
+# Compiles and runs the C sample embedded in STATIC_MEMORY.md against the current aec.h. The script builds audiolib itself, so
+# the target sits outside the COMMON_LIB dispatch like test-header-fresh.
+.PHONY: test-docs-smoke
+test-docs-smoke:
+	CC='$(CC)' CXX='$(CXX)' BACKEND='$(BACKEND)' COMMON_DIR='$(abspath $(COMMON_DIR))' bash $(TEST_DIR)/docs_smoke.sh
 
 # Builds AND runs (unlike `bench`, which only builds) the delay_aec_reset() test. It is self-contained (synthetic signals,
 # no fixture file).
@@ -641,7 +680,7 @@ test-delay-kernels: $(TEST_DKN_TARGET)
 	"$(abspath $(TEST_DKN_TARGET))"
 
 $(TEST_DKN_OBJ): $(TEST_DIR)/test_delay_kernels.c | _cfg_guard
-	$(CC) $(CFLAGS) -I. -MD -MP -c -o $@ $<
+	$(CC) $(CFLAGS) $(TEST_INC) -I. -MD -MP -c -o $@ $<
 
 $(TEST_DKN_TARGET): $(TEST_DKN_OBJ) $(OBJ_DIR)/aec_scale.o | _cfg_guard
 	$(CC) $(CFLAGS) -o $@ $(TEST_DKN_OBJ) $(OBJ_DIR)/aec_scale.o -lm
@@ -657,7 +696,7 @@ test-delay-matched-neon: $(TEST_DMN_TARGET)
 	"$(abspath $(TEST_DMN_TARGET))"
 
 $(TEST_DMN_OBJ): $(TEST_DIR)/test_delay_matched_neon.c | _cfg_guard
-	$(CC) $(CFLAGS) -I. -MD -MP -c -o $@ $<
+	$(CC) $(CFLAGS) $(TEST_INC) -I. -MD -MP -c -o $@ $<
 
 $(TEST_DMN_TARGET): $(TEST_DMN_OBJ) $(OBJ_DIR)/aec_scale.o | _cfg_guard
 	$(CC) $(CFLAGS) -o $@ $(TEST_DMN_OBJ) $(OBJ_DIR)/aec_scale.o -lm
@@ -670,7 +709,7 @@ test-neon-twins: $(TEST_NT_TARGET)
 	"$(abspath $(TEST_NT_TARGET))"
 
 $(TEST_NT_OBJ): $(TEST_DIR)/test_neon_twins.c | _cfg_guard
-	$(CC) $(CFLAGS) -I. -MD -MP -c -o $@ $<
+	$(CC) $(CFLAGS) $(TEST_INC) -I. -MD -MP -c -o $@ $<
 
 $(TEST_NT_TARGET): $(TEST_NT_OBJ) $(OBJ_DIR)/aec_scale.o | _cfg_guard
 	$(CC) $(CFLAGS) -o $@ $(TEST_NT_OBJ) $(OBJ_DIR)/aec_scale.o -lm
@@ -681,7 +720,7 @@ $(TEST_NT_TARGET): $(TEST_NT_OBJ) $(OBJ_DIR)/aec_scale.o | _cfg_guard
 # $(TARGET)/$(BENCH_TARGET) relink only then.
 # =============================================================================
 ifneq ($(COMMON_LIB),)
-.PHONY: all bench FORCE test test-full test-counter-saturation test-rate-structural _run-rate-structural test-config-validation test-process-context test-split-entry test-split-entry-2 test-split-entry-3 test-aec-array test-aec-array-2 test-aec-array-flow test-avg-reverb-slots test-linear-context test-guard-unify test-res-nearend-gate test-runtime-preset test-delay-num-filters test-duty-census test-external-realign test-cli-delay-flags test-shared-far-spec test-spectral-reuse test-heap-alignment test-shared-fft-handle test-synthesis-window test-static-aec test-memory-layout test-handle-ready test-reset-parity test-zero-heap test-aec-res test-detectors-parity test-detectors-parity-all test-parity-e2e pyc-parity-driver
+.PHONY: FORCE _run-rate-structural $(AEC_COMMON_GOALS)
 all: $(TARGET)
 bench: $(BENCH_TARGET)
 
@@ -809,6 +848,10 @@ test-spectral-reuse: $(TEST_SRU_TARGET)
 test-heap-alignment: $(TEST_HAL_TARGET)
 	"$(abspath $(TEST_HAL_TARGET))"
 
+# Builds AND runs: create/process/reset/destroy cycles, and the refusals of a destroyed handle.
+test-lifecycle: $(TEST_LIF_TARGET)
+	"$(abspath $(TEST_LIF_TARGET))"
+
 # Builds AND runs, same convention as test-counter-saturation above.
 test-shared-fft-handle: $(TEST_SFH_TARGET)
 	"$(abspath $(TEST_SFH_TARGET))"
@@ -818,14 +861,14 @@ test-synthesis-window: $(TEST_SSW_TARGET)
 	"$(abspath $(TEST_SSW_TARGET))"
 
 test-memory-layout: $(OBJS) $(COMMON_LIB) | _cfg_guard
-	$(CC) $(CFLAGS) -c -o "$(OBJ_DIR)/test_memory_layout.o" "$(TEST_DIR)/test_memory_layout.c"
+	$(CC) $(CFLAGS) $(TEST_INC) -c -o "$(OBJ_DIR)/test_memory_layout.o" "$(TEST_DIR)/test_memory_layout.c"
 	$(LINK) $(CFLAGS) -o "$(BIN_DIR)/test_memory_layout" "$(OBJ_DIR)/test_memory_layout.o" $(OBJS) $(COMMON_LIB) $(LDFLAGS)
 	"$(abspath $(BIN_DIR)/test_memory_layout)"
 
 # Builds AND runs. check_handle_entries.py first compares the entries the test calls with the Aec-handle prototypes of aec.h and aec_internal.h.
 test-handle-ready: $(OBJS) $(COMMON_LIB) | _cfg_guard
 	$(PYTHON) -I "$(TEST_DIR)/check_handle_entries.py" include/aec.h "$(TEST_DIR)/test_handle_ready.c" include/aec_internal.h
-	$(CC) $(CFLAGS) -c -o "$(OBJ_DIR)/test_handle_ready.o" "$(TEST_DIR)/test_handle_ready.c"
+	$(CC) $(CFLAGS) $(TEST_INC) -c -o "$(OBJ_DIR)/test_handle_ready.o" "$(TEST_DIR)/test_handle_ready.c"
 	$(LINK) $(CFLAGS) -o "$(BIN_DIR)/test_handle_ready" "$(OBJ_DIR)/test_handle_ready.o" $(OBJS) $(COMMON_LIB) $(LDFLAGS)
 	"$(abspath $(BIN_DIR)/test_handle_ready)"
 
@@ -841,18 +884,18 @@ test-reset-parity: $(TEST_RPY_TARGET)
 # Regenerates the golden from the Python reference every run, so the gate
 # compares the CURRENT Python against the CURRENT C rather than a stale blob.
 test-detectors-parity: $(TEST_DET_TARGET)
-	python3 ../python/diag/gen_detectors_golden.py "$(TEST_DET_GOLDEN)" $(TEST_DET_HOP) $(TEST_DET_SR)
+	$(PYTHON) ../python/diag/gen_detectors_golden.py "$(TEST_DET_GOLDEN)" $(TEST_DET_HOP) $(TEST_DET_SR)
 	"$(abspath $(TEST_DET_TARGET))" "$(TEST_DET_GOLDEN)"
 
 # Four-grid gate: 8 kHz (not a product grid) plus the three product grids.
 test-detectors-parity-all: $(TEST_DET_TARGET)
-	python3 ../python/diag/gen_detectors_golden.py "$(TEST_DET_GOLDEN)" 128 8000
+	$(PYTHON) ../python/diag/gen_detectors_golden.py "$(TEST_DET_GOLDEN)" 128 8000
 	"$(abspath $(TEST_DET_TARGET))" "$(TEST_DET_GOLDEN)"
-	python3 ../python/diag/gen_detectors_golden.py "$(TEST_DET_GOLDEN)" 128 16000
+	$(PYTHON) ../python/diag/gen_detectors_golden.py "$(TEST_DET_GOLDEN)" 128 16000
 	"$(abspath $(TEST_DET_TARGET))" "$(TEST_DET_GOLDEN)"
-	python3 ../python/diag/gen_detectors_golden.py "$(TEST_DET_GOLDEN)" 256 16000
+	$(PYTHON) ../python/diag/gen_detectors_golden.py "$(TEST_DET_GOLDEN)" 256 16000
 	"$(abspath $(TEST_DET_TARGET))" "$(TEST_DET_GOLDEN)"
-	python3 ../python/diag/gen_detectors_golden.py "$(TEST_DET_GOLDEN)" 512 48000
+	$(PYTHON) ../python/diag/gen_detectors_golden.py "$(TEST_DET_GOLDEN)" 512 48000
 	"$(abspath $(TEST_DET_TARGET))" "$(TEST_DET_GOLDEN)"
 
 test-zero-heap: $(TEST_ZH_TARGET)
@@ -875,9 +918,9 @@ TEST_SIMD_DEP   = selftest test-process-context test-split-entry test-split-entr
                   test-delay-num-filters test-duty-census test-external-realign test-reset-parity test-delay-reset \
                   test-delay-dominant-selection test-delay-kernels test-delay-matched-neon test-neon-twins \
                   test-rate-structural test-counter-saturation
-TEST_SIMD_INDEP = test-heap-alignment test-memory-layout test-handle-ready test-config-validation test-avg-reverb-slots \
+TEST_SIMD_INDEP = test-heap-alignment test-lifecycle test-memory-layout test-handle-ready test-config-validation test-avg-reverb-slots \
                   test-shared-far-spec test-spectral-reuse test-shared-fft-handle test-synthesis-window test-static-aec test-zero-heap \
-                  test-header-fresh test-header-cpp test-detectors-parity-all test-cli-delay-flags
+                  test-header-fresh test-header-cpp test-docs-smoke test-detectors-parity-all test-cli-delay-flags
 TEST_BUILD_GATES = test-no-testing-symbols audit-no-stdio
 CLEAN_ENV       = env -u MAKEFLAGS -u MFLAGS -u MAKELEVEL
 
@@ -1012,6 +1055,10 @@ $(TEST_SRU_TARGET): $(OBJS) $(TEST_SRU_OBJS) $(COMMON_LIB) | _cfg_guard
 	@echo "test_spectral_reuse [$(BACKEND)] -> $@"
 
 # The test includes the actual aec.c with allocation hooks.
+$(TEST_LIF_TARGET): $(OBJS) $(TEST_LIF_OBJS) $(COMMON_LIB) | _cfg_guard
+	$(LINK) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+	@echo "test_lifecycle [$(BACKEND)] -> $@"
+
 $(TEST_HAL_TARGET): $(filter-out $(OBJ_DIR)/aec.o,$(OBJS)) $(TEST_HAL_OBJ) $(COMMON_LIB) | _cfg_guard
 	$(LINK) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
@@ -1023,12 +1070,12 @@ $(TEST_SSW_TARGET): $(OBJS) $(TEST_SSW_OBJS) $(COMMON_LIB) | _cfg_guard
 	$(LINK) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 	@echo "test_synthesis_window [$(BACKEND)] -> $@"
 
-$(TEST_DET_TARGET): $(TEST_DET_SRC) $(SRC_DIR)/detectors.c $(SRC_DIR)/aec_scale.c include/detectors.h | _cfg_guard
+$(TEST_DET_TARGET): $(TEST_DET_SRC) $(SRC_DIR)/detectors.c $(SRC_DIR)/aec_scale.c $(SRC_DIR)/detectors.h | _cfg_guard
 	@mkdir -p $(BIN_DIR)
 #	$(CC), not $(LINK): LINK is $(CXX) so that NE10's C++ archive links, but
 #	this target pulls in no archive at all -- feeding C sources with
 #	-std=gnu99 to a C++ driver just fails.
-	$(CC) $(CFLAGS) -o $@ $(TEST_DET_SRC) $(SRC_DIR)/detectors.c $(SRC_DIR)/aec_scale.c -lm
+	$(CC) $(CFLAGS) $(TEST_INC) -o $@ $(TEST_DET_SRC) $(SRC_DIR)/detectors.c $(SRC_DIR)/aec_scale.c -lm
 	@echo "parity_detectors [$(BACKEND)] -> $@"
 
 $(TEST_STATIC_TARGET): $(OBJS) $(TEST_STATIC_OBJS) $(COMMON_LIB) | _cfg_guard
@@ -1413,11 +1460,11 @@ audit-no-stdio:
 #   Default: fast_math.h approximations for expf/sqrtf in hot paths
 #   Example: make EXTRA_CFLAGS="-DUSE_STANDARD_MATH"
 
-# `debug` delegates to `all` with -g -DAEC_DEBUG added through EXTRA_CFLAGS, which folds into CFLAGS before CFG_SIG is
+# `debug` delegates to `all` with -g added through EXTRA_CFLAGS, which folds into CFLAGS before CFG_SIG is
 # computed, so a debug build gets its own obj/bin directory (a target-specific CFLAGS += would reach only the recipe, after
 # the key was computed).
 debug:
-	+@$(MAKE) EXTRA_CFLAGS='$(EXTRA_CFLAGS) -g -DAEC_DEBUG' all
+	+@$(MAKE) EXTRA_CFLAGS='$(EXTRA_CFLAGS) -g' all
 
 clean:
 	rm -rf $(OBJ_ROOT) $(BIN_ROOT)
@@ -1468,6 +1515,19 @@ help:
 	@echo "  test-spectral-reuse  Build + run spectrum-power reuse and fallback regression"
 	@echo "  test-heap-alignment  Check aligned arena allocation and failure cleanup"
 	@echo "  test-handle-ready    Every aec.h entry refuses a zero-filled, failed-create or destroyed handle"
+	@echo "  test-lifecycle  Build + run create/process/reset/destroy cycles and the destroyed-handle refusals"
+	@echo "                  (test_lifecycle) -- run from c_impl/"
+	@echo "  test-docs-smoke  Compile and run the C sample embedded in STATIC_MEMORY.md against the current aec.h"
+	@echo "  test-config-validation  Build + run the invalid-AecConfig rejection test (aec_get_mem_size, aec_init, aec_create)"
+	@echo "  test-delay-dominant-selection  Build + run the dominant-peak delay selection test"
+	@echo "                  (test_delay_dominant_selection) -- run from c_impl/"
+	@echo "  test-external-realign  Build + run the aec_apply_external_realign() warm-transfer regression test"
+	@echo "  test-guard-unify  Build + run the one-algorithm-behind-every-entry-point test (test_guard_unify)"
+	@echo "  test-linear-context  Build + run the linear-stage view regression test (aec_get_linear, test_linear_context)"
+	@echo "  test-memory-layout  Build + run the pool-size, carve-end and tail-guard test"
+	@echo "  test-res-nearend-gate  Build + run the RES near-end floor policy test"
+	@echo "  test-runtime-preset  Build + run the aec_set_level() runtime retarget test"
+	@echo "  test-no-testing-symbols  Check that no test-only symbol ships in libaec.a"
 	@echo "  test-shared-fft-handle  Build + run the permanent shared-FFT-handle"
 	@echo "                  regression test (test_shared_fft_handle) -- run from c_impl/"
 	@echo "  test-synthesis-window  Build + run the aec_synthesis_window() accessor test (3 grids, refusals)"
@@ -1490,10 +1550,10 @@ help:
 	@echo "                  vs a portable model of the AArch64 NEON dataflow; scalar kernels vs the scalar model otherwise"
 	@echo "  test-aec-res    RES gain stage (src/aec_res_internal.h): lane-equal config, API contract, render scale, initial phase"
 	@echo "  test-header-fresh  Regenerate include/aec_balanced_config.h and diff it against the checked-in copy"
-	@echo "  test-header-cpp  Compile-only C++11 check that aec.h and aec_internal.h compile as C++ with the AEC_LEVEL_* names"
+	@echo "  test-header-cpp  Compile-only checks: aec.h, aec_internal.h, aec_debug.h each alone as C, together as C++11 with the AEC_LEVEL_* names"
 	@echo "  test-detectors-parity  Gate detectors.c against the Python reference (regenerates the golden)"
 	@echo "  test-detectors-parity-all  Run detector parity on legacy 8 kHz and all three product grids"
-	@echo "  debug   Build with -g -DAEC_DEBUG"
+	@echo "  debug   Build with -g"
 	@echo "  publish Copy this build's artifacts to dist/<backend>/<config-hash>/ + update dist/<backend>/current"
 	@echo "  audit-profile   Assert PROFILE keys its own build and actually changes what"
 	@echo "                  is linked, in both directions -- run from c_impl/"
@@ -1508,7 +1568,7 @@ help:
 	@echo "   COMMON_LIB the same way phase 1 does -- see the two-phase dispatch"
 	@echo "   comment in this Makefile -- and pass it: make print-bin-dir COMMON_LIB=\"...\")"
 	@echo "  ./bin/<backend>-<config-hash>/aec_wav <mic.wav> <ref.wav> <out.wav> [options]"
-	@echo "  ./bin/<backend>-<config-hash>/bench_rtf [--seconds N] [--repeat M] [--level 0|1|2|3] [--sr HZ] [--fft N] [--stage full|linear|both] [--scene noise|bursts]"
+	@echo "  ./bin/<backend>-<config-hash>/bench_rtf [--seconds N] [--repeat M] [--level 0|1|2|3] [--sr HZ] [--fft N] [--stage full|linear|both] [--scene noise|bursts] [--live-observer, needs AEC_TESTING=1] [--wav mic.wav ref.wav]"
 	@echo "  make COMMON_DIR=<path>       (override audiolib location)"
 	@echo "  make WERROR=1            (opt-in: -Werror for this repo's own sources)"
 	@echo "  make lib NO_STDIO=1      (opt-in: stdio-free libaec.a for board/no-stdio builds --"
@@ -1519,9 +1579,7 @@ help:
 	@echo "automatically; no manual clean needed, and two differently-configured"
 	@echo "builds can run concurrently in this same tree."
 
-dirs: _cfg_guard
-
-.PHONY: all dirs clean debug help
+.PHONY: all clean debug help
 
 # Header dependency tracking: -MD (not -MMD) with -MP, so a deleted header does not break a stale .d. The wildcard is empty
 # before any object exists for this CFG_SIG.

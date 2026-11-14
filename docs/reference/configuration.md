@@ -2,126 +2,132 @@
 
 ## 6. `AecConfig` 完整參考
 
-**永遠從 `aec_config_from_level()`（或 `aec_config_defaults()`）開始**，再覆寫少數必要
-欄位。這兩個函式會先 `memset` 整個結構，所以未列出的欄位都會被歸零；自己手動填一個
-未初始化的 `AecConfig` 幾乎一定會被驗證擋下。取樣率不是 8000／16000／48000 時（含 0 與負值），
-兩個函式回傳的 `fft_size` 與 `filter_length` 都是 `0`，`aec_get_mem_size()` 回傳 0、`aec_init()` 回傳 NULL、
-`aec_create()` 回傳非 0；函式本身不會溢位或中止。
+`AecConfig` 只有 **12 個欄位**，都是產品會設的輸入。**永遠從 `aec_config_from_level()` 開始**，再覆寫少數必要欄位：
 
 ```c
 AecConfig cfg;
-aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, 16000);
-cfg.enable_cng = 0;          /* 只覆寫你真的要改的 */
+aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, 16000);   /* sample_rate、fft_size、level 與其餘欄位的預設 */
+cfg.enable_cng = 0;                                       /* 只覆寫你真的要改的 */
 ```
 
-`aec_config_defaults()` 給的就是 balanced 的值；`aec_config_from_level()` 只在此之上
-改 [§7](levels.md#7-level-選擇) 表列的三個 floor 欄位（`min_gain_floor_far_active_db`、`min_gain_floor_dt_db`、`min_gain_split_floor_enabled`）。以下所有預設值與範圍都直接取自程式碼。
+`aec_config_from_level()` 先把整個結構歸零，再填 `sample_rate`、該取樣率的產品 `fft_size`、`level` 與其餘欄位的預設值；
+列舉範圍外的 level 讀作 `AEC_LEVEL_BALANCED`。自己手動填一個未初始化的 `AecConfig` 幾乎一定會被驗證擋下，
+而歸零的結構等於 `AEC_LEVEL_MILD`（level 0）。取樣率不是 8000／16000／48000 時（含 0 與負值），
+`fft_size` 是 `0`，`aec_get_mem_size()` 回傳 0、`aec_init()` 回傳 NULL、`aec_create()` 回傳 NULL；函式本身不會溢位或中止。
 
-**參數分級**：建議對外開放的只有 `sample_rate`、`fft_size`、`filter_length`、`delay_mode`、
-`fixed_delay_samples`、`delay_num_filters`、`residual`、`enable_cng` 與 level（經由
-`min_gain_floor_far_active_db`／`min_gain_floor_dt_db`／`min_gain_split_floor_enabled` 三個欄位）；
-進階外部為 `enable_highpass`、`highpass_cutoff_hz`、`enable_shadow`、`delay_est_period_s`；
-`residual` 的 `STATE`／`ESTIMATE` 與 `aec_process_linear()`／`aec_process_residual()` 是串鏈整合者專用；
-其餘 38 個欄位（§6.5 與 §6.6 的欄位、live observer 等）屬內部調校參數，不建議開放。
-逐欄分級、出處行與理由見 [外部參數](../html/reference/aec_params.html) 與 [內部參數](../html/reference/aec_params_internal.html)。
+**其餘一切都不是呼叫端的設定。** 濾波器長度（52 ms；48 kHz 為 64 ms）、步進、shadow filter、高通、飽和偵測、
+各偵測器門檻、延遲估計的時間常數、抑制器的 floor 值等，全部由函式庫依 `(sample_rate, fft_size, n_mics, level)`
+推導（庫內部的 `AecTuning`，不在公開標頭）；level 之外沒有第二個強度旋鈕，`aec_set_level()` 是唯一的執行期調整。
+§6.5–§6.6c 保留這些值作為**唯讀參考**，說明 pool 大小與行為從哪裡來。以下所有預設值與範圍都直接取自程式碼。
+
+| 欄位 | 型別 | 預設 | 允許範圍 | 小節 |
+|---|---|---|---|---|
+| `sample_rate` | `int` | 呼叫端指定 | 8000 / 16000 / 48000 | [§6.1](#61-訊號格點建立後不可更改) |
+| `fft_size` | `int` | 該取樣率的產品格點 | 與 `sample_rate` 成對；`0` 被拒絕 | [§6.1](#61-訊號格點建立後不可更改) |
+| `n_mics` | `int` | `1` | `1` 或 `AEC_ARRAY_MICS`（4） | [§6.8](#68-陣列實例欄位n_mics--4) |
+| `level` | `AecLevel` | `AEC_LEVEL_BALANCED` | 0 – 3 | [§6.3](#63-抑制強度) |
+| `residual` | `AecResidualMode` | `AEC_RESIDUAL_FULL` | `OFF`（0）… `FULL`（3） | [§6.2](#62-殘留階段與舒適噪音) |
+| `delay_mode` | `AecDelayMode` | `AEC_DELAY_MATCHED` | `MATCHED` / `FIXED` / `EXTERNAL_ALIGNED` | [§6.4](#64-延遲估計) |
+| `fixed_delay_samples` | `int` | `-1` | `-1`，或 `FIXED` 時 0 – `120 × sample_rate` | [§6.4](#64-延遲估計) |
+| `delay_num_filters` | `int` | `5` | 1 – 5（只在 `MATCHED`） | [§6.4](#64-延遲估計) |
+| `enable_cng` | `int` | `1` | 0 / 1 | [§6.2](#62-殘留階段與舒適噪音) |
+| `capture_proxy_channel` | `int` | `0` | 0 – 3（單聲道必須是 0） | [§6.8](#68-陣列實例欄位n_mics--4) |
+| `delay_backward_quarantine_enabled` | `int` | `0` | 0 / 1（單聲道必須是 0） | [§6.8](#68-陣列實例欄位n_mics--4) |
+| `delay_backward_quarantine_s` | `float` | `1.0` | 0 – 3600 | [§6.8](#68-陣列實例欄位n_mics--4) |
 
 ### 6.1 訊號格點（建立後不可更改）
 
 | 欄位 | 型別 | 預設 | 允許範圍 | 說明／何時調整 |
 |---|---|---|---|---|
 | `sample_rate` | `int` | 呼叫端指定 | 8000 / 16000 / 48000 | 必填。與音訊來源一致。 |
-| `fft_size` | `int` | 8k→256、16k→256、48k→1024（由 `aec_config_defaults()` 填入，＝`aec_default_fft_size()`） | 須與 `sample_rate` 成對（見 [§1](../c_user_manual_zh_TW.md#1-這個函式庫是什麼不是什麼)）；**`0`（自動）會被拒絕** | 只有 16 kHz 有第二選擇（512）。改成 512 會讓 hop 變 16 ms、延遲加倍，但每秒呼叫次數減半。核心不會替你猜格點——所有入口都走同一支 `aec_resolve_signal_grid()`。 |
-| `filter_length` | `int` | `sr × 52/1000`（48 kHz 為 `sr × 64/1000`）→ 8k:416、16k:832、48k:3072；不支援的取樣率為 `0`（與 `fft_size` 同為 `0`，建立時被拒絕） | 1 – 4096 | **單位是 sample，不是 ms。** 涵蓋的回音路徑長度。大房間／長殘響時調高，代價是記憶體與運算量上升。 |
-| `n_partitions` | `int` | `0`（自動） | `0` 或 1 – 256 | 留 `0` 即可，由 `filter_length` 與 hop 自動推導。 |
+| `fft_size` | `int` | 8k→256、16k→256、48k→1024（由 `aec_config_from_level()` 填入，＝`aec_default_fft_size()`） | 須與 `sample_rate` 成對（見 [§1](../c_user_manual_zh_TW.md#1-這個函式庫是什麼不是什麼)）；**`0`（自動）會被拒絕** | 只有 16 kHz 有第二選擇（512）。改成 512 會讓 hop 變 16 ms、延遲加倍，但每秒呼叫次數減半。核心不會替你猜格點——所有入口都走同一支 `aec_resolve_signal_grid()`。 |
 
-### 6.2 模組開關（除 `residual` 外只接受 0 或 1）
+濾波器長度不是欄位：由取樣率決定，`sr × 52/1000`（48 kHz 為 `sr × 64/1000`）→ 8k：416、16k：832、48k：3072 sample；
+分割數是 `ceil(濾波器長度 ÷ hop)`。不支援的取樣率派生值為 `0`，與 `fft_size` 一樣在建立時被拒絕。
+
+### 6.2 殘留階段與舒適噪音
 
 | 欄位 | 預設 | 說明／何時調整 |
 |---|---:|---|
 | `residual` | `AEC_RESIDUAL_FULL` | `AecResidualMode`：後級（殘留回音抑制）做到哪裡，允許範圍 `AEC_RESIDUAL_OFF`（0）…`AEC_RESIDUAL_FULL`（3），範圍外會被驗證拒絕。`FULL`＝完整抑制（`aec_process()` 套用增益、加舒適噪音並合成）；`OFF`＝只有線性 filter，輸出是純線性殘差、延遲降為 0，但回音殘留明顯變多，診斷時可用（見 [§9](integration.md#9-常見問題排除)）。`STATE`、`ESTIMATE` 給自己套增益的整合者，見 [§8](integration.md#8-進階整合-seam)。不影響**單聲道**實例的記憶池大小；`n_mics = 4` 的陣列實例則隨它改變，且不接受 `OFF`（[§6.8](#68-陣列實例欄位n_mics--4)）。 |
-| `enable_cng` | `1` | 舒適噪音。若下游還有另一套噪音處理／CNG，**請關掉這個**，兩層疊加會讓噪音底變得不自然。 |
-| `enable_highpass` | `1` | mic 路徑的高通濾波（見 `highpass_cutoff_hz`）。上游已有高通時可關。 |
-| `enable_saturation` | `1` | 削波偵測與參考訊號軟限幅。建議維持開啟。 |
-| `enable_shadow` | `1` | 輔助 filter，用於偵測回音路徑變化。關閉會少掉 28,912 B（16 kHz/256，見 [§4](lifecycle.md#4-生命週期) 記憶池表），但路徑突變後的恢復會變慢。 |
-| `saturation_softclip_ref` | `1` | 對參考訊號套用軟限幅。`enable_saturation = 0` 時無作用。 |
+| `enable_cng` | `1` | 舒適噪音，0 或 1。若下游還有另一套噪音處理／CNG，**請關掉這個**，兩層疊加會讓噪音底變得不自然。 |
+
+內部的模組開關（mic 路徑高通 80 Hz、削波偵測與參考訊號軟限幅、shadow filter）一律開啟，不可設定。
+shadow filter 佔 27,888 B（16 kHz/256，見 [§4](lifecycle.md#4-生命週期) 記憶池表），用於偵測回音路徑變化。
 
 ### 6.3 抑制強度
 
-| 欄位 | 型別 | 預設 | 允許範圍 | 說明／何時調整 |
-|---|---|---:|---|---|
-| `min_gain_floor_far_active_db` | `float` | `-28.0` | -300 – 50 | **mild/balanced level 唯一的差別**，也是主要的強度旋鈕。遠端在說話時允許的最低增益。**調低**（例如 -38）＝回音壓得更乾淨，但 double-talk 時近端更容易被壓掉；**調高**（例如 -20）＝近端保留較好，回音殘留較多。優先用 level（[§7](levels.md#7-level-選擇)）而不是自己填數字。 |
-| `min_gain_floor_dt_db` | `float` | `-20.0` | -300 – 50 | double-talk 期間專用的最低增益，與上一項分開；aggressive level 把這個欄位也調低到 `-30.0`（mild/balanced 仍共用 `-20.0`），不然 double-talk 觸發時三個 level 會蓋回同一個值,聽不出強度差。**調高**可在雙方同時說話時多保留近端。需 `dt_aware_res_floor_enabled = 1` 才生效。 |
-| `dt_aware_res_floor_enabled` | `int` | `1` | 0 / 1 | 是否啟用上面這個 double-talk 專用下限。 |
-| `dt_aware_recovery_soft` | `int` | `1` | 0 / 1 | 近端最近有聲音時，改用非破壞性的方式做重新對齊，避免把近端語音削掉。 |
+`AecConfig.level`（`AecLevel`，0 – 3）是**唯一**的抑制強度設定，只收數字：0＝`AEC_LEVEL_MILD`、1＝`AEC_LEVEL_BALANCED`（預設）、
+2＝`AEC_LEVEL_AGGRESSIVE`、3＝`AEC_LEVEL_NO_FLOOR`；範圍外的值被驗證拒絕。選擇方式與取捨見 [§7](levels.md#7-level-選擇)。
+函式庫由 level 查表帶出三個內部值（`aec_level_floor_db()`、`aec_level_dt_floor_db()`、`aec_level_split_floor_enabled()` 可讀）：
+
+| level | far-active 最低增益 | double-talk 最低增益 | split floor |
+|---|---:|---:|---|
+| `MILD` | -20 dB | -20 dB | 開 |
+| `BALANCED` | -28 dB | -20 dB | 開 |
+| `AGGRESSIVE` | -38 dB | -30 dB | 開 |
+| `NO_FLOOR` | （不用） | （不用） | 關 |
+
+`aec_set_level()` 在執行期改變它，並把新 level 記為實例的 level。double-talk 專用下限是否生效、近端保護的時間常數等都是內部常數。
 
 ### 6.4 延遲估計
 
 | 欄位 | 型別 | 預設 | 允許範圍 | 說明／何時調整 |
 |---|---|---:|---|---|
 | `delay_mode` | `AecDelayMode` | `AEC_DELAY_MATCHED` | `MATCHED` / `FIXED` / `EXTERNAL_ALIGNED` | **對齊方式的唯一真實來源**（見 [§3](../c_user_manual_zh_TW.md#延遲契約) 延遲契約的三態表）。init 時決定、instance 存活期間不可變（各 mode 的 pool 佈局不同，要改必須 destroy + 重新 init）。非法組合一律拒絕。 |
-| `fixed_delay_samples` | `int` | `-1` | `-1`，或 `FIXED` 時 0 – `120 × sample_rate` | **只在 `FIXED` 有意義**：bring-up 量測到的系統延遲，單位是 native-rate sample。其他 mode 必須維持 `-1`（帶值會被拒絕，不會被忽略）。它同時**決定參考環形緩衝的大小**：`FIXED` 只配置 `fixed_delay_samples + hop_size` 個 sample（緊上界，見 [§4](lifecycle.md#4-生命週期) 記憶池表的公式），`max_delay_ms` / `delay_buffer_ms` 在此 mode 無效。 |
-| `max_delay_ms` | `float` | `1024.0` | 0 – 60000 | **`MATCHED` 專用**：參考訊號搜尋環形緩衝的尺寸下限（ms），不是搜尋上限（見 [§3](../c_user_manual_zh_TW.md#延遲契約) 延遲契約）。調高只是多配記憶體，不會提高可擷取的延遲。`FIXED` / `EXTERNAL_ALIGNED` 下完全無效（見 [§4](lifecycle.md#4-生命週期) 環形緩衝大小公式）。 |
-| `delay_buffer_ms` | `float` | `2048.0` | 0 – 120000 | **`MATCHED` 專用**：參考訊號搜尋環形緩衝長度（ms）。實際樣本數取 `delay_buffer_ms` 與 `max_delay_ms + 4096 samples` 兩者較大者。調高 `max_delay_ms` 時通常要一併調高。`FIXED` / `EXTERNAL_ALIGNED` 下完全無效。 |
-| `delay_est_init_s` | `float` | `0.3` | 0 – 3600 | 延遲估計值需維持穩定多久才視為已鎖定（秒）。 |
-| `delay_est_period_s` | `float` | `0.0` | 0 – 3600 | matched filter 的分析週期（秒），算力節流旋鈕。`0`（預設）＝每個 hop 都分析（全速）。`> 0` 時，延遲估計值維持 solid 且穩定 `delay_est_init_s` 後，matched filter 只每 K 個 hop 實跑一次（K ＝ `round(period ÷ hop 時長) ÷ 5`，整數除法、下限 1；其餘 hop 仍餵入資料、只是不分析）；估計變得不穩、或 windowed ERLE 較峰值下滑超過 6 dB 時回到全速。調大省 MIPS、但延遲變動偵測變慢，也可能改變 matched filter 鎖到的 lag。 |
-| `delay_num_filters` | `int` | `5` | 1 – 5（**只在 `MATCHED`**；其他 mode 必須維持 5） | Matched-filter bank 大小（決定記憶體與可搜尋的延遲範圍）。可靠搜尋上限隨之縮小：n=1→125ms／2→221ms／3→317ms／4→413ms／5→509ms；預設 `delay_est_period_s = 0`（每 hop 全速分析）時，每少一組省 ~4.2 MMAC/s 的搜尋算力，**並省 5,728 B 記憶池**（bank、render ring、兩個 histogram 都依 n 從記憶池切出，見 [§4](lifecycle.md#4-生命週期) 記憶池表）。縮小的正確場景是**上游已先提供 coarse-compensated far**（HAL/系統層自行移除 bulk delay 後才餵進來）、matched filter 只需追殘差的 `MATCHED` 部署——注意這與 `FIXED` 無關：`FIXED`（`fixed_delay_samples`）根本不建 matched filter，`EXTERNAL_ALIGNED` 連 estimator/ring 都沒有。bench/dataset 一律維持 5（見 `delay_estimator_design_zh_TW.md` §5）。`FIXED` / `EXTERNAL_ALIGNED` 根本沒有 matched filter，改這個值會被拒絕（不是忽略）；`0` 在任何 mode 都是錯誤，不是「關閉延遲估計」的入口。 |
-| `delay_acquire_protect_converged` | `int` | `1` | 0 / 1 | filter 已收斂時，保護它不被**首次**延遲擷取破壞（Path A）。 |
-| `delay_acquire_warm_transfer` | `int` | `1` | 0 / 1 | 首次擷取到延遲時，把已學到的回音模型平移過去而不是歸零，避免開場一秒左右出現一段明顯回音。建議維持開啟。 |
-| `delay_acquire_inst_erle_db` | `float` | `4.0` | -100 – 100 | 上一項的觸發門檻（dB）：既有模型要夠好才值得平移。 |
+| `fixed_delay_samples` | `int` | `-1` | `-1`，或 `FIXED` 時 0 – `120 × sample_rate` | **只在 `FIXED` 有意義**：bring-up 量測到的系統延遲，單位是 native-rate sample。其他 mode 必須維持 `-1`（帶值會被拒絕，不會被忽略）。它同時**決定參考環形緩衝的大小**：`FIXED` 只配置 `fixed_delay_samples + hop_size` 個 sample（緊上界，見 [§4](lifecycle.md#4-生命週期) 記憶池表的公式）。 |
+| `delay_num_filters` | `int` | `5` | 1 – 5（**只在 `MATCHED`**；其他 mode 必須維持 5） | Matched-filter bank 大小（決定記憶體與可搜尋的延遲範圍）。可靠搜尋上限隨之縮小：n=1→125ms／2→221ms／3→317ms／4→413ms／5→509ms；每少一組省 ~4.2 MMAC/s 的搜尋算力（每 hop 全速分析時），**並省 11,264 B 記憶池（單通道 MATCHED，48 kHz 為 23,552 B；陣列的共用 estimator 為 5,120 B）**（bank、render ring、兩個 histogram 都依 n 從記憶池切出，見 [§4](lifecycle.md#4-生命週期) 記憶池表）。縮小的正確場景是**上游已先提供 coarse-compensated far**（HAL/系統層自行移除 bulk delay 後才餵進來）、matched filter 只需追殘差的 `MATCHED` 部署——注意這與 `FIXED` 無關：`FIXED`（`fixed_delay_samples`）根本不建 matched filter，`EXTERNAL_ALIGNED` 連 estimator/ring 都沒有。bench/dataset 一律維持 5（見 `delay_estimator_design_zh_TW.md` §5）。`FIXED` / `EXTERNAL_ALIGNED` 根本沒有 matched filter，改這個值會被拒絕（不是忽略）；`0` 在任何 mode 都是錯誤，不是「關閉延遲估計」的入口。 |
 
-### 6.5 以 10 ms 為單位撰寫的時間欄位 ⚠️
+估計器的時間常數是內部常數：延遲估計值需穩定 0.3 s 才視為鎖定，之後 matched filter 預設每個 hop 都分析（不做 duty-cycle 節流）；
+單聲道 `MATCHED` 的參考環形緩衝取 estimator 可回報的最大延遲加 `hop_size`（見 [§4](lifecycle.md#4-生命週期) 環形緩衝大小公式），
+它只決定記憶體，**不是**可擷取的延遲上限（上限由 `delay_num_filters` 決定，環永遠放得下 estimator 報得出的延遲）。陣列實例的共用環形緩衝為 `ceil(1024 ms × sample_rate / 1000) + 2 × hop + 1` sample。
 
-這六個欄位有特殊語意，是最容易誤用的一組：
+### 6.5 以 10 ms 為單位撰寫的時間常數（內部，唯讀參考）⚠️
 
-> **你填的數值會被當成「N × 10 ms 的實際時長」，函式庫在建立時自動換算成目前格點的
-> hop 數。** 它們**不是**直接的 hop 計數。
+函式庫內有六個以「N × 10 ms」撰寫的時間常數（呼叫端不能設定），建立實例時依目前格點換算成 hop 數：
 
-例如在 16 kHz/256（hop = 8 ms）下填 `warmup_frames = 100`，實例內部會變成 125 hop，
-也就是 1000 ms；在 48 kHz 下會變成 94 hop，同樣約 1000 ms。**換算後的時長在所有格點
-上一致**，這正是這個設計的目的。換算寫進實例自己的設定副本，你傳入的 `AecConfig`
-不會被改動。
+> **數值是「N × 10 ms 的實際時長」，不是直接的 hop 計數。**
 
-| 欄位 | 型別 | 預設 | 換算後時長 | 允許範圍 | 說明／何時調整 |
-|---|---|---:|---:|---|---|
-| `warmup_frames` | `int` | `100` | ≈ 1000 ms | 0 – 1000000 | 啟動期長度：這段期間 filter 用較積極的方式收斂。冷啟動收斂太慢可調高。 |
-| `epc_hangover` | `int` | `20` | ≈ 200 ms | 0 – 1000000 | 偵測到回音路徑改變後的加速恢復期長度。裝置常移動可調高。 |
-| `ne_recent_hold` | `int` | `150` | ≈ 1500 ms | 0 – 1000000 | 「近端最近說過話」旗標的保持時間，餵給 §6.3 的 double-talk 保護。近端一停就被壓掉時可調高。 |
-| `filter_misadjustment_stable_frames` | `int` | `30` | ≈ 300 ms | 0 – 1000000 | 判定 filter 已穩定所需的持續時間。 |
-| `filter_misadjustment_hangover_frames` | `int` | `100` | ≈ 1000 ms | 0 – 1000000 | 上述判定的保持時間。 |
-| `shadow_err_alpha` | `float` | `0.80` | （平滑係數，非時長） | 0 – 1 | 輔助 filter 誤差的平滑係數，同樣會依格點重新換算（16 kHz/256 下實際為 0.8365）。不建議調整。 |
+例如在 16 kHz/256（hop = 8 ms）下 `warmup_frames = 100` 在實例內部變成 125 hop，也就是 1000 ms；在 48 kHz 下變成 94 hop，同樣約 1000 ms。
+**換算後的時長在所有格點上一致**，這正是這個設計的目的。換算寫進實例自己的 tuning 副本（`Aec::tun`），不改動傳入的 `AecConfig`。
 
-`ne_recent_sustain`（預設 `3`，範圍 0 – 1000000）**不會**被換算，固定維持字面值
-`3`，不要跟上表混淆——但原因不是它是真正的次數計數：它的計數器每個 hop 都會遞增或
+| 內部常數 | 預設 | 換算後時長 | 作用 |
+|---|---:|---:|---|
+| `warmup_frames` | `100` | ≈ 1000 ms | 啟動期長度：這段期間 filter 用較積極的方式收斂。 |
+| `epc_hangover` | `20` | ≈ 200 ms | 偵測到回音路徑改變後的加速恢復期長度。 |
+| `ne_recent_hold` | `150` | ≈ 1500 ms | 「近端最近說過話」旗標的保持時間，餵給 double-talk 保護。 |
+| `filter_misadjustment_stable_frames` | `30` | ≈ 300 ms | 判定 filter 已穩定所需的持續時間。 |
+| `filter_misadjustment_hangover_frames` | `100` | ≈ 1000 ms | 上述判定的保持時間。 |
+| `shadow_err_alpha` | `0.80` | （平滑係數，非時長） | 輔助 filter 誤差的平滑係數，同樣依格點重新換算（16 kHz/256 下實際為 0.8365）。 |
+
+`ne_recent_sustain`（`3`）**不會**被換算，固定維持字面值 `3`，不要跟上表混淆——但原因不是它是真正的次數計數：它的計數器每個 hop 都會遞增或
 歸零、沒有跳過條件，所以「連續 3 次」就是連續 3 個 hop 的時長，會隨格點變動（16 kHz/
 256 預設格點約 24 ms，16 kHz/512 約 48 ms，48 kHz/1024 約 32 ms）。固定字面值 3 是
 因為三個格點目前各自的行為都已個別驗證過；換算成單一時長會讓 16 kHz/512 格點變成
 只需 2 個 hop，量測後會在該格點引入新的回音誤觸發。
 
-### 6.6 其餘可設定欄位
+### 6.6 其餘內部調校值（唯讀參考）
 
-這些是內部調校參數，預設值是整體調過的。除非有明確量測依據，**請維持預設**。
+預設值是整體調過的，呼叫端無法更動（測試經 `aec_testing_*` 鉤子覆寫，見 `test/aec_test_tuning.h`）。
 
-| 欄位 | 型別 | 預設 | 允許範圍 | 說明 |
-|---|---|---:|---|---|
-| `mu` | `float` | `0.3` | 0 – 10 | 主 filter 適應步進。調高收斂快但更容易發散。 |
-| `delta` | `float` | `1e-8` | 0 – 1 | 適應運算的除零保護下限。 |
-| `highpass_cutoff_hz` | `float` | `80.0` | `enable_highpass = 1` 時須 > 0 且 **< 0.45 × sample_rate**；關閉時為 0 – 20000 | mic 路徑高通截止頻率。低頻風噪嚴重可調高。 |
-| `saturation_threshold` | `float` | `0.95` | 0 – 10 | 判定削波的振幅門檻（相對滿刻度 1.0）。 |
-| `shadow_mu_min` | `float` | `0.5` | 0 – 10 | 輔助 filter 的最小步進。 |
-| `shadow_mu_nlms` | `float` | `0.5` | 0 – 10 | 輔助 filter 的標稱步進。 |
-| `epc_total_rise` | `float` | `1.5` | 0 – 1000 | 判定回音路徑改變的能量上升倍率門檻。誤判太多可調高。 |
-| `epc_delta_threshold` | `float` | `0.3` | 0 – 1000 | 同上，變化量門檻。 |
-| `epc_mu_floor` | `float` | `0.5` | 0 – 10 | **保留欄位，C 庫內沒有任何使用處**（只有宣告、預設值與範圍驗證），調它不會有任何效果。 |
-| `kalman_q_high` | `float` | `1e-3` | 0 – 1 | 未收斂／路徑改變時的模型不確定度。 |
-| `kalman_q_low` | `float` | `1e-6` | 0 – 1 | 已收斂後的模型不確定度。 |
-| `ne_recent_threshold` | `float` | `0.3` | 0 – 1000 | 判定近端有聲音的能量門檻。近端偵測過鈍可調低。 |
-| `filter_misadjustment_scale_min` | `float` | `0.5` | 0 – 1000 | 回音估計修正倍率下限。 |
-| `filter_misadjustment_scale_max` | `float` | `2.0` | 0 – 1000 | 回音估計修正倍率上限。 |
+| 內部值 | 預設 | 允許範圍（驗證） | 說明 |
+|---|---:|---|---|
+| `mu` | `0.3` | 0 – 10 | 主 filter 適應步進。 |
+| `delta` | `1e-8` | 0 – 1 | 適應運算的除零保護下限。 |
+| `highpass_cutoff_hz` | `80.0` | 高通開啟時須 > 0 且 **< 0.45 × sample_rate** | mic 路徑高通截止頻率。 |
+| `saturation_threshold` | `0.95` | 0 – 10 | 判定削波的振幅門檻（相對滿刻度 1.0）。 |
+| `shadow_mu_min` / `shadow_mu_nlms` | `0.5` / `0.5` | 0 – 10 | 輔助 filter 的最小／標稱步進。 |
+| `epc_total_rise` / `epc_delta_threshold` | `1.5` / `0.3` | 0 – 1000 | 判定回音路徑改變的能量上升倍率與變化量門檻。 |
+| `ne_recent_threshold` | `0.3` | 0 – 1000 | 判定近端有聲音的能量門檻。 |
+| `filter_misadjustment_scale_min` / `_max` | `0.5` / `2.0` | 0 – 1000 | 回音估計修正倍率下限／上限。 |
+| `dt_aware_recovery_soft`、`dt_aware_res_floor_enabled`、`delay_acquire_protect_converged`、`delay_acquire_warm_transfer`（均 `1`）、`delay_acquire_inst_erle_db`（`4.0` dB） | | 0 / 1；-100 – 100 | 近端最近有聲音時改用非破壞性的重新對齊；double-talk 專用下限；首次延遲擷取時保護已收斂的 filter 並把學到的回音模型平移過去（需 inst-ERLE 峰值超過門檻）。 |
 
 ### 6.6b 逐階段耗時（`aec_get_last_timing`）
 
 ```c
-typedef struct AecStageTiming AecStageTiming;   /* delay_us / frontend_us / linear_us / steering_us / res_us */
+typedef struct AecStageTiming {                 /* aec.h；各欄單位微秒 */
+    uint32_t delay_us, frontend_us, linear_us, res_us, steering_us;
+} AecStageTiming;
 void aec_get_last_timing(const Aec* a, AecStageTiming* out);
 ```
 
@@ -187,32 +193,23 @@ make PROFILE=1 EXTRA_CFLAGS='-DAEC_NOW_US=board_timer_us -include my_timer.h'
 包裝這個函式庫的上層元件若有自己的計時覆寫點，刻意不共用：一個元件的
 時鐘屬於該元件自己的建置契約。
 
-### 6.6c Live observer（實驗性）
+### 6.6c Live observer（實驗性，內部）
 
-**預設關閉（`live_observer_enabled = 0`），關閉時輸出逐位元不變。未進任何
-出貨 level，不要在產品路徑上開啟。**
+**預設關閉，關閉時輸出逐位元不變。未進任何出貨 level，沒有公開開關**（只有測試鉤子與 `bench_rtf --live-observer` 的 `AEC_TESTING` 建置能開）。
 
 機制：第三個獨立 PBFDAF 實例（NLMS，跟 `shadow_filter` 同一個 struct），讀
-遠端 ring 比主濾波器的延遲補償讀取早 `live_observer_shift_ms`。每 hop 把
+遠端 ring 比主濾波器的延遲補償讀取早 24 ms。每 hop 把
 自己的誤差能量 EMA 跟主濾波器（R² 實際採用的那條選線，不是恆取 main）的
 誤差能量 EMA 比較，只有在觀察器沒有比主濾波器差（corroboration）時才信任
 其證據；證據夾在主濾波器殘留回音功率以內，經 `max(r2, evidence)` 注入
-residual-echo R²（只到 `live_observer_max_hz` 的低頻段），從不碰輸出、
-delay 或任一濾波器的視窗／taps。
+residual-echo R²（只到 1000 Hz 的低頻段），從不碰輸出、
+delay 或任一濾波器的視窗／taps。內部值：`live_observer_shift_ms`＝24.0、`live_observer_max_hz`＝1000.0、
+`live_observer_mu`＝0.3（範圍 (0, 2]）、`live_observer_corrob_ms`＝100.0、`live_observer_corrob_margin_db`＝0.0（須有限）。
 
-| 欄位 | 型別 | 預設 | 允許範圍 | 說明 |
-|---|---|---:|---|---|
-| `live_observer_enabled` | `int` | `0` | 0 / 1 | 總開關。 |
-| `live_observer_shift_ms` | `float` | `24.0` | 0 – 1e9 | 觀察器讀遠端 ring 比主濾波器早多少 ms。 |
-| `live_observer_max_hz` | `float` | `1000.0` | 0 – 1e9 | 證據注入 R² 的頻率上限；高於此頻率的 bin 永遠不受影響。 |
-| `live_observer_mu` | `float` | `0.3` | (0, 2] | 觀察器自己的 NLMS 步進。 |
-| `live_observer_corrob_ms` | `float` | `100.0` | 0 – 1e9 | corroboration EMA 的時間常數。 |
-| `live_observer_corrob_margin_db` | `float` | `0.0` | 必須是有限值 | corroboration 容忍度（dB）；觀察器誤差 EMA 超過主濾波器誤差 EMA 這個容忍倍率就不信任。 |
-
-記憶體增量（`aec_get_mem_size()` 實測，delay_num_filters=5，balanced
-level）：8 kHz/256 +29,472 B、16 kHz/256（預設）+38,768 B、16 kHz/512
+記憶體增量（`aec_testing_get_mem_size()` 實測，delay_num_filters=5，balanced
+level）：8 kHz/256 +29,472 B、16 kHz/256 +38,768 B、16 kHz/512
 +58,656 B、48 kHz/1024 +141,648 B。算量增量用 `bench_rtf --live-observer`
-在目標格點量測（`make bench` 建置）；固定開銷來自觀察器每 hop 3 個與分接數
+在目標格點量測（`make bench AEC_TESTING=1` 建置）；固定開銷來自觀察器每 hop 3 個與分接數
 無關的 FFT。
 
 ### 6.7 靜態記憶體拆解（`aec_get_mem_breakdown`）
@@ -232,7 +229,7 @@ int aec_get_mem_breakdown(const AecConfig* cfg, AecMemBreakdown* out);
 
 陣列實例（`n_mics = 4`）的 `lane_bytes`／`fusion_bytes` 才非 0，`estimator_bytes`／`ring_bytes` 是共用估計器與共用對齊環的；
 `estimator_bytes`、`ring_bytes`、`lane_bytes`、`fusion_bytes` 四者相加**不等於** `total_bytes`：差的是 `Aec` 標頭
-（`sizeof(Aec)` 對齊 16 B），它不在任何一個欄位之內（實測數字見 [§4](lifecycle.md#陣列實例的記憶池)）。
+（`Aec` 標頭，對齊 16 B），它不在任何一個欄位之內（實測數字見 [§4](lifecycle.md#陣列實例的記憶池)）。
 
 把 [§4](lifecycle.md#4-生命週期) 記憶池大小表格背後的算法變成一個可查詢的 API：`total_bytes` 就是
 `aec_get_mem_size(cfg)` 本身（同一次呼叫算出來，不是另一套算式），
@@ -240,8 +237,8 @@ int aec_get_mem_breakdown(const AecConfig* cfg, AecMemBreakdown* out);
 `aec_get_mem_size()` 內部本來就在用的同一批 helper（`delay_aec_get_mem_size()`、
 `aec_derive_dims()` 的 ring 大小 out-param）——查詢這個函式不可能得到與
 `aec_carve()` 實際切出來的 pool 佈局不同的答案。失敗條件與
-`aec_get_mem_size()` 完全一致：`cfg` 為 `NULL` 或未通過 `aec_resolve_valid_config()`
-時回傳 0（並把 `*out` 清零）。`example/aec_wav.c` 的 `--print-mem-size`
+`aec_get_mem_size()` 完全一致：`cfg` 為 `NULL` 或未通過 `aec_resolve()`
+時回傳 `AEC_ERR_ARG`（並把 `*out` 清零）。`example/aec_wav.c` 的 `--print-mem-size`
 （[附錄 A](wav_cli.md#附錄-aaec_wav-命令列工具)）就是這個 API 的一個瘦封裝。
 
 ### 6.8 陣列實例欄位（`n_mics = 4`）
@@ -253,15 +250,15 @@ int aec_get_mem_breakdown(const AecConfig* cfg, AecMemBreakdown* out);
 | `delay_backward_quarantine_enabled` | `int` | `0` | 0 / 1（單聲道必須是 0） | 只在 `MATCHED` 有意義。比目前 delay 更早的新估計，在 capture-proxy lane 仍在消除期間先保留 `delay_backward_quarantine_s` 秒再採用；消除失效就立刻採用。前向移動與首次取得不受影響。 |
 | `delay_backward_quarantine_s` | `float` | `1.0` | 0 – 3600 | 上一項的保留時間（秒），建立時換算成 hop 數（下限 1）。 |
 
-以 `make AEC_NO_ARRAY=1` 建置的單聲道函式庫沒有陣列實例：`n_mics` 不是 1 時 `aec_get_mem_size()` 回 0、`aec_init()` 回 NULL、`aec_create()` 回 -1，`aec_get_array()` 與 `aec_array_*()` 診斷函式不存在（呼叫即連結錯誤）。flag 折進 config hash，與一般建置各有自己的 `bin/<backend>-<hash>/`；實測 `libaec.a` 的 `__TEXT` 減少約 21 kB（SIMD=1，184,765 → 163,433 B；SIMD=0 為 166,881 → 148,721 B）。
+以 `make AEC_NO_ARRAY=1` 建置的單聲道函式庫沒有陣列實例：`n_mics` 不是 1 時 `aec_get_mem_size()` 回 0、`aec_init()` 回 NULL、`aec_create()` 回 NULL，`aec_get_array()` 與 `aec_array_*()` 診斷函式不存在（呼叫即連結錯誤）。flag 折進 config hash，與一般建置各有自己的 `bin/<backend>-<hash>/`；實測 `libaec.a` 的 `__TEXT` 減少約 22 kB（SIMD=1，164,227 → 142,015 B；SIMD=0 為 145,667 → 126,643 B）。
 
 陣列實例對既有欄位的規則：
 
 - `residual` 必須是 `STATE`、`ESTIMATE` 或 `FULL`（`OFF` 被拒絕），並改變池大小；
-- 格點只接受 16 kHz／256、16 kHz／512、48 kHz／1024，`max_delay_ms` 必須 ≤ 4096；
-- `delay_mode`、`delay_num_filters`、`fixed_delay_samples`、`delay_est_period_s`、`max_delay_ms` 描述**共用**的對齊，每條 lane 一律以 `EXTERNAL_ALIGNED` 吃對齊後的 far；
-  `delay_est_init_s`、`delay_buffer_ms` 不被讀（duty-cycle 保持時間固定 0.3 s，環形緩衝大小由 `max_delay_ms` 決定）；
-- 其餘欄位（`filter_length`、`mu`、`enable_shadow`、偵測器門檻…）原樣交給每條 lane；level 欄位只作用在融合後的一次增益階段，lane 自己的 level 沒有效果；
-- `aec_set_level()` 重新設定融合的增益階段（`FULL`）；`STATE`／`ESTIMATE` 沒有增益階段，呼叫回 0 但無效。
+- 格點只接受 16 kHz／256、16 kHz／512、48 kHz／1024；
+- `delay_mode`、`delay_num_filters`、`fixed_delay_samples` 描述**共用**的對齊，每條 lane 一律以 `EXTERNAL_ALIGNED` 吃對齊後的 far；
+  共用環形緩衝大小固定由 1024 ms 的可達延遲決定（見 [§6.4](#64-延遲估計)），duty-cycle 保持時間固定 0.3 s；
+- 其餘內部調校值（濾波器長度、步進、shadow filter、偵測器門檻…）與 level 的內部值原樣交給每條 lane；level 只作用在融合後的一次增益階段，lane 自己的 level 沒有效果；
+- `aec_set_level()` 重新設定融合的增益階段（`FULL`）並記錄新 level；`STATE`／`ESTIMATE` 沒有增益階段，呼叫回 0 但只更新記錄的 level。
 
 ---

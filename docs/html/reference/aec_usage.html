@@ -32,7 +32,7 @@ pre code{background:none;padding:0}
 <h1>AEC 如何呼叫使用 — <code>AEC/c_impl</code></h1>
 
 <h2>概要</h2>
-<p>單聲道 AEC(<code>Aec</code>)一個實例處理一支 mic 與一路 ref。整合者只需要 <code>aec.h</code>(殘留回音抑制增益在 <code>Aec</code> 或陣列實例內,沒有獨立的公開介面)。本頁給呼叫順序、最小可編譯範例、初始化／對齊／錯誤處理／reset／destroy 規則;時序圖見 <a href="aec_sequence.html">aec_sequence</a>,參數見 <a href="aec_params.html">外部參數</a> 與 <a href="aec_params_internal.html">內部參數</a>。下列範例 A–D 已在暫存複本以 <code>-Wall -Wextra -Werror</code> 對 <code>aec.h</code> 編譯,並在靜音輸入上跑完(含 <code>aec_process</code> 與 <code>aec_process_linear</code> + <code>aec_process_residual</code> 兩條路),識別字全部存在;<code>app_read_hop</code> 等是呼叫端自己的音訊 I/O。範例 E(四麥克風陣列實例)同樣以 <code>-Wall -Wextra -Werror</code> 編譯,並以測試用的 beamformer 與合成替身跑完 50 個 hop,所有回傳都是 <code>AEC_OK</code>。</p>
+<p>單聲道 AEC(<code>Aec</code>)一個實例處理一支 mic 與一路 ref。整合者只需要 <code>aec.h</code>(殘留回音抑制增益在 <code>Aec</code> 或陣列實例內,沒有獨立的公開介面)。本頁給呼叫順序、最小可編譯範例、初始化／對齊／錯誤處理／reset／destroy 規則;時序圖見 <a href="aec_sequence.html">aec_sequence</a>,參數見 <a href="aec_params.html">外部參數</a> 與 <a href="aec_params_internal.html">內部參數</a>。下列範例 A–E 已在暫存複本以 <code>-Wall -Wextra -Werror</code> 只對公開的 <code>include/</code> 編譯、連結並實際執行:A 在 16 kHz 與 48 kHz 各跑 100 hop,B 建立後釋放,C 的控制呼叫在活的實例上呼叫,D(<code>aec_process_linear</code> + <code>aec_process_residual</code> 兩段式)跑 100 hop,E(四麥克風陣列實例)以測試用的 beamformer 與合成替身跑 50 個 hop,所有回傳都是 <code>AEC_OK</code>;<code>app_read_hop</code> 等是呼叫端自己的音訊 I/O。</p>
 
 <h2>1. Include 與連結</h2>
 <pre><code>#include "aec.h"        /* AEC/c_impl/include/aec.h:標準整合只需要這一個 */
@@ -40,16 +40,16 @@ pre code{background:none;padding:0}
 cc -std=gnu99 -O2 -ffp-contract=off app.c \
    -I&lt;AEC&gt;/c_impl/include -I&lt;audiolib&gt;/common/include \
    "$(make -s -C &lt;AEC&gt;/c_impl print-lib-path)" "$(make -s -C &lt;audiolib&gt;/common print-lib-path)" -lm -o app</code></pre>
-<p class="small"><code>libaec.a</code> 不含共用 DSP,<code>libaudio_common.a</code> 一定要一起連結;<code>-ffp-contract=off</code> 是必要旗標(Makefile 會 append 在最後,見 <a href="aec_c_api.html">AEC API</a> §11)。<code>aec.h</code> 會 include audiolib 的 <code>fft_wrapper.h</code>／<code>hpf.h</code>,所以兩個 include 路徑都要給。輸出路徑含設定雜湊,用 <code>print-lib-path</code> 取,不要自己拼。</p>
+<p class="small"><code>libaec.a</code> 不含共用 DSP,<code>libaudio_common.a</code> 一定要一起連結;<code>-ffp-contract=off</code> 是必要旗標(Makefile 會 append 在最後,見 <a href="aec_c_api.html">AEC API</a> §11)。<code>aec.h</code> 會 include audiolib 的 <code>fft_wrapper.h</code>,所以兩個 include 路徑都要給。<code>libaudio_common.a</code> 含一個 C++ 翻譯單元(NE10 的 generic-radix kernel),Makefile 以 C++ driver 連結;用 <code>cc</code> 連結時若出現 C++ runtime 的未定義符號,改用 <code>c++</code>／<code>g++</code> 連結,或補上該工具鏈的 C++ runtime。輸出路徑含設定雜湊,用 <code>print-lib-path</code> 取,不要自己拼。</p>
 
 <h2>2. 呼叫順序</h2>
 <div class="tblwrap"><table>
 <tr><th>#</th><th>步驟</th><th>函式</th><th>失敗時</th></tr>
-<tr><td>1</td><td>取得完整設定(不要手填)</td><td><code>aec_config_from_level(&amp;cfg, level, sample_rate)</code>(或 <code>aec_config_defaults</code>)</td><td>無回傳;不認得的 level 值<b>靜默退回 balanced</b>;取樣率不是 8000／16000／48000 時 <code>fft_size</code> 與 <code>filter_length</code> 都是 0,<code>aec_get_mem_size()</code> 回 0、<code>aec_init()</code> 回 NULL、<code>aec_create()</code> 回非 0</td></tr>
+<tr><td>1</td><td>取得完整設定(不要手填)</td><td><code>aec_config_from_level(&amp;cfg, level, sample_rate)</code></td><td>無回傳;不認得的 level 值<b>靜默退回 balanced</b>(存 <code>cfg.level</code>);取樣率不是 8000／16000／48000 時(含 0 與負值)<code>fft_size</code> 是 0,<code>aec_get_mem_size()</code> 回 0、<code>aec_init()</code> 回 NULL、<code>aec_create()</code> 回 NULL</td></tr>
 <tr><td>2</td><td>只覆寫<a href="aec_params.html">外部欄位</a>(<code>fft_size</code>、<code>delay_mode</code>…)</td><td>直接寫 <code>cfg.*</code></td><td>下一步才會被驗證</td></tr>
 <tr><td>3</td><td>(選用)確認格點</td><td><code>aec_resolve_signal_grid(sr, fft, &amp;grid)</code>、<code>aec_default_fft_size(sr)</code></td><td>回 <code>AEC_ERR_ARG</code>(不動 <code>*out</code>);成功回 <code>AEC_OK</code>(0)</td></tr>
 <tr><td>4</td><td>查記憶池大小(pool 路徑)</td><td><code>aec_get_mem_size(&amp;cfg)</code>;拆解用 <code>aec_get_mem_breakdown</code></td><td><code>aec_get_mem_size</code> <b>回 0</b>(不是負值);<code>aec_get_mem_breakdown</code> 回 <code>AEC_ERR_ARG</code>,成功 <code>AEC_OK</code></td></tr>
-<tr><td>5</td><td>建立實例</td><td>pool:<code>aec_init(mem, bytes, &amp;cfg)</code>;heap:<code>aec_create(&amp;aec, &amp;cfg)</code></td><td><code>aec_init</code> 回 <b>NULL</b>(cfg 無效、未 16-byte 對齊、pool 過小);<code>aec_create</code> 回 <b>-1</b></td></tr>
+<tr><td>5</td><td>建立實例</td><td>pool:<code>aec_init(mem, bytes, &amp;cfg)</code>;heap:<code>aec = aec_create(&amp;cfg)</code></td><td><code>aec_init</code> 回 <b>NULL</b>(cfg 無效、未 16-byte 對齊、pool 過小);<code>aec_create</code> 也回 <b>NULL</b>(cfg 無效、記憶體不足)</td></tr>
 <tr><td>5a</td><td>(選用)記憶池描述子;<b>陣列實例(<code>n_mics = 4</code>)建議使用</b></td><td><code>aec_get_mem_requirements(&amp;cfg, &amp;req)</code> + <code>aec_init_ex(mem, bytes, &amp;cfg, &amp;req)</code></td><td>前者回 <b>-1</b>(cfg 無效、<code>req</code> 清零);後者回 <b>NULL</b>(同 <code>aec_init</code>,另加描述子與目前建置不符)。陣列的池大小隨 <code>residual</code> 改變,見範例 E</td></tr>
 <tr><td>6</td><td>取每次呼叫的樣本數</td><td><code>aec_hop_size(aec)</code></td><td>NULL 回 0</td></tr>
 <tr><td>7</td><td>每個 hop 處理一次</td><td><code>aec_process(aec, mic, ref, out)</code> 或 <code>aec_process_linear(aec, mic, ref)</code> + <code>aec_process_residual(aec, NULL)</code></td><td>回傳 <code>AecStatus</code>(<code>AEC_OK</code> = 0;<code>AEC_ERR_ARG</code>／<code>AEC_ERR_MODE</code>／<code>AEC_ERR_SEQUENCE</code> 為呼叫錯誤,實例原封不動);長度由呼叫端保證</td></tr>
@@ -90,7 +90,7 @@ int run_aec_pool(int sample_rate)
     int rc = (mic &amp;&amp; ref &amp;&amp; out) ? 0 : -1;
 
     while (rc == 0 &amp;&amp; app_read_hop(mic, ref, hop)) {
-        aec_process(aec, mic, ref, out);              /* void: no per-call error code */
+        aec_process(aec, mic, ref, out);              /* AecStatus: AEC_OK, or a negative code with nothing written to out */
         app_write_hop(out, hop);
     }
 
@@ -105,13 +105,14 @@ int run_aec_pool(int sample_rate)
 int run_aec_heap(void)
 {
     AecConfig cfg;
-    Aec aec;                                          /* the struct is owned by the caller */
+    Aec *aec;                                         /* opaque: only a pointer */
     aec_config_from_level(&amp;cfg, AEC_LEVEL_BALANCED, 48000);
-    if (aec_create(&amp;aec, &amp;cfg) != 0) return -1;       /* -1: cfg rejected or allocation failed */
+    aec = aec_create(&amp;cfg);
+    if (!aec) return -1;                              /* NULL: cfg rejected or allocation failed */
 
-    /* ... aec_process(&amp;aec, mic, ref, out) once per hop ... */
+    /* ... aec_process(aec, mic, ref, out) once per hop ... */
 
-    aec_destroy(&amp;aec);                                /* frees the single internal arena: exactly once */
+    aec_destroy(aec);                                 /* frees the one block: exactly once; the pointer is dead afterwards */
     return 0;
 }</code></pre>
 <h3>C. hop 之間的控制呼叫</h3>
@@ -147,12 +148,13 @@ extern void app_consume_frame(const AecResidualView *rv, const AecLinearView *li
 int run_aec_seam(int sample_rate)
 {
     AecConfig cfg;
-    Aec aec;
+    Aec *aec;
     aec_config_from_level(&amp;cfg, AEC_LEVEL_BALANCED, sample_rate);
     cfg.residual = AEC_RESIDUAL_FULL;   /* the post block runs and fills the view; the split entry points apply nothing */
-    if (aec_create(&amp;aec, &amp;cfg) != 0) return -1;
+    aec = aec_create(&amp;cfg);
+    if (!aec) return -1;
 
-    int hop = aec_hop_size(&amp;aec);
+    int hop = aec_hop_size(aec);
     float *mic = malloc((size_t)hop * sizeof *mic);
     float *ref = malloc((size_t)hop * sizeof *ref);
     int rc = (mic &amp;&amp; ref) ? 0 : -1;
@@ -160,10 +162,10 @@ int run_aec_seam(int sample_rate)
     while (rc == 0 &amp;&amp; app_read_hop(mic, ref, hop)) {
         AecResidualView rv = { .struct_size = sizeof rv };
         AecLinearView lin = { .struct_size = sizeof lin };
-        if (aec_process_linear(&amp;aec, mic, ref) != AEC_OK ||       /* no out buffer */
-            aec_process_residual(&amp;aec, NULL) != AEC_OK ||
-            aec_get_residual(&amp;aec, &amp;rv) != AEC_OK ||              /* error_spec, r2, comfort_noise, res_gain, ... */
-            aec_get_linear(&amp;aec, &amp;lin) != AEC_OK) {               /* aligned_far_hop, delay_state, generation */
+        if (aec_process_linear(aec, mic, ref) != AEC_OK ||        /* no out buffer */
+            aec_process_residual(aec, NULL) != AEC_OK ||
+            aec_get_residual(aec, &amp;rv) != AEC_OK ||               /* error_spec, r2, comfort_noise, res_gain, ... */
+            aec_get_linear(aec, &amp;lin) != AEC_OK) {                /* aligned_far_hop, delay_state, generation */
             rc = -1;
             break;
         }
@@ -171,7 +173,7 @@ int run_aec_seam(int sample_rate)
     }
 
     free(mic); free(ref);
-    aec_destroy(&amp;aec);
+    aec_destroy(aec);
     return rc;
 }</code></pre>
 <div class="note">seam 路徑要 <code>residual</code> 不是 <code>OFF</code>(預設 <code>FULL</code> 即可),並用 <code>aec_process_linear</code> + <code>aec_process_residual</code> 驅動:<code>OFF</code> 時沒有後級,<code>aec_get_residual</code> 回 <code>AEC_ERR_MODE</code>,<code>error_spec</code>／<code>res_gain</code>／<code>r2</code>／<code>comfort_noise</code>／<code>formed_hop</code> 都拿不到。<code>ESTIMATE</code> 不算 <code>res_gain</code>,<code>STATE</code> 連 <code>r2</code>／<code>comfort_noise</code> 也不算。<code>enable_cng</code> 只管 <code>aec_process()</code> 在 <code>FULL</code> 時時域輸出內的舒適噪音注入;<code>rv.comfort_noise</code>(PSD)只要後級有跑就會算,與 <code>enable_cng</code> 無關。<code>AecResidualView</code>／<code>AecLinearView</code> 的指標在下一次任何 process 或 reset 呼叫後失效,要跨 hop 就自己複製。</div>
@@ -240,7 +242,7 @@ int app_run_hop(Aec *aec, const float *mics, const float *ref,
     return AEC_OK;
 }</code></pre>
 <div class="note"><b>陣列實例的要點</b>:權重是聲道優先的 <code>Complex[4][n_freqs]</code>,融合為 <code>Σ w · lane</code>(不取共軛),必須有限且不全為零,否則 <code>aec_process_residual()</code> 回 <code>AEC_ERR_ARG</code> 且該 hop 保持開啟;<code>beamformed_error</code> 由呼叫端持有並活到本 hop 檢視讀完,或傳 <code>NULL</code> 由權重重建;含非有限值同樣回 <code>AEC_ERR_ARG</code>(實例不重設)。<code>residual</code> 三種值(<code>OFF</code> 被拒絕)的差別:<code>STATE</code> 只有四條 lane,<code>aec_process_residual()</code> 回 <code>AEC_ERR_MODE</code>,波束後的頻譜由呼叫端自己渲染;<code>ESTIMATE</code> 融合但不算增益(<code>aec_apply_*</code> 回 <code>AEC_ERR_MODE</code>),同一 hop 可重複融合;<code>FULL</code> 另算一次 <code>G_res</code>,同一 hop 的第二次 <code>aec_process_residual()</code> 回 <code>AEC_ERR_SEQUENCE</code>。<code>aec_get_residual()</code> 在陣列上 <code>formed_hop</code> 與 <code>echo_spec</code> 為 <code>NULL</code>。<code>aec_process()</code>、<code>aec_apply_external_realign()</code> 在陣列上被拒絕。<code>aec_post_reset_serial()</code> 是四條 lane 的計數之和(<code>aec_reset()</code> 前進 4),只比較是否與自己存的不同。完整契約見 <code>AEC/docs/reference/integration.md</code> §8.8。</div>
-<div class="warn"><b>目前尚未做到</b>:遠端側狀態仍是每條 lane 各一份(共用的是 delay 估計器、對齊後 far、FFT 控制代碼,以及 hop 內由 lane 0 借給 lane 1–3 的遠端 FFT 結果)(16k/256 每條 <code>ESTIMATE</code>／<code>FULL</code> lane 147,200 B,四條共 588,800 B,約占 <code>FULL</code> 陣列池 720,352 B 的 82%;<code>STATE</code> lane 不切殘餘回音估計器與舒適噪音陣列,每條 124,880 B)。陣列的 <code>STATE</code>／<code>ESTIMATE</code>／<code>FULL</code> 池大小在 16k/256 為 616,912／712,448／720,352 B(主機實測;以 <code>aec_get_mem_requirements()</code> 為準)。</div>
+<div class="warn"><b>目前尚未做到</b>:遠端側狀態仍是每條 lane 各一份(共用的是 delay 估計器、對齊後 far、FFT 控制代碼,以及 hop 內由 lane 0 借給 lane 1–3 的遠端 FFT 結果)(16k/256 每條 <code>ESTIMATE</code>／<code>FULL</code> lane 142,880 B,四條共 571,520 B,約占 <code>FULL</code> 陣列池 701,280 B 的 81%;<code>STATE</code> lane 不切殘餘回音估計器與舒適噪音陣列,每條 120,560 B)。陣列的 <code>STATE</code>／<code>ESTIMATE</code>／<code>FULL</code> 池大小在 16k/256 為 595,744／691,280／701,280 B(主機實測;以 <code>aec_get_mem_requirements()</code> 為準)。</div>
 
 <h2>4. 初始化、對齊、錯誤處理、reset、destroy</h2>
 <div class="tblwrap"><table>
@@ -248,18 +250,18 @@ int app_run_hop(Aec *aec, const float *mics, const float *ref,
 <tr><td>輸入長度</td><td><code>mic</code>／<code>ref</code>／<code>out</code> 各恰好 <code>aec_hop_size()</code> 個 float32,標稱 [-1, 1];處理函式沒有長度參數、不檢查(給少＝讀未初始化記憶體)。mic、ref、out 可互相 alias(<code>aec_stage_linear</code> 開頭就複製進內部 buffer)。</td></tr>
 <tr><td>池對齊與大小</td><td>基底 16-byte 對齊,<code>aec_init</code> 在寫任何 byte 前檢查(<code>aec.c</code> <code>aec_init</code>);<code>mem_size</code> 少 1 byte 即 NULL。<code>Aec</code> 結構本身也在池內。大小與格點、backend、struct 大小有關,<b>永遠以 <code>aec_get_mem_size()</code> 為準</b>。</td></tr>
 <tr><td>查大小與 init 用同一份 cfg</td><td>兩者各自驗證與計算,傳不同 cfg 不會被偵測(只擋 <code>mem_size &lt; need</code>)。</td></tr>
-<tr><td>init-time immutable</td><td><code>sample_rate</code>、<code>fft_size</code>、<code>filter_length</code>、<code>n_partitions</code>、<code>delay_mode</code>、<code>delay_num_filters</code>、<code>fixed_delay_samples</code> 決定 pool 佈局(陣列實例另有 <code>n_mics</code>、<code>capture_proxy_channel</code>、<code>max_delay_ms</code> 與 <code>residual</code>);改了要重新查大小並重建。<code>aec_create</code>／<code>aec_init</code> 會複製一份設定,事後改手上那份無效,也不要改 <code>aec.cfg</code>。</td></tr>
+<tr><td>init-time immutable</td><td><code>sample_rate</code>、<code>fft_size</code>、<code>delay_mode</code>、<code>delay_num_filters</code>、<code>fixed_delay_samples</code> 決定 pool 佈局(濾波器長度由取樣率派生;陣列實例另有 <code>n_mics</code>、<code>capture_proxy_channel</code> 與 <code>residual</code>);改了要重新查大小並重建。<code>aec_create</code>／<code>aec_init</code> 會複製一份設定,事後改手上那份無效;<code>Aec</code> 是不透明型別,沒有可改的內部設定。</td></tr>
 <tr><td>mic／ref 前提</td><td>ref 是實際送往喇叭的訊號,與 mic 同取樣率同時鐘;延遲只能是正的(mic 落後 ref)。函式庫不補償 clock drift。</td></tr>
 <tr><td>延遲三態</td><td><code>MATCHED</code>(預設,線上估計)／<code>FIXED</code>(給量測延遲 <code>fixed_delay_samples</code>)／<code>EXTERNAL_ALIGNED</code>(呼叫端保證已對齊);非法組合在建立時被拒絕,不會被修正。表見 <a href="aec_c_api.html">AEC API</a> §4。</td></tr>
 <tr><td>執行緒</td><td>一個實例<b>不是 thread-safe</b>;<code>aec_process*</code>、<code>aec_set_level</code>、<code>aec_reset</code>、<code>aec_apply_external_realign</code>、<code>aec_destroy</code> 都要由呼叫端序列化。不同實例彼此獨立。</td></tr>
 <tr><td><code>aec_reset</code></td><td>清延遲估計、參考環、濾波器、偵測器、輸出 OLA 等執行期狀態,<b>保留設定、記憶體與 <code>aec_set_level</code> 設的目標</b>;會讓 <code>generation</code> 與 <code>aec_post_reset_serial()</code> 各 +1(<code>aec_reset</code> 是獨立的一次呼叫,不在任何處理呼叫之內,回傳時 serial 已是 +1 後的值;函式庫自己清 OLA 並把 CNG 種子設回 <code>AEC_CNG_SEED</code>;函式庫外自行合成的消費端看到 serial 改變就同步清自己的 OLA 與 CNG,不要反過來呼叫 <code>aec_reset</code>)。每個獨立串流前呼叫;只是外部對齊改變時改用 <code>aec_apply_external_realign</code>(不重啟 OLA,輸出連續)。</td></tr>
 <tr><td><code>aec_destroy</code></td><td>heap 實例釋放單一 arena,<b>剛好一次</b>;pool 實例不釋放任何記憶體(只清內部參考)、可重複呼叫(NULL 也安全),池由呼叫端回收。</td></tr>
-<tr><td>零 heap</td><td>pool 路徑從 init 到 destroy 不呼叫 malloc(<code>make test-zero-heap</code>:50 個 init/process/reset/destroy 週期 allocator 呼叫為 0)。heap 路徑只在 <code>aec_create</code> 做<b>一次</b> 16-byte 對齊配置。</td></tr>
+<tr><td>零 heap</td><td>pool 路徑從 init 到 destroy 不呼叫 malloc(<code>make test-zero-heap</code>:50 個 init/process/reset/destroy 週期 allocator 呼叫為 0)。heap 路徑只在 <code>aec_create</code> 做<b>一次</b> 16-byte 對齊配置(<code>aec_destroy</code> 釋放同一塊,指標隨即失效)。</td></tr>
 </table></div>
 <p class="small">各函式對 NULL 的行為(會 crash／安全／no-op)的完整表在 <code>AEC/docs/reference/lifecycle.md</code> §5。</p>
 
 <h2>5. 接到 NR 與合成(單聲道整鏈)</h2>
-<p>AEC 庫本身不包 NR 或合成。整合者各自初始化 <code>Aec</code>、<code>AnrDenoiser</code>(NR 庫)、<code>AcIstft</code>(audiolib),並自己寫一小段每 hop 的串接;Audio_ALG 的 <code>pipelines/mono/aec_nr_res/main.c</code> 就是這樣(串接函式 <code>mono_form()</code>)。AEC 端用預設的 <code>residual = FULL</code> 建立並以 <code>aec_process_linear</code> + <code>aec_process_residual</code> 驅動,單聲道的 RES 增益是 AEC 自己算的 <code>rv.res_gain</code>(由 <code>aec_get_residual()</code> 取得),不需另建 <code>AecRes</code>。</p>
+<p>AEC 庫本身不包 NR 或合成。整合者各自初始化 <code>Aec</code>、<code>AnrDenoiser</code>(NR 庫)、<code>AcIstft</code>(audiolib),並自己寫一小段每 hop 的串接;Audio_ALG 的 <code>pipelines/mono/aec_nr_res/main.c</code> 就是這樣(串接函式 <code>mono_form()</code>)。AEC 端用預設的 <code>residual = FULL</code> 建立並以 <code>aec_process_linear</code> + <code>aec_process_residual</code> 驅動,單聲道的 RES 增益是 AEC 自己算的 <code>rv.res_gain</code>(由 <code>aec_get_residual()</code> 取得),不需另建增益階段。</p>
 <pre><code>aec_process_linear(aec, mic, ref);           /* 線性 stage */
 aec_process_residual(aec, NULL);             /* post 區塊,不寫 out、不套增益 */
 AecResidualView rv = { .struct_size = sizeof rv };
@@ -269,14 +271,14 @@ if (aec_post_reset_serial(aec) != my_serial) {   /* 硬 post 鏈 reset:在 ac_is
 }
 const float *extra = NULL;
 if (use_r2 &amp;&amp; rv.r2 &amp;&amp; rv.usable_linear) {          /* R2 併入噪音底,僅在 usable_linear 為真時 */
-    sk_scale_f32(scratch, rv.r2, 1.0f / (32768.0f * 32768.0f), n_freqs);   /* r2 是 int16² 尺度 */
+    sk_scale_f32(scratch, rv.r2, AEC_PSD_SCALE_INV_F, n_freqs);   /* r2 是 int16² 尺度；AEC_PSD_SCALE_INV_F 在 aec.h */
     extra = scratch;
 }
 g_nr = anr_process_gain_with_residual_psd(nr, rv.error_spec, extra);   /* NR 增益;extra 為 NULL 時等同 anr_process_gain(nr, rv.error_spec) */
 aec_apply_gain(aec, g_nr, spec);                               /* P = base_spec * min(g_nr, g_res)(渲染 base_spec,不是 error_spec) */
 if (use_cng) aec_apply_cng(aec, g_nr, spec);                   /* 開 CNG 時:實例內產生器,下限 AEC_CNG_NR_GAIN_FLOOR */
 ac_istft_push(istft, spec, out);                               /* 反 FFT + 合成 + OLA */</code></pre>
-<p class="small">上列 <code>anr_*</code> 屬 NR 庫,<code>sk_*</code>／<code>ac_istft_push</code> 屬 audiolib,只有 <code>aec_*</code> 是 AEC 庫的 API;流程時序見 <a href="aec_sequence.html">aec_sequence</a> §3,各 stage 的介面見 串接範例。</p>
+<p class="small">上列 <code>anr_*</code> 屬 NR 庫,<code>sk_*</code>／<code>ac_istft_push</code> 屬 audiolib,只有 <code>aec_*</code> 是 AEC 庫的 API;流程時序見 <a href="aec_sequence.html">aec_sequence</a> §3,各 stage 的介面見各庫自己的文件。</p>
 
 </body>
 </html>

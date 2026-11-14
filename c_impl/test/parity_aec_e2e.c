@@ -44,6 +44,8 @@
  *   bin/p_e2e bin/g.bin 1 --live-observer
  */
 #include "aec.h"
+#include "aec_white_box.h"
+#include "aec_test_tuning.h"
 #include "cli_level.h"
 
 /* Max allowed |C - Python| per sample, per rate class (see the table in the
@@ -77,8 +79,8 @@ int main(int argc, char **argv) {
             return 2;
         }
     }
-    AecConfig cfg;
-    aec_config_from_level(&cfg, level, sr);
+    AecTestCfg tc;
+    aec_tcfg_from_level(&tc, level, sr);
     /* Golden produced with --no-res: the post-filter block never runs, so the
      * quantities that steer the filter from outside it are what this case
      * checks. `out` is then the linear residual, i.e. equal to raw. */
@@ -86,13 +88,13 @@ int main(int argc, char **argv) {
      * check silently drops a flag if the two are passed in the other order, e.g. `--live-observer
      * --no-res` (the generator's argparse is order-independent). */
     for (int ai = 3; ai < argc; ++ai) {
-        if (!strcmp(argv[ai], "--no-res")) cfg.residual = AEC_RESIDUAL_OFF;
-        else if (!strcmp(argv[ai], "--live-observer")) cfg.live_observer_enabled = 1;
+        if (!strcmp(argv[ai], "--no-res")) tc.c.residual = AEC_RESIDUAL_OFF;
+        else if (!strcmp(argv[ai], "--live-observer")) tc.t.live_observer_enabled = 1;
     }
-    Aec aec;
-    if (aec_create(&aec, &cfg) != 0) { fprintf(stderr, "aec_create\n"); return 2; }
-    if (aec_hop_size(&aec) != hop) {
-        fprintf(stderr, "hop mismatch C=%d golden=%d\n", aec_hop_size(&aec), hop);
+    Aec *aec = NULL;
+    if ((aec = aec_tcfg_create(&tc)) == NULL) { fprintf(stderr, "aec_create\n"); return 2; }
+    if (aec_hop_size(aec) != hop) {
+        fprintf(stderr, "hop mismatch C=%d golden=%d\n", aec_hop_size(aec), hop);
         return 2;
     }
 
@@ -111,8 +113,8 @@ int main(int argc, char **argv) {
             !rd(f, ref, (size_t)hop * 4) ||
             !rd(f, exp, (size_t)hop * 4) ||
             !rd(f, exp_raw, (size_t)hop * 4)) { fprintf(stderr, "row %d\n", hi); return 2; }
-        aec_process(&aec, mic, ref, out);
-        const float *raw = aec.raw_output;   /* linear residual (struct exposed) */
+        aec_process(aec, mic, ref, out);
+        const float *raw = aec->raw_output;   /* linear residual (struct exposed) */
         for (int k = 0; k < hop; ++k) {
             if (out[k] != exp[k]) {
                 double d = (double)out[k] - (double)exp[k]; if (d < 0) d = -d;
@@ -138,7 +140,7 @@ int main(int argc, char **argv) {
     printf("  >>> out[hop] mism=%ld (max=%.3e first_hop=%d first_samp=%d)\n",
            mism, maxd, first_hop, first_samp);
 
-    aec_destroy(&aec);
+    aec_destroy(aec);
     free(mic); free(ref); free(exp); free(exp_raw); free(out);
 
     if (raw_maxd < tol && maxd < tol) {

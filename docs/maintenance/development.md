@@ -6,7 +6,10 @@ should start from the root README or the C integration guide instead.
 
 ## What this repo is
 
-Single-channel AEC (1 mic + 1 ref reference signal). Two implementations of the
+AEC for one microphone and one reference signal. The C library also builds a
+four-microphone array instance (`AecConfig.n_mics = 4`: four lanes, one shared delay
+estimator, fusion buffers; the beamformer stays with the caller); the Python reference
+implements the single-channel algorithm only. Two implementations of the
 **same algorithm** — Python is the fp64 algorithm spec, C is the float32
 production implementation, and their outputs agree within a documented
 numerical tolerance (not bit-equal):
@@ -67,6 +70,14 @@ python3 python/bench_aecmos.py out_python/ results/ --baseline /path/to/baseline
 regression check, A/B, and audit; other settings produce results that are not
 comparable.
 
+### 90-case blind A/B (baseline vs candidate worktrees)
+
+`eval/run_py_ab.sh` (Python path, `NO_PREALIGN=1`) and `eval/run_c_ab.sh` (C path, `aec_wav`) render and score the stems in
+`eval/manifest_90case_stems.txt`; `eval/ab_report.py` summarises. A change that lands in both ports needs both runners: neither
+sees the other's regressions. `eval/manifest_90case_stems.txt` currently lists 29 stems that are absent from their scenario
+directory (they sit under `nearend_singletalk/_quarantine_non_official`), so both runners stop at their completeness gate until
+the manifest is repointed.
+
 ### Byte-equal regression check (behaviour-neutral changes)
 
 A behaviour-neutral change must produce byte-identical output on the side of
@@ -120,7 +131,7 @@ All MATCH before any commit that touches code outside docs.
 
 ```bash
 cd c_impl
-make                  # debug: `make debug` (adds -g -DAEC_DEBUG)
+make                  # debug: `make debug` (adds -g)
 # artifacts land in bin/<backend>-<config-hash>/;
 # `make print-bin-dir` (same flags) resolves the exact path, or use
 # `make publish` for a stable dist/<backend>/current/ path:
@@ -143,6 +154,11 @@ Output WAV defaults to fp32 PCM (`AEC_OUT_FLOAT=0` for 16-bit).
 python3 -m pytest python/tests
 ```
 
+Two of these read documentation: `python/tests/test_c_python_map.py` (the marker, count and statistics checks of
+`docs/c_python_function_map.md`) and `python/tests/test_timing_inventory.py` (`docs/timing_constant_inventory.json`
+and the `.md` rendered from it by `python/diag/gen_timing_inventory.py`). `make test-docs-smoke` (in `c_impl/`) compiles and
+runs the C sample between the `docs-smoke` markers of `c_impl/STATIC_MEMORY.md`. Run them after a documentation change.
+
 ### C tests
 
 ```bash
@@ -155,6 +171,22 @@ make test-full        # + full Python<->C parity matrix, end-to-end gate, slow s
 `make test` also runs the pytest suite and the lean parity suite
 (`make test-pyc-parity`; `PYC_ARGS=--full` for every scenario). The tiers and
 their members are listed in `c_impl/README.md`.
+
+### Behaviour-neutral C changes: the line-stream baseline
+
+No golden directory ships in `c_impl/test/`. The five hash-stream tests (`test-split-entry`, `test-split-entry-2`,
+`test-split-entry-3`, `test-aec-array`, `test-aec-array-2`) capture and compare their own output instead, run from `c_impl/`:
+
+```bash
+out="$(mktemp -d)"                                    # scratch directory outside the repository; delete it when done
+AEC_TEST_BASELINE_WRITE="$out" make test-split-entry  # BEFORE editing: write <test>_simd{0,1}.txt for this build
+# ... make the change ...
+AEC_TEST_BASELINE="$out" make test-split-entry        # AFTER editing: every line must match
+```
+
+Do this for each of the five tests, at `SIMD=1` and `SIMD=0`. A pool-size change shows up only in the `META` lines; every hop hash must stay
+identical. The files are valid for the host, compiler and FFT backend that wrote them. The Python-side goldens
+(`make test-detectors-parity`, `make test-parity-e2e`) are regenerated from the Python reference on every run and are not checked in.
 
 ## Architecture — what to read before changing things
 
@@ -200,6 +232,9 @@ PathChangeRegimeHandler in [python/modules/epc.py](../../python/modules/epc.py).
 The handler is **load-bearing on the cohort tail**; do not remove or bypass it.
 
 ### `AecConfig` and presets
+
+(Python twin. The C `AecConfig` has 12 fields and one strength field, `level`; everything below that the Python dataclass
+exposes is a library-internal `AecTuning` value in C. See `docs/reference/configuration.md` §6.)
 
 Four presets — `mild` / `balanced` / `aggressive` / `no_floor` — are defined in
 [python/modules/config.py](../../python/modules/config.py) (`from_preset`). All share

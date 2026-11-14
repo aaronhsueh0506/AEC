@@ -40,11 +40,10 @@ int main(void) {
     int hop;
 
     aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, 16000);
-    a = (Aec *)malloc(sizeof(Aec));
-    if (!a) { printf("FAIL: out of memory\n"); return 2; }
-    if (aec_create(a, &cfg) != 0) { printf("FAIL: aec_create\n"); free(a); return 2; }
+    a = aec_create(&cfg);
+    if (!a) { printf("FAIL: aec_create\n"); return 2; }
 
-    hop = a->hop_size;
+    hop = aec_hop_size(a);
     mic = (float *)calloc((size_t)hop, sizeof(float));
     far = (float *)calloc((size_t)hop, sizeof(float));
     out = (float *)malloc((size_t)hop * sizeof(float));
@@ -63,7 +62,7 @@ int main(void) {
     expect("res_us stamps",      t.res_us,      1);
 
     free(mic); free(far); free(out);
-    aec_destroy(a); free(a);
+    aec_destroy(a);
 
     printf(fails ? "profile_stamp_topology: %d FAILED\n" : "profile_stamp_topology: all pass\n", fails);
     return fails != 0;

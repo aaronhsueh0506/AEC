@@ -149,11 +149,11 @@ shows their public configuration values, not necessarily the internal hop count.
 | | `shadow_dtd_advantage_scale` / `shadow_dtd_offset` | 3.0 / 1.5 | |
 | Misadjustment estimator | `filter_misadjustment_*` | 100 / 30 / 0.5 / 2.0 | hangover/stable use 10 ms authored basis; scale min/max are dimensionless |
 | PBFDKF (Kalman) | `use_kalman` | **ON** | |
-| | `kalman_q_high` / `kalman_q_low` | 1e-3 / 1e-6 | |
+| | `kalman_q_high` / `kalman_q_low` | 1e-3 / 1e-6 | Python only (the C filter keeps no `Q`) |
 | | `warmup_frames` | 80 (preset 100) | 10 ms authored basis; preset remains approximately 1.0 s after grid retiming |
 | EPC | `epc_delta_threshold` / `epc_total_rise` / `epc_hangover` | 0.3 / 1.5 / 20 | |
 | Delay estimation | `enable_delay_est` | **ON** | deprecated mirror of `delay_mode` |
-| | `max_delay_ms` / `delay_buffer_ms` | 1024 / 2048 | |
+| | `max_delay_ms` / `delay_buffer_ms` | 1024 / 2048 | `delay_buffer_ms` is Python only; in C `max_delay_ms` is an internal value read by the array instance only (single-channel ring = estimator reach + hop) |
 | | `delay_est_period_s` / `delay_est_init_s` | 0.5 / 0.3 | |
 | | `delay_par_low_threshold` / `_solid_threshold` | 5.0 / 8.0 | |
 | HPF | `enable_highpass` | **ON** | mic-path only |
@@ -165,10 +165,11 @@ shows their public configuration values, not necessarily the internal hop count.
 | | `return_res_context` | OFF | switches `process()` return type (§4); with `enable_res=False` it selects the context-only seam, which publishes the same analysis seam and rendering base as the full mode ([§3.8](reference/postfilter.md#38-output-guard-rendering-base-and-post-reset-serial)) |
 | | `clear_filter_history` | OFF | |
 
-Defaults above are the Python `AecConfig` dataclass values. The C `aec_config_defaults()`
-(`c_impl/src/aec.c`) differs in three fields: `enable_cng` (C: 1), `warmup_frames` (C: 100) and
-`delay_est_period_s` (C: 0.0, i.e. the matched filter analyses every hop). C also carries the reserved `epc_mu_floor`
-(no consumer), which the Python config does not have. The C `AecConfig` does not have the Python flag pair
+Defaults above are the Python `AecConfig` dataclass values. The C library keeps them in an internal `AecTuning` (all of them except the Python-only
+`kalman_q_high` / `kalman_q_low`, `delay_buffer_ms` and `epc_mu_floor`, which C does not have) apart from the public fields
+(`c_impl/src/aec_tuning.h`, built by `aec_resolve()` from the sample rate, the grid, `n_mics` and the level; the public `AecConfig` has 12 fields
+and callers cannot set the others). The C defaults differ from the Python dataclass in three values: `enable_cng` (C: 1, a public field), `warmup_frames` (C: 100) and
+`delay_est_period_s` (C: 0.0, i.e. the matched filter analyses every hop). The C `AecConfig` does not have the Python flag pair
 `enable_res` / `return_res_context` either: its single field `residual` (`AecResidualMode`, default `AEC_RESIDUAL_FULL`)
 covers them (Python `enable_res=True` = C `FULL` driven by `aec_process()`; `enable_res=False, return_res_context=True` =
 C `FULL` driven by `aec_process_linear()` + `aec_process_residual()`; both false = C `OFF`), and the C `AEC_RESIDUAL_STATE` /
@@ -235,7 +236,7 @@ mic-path HPF. The relationship between the two implementations is:
 * **Python↔C comparison is tolerance-based**, not 0/0.
 
 The delay-estimator matched filter is float32 fast-math and duty-cycle capable
-(see [§2.3](reference/linear_frontend.md#23-delay-estimator-aec3-aligned) and `c_impl/include/delay_aec.h`).
+(see [§2.3](reference/linear_frontend.md#23-delay-estimator-aec3-aligned) and `c_impl/src/delay_aec.h`).
 
 The **FFT backend is NE10 (float32, ARM NEON)** (via the shared
 `audiolib` layer), which is not bit-exact to numpy's fp64 `np.fft`. Because

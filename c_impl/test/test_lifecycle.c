@@ -1,9 +1,8 @@
 /* test_lifecycle.c — create/destroy lifecycle regression test.
  *
- * Leak check: aec_create() carves every sub-module array out of a single
- * arena (aec.c: aec_carve(), shared by aec_create() and aec_init());
- * aec_destroy() frees it with one free(). This test repeatedly
- * create/process/reset/destroy's an Aec so a leak checker
+ * Leak check: aec_create() allocates one block of aec_get_mem_size() bytes that holds the Aec and every sub-module array
+ * (aec.c: aec_carve(), shared by aec_create() and aec_init()); aec_destroy() frees it with one free(). This test repeatedly
+ * create/process/reset/destroy's an Aec (single-channel and array) so a leak checker
  * (`leaks --atExit`) run over it shows there is no per-cycle leak: a real
  * leak would show up as N-times-repeated allocations; a correct teardown
  * stays flat regardless of the iteration count.
@@ -12,23 +11,13 @@
  * portable way to do that here), but it does exercise the two cheap,
  * always-checkable safety properties:
  *   - aec_destroy(NULL) is a safe no-op.
- *   - Calling aec_destroy() twice on the same successfully-created instance
- *     is safe (idempotent: the second call frees nothing and dereferences
- *     nothing already freed).
- *   - A destroyed handle is refused by the entry points (aec.h, "A destroyed
- *     handle"): process calls answer AEC_ERR_ARG and aec_get_linear() zeroes *out.
+ *   - Calling aec_destroy() twice on the same aec_init() instance is safe (idempotent: the second call frees nothing and
+ *     dereferences nothing already freed). An aec_create() instance is freed by aec_destroy(); its pointer is dead.
+ *   - A destroyed pool instance is refused by the entry points (aec.h, "A handle that is not ready"): process calls answer
+ *     AEC_ERR_ARG and aec_get_linear() zeroes *out.
  *
- * Build (standalone, from c_impl/):
- *   make -C ../../audiolib/common lib
- *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=gnu99 -Iinclude -Iexample \
- *       -I../../audiolib/common/include -I../../audiolib/common \
- *       test/test_lifecycle.c $(find src -name '*.c') \
- *       $(make -s -C ../../audiolib/common print-lib-path) -lm \
- *       -o bin/test_lifecycle
- * Run:
- *   ./bin/test_lifecycle
- * Leak check (macOS):
- *   leaks --atExit -- ./bin/test_lifecycle
+ * Run from c_impl/:  make test-lifecycle
+ * Leak check (macOS):  leaks --atExit -- "$(make -s print-bin-dir)/test_lifecycle"
  */
 #include "aec.h"
 #include "aec_internal.h"
@@ -53,27 +42,61 @@ static int g_pass = 0;
  * lifecycle, not audio content; that is covered elsewhere, e.g.
  * test_static_aec.c / the render byte-identity gate). */
 static int run_one_cycle(const AecConfig* cfg) {
-    Aec a;
-    if (aec_create(&a, cfg) != 0) return 0;
+    Aec *a = NULL;
+    if ((a = aec_create(cfg)) == NULL) return 0;
 
-    int hop = aec_hop_size(&a);
-    if (hop <= 0 || hop > 4096) { aec_destroy(&a); return 0; }
+    int hop = aec_hop_size(a);
+    if (hop <= 0 || hop > 4096) { aec_destroy(a); return 0; }
 
     float mic[4096] = {0};
     float ref[4096] = {0};
     float out[4096];
     for (int i = 0; i < 5; ++i) {
-        aec_process(&a, mic, ref, out);
+        aec_process(a, mic, ref, out);
     }
 
-    aec_reset(&a);
+    aec_reset(a);
     for (int i = 0; i < 5; ++i) {
-        aec_process(&a, mic, ref, out);
+        aec_process(a, mic, ref, out);
     }
 
-    aec_destroy(&a);
+    aec_destroy(a);
     return 1;
 }
+
+/* The same cycle on a four-microphone array instance: the heap block holds the control block, the lanes and the estimator. */
+#ifndef AEC_NO_ARRAY
+static int run_one_array_cycle(const AecConfig* cfg) {
+    Aec* a = aec_create(cfg);
+    if (!a) return 0;
+    int hop = aec_hop_size(a);
+    if (hop <= 0 || hop > 1024) { aec_destroy(a); return 0; }
+    static float mics[1024 * AEC_ARRAY_MICS], ref[1024];
+    for (int i = 0; i < 5; ++i) {
+        if (aec_process_linear(a, mics, ref) != AEC_OK) { aec_destroy(a); return 0; }
+    }
+    aec_reset(a);
+    for (int i = 0; i < 5; ++i) {
+        if (aec_process_linear(a, mics, ref) != AEC_OK) { aec_destroy(a); return 0; }
+    }
+    aec_destroy(a);
+    return 1;
+}
+
+static void test_array_cycles(int n_iters) {
+    AecConfig cfg;
+    aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, 16000);
+    cfg.n_mics = AEC_ARRAY_MICS;
+    cfg.residual = AEC_RESIDUAL_STATE;
+    int all_ok = 1;
+    for (int i = 0; i < n_iters; ++i) {
+        if (!run_one_array_cycle(&cfg)) { all_ok = 0; break; }
+    }
+    char label[96];
+    snprintf(label, sizeof(label), "%d array create->process_linear(x5)->reset->process_linear(x5)->destroy cycles all succeed", n_iters);
+    CHECK(all_ok, label);
+}
+#endif
 
 static void test_cycles(int n_iters) {
     AecConfig cfg;
@@ -97,7 +120,7 @@ static void test_destroy_null(void) {
     CHECK(1, "aec_destroy(NULL) does not crash");
 }
 
-/* The process and view entry points on a destroyed single-channel handle (the pool or Aec storage is still alive). */
+/* The process and view entry points on a destroyed pool instance (the pool is still alive). */
 static void check_destroyed_single(Aec* a, const char* what) {
     static float mic[4096], ref[4096], out[4096];
     AecLinearView lv;
@@ -119,26 +142,25 @@ static void check_destroyed_single(Aec* a, const char* what) {
     CHECK(declared == sizeof lv && n == sizeof lv, msg);
 }
 
-/* Double-destroy: aec_destroy() is idempotent on a successfully-created
- * instance. Covers both the heap-arena path (aec_create) and the static-pool
- * path (aec_init). */
-static void test_double_destroy_heap(void) {
+/* Heap path: aec_destroy() frees the block that holds the instance, so the pointer is dead afterwards; a new aec_create()
+ * builds a working instance. Pool path: aec_destroy() is idempotent and leaves the handle refused. */
+static void test_destroy_heap(void) {
     AecConfig cfg;
     aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, 16000);
 
-    Aec a;
-    int created = (aec_create(&a, &cfg) == 0);
-    CHECK(created, "double-destroy (heap-arena path): aec_create() succeeds");
+    Aec *a = NULL;
+    int created = ((a = aec_create(&cfg)) != NULL);
+    CHECK(created, "destroy (heap path): aec_create() succeeds");
     if (!created) return;
 
-    int hop = aec_hop_size(&a);
+    int hop = aec_hop_size(a);
     float mic[4096] = {0}, ref[4096] = {0}, out[4096];
-    if (hop > 0 && hop <= 4096) aec_process(&a, mic, ref, out);
+    if (hop > 0 && hop <= 4096) aec_process(a, mic, ref, out);
 
-    aec_destroy(&a);
-    aec_destroy(&a);   /* second call must not double-free / use-after-free */
-    CHECK(1, "double-destroy (heap-arena path): second aec_destroy() does not crash");
-    check_destroyed_single(&a, "destroyed heap handle");
+    aec_destroy(a);
+    created = ((a = aec_create(&cfg)) != NULL);
+    CHECK(created && aec_hop_size(a) == hop, "destroy (heap path): aec_create() after a destroy builds the same instance");
+    aec_destroy(a);
 }
 
 static void test_double_destroy_static(void) {
@@ -174,9 +196,13 @@ int main(void) {
     for (size_t i = 0; i < sizeof(iters) / sizeof(iters[0]); ++i) {
         test_cycles(iters[i]);
     }
+#ifndef AEC_NO_ARRAY
+    test_array_cycles(10);
+    test_array_cycles(100);
+#endif
 
     test_destroy_null();
-    test_double_destroy_heap();
+    test_destroy_heap();
     test_double_destroy_static();
 
     printf("\n%d passed, %d failed\n", g_pass, g_fail);

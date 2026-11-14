@@ -10,10 +10,12 @@
  *
  * Run from c_impl/:  make test-split-entry */
 #include "aec.h"
+#include "aec_white_box.h"
 #include "../src/aec_res_internal.h"
 #include "utility/simd_kernels.h"
 #include "split_signal.h"
 #include "res_gain_of.h"
+#include "aec_pool_test_util.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -55,20 +57,9 @@ static void make_cfg(AecConfig* c, const Grid* g, Mode m) {
     }
 }
 
-static void* pool_alloc(size_t bytes) {
-    void* p = NULL;
-    if (!bytes || posix_memalign(&p, 64u, bytes) != 0) return NULL;
-    memset(p, 0xA5, bytes);
-    return p;
-}
+static void* pool_alloc(size_t bytes) { return aec_test_pool_alloc_fill(bytes, 0xA5); }
 
-static Aec* new_aec(const AecConfig* cfg, void** mem_out) {
-    size_t sz = aec_get_mem_size(cfg);
-    void* mem = pool_alloc(sz);
-    Aec* a = (sz && mem) ? aec_init(mem, sz, cfg) : NULL;
-    *mem_out = mem;
-    return a;
-}
+static Aec* new_aec(const AecConfig* cfg, void** mem_out) { return aec_test_new_aec(cfg, mem_out, 0xA5); }
 
 static void views(const Aec* a, AecLinearView* lv, AecResidualView* rv, int* have_rv) {
     memset(lv, 0, sizeof *lv); lv->struct_size = sizeof *lv;
@@ -153,14 +144,9 @@ static void apply_hop(const Grid* g, const char* mode, const char* pfx, int hop,
     snprintf(f, sizeof f, "%sapply_cng", pfx); emit(g, mode, f, hop, split_hash_complex(p2, n));
     if (a_null) {
         /* a second instance fed the same signal produces the NULL-extra lines from its own generator */
-        float gn_dummy;
-        (void)gn_dummy;
         aec_apply_gain_spec(q1, base, gain, NULL, n);
         memcpy(q2, q1, (size_t)n * sizeof(Complex));
         aec_apply_cng_spec(&st->rng_null, q2, cn, gain, NULL, n);
-        {
-            const Complex* base_n = base; (void)base_n;
-        }
         CHECK(aec_apply_gain(a_null, NULL, p1) == AEC_OK, "aec_apply_gain NULL hop %d", hop);
         memcpy(p2, p1, (size_t)n * sizeof(Complex));
         CHECK(aec_apply_cng(a_null, NULL, p2) == AEC_OK, "aec_apply_cng NULL hop %d", hop);
@@ -307,10 +293,9 @@ static void test_sequence(void) {
     CHECK(aec_process_linear(a, mic, ref) == AEC_ERR_SEQUENCE, "linear twice");
     CHECK(aec_process(a, mic, ref, out) == AEC_ERR_SEQUENCE, "process while a hop is open");
     {
-        float g1[NB_MAX]; Complex o[NB_MAX];
+        Complex o[NB_MAX];
         CHECK(res_gain_of(a) == NULL, "gain while pending");
         CHECK(aec_apply_gain(a, NULL, o) == AEC_ERR_SEQUENCE, "apply_gain while pending");
-        (void)g1;
     }
     CHECK(aec_process_residual(a, (const AecBeam*)mic) == AEC_ERR_ARG, "residual with a beam on a single-channel instance");
     CHECK(aec_process_residual(a, NULL) == AEC_OK, "residual");

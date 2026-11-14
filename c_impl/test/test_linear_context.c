@@ -15,8 +15,8 @@
  *      confidence 1.0, frozen generation, LOCKED once the ring can serve the offset, and the exposed far is byte-equal to
  *      the caller's far delayed by exactly that many samples. EXTERNAL_ALIGNED exposes the caller's own far byte for byte
  *      every hop, with delay_samples 0, LOCKED from hop 0, frozen generation.
- *   6. Per-mode reference-ring sizing. FIXED carves exactly `fixed_delay_samples + hop` (max_delay_ms/delay_buffer_ms are
- *      inert there) and serves the caller's far delayed by exactly that many samples across hundreds of wraps, including
+ *   6. Per-mode reference-ring sizing. FIXED carves exactly `fixed_delay_samples + hop` (max_delay_ms is inert
+ *      there) and serves the caller's far delayed by exactly that many samples across hundreds of wraps, including
  *      through aec_reset()'s refill. EXTERNAL_ALIGNED carries no ring, and its pool is FIXED(0)'s minus one hop-sized
  *      array.
  *
@@ -42,6 +42,9 @@
  * Also wired into the Makefile: `make test-linear-context`.
  */
 #include "aec.h"
+#include "aec_white_box.h"
+#include "aec_test_tuning.h"
+#include "aec_pool_test_util.h"
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -65,8 +68,7 @@ static void context_only_config(AecConfig* cfg, int sample_rate, int fft_size) {
 
 /* One hop of a split-entry instance (the library applies no gain and synthesizes nothing). */
 static void split_hop(Aec* a, const float* mic, const float* far) {
-    int st = aec_process_linear(a, mic, far);
-    if (st == AEC_OK) st = aec_process_residual(a, NULL);
+    int st = aec_test_split_hop(a, mic, far);
     if (st != AEC_OK) { printf("FAIL: split hop refused (%d)\n", st); g_fail++; }
 }
 
@@ -77,13 +79,7 @@ static void get_linear(const Aec* a, AecLinearView* v) {
 
 /* Deterministic xorshift noise, same style as the sibling tests. */
 static unsigned g_rng_state = 0x11EC5EEDu;
-static float rng_uniform(float amp) {
-    g_rng_state ^= g_rng_state << 13;
-    g_rng_state ^= g_rng_state >> 17;
-    g_rng_state ^= g_rng_state << 5;
-    float u = (float)(g_rng_state & 0xFFFFFFu) / (float)0xFFFFFFu;
-    return amp * (2.0f * u - 1.0f);
-}
+static float rng_uniform(float amp) { return aec_test_rng_uniform(&g_rng_state, amp); }
 
 /* One long shared far history so the test can reconstruct, from the CALLER
  * side, exactly which raw samples an aligned far_hop must contain.  Sized
@@ -184,18 +180,18 @@ static void scenario_acquire_and_verify(int sample_rate, int fft_size,
     char msg[160];
     AecConfig cfg;
     context_only_config(&cfg, sample_rate, fft_size);
-    Aec a;
+    Aec *a = NULL;
     snprintf(msg, sizeof msg, "%s: aec_create", tag);
-    CHECK(aec_create(&a, &cfg) == 0, msg);
-    int hop = a.hop_size;
+    CHECK((a = aec_create(&cfg)) != NULL, msg);
+    int hop = a->hop_size;
 
     long pushed = 0;
     AecLinearView ctx0;
-    get_linear(&a, &ctx0);
+    get_linear(a, &ctx0);
     LockWatch w; memset(&w, 0, sizeof w);
     w.gen_before = ctx0.generation;
 
-    run_hops(&a, 500, true_delay, &pushed, watch_hop, &w);
+    run_hops(a, 500, true_delay, &pushed, watch_hop, &w);
 
     snprintf(msg, sizeof msg, "%s: estimator locks within 500 hops", tag);
     CHECK(w.locked_seen, msg);
@@ -210,7 +206,7 @@ static void scenario_acquire_and_verify(int sample_rate, int fft_size,
     CHECK(w.gen_at_lock == w.gen_before + 1, msg);
 
     AecLinearView ctx;
-    get_linear(&a, &ctx);
+    get_linear(a, &ctx);
     snprintf(msg, sizeof msg, "%s: steady state LOCKED after lock", tag);
     CHECK(ctx.delay_state == AEC_LINEAR_DELAY_LOCKED, msg);
     snprintf(msg, sizeof msg, "%s: confidence >= 0.5 once locked", tag);
@@ -225,13 +221,13 @@ static void scenario_acquire_and_verify(int sample_rate, int fft_size,
     CHECK(true_delay - ctx.delay_samples <= residual_cap, msg);
 
     snprintf(msg, sizeof msg, "%s: aligned_far_hop aliases a->far_hop", tag);
-    CHECK(ctx.aligned_far_hop == a.far_hop, msg);
+    CHECK(ctx.aligned_far_hop == a->far_hop, msg);
     snprintf(msg, sizeof msg, "%s: residual view formed_hop aliases the formed output", tag);
     {
         AecResidualView rv;
         memset(&rv, 0, sizeof rv);
         rv.struct_size = sizeof rv;
-        CHECK(aec_get_residual(&a, &rv) == AEC_OK && rv.formed_hop == a.a3_lfs.e_form, msg);
+        CHECK(aec_get_residual(a, &rv) == AEC_OK && rv.formed_hop == a->a3_lfs.e_form, msg);
     }
 
     /* Content proof: the exposed hop == raw far delayed by delay_samples,
@@ -249,8 +245,8 @@ static void scenario_acquire_and_verify(int sample_rate, int fft_size,
     LockWatch w2; memset(&w2, 0, sizeof w2);
     w2.gen_before = gen_locked;
     /* reuse watch via fresh struct: it counts CHANGED hops from here on */
-    run_hops(&a, 5000, true_delay + 10 * hop, &pushed, watch_hop, &w2);
-    get_linear(&a, &ctx);
+    run_hops(a, 5000, true_delay + 10 * hop, &pushed, watch_hop, &w2);
+    get_linear(a, &ctx);
     printf("info: %s: shift re-lock after %d hops (%.1f s audio)\n", tag,
            w2.first_changed_hop,
            (double)w2.first_changed_hop * hop / sample_rate);
@@ -272,14 +268,14 @@ static void scenario_acquire_and_verify(int sample_rate, int fft_size,
 
     /* Reset: one more generation bump, back to UNLOCKED. */
     unsigned gen_shift = ctx.generation;
-    aec_reset(&a);
-    get_linear(&a, &ctx);
+    aec_reset(a);
+    get_linear(a, &ctx);
     snprintf(msg, sizeof msg, "%s: reset: generation advanced", tag);
     CHECK(ctx.generation > gen_shift, msg);
     snprintf(msg, sizeof msg, "%s: reset: UNLOCKED with delay_samples == -1", tag);
     CHECK(ctx.delay_state == AEC_LINEAR_DELAY_UNLOCKED && ctx.delay_samples == -1, msg);
 
-    aec_destroy(&a);
+    aec_destroy(a);
     g_rng_state = 0x11EC5EEDu;  /* keep scenarios independent of ordering */
 }
 
@@ -292,26 +288,26 @@ static void scenario_external_aligned(void) {
     AecConfig cfg;
     context_only_config(&cfg, 16000, 0);
     cfg.delay_mode = AEC_DELAY_EXTERNAL_ALIGNED;
-    Aec a;
+    Aec *a = NULL;
     snprintf(msg, sizeof msg, "%s: aec_create", tag);
-    CHECK(aec_create(&a, &cfg) == 0, msg);
+    CHECK((a = aec_create(&cfg)) != NULL, msg);
     snprintf(msg, sizeof msg, "%s: resolves to EXTERNAL_ALIGNED", tag);
-    CHECK(a.cfg.delay_mode == AEC_DELAY_EXTERNAL_ALIGNED, msg);
+    CHECK(a->cfg.delay_mode == AEC_DELAY_EXTERNAL_ALIGNED, msg);
     snprintf(msg, sizeof msg, "%s: no ring carved", tag);
-    CHECK(a.ref_ring == NULL && !a.has_delay, msg);
+    CHECK(a->ref_ring == NULL && !a->has_delay, msg);
 
-    int hop = a.hop_size;
+    int hop = a->hop_size;
     long pushed = 0;
     AecLinearView first, ctx;
-    get_linear(&a, &first);
+    get_linear(a, &first);
 
     /* Walk EVERY hop: the far the seam exposes must equal the far this test
      * just handed in (modulo nothing -- amplitude 0.05 never soft-clips). */
     int content_ok = 1, state_ok = 1, gen_ok = 1;
     for (int h = 0; h < 120; ++h) {
         long base = pushed;
-        pushed = drive_hop(&a, pushed, 800);
-        get_linear(&a, &ctx);
+        pushed = drive_hop(a, pushed, 800);
+        get_linear(a, &ctx);
         if (memcmp(ctx.aligned_far_hop, g_far_hist + base,
                    (size_t)hop * sizeof(float)) != 0) content_ok = 0;
         if (ctx.delay_state != AEC_LINEAR_DELAY_LOCKED ||
@@ -325,8 +321,8 @@ static void scenario_external_aligned(void) {
     snprintf(msg, sizeof msg, "%s: generation frozen while processing", tag);
     CHECK(gen_ok, msg);
     snprintf(msg, sizeof msg, "%s: aligned_far_hop aliases a->far_hop", tag);
-    CHECK(ctx.aligned_far_hop == a.far_hop, msg);
-    aec_destroy(&a);
+    CHECK(ctx.aligned_far_hop == a->far_hop, msg);
+    aec_destroy(a);
     g_rng_state = 0x11EC5EEDu;
 }
 
@@ -343,17 +339,17 @@ static void scenario_fixed_delay(void) {
     context_only_config(&cfg, 16000, 0);
     cfg.fixed_delay_samples = fixed;
     cfg.delay_mode = AEC_DELAY_FIXED;
-    Aec a;
+    Aec *a = NULL;
     snprintf(msg, sizeof msg, "%s: aec_create", tag);
-    CHECK(aec_create(&a, &cfg) == 0, msg);
+    CHECK((a = aec_create(&cfg)) != NULL, msg);
     snprintf(msg, sizeof msg, "%s: resolves to FIXED", tag);
-    CHECK(a.cfg.delay_mode == AEC_DELAY_FIXED, msg);
+    CHECK(a->cfg.delay_mode == AEC_DELAY_FIXED, msg);
     snprintf(msg, sizeof msg, "%s: ring carved, no estimator", tag);
-    CHECK(a.ref_ring != NULL && !a.has_delay, msg);
+    CHECK(a->ref_ring != NULL && !a->has_delay, msg);
 
-    int hop = a.hop_size;
+    int hop = a->hop_size;
     AecLinearView first, ctx;
-    get_linear(&a, &first);
+    get_linear(a, &first);
     snprintf(msg, sizeof msg, "%s: delay_samples reads the configured delay "
                               "before the first hop", tag);
     CHECK(first.delay_samples == fixed, msg);
@@ -368,8 +364,8 @@ static void scenario_fixed_delay(void) {
     int early_unlocked = 1, late_locked = 1, delay_ok = 1, conf_ok = 1, gen_ok = 1;
     int content_ok = 1, changed_seen = 0;
     for (int h = 0; h < 400; ++h) {
-        pushed = drive_hop(&a, pushed, fixed);
-        get_linear(&a, &ctx);
+        pushed = drive_hop(a, pushed, fixed);
+        get_linear(a, &ctx);
         if (ctx.delay_samples != fixed) delay_ok = 0;
         if (ctx.delay_confidence != 1.0f) conf_ok = 0;
         if (ctx.generation != first.generation) gen_ok = 0;
@@ -410,15 +406,15 @@ static void scenario_fixed_delay(void) {
      * far -- the one legitimate generation bump in this mode -- and must
      * re-seed the applied delay from the config, not to -1. */
     unsigned gen_before = ctx.generation;
-    aec_reset(&a);
-    get_linear(&a, &ctx);
+    aec_reset(a);
+    get_linear(a, &ctx);
     snprintf(msg, sizeof msg, "%s: reset re-seeds the configured delay (not -1)", tag);
-    CHECK(ctx.delay_samples == fixed && a.current_delay == fixed, msg);
+    CHECK(ctx.delay_samples == fixed && a->current_delay == fixed, msg);
     snprintf(msg, sizeof msg, "%s: reset returns to UNLOCKED (ring emptied)", tag);
     CHECK(ctx.delay_state == AEC_LINEAR_DELAY_UNLOCKED, msg);
     snprintf(msg, sizeof msg, "%s: reset bumps generation (ring content invalidated)", tag);
     CHECK(ctx.generation > gen_before, msg);
-    aec_destroy(&a);
+    aec_destroy(a);
     g_rng_state = 0x11EC5EEDu;
 }
 
@@ -430,34 +426,34 @@ static void scenario_fixed_zero_delay(void) {
     context_only_config(&cfg, 16000, 0);
     cfg.delay_mode = AEC_DELAY_FIXED;
     cfg.fixed_delay_samples = 0;
-    Aec a;
-    CHECK(aec_create(&a, &cfg) == 0, "fixed0: aec_create");
-    CHECK(a.ref_ring != NULL, "fixed0: ring still carved (unlike EXTERNAL)");
+    Aec *a = NULL;
+    CHECK((a = aec_create(&cfg)) != NULL, "fixed0: aec_create");
+    CHECK(a->ref_ring != NULL, "fixed0: ring still carved (unlike EXTERNAL)");
     long pushed = 0;
     AecLinearView first, ctx;
-    get_linear(&a, &first);
-    run_hops(&a, 40, 0, &pushed, NULL, NULL);
-    get_linear(&a, &ctx);
+    get_linear(a, &first);
+    run_hops(a, 40, 0, &pushed, NULL, NULL);
+    get_linear(a, &ctx);
     CHECK(ctx.delay_samples == 0 && ctx.delay_state == AEC_LINEAR_DELAY_LOCKED,
           "fixed0: LOCKED at delay 0 from the start");
     CHECK(ctx.generation == first.generation,
           "fixed0: generation frozen while processing");
-    CHECK(memcmp(ctx.aligned_far_hop, g_far_hist + pushed - a.hop_size,
-                 (size_t)a.hop_size * sizeof(float)) == 0,
+    CHECK(memcmp(ctx.aligned_far_hop, g_far_hist + pushed - a->hop_size,
+                 (size_t)a->hop_size * sizeof(float)) == 0,
           "fixed0: exposed far is the caller's latest hop");
-    aec_destroy(&a);
+    aec_destroy(a);
     g_rng_state = 0x11EC5EEDu;
 }
 
 /* ── the FIXED ring is sized for the delay, not for a search ──────────── */
 
 /* FIXED carves exactly `fixed_delay_samples + hop` samples (the tight bound derived in
- * aec_ref_ring_samples()), not the MATCHED search ring (max(delay_buffer_ms, max_delay_ms + 4096)).
+ * aec_ref_ring_samples()), not the MATCHED ring (the estimator's reach + hop).
  * Two claims: a) the size is that expression on every grid and across the interesting fixed values
  * (0, sub-hop, exact hop multiple, non-multiple, one past the max_delay_ms budget); b) max_delay_ms
- * / delay_buffer_ms are inert here: a config differing only in those two fields produces the
- * identical ring and pool size. (b) fails if an edit reintroduces the max() against the search
- * budget; (a) alone would still pass for every fixed value above that budget. */
+ * is inert here: a config differing only in that field produces the identical ring and pool size.
+ * (b) fails if an edit reintroduces a max() against a search budget; (a) alone would still pass for
+ * every fixed value above that budget. */
 static void scenario_fixed_ring_exact_size(void) {
     static const struct { int sr, fft, fixed; const char* tag; } rows[] = {
         { 16000,  256,     0, "16k/256 fixed=0 (degenerate, write-only ring)" },
@@ -473,8 +469,9 @@ static void scenario_fixed_ring_exact_size(void) {
     unsigned r;
     printf("--- FIXED reference-ring capacity ---\n");
     for (r = 0; r < sizeof rows / sizeof rows[0]; ++r) {
-        AecConfig cfg, wide;
-        Aec a, b;
+        AecConfig cfg;
+        AecTestCfg wide;
+        Aec *a = NULL, *b = NULL;
         size_t mem_a, mem_b;
         int hop, want;
 
@@ -483,38 +480,38 @@ static void scenario_fixed_ring_exact_size(void) {
         cfg.fixed_delay_samples = rows[r].fixed;
         mem_a = aec_get_mem_size(&cfg);
         snprintf(msg, sizeof msg, "%s: aec_create", rows[r].tag);
-        CHECK(mem_a > 0 && aec_create(&a, &cfg) == 0, msg);
-        hop = a.hop_size;
+        CHECK(mem_a > 0 && (a = aec_create(&cfg)) != NULL, msg);
+        hop = a->hop_size;
         want = rows[r].fixed + hop;
         printf("    %-44s ring=%d samples  pool=%zu B\n",
-               rows[r].tag, a.ref_ring_size, mem_a);
+               rows[r].tag, a->ref_ring_size, mem_a);
         snprintf(msg, sizeof msg, "%s: ring == fixed + hop (%d), got %d",
-                 rows[r].tag, want, a.ref_ring_size);
-        CHECK(a.ref_ring_size == want, msg);
+                 rows[r].tag, want, a->ref_ring_size);
+        CHECK(a->ref_ring_size == want, msg);
         snprintf(msg, sizeof msg, "%s: ring carved, no estimator", rows[r].tag);
-        CHECK(a.ref_ring != NULL && !a.has_delay, msg);
+        CHECK(a->ref_ring != NULL && !a->has_delay, msg);
 
-        /* (b) the search-ring knobs do not reach this mode. */
-        wide = cfg;
-        wide.max_delay_ms = 60000.0f;
-        wide.delay_buffer_ms = 120000.0f;
-        mem_b = aec_get_mem_size(&wide);
+        /* (b) the search-ring knob does not reach this mode. */
+        wide.c = cfg;
+        aec_tcfg_refresh(&wide);
+        wide.t.max_delay_ms = 60000.0f;
+        mem_b = aec_tcfg_mem_size(&wide);
         snprintf(msg, sizeof msg,
-                 "%s: max_delay_ms/delay_buffer_ms inert (pool %zu == %zu)",
+                 "%s: max_delay_ms inert (pool %zu == %zu)",
                  rows[r].tag, mem_b, mem_a);
         CHECK(mem_b == mem_a, msg);
-        if (mem_b > 0 && aec_create(&b, &wide) == 0) {
+        if (mem_b > 0 && (b = aec_tcfg_create(&wide)) != NULL) {
             snprintf(msg, sizeof msg,
-                     "%s: max_delay_ms/delay_buffer_ms inert (ring %d == %d)",
-                     rows[r].tag, b.ref_ring_size, a.ref_ring_size);
-            CHECK(b.ref_ring_size == a.ref_ring_size, msg);
-            aec_destroy(&b);
+                     "%s: max_delay_ms inert (ring %d == %d)",
+                     rows[r].tag, b->ref_ring_size, a->ref_ring_size);
+            CHECK(b->ref_ring_size == a->ref_ring_size, msg);
+            aec_destroy(b);
         } else {
             snprintf(msg, sizeof msg, "%s: wide-knob instance creates",
                      rows[r].tag);
             CHECK(0, msg);
         }
-        aec_destroy(&a);
+        aec_destroy(a);
         g_rng_state = 0x11EC5EEDu;
     }
 }
@@ -527,7 +524,7 @@ static void scenario_fixed_ring_wraps(int sr, int fft, int fixed, int hops,
                                       const char* tag) {
     char msg[224];
     AecConfig cfg;
-    Aec a;
+    Aec *a = NULL;
     int hop, raw_hops, wrapped = 0, laps;
     long pushed = 0;
     int content_ok = 1, locked_ok = 1, h;
@@ -536,8 +533,8 @@ static void scenario_fixed_ring_wraps(int sr, int fft, int fixed, int hops,
     cfg.delay_mode = AEC_DELAY_FIXED;
     cfg.fixed_delay_samples = fixed;
     snprintf(msg, sizeof msg, "%s: aec_create", tag);
-    CHECK(aec_create(&a, &cfg) == 0, msg);
-    hop = a.hop_size;
+    CHECK((a = aec_create(&cfg)) != NULL, msg);
+    hop = a->hop_size;
     /* Raw-far hops before the ring can serve the offset; hop raw_hops is the
      * first aligned one and is asserted like every later hop. */
     raw_hops = (fixed + hop - 1) / hop;
@@ -545,13 +542,13 @@ static void scenario_fixed_ring_wraps(int sr, int fft, int fixed, int hops,
     for (h = 0; h < hops; ++h) {
         AecLinearView ctx;
         int read_pos;
-        pushed = drive_hop(&a, pushed, fixed);
+        pushed = drive_hop(a, pushed, fixed);
         /* Recompute the read the engine just made, from the post-write
          * cursor, to classify contiguous vs split. */
-        read_pos = (a.ref_ring_write - hop - a.current_delay) % a.ref_ring_size;
-        if (read_pos < 0) read_pos += a.ref_ring_size;
-        if (read_pos + hop > a.ref_ring_size) wrapped++;
-        get_linear(&a, &ctx);
+        read_pos = (a->ref_ring_write - hop - a->current_delay) % a->ref_ring_size;
+        if (read_pos < 0) read_pos += a->ref_ring_size;
+        if (read_pos + hop > a->ref_ring_size) wrapped++;
+        get_linear(a, &ctx);
         if (h < raw_hops) continue;
         if (ctx.delay_state != AEC_LINEAR_DELAY_LOCKED) locked_ok = 0;
         {
@@ -561,9 +558,9 @@ static void scenario_fixed_ring_wraps(int sr, int fft, int fixed, int hops,
                 content_ok = 0;
         }
     }
-    laps = (int)((long)hops * hop / a.ref_ring_size);
+    laps = (int)((long)hops * hop / a->ref_ring_size);
     printf("    %-30s ring=%d, %d laps, %d/%d hops split-read\n",
-           tag, a.ref_ring_size, laps, wrapped, hops);
+           tag, a->ref_ring_size, laps, wrapped, hops);
     snprintf(msg, sizeof msg, "%s: LOCKED for every post-fill hop", tag);
     CHECK(locked_ok, msg);
     snprintf(msg, sizeof msg,
@@ -576,7 +573,7 @@ static void scenario_fixed_ring_wraps(int sr, int fft, int fixed, int hops,
     snprintf(msg, sizeof msg, "%s: the ring wrapped many times (%d laps)",
              tag, laps);
     CHECK(laps >= 4, msg);
-    aec_destroy(&a);
+    aec_destroy(a);
     g_rng_state = 0x11EC5EEDu;
 }
 
@@ -587,7 +584,7 @@ static void scenario_fixed_ring_wraps(int sr, int fft, int fixed, int hops,
 static void scenario_fixed_reset_refill(void) {
     const int fixed = 1600;
     AecConfig cfg;
-    Aec a;
+    Aec *a = NULL;
     char msg[192];
     int hop, raw_hops, pass, h;
     long pushed = 0;
@@ -595,16 +592,16 @@ static void scenario_fixed_reset_refill(void) {
     context_only_config(&cfg, 16000, 0);
     cfg.delay_mode = AEC_DELAY_FIXED;
     cfg.fixed_delay_samples = fixed;
-    CHECK(aec_create(&a, &cfg) == 0, "fixed-refill: aec_create");
-    hop = a.hop_size;
+    CHECK((a = aec_create(&cfg)) != NULL, "fixed-refill: aec_create");
+    hop = a->hop_size;
     raw_hops = (fixed + hop - 1) / hop;
 
     for (pass = 0; pass < 2; ++pass) {
         int unlocked_hops = 0, content_ok = 1, locked_ok = 1;
         for (h = 0; h < 3 * (raw_hops + 1); ++h) {
             AecLinearView ctx;
-            pushed = drive_hop(&a, pushed, fixed);
-            get_linear(&a, &ctx);
+            pushed = drive_hop(a, pushed, fixed);
+            get_linear(a, &ctx);
             if (ctx.delay_state == AEC_LINEAR_DELAY_UNLOCKED) {
                 unlocked_hops++;
                 continue;
@@ -628,12 +625,12 @@ static void scenario_fixed_reset_refill(void) {
                  "fixed-refill pass %d: aligned far correct after refill", pass);
         CHECK(content_ok, msg);
         if (pass == 0) {
-            aec_reset(&a);
-            CHECK(a.ref_ring_filled == 0 && a.current_delay == fixed,
+            aec_reset(a);
+            CHECK(a->ref_ring_filled == 0 && a->current_delay == fixed,
                   "fixed-refill: reset empties the ring, keeps the delay");
         }
     }
-    aec_destroy(&a);
+    aec_destroy(a);
     g_rng_state = 0x11EC5EEDu;
 }
 
@@ -650,17 +647,17 @@ static void scenario_external_has_no_delay_state(void) {
     unsigned g;
     for (g = 0; g < sizeof grids / sizeof grids[0]; ++g) {
         AecConfig ce, cf;
-        Aec a;
+        Aec *a = NULL;
         size_t mem_e, mem_f0, ring_bytes;
         context_only_config(&ce, grids[g].sr, grids[g].fft);
         ce.delay_mode = AEC_DELAY_EXTERNAL_ALIGNED;
         mem_e = aec_get_mem_size(&ce);
         snprintf(msg, sizeof msg, "%s external: aec_create", grids[g].tag);
-        CHECK(mem_e > 0 && aec_create(&a, &ce) == 0, msg);
+        CHECK(mem_e > 0 && (a = aec_create(&ce)) != NULL, msg);
         snprintf(msg, sizeof msg,
                  "%s external: no ring, no estimator, delay 0", grids[g].tag);
-        CHECK(a.ref_ring == NULL && a.ref_ring_size == 0 && !a.has_delay
-              && a.current_delay == 0, msg);
+        CHECK(a->ref_ring == NULL && a->ref_ring_size == 0 && !a->has_delay
+              && a->current_delay == 0, msg);
 
         /* The ONLY thing FIXED-with-zero-delay buys over EXTERNAL is the
          * hop-sized ring, so the pool difference must be exactly that array
@@ -670,12 +667,12 @@ static void scenario_external_has_no_delay_state(void) {
         cf.delay_mode = AEC_DELAY_FIXED;
         cf.fixed_delay_samples = 0;
         mem_f0 = aec_get_mem_size(&cf);
-        ring_bytes = (((size_t)a.hop_size * sizeof(float)) + 15u) & ~(size_t)15u;
+        ring_bytes = (((size_t)a->hop_size * sizeof(float)) + 15u) & ~(size_t)15u;
         snprintf(msg, sizeof msg,
                  "%s external: pool is FIXED(0) minus exactly one hop-ring "
                  "(%zu - %zu == %zu)", grids[g].tag, mem_f0, mem_e, ring_bytes);
         CHECK(mem_f0 > mem_e && mem_f0 - mem_e == ring_bytes, msg);
-        aec_destroy(&a);
+        aec_destroy(a);
         g_rng_state = 0x11EC5EEDu;
     }
 }
@@ -688,9 +685,9 @@ static void scenario_external_has_no_delay_state(void) {
 static void scenario_unfilled_ring_reads_unlocked(void) {
     AecConfig cfg;
     context_only_config(&cfg, 16000, 0);
-    Aec a;
-    CHECK(aec_create(&a, &cfg) == 0, "unfilled-ring: aec_create");
-    int hop = a.hop_size;
+    Aec *a = NULL;
+    CHECK((a = aec_create(&cfg)) != NULL, "unfilled-ring: aec_create");
+    int hop = a->hop_size;
     float mic[1024];
     memset(mic, 0, sizeof mic);
 
@@ -698,17 +695,17 @@ static void scenario_unfilled_ring_reads_unlocked(void) {
      * (as after a reset that kept the delay -- an artificial but layout-legal
      * state). Silence on mic keeps the estimator from re-acquiring. */
     long pushed = 0;
-    run_hops(&a, 4, 0, &pushed, NULL, NULL);
-    a.current_delay = 5000;
-    a.ref_ring_filled = 64;
+    run_hops(a, 4, 0, &pushed, NULL, NULL);
+    a->current_delay = 5000;
+    a->ref_ring_filled = 64;
 
     long base = pushed;
     for (int i = 0; i < hop; ++i) g_far_hist[base + i] = rng_uniform(0.05f);
-    split_hop(&a, mic, g_far_hist + base);
+    split_hop(a, mic, g_far_hist + base);
     pushed = base + hop;
 
     AecLinearView ctx;
-    get_linear(&a, &ctx);
+    get_linear(a, &ctx);
     CHECK(ctx.delay_samples == 5000, "unfilled-ring: delay reads as applied");
     CHECK(ctx.delay_state == AEC_LINEAR_DELAY_UNLOCKED,
           "unfilled-ring: UNLOCKED while the ring cannot cover the delay");
@@ -721,38 +718,38 @@ static void scenario_unfilled_ring_reads_unlocked(void) {
     for (int h = 0; h < 5000 / hop + 4; ++h) {
         base = pushed;
         for (int i = 0; i < hop; ++i) g_far_hist[base + i] = rng_uniform(0.05f);
-        split_hop(&a, mic, g_far_hist + base);
+        split_hop(a, mic, g_far_hist + base);
         pushed = base + hop;
     }
-    get_linear(&a, &ctx);
+    get_linear(a, &ctx);
     CHECK(ctx.delay_state == AEC_LINEAR_DELAY_LOCKED,
           "unfilled-ring: LOCKED once the ring covers the delay");
     long start = pushed - hop - ctx.delay_samples;
     CHECK(start >= 0 && memcmp(ctx.aligned_far_hop, g_far_hist + start,
                                (size_t)hop * sizeof(float)) == 0,
           "unfilled-ring: compensated far byte-equal at the poked offset");
-    aec_destroy(&a);
+    aec_destroy(a);
     g_rng_state = 0x11EC5EEDu;
 }
 
 static void scenario_ring_filled_saturates(void) {
     AecConfig cfg;
     context_only_config(&cfg, 16000, 0);
-    Aec a;
-    CHECK(aec_create(&a, &cfg) == 0, "ring-filled: aec_create");
-    int rs = a.ref_ring_size;
-    int hop = a.hop_size;
+    Aec *a = NULL;
+    CHECK((a = aec_create(&cfg)) != NULL, "ring-filled: aec_create");
+    int rs = a->ref_ring_size;
+    int hop = a->hop_size;
     long pushed = 0;
     int hops_to_fill = rs / hop + 8;
-    run_hops(&a, hops_to_fill, 1600, &pushed, NULL, NULL);
-    CHECK(a.ref_ring_filled == rs, "filled saturates at ring size");
-    run_hops(&a, 100, 1600, &pushed, NULL, NULL);
-    CHECK(a.ref_ring_filled == rs, "filled stays frozen at ring size");
+    run_hops(a, hops_to_fill, 1600, &pushed, NULL, NULL);
+    CHECK(a->ref_ring_filled == rs, "filled saturates at ring size");
+    run_hops(a, 100, 1600, &pushed, NULL, NULL);
+    CHECK(a->ref_ring_filled == rs, "filled stays frozen at ring size");
     AecLinearView ctx;
-    get_linear(&a, &ctx);
+    get_linear(a, &ctx);
     CHECK(ctx.delay_state != AEC_LINEAR_DELAY_UNLOCKED || ctx.delay_samples < 0,
           "saturated fill never blocks a valid locked state");
-    aec_destroy(&a);
+    aec_destroy(a);
     g_rng_state = 0x11EC5EEDu;
 }
 
@@ -766,7 +763,7 @@ static void scenario_ring_filled_saturates(void) {
  * usable verdict is false, and the guard must actually fire in this scenario. */
 static void scenario_far_active_no_echo(int silent_mic, const char *label) {
     AecConfig cfg;
-    Aec a;
+    Aec *a = NULL;
     int hop, i, h;
     const int HOPS = 900;
     float *mic, *far;
@@ -776,8 +773,8 @@ static void scenario_far_active_no_echo(int silent_mic, const char *label) {
     g_rng_state = 0x11EC5EEDu;
     aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, 16000);
     cfg.residual = AEC_RESIDUAL_FULL;   /* the seam the NN post-filter consumes (split entry points) */
-    if (aec_create(&a, &cfg) != 0) { CHECK(0, "create"); return; }
-    hop = aec_hop_size(&a);
+    if ((a = aec_create(&cfg)) == NULL) { CHECK(0, "create"); return; }
+    hop = aec_hop_size(a);
     mic = (float *)malloc((size_t)hop * sizeof(float));
     far = (float *)malloc((size_t)hop * sizeof(float));
 
@@ -789,10 +786,10 @@ static void scenario_far_active_no_echo(int silent_mic, const char *label) {
             far[i] = rng_uniform(0.6f);
             mic[i] = silent_mic ? 0.0f : rng_uniform(0.05f);
         }
-        split_hop(&a, mic, far);
+        split_hop(a, mic, far);
         memset(&ob, 0, sizeof ob);
         ob.struct_size = sizeof ob;
-        if (aec_get_residual(&a, &ob) != AEC_OK) { CHECK(0, "residual view"); break; }
+        if (aec_get_residual(a, &ob) != AEC_OK) { CHECK(0, "residual view"); break; }
         if (ob.guard_active) guard_hops++;
         if (ob.usable_linear) continue;
         unusable_hops++;
@@ -825,7 +822,7 @@ static void scenario_far_active_no_echo(int silent_mic, const char *label) {
            worst > 0.0 ? 10.0 * log10(worst) : 0.0, guard_hops, unusable_hops);
 
     free(mic); free(far);
-    aec_destroy(&a);
+    aec_destroy(a);
 }
 
 int main(void) {

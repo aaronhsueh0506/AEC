@@ -16,7 +16,7 @@
 #include "aec.h"
 #include "../src/aec_res_internal.h"
 #include "res_gain_of.h"
-#include "aec_test_hooks.h"   /* AEC_TESTING build: the admission candidate */
+#include "aec_test_tuning.h"   /* AEC_TESTING build: the admission candidate, the tuning overrides */
 #include "utility/simd_kernels.h"
 
 #include <math.h>
@@ -62,22 +62,22 @@ static void frame_hook(void* h, const struct G2ACase* c, int hop, const struct G
 #include "baseline2_array.h"
 
 static void* g2a_create(const G2ACase* c, int mode) {
-    AecConfig cfg;
+    AecTestCfg cfg;
     NewH* h = (NewH*)calloc(1, sizeof *h);
-    aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, c->sr);
-    cfg.fft_size = c->fft;
-    cfg.n_mics = AEC_ARRAY_MICS;
-    cfg.residual = mode == 0 ? AEC_RESIDUAL_STATE : mode == 1 ? AEC_RESIDUAL_ESTIMATE : AEC_RESIDUAL_FULL;
-    cfg.delay_mode = c->delay_mode == 0 ? AEC_DELAY_MATCHED : c->delay_mode == 1 ? AEC_DELAY_FIXED : AEC_DELAY_EXTERNAL_ALIGNED;
-    cfg.fixed_delay_samples = c->delay_mode == 1 ? (int)((int64_t)c->stim.dly[0].d16 * c->sr / 16000) : -1;
-    cfg.capture_proxy_channel = c->proxy;
-    cfg.delay_backward_quarantine_enabled = c->quarantine;
-    cfg.delay_backward_quarantine_s = c->quarantine_s;
-    cfg.delay_est_period_s = c->duty_s;
-    if (c->noshadow) cfg.enable_shadow = 0;
-    size_t sz = aec_get_mem_size(&cfg);
+    aec_tcfg_from_level(&cfg, AEC_LEVEL_BALANCED, c->sr);
+    cfg.c.fft_size = c->fft;
+    cfg.c.n_mics = AEC_ARRAY_MICS;
+    cfg.c.residual = mode == 0 ? AEC_RESIDUAL_STATE : mode == 1 ? AEC_RESIDUAL_ESTIMATE : AEC_RESIDUAL_FULL;
+    cfg.c.delay_mode = c->delay_mode == 0 ? AEC_DELAY_MATCHED : c->delay_mode == 1 ? AEC_DELAY_FIXED : AEC_DELAY_EXTERNAL_ALIGNED;
+    cfg.c.fixed_delay_samples = c->delay_mode == 1 ? (int)((int64_t)c->stim.dly[0].d16 * c->sr / 16000) : -1;
+    cfg.c.capture_proxy_channel = c->proxy;
+    cfg.c.delay_backward_quarantine_enabled = c->quarantine;
+    cfg.c.delay_backward_quarantine_s = c->quarantine_s;
+    cfg.t.delay_est_period_s = c->duty_s;
+    if (c->noshadow) cfg.t.enable_shadow = 0;
+    size_t sz = aec_tcfg_mem_size(&cfg);
     h->mem = g2_pool(sz);
-    h->a = h->mem ? aec_init(h->mem, sz, &cfg) : NULL;
+    h->a = h->mem ? aec_tcfg_init(h->mem, sz, &cfg) : NULL;
     h->mode = mode; h->hop = c->fft / 2; h->n = h->hop + 1;
     if (!h->a) { free(h->mem); free(h); return NULL; }
     return h;

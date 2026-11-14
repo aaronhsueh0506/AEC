@@ -8,16 +8,8 @@ extern "C" {
 #endif
 
 /* ── EchoPathChangeDetector ─────────────────────────────── */
-typedef enum {
-    EPC_NONE = 0,
-    EPC_DELAY,
-    EPC_EPV,
-    EPC_SHADOW_RISE,
-} EpcSource;
-
 typedef struct EpcEvent {
     int       fired;     /* 0/1 */
-    EpcSource source;
 } EpcEvent;
 
 typedef struct EpcDetector {
@@ -59,7 +51,6 @@ typedef enum {
 
 typedef struct ShadowCopyDecision {
     int pause_main;
-    int boost_q;
     int reverse_copy;
 } ShadowCopyDecision;
 

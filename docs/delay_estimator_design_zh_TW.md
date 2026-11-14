@@ -57,7 +57,7 @@ render/capture（per hop）
    `aec_reset()` 能清，而重置後幾何限制不變、會鎖回同一個錯誤值。
 4. **回報的是 dominant peak**。aggregator 用 highest-peak 直方圖判定品質，
    production 回報的延遲就是這個 dominant 候選；pre-echo 候選只供 AEC3
-   對照與診斷，不決定對齊位置（若回報 pre-echo 候選，錯值會天生自洽、
+   對照與診斷（Python 端；C 沒有 pre-echo 狀態），不決定對齊位置（若回報 pre-echo 候選，錯值會天生自洽、
    confidence 天生是 1.0，任何「連續 K 次確認」閘門都擋不住）。由
    `test_delay_dominant_selection`（Python 與 C）釘住。
 5. **dominant-peak 近似平手時，C 與 Python 可能落在不同路徑。** 例如舊反射與
@@ -112,11 +112,11 @@ scratch（只有 48 kHz 才配置）。
 
 | n | 可靠覆蓋 | full-rate bank 上限 | RAM（估計器，16 kHz 實測） |
 |---|---|---|---:|
-| 5（預設） | 509 ms | 21.120 MMAC/s | 33,936 B |
-| 4 | 413 ms | 16.896 MMAC/s | 28,208 B |
-| 3 | 317 ms | 12.672 MMAC/s | 22,480 B |
-| 2 | 221 ms | 8.448 MMAC/s | 16,752 B |
-| 1 | 125 ms | 4.224 MMAC/s | 11,024 B |
+| 5（預設） | 509 ms | 21.120 MMAC/s | 29,248 B |
+| 4 | 413 ms | 16.896 MMAC/s | 24,128 B |
+| 3 | 317 ms | 12.672 MMAC/s | 19,008 B |
+| 2 | 221 ms | 8.448 MMAC/s | 13,888 B |
+| 1 | 125 ms | 4.224 MMAC/s | 8,768 B |
 | estimator OFF（`FIXED` / `EXTERNAL_ALIGNED`） | — | 0 | 0 B |
 
 NEON 路徑把當次 tap update 與下一個 sample 的 dot 合併走訪，直接使用
@@ -129,23 +129,21 @@ scalar 路徑保留原演算。`make test-delay-kernels` 對照獨立的分開�
 
 **Config 通路**：Python `AecConfig.delay_num_filters`
 （1..5，`__post_init__` fail-fast 驗證）→ orchestrator → LegacyDelayShim
-→ `EchoPathDelayEstimator(num_filters=…)`；C `AecConfig::delay_num_filters`
-（`aec_resolve_valid_config` 拒絕超界）→ `delay_aec_get_mem_size()` /
+→ `EchoPathDelayEstimator(num_filters=…)`；C `AecConfig.delay_num_filters`
+（建立時 `aec_resolve` 拒絕超界）→ `delay_aec_get_mem_size()` /
 `delay_aec_init()` → runtime `DaMatchedFilter::num_filters`。
 
-**RAM 隨 n 縮**：`DelayAec` 是 metadata + pool pointers，bank／accumulated
-error／render ring／兩個 lag histogram 全部由 `aec_get_mem_size(cfg)` 依
+**RAM 隨 n 縮**：`DelayAec` 是 metadata + pool pointers，bank／render ring／
+lag histogram 與其估計環全部由 `aec_get_mem_size(cfg)` 依
 resolved `(sample_rate, hop, n)` 從呼叫端記憶池切出，每少一組 filter 固定省
-**5,728 B**（每個格點都一樣），n=1 相對 n=5 省 22,912 B。`DA_NUM_FILTERS`(=5)
+estimator 部分 **5,120 B**（每個格點都一樣）；單通道 MATCHED 的參考環另外縮短 1,536 samples（16／8 kHz 6,144 B、48 kHz 18,432 B），合計每組 filter 11,264 B（48 kHz 23,552 B），n=1 相對 n=5 省 45,056 B（48 kHz 94,208 B）。陣列實例的共用 estimator 只省 5,120 B。`AEC_DELAY_NUM_FILTERS_MAX`(=5，`aec.h`)
 只是驗證用的幾何上限，不 size 任何東西。零 heap；`n` 與格點一樣是 init-time
 immutable（要改必須重新查大小並重新 init）。
 
 Histogram bins 用 `n*SHIFT + SIZE` 的公式（多帶一組 filter 的餘裕），不是算術上最緊的
-`(n-1)*SHIFT + SIZE`。這是必要的：pre-echo histogram 的 bin 數決定 windowed
-local-max scan 走幾個 32-bin 視窗，用最緊公式時 n=2 只會掃 1 個視窗（bin 0..31），
-但該 bank 自己就能報到 bin 55——等於砍掉一半搜尋範圍。此公式在 n=1..5 都剛好涵蓋
-可達 bin，且多出的視窗恆為全零（永遠贏不了 scan），所以每個 n 的行為都與
-「陣列固定配到 n=5 上限」時完全一致。
+`(n-1)*SHIFT + SIZE`。多出的 bin 是一組 filter 的餘裕，
+可達 lag 永遠到不了它們（恆為 0，不會成為 argmax），所以每個 n 的行為都與
+「陣列固定配到 n=5 上限」時一致。
 
 使用場景：板端 fixed_delay 補償後 nf=1~2；bench/dataset 一律維持 5
 （發佈分數的量測幾何）。

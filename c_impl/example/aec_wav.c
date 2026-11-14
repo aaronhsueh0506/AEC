@@ -1,7 +1,7 @@
 /* aec_wav.c -- WAV processing CLI on top of aec.
  *  - --level takes 0 mild, 1 balanced, 2 aggressive or 3 no_floor (a whole decimal number); --preset is an alias.
  *  - The hop size comes from the library's signal grid (fft_size / 2).
- *  - --debug-level / --debug sets the debug level and periodic status print. */
+ *  - --debug prints the periodic status line; --debug-trace writes the per-frame CSV trace. */
 #include "aec.h"
 #include "cli_level.h"
 #include "aec_debug.h"
@@ -21,20 +21,14 @@ static void print_usage(const char* prog) {
         "  --no-delay-est                 EXTERNAL_ALIGNED mode: no online delay\n"
         "                                 estimation (inputs assumed pre-aligned)\n"
         "  --no-res                       Disable residual echo suppressor\n"
-        "  --no-shadow                    Disable shadow filter\n"
-        "  --no-hpf                       Disable 80Hz high-pass\n"
         "  --fft-size <n>                 256/512 @16kHz; 1024 @48kHz\n"
         "  --delay-mode {matched|fixed|external}\n"
         "                                 alignment mode (default: matched)\n"
         "  --delay-num-filters <1..5>     MATCHED matched-filter bank size (default 5)\n"
         "  --fixed-delay <samples>        FIXED delay, native-rate samples (>=0)\n"
-        "  --delay-est-period <s>         override AecConfig.delay_est_period_s\n"
-        "                                 (matched-filter duty-cycle period; diagnostic)\n"
         "  --print-mem-size               print the resolved grid/mode/n and the\n"
         "                                 static-pool byte breakdown, then exit\n"
         "                                 without touching any audio\n"
-        "  --debug-level <0..3>           0=off, 1=summary, 2=per-frame, 3=full\n"
-        "  --debug-log <path>             redirect log to file (default stderr)\n"
         "  --debug-trace <path>           per-frame CSV trace (logr) of post-filter state\n"
         "  --debug                        print one aec_debug_status() line per second\n",
         prog);
@@ -80,19 +74,16 @@ int main(int argc, char* argv[]) {
 
     AecLevel level = AEC_LEVEL_BALANCED;
     int explicit_cng = -1;
-    int no_delay_est = 0, no_res = 0, no_shadow = 0, no_hpf = 0;
-    int debug_level = 0;
-    const char* debug_log = NULL;
+    int no_delay_est = 0, no_res = 0;
     const char* debug_trace = NULL;
     int debug_status = 0;
     int fft_size = 0;
     /* Delay-mode overrides use a separate "given" flag, and are handed to aec_create() unvalidated
-     * so aec_resolve_valid_config() is the single authority; illegal values fail the run instead of
+     * so aec_resolve() is the single authority; illegal values fail the run instead of
      * being clamped. */
     AecDelayMode delay_mode = AEC_DELAY_MATCHED;  int have_delay_mode = 0;
     int delay_num_filters = 0;                    int have_delay_num_filters = 0;
     int fixed_delay_samples = 0;                  int have_fixed_delay = 0;
-    float delay_est_period_s = 0.0f;              int have_delay_est_period = 0;
     int print_mem_size = 0;
 
     for (int i = 4; i < argc; ++i) {
@@ -106,8 +97,6 @@ int main(int argc, char* argv[]) {
         else if (!strcmp(arg, "--no-cng"))          explicit_cng = 0;
         else if (!strcmp(arg, "--no-delay-est"))    no_delay_est = 1;
         else if (!strcmp(arg, "--no-res"))          no_res = 1;
-        else if (!strcmp(arg, "--no-shadow"))       no_shadow = 1;
-        else if (!strcmp(arg, "--no-hpf"))          no_hpf = 1;
         else if (!strcmp(arg, "--fft-size") && i + 1 < argc)
             fft_size = atoi(argv[++i]);
         else if (!strcmp(arg, "--delay-mode") && i + 1 < argc) {
@@ -121,14 +110,8 @@ int main(int argc, char* argv[]) {
             delay_num_filters = atoi(argv[++i]); have_delay_num_filters = 1;
         } else if (!strcmp(arg, "--fixed-delay") && i + 1 < argc) {
             fixed_delay_samples = atoi(argv[++i]); have_fixed_delay = 1;
-        } else if (!strcmp(arg, "--delay-est-period") && i + 1 < argc) {
-            delay_est_period_s = (float)atof(argv[++i]); have_delay_est_period = 1;
         } else if (!strcmp(arg, "--print-mem-size"))
             print_mem_size = 1;
-        else if (!strcmp(arg, "--debug-level") && i + 1 < argc)
-            debug_level = atoi(argv[++i]);
-        else if (!strcmp(arg, "--debug-log") && i + 1 < argc)
-            debug_log = argv[++i];
         else if (!strcmp(arg, "--debug-trace") && i + 1 < argc)
             debug_trace = argv[++i];
         else if (!strcmp(arg, "--debug"))
@@ -184,14 +167,11 @@ int main(int argc, char* argv[]) {
     }
     if (explicit_cng >= 0) cfg.enable_cng = explicit_cng;
     if (no_res)       cfg.residual = AEC_RESIDUAL_OFF;
-    if (no_shadow)    cfg.enable_shadow = 0;
-    if (no_hpf)       cfg.enable_highpass = 0;
     if (have_delay_mode)         cfg.delay_mode = delay_mode;
     if (have_delay_num_filters)  cfg.delay_num_filters = delay_num_filters;
     if (have_fixed_delay)        cfg.fixed_delay_samples = fixed_delay_samples;
     if (no_delay_est && cfg.delay_mode == AEC_DELAY_MATCHED)
         cfg.delay_mode = cfg.fixed_delay_samples >= 0 ? AEC_DELAY_FIXED : AEC_DELAY_EXTERNAL_ALIGNED;
-    if (have_delay_est_period)   cfg.delay_est_period_s = delay_est_period_s;
 
     /* --print-mem-size: report the static-pool size and exit before any audio is touched. */
     if (print_mem_size) {
@@ -213,11 +193,6 @@ int main(int argc, char* argv[]) {
         return 0;
     }
 
-    aec_debug_set_level(debug_level);
-    if (debug_log) {
-        FILE* fp = fopen(debug_log, "w");
-        if (fp) aec_debug_set_log(fp);
-    }
     FILE* trace_fp = NULL;
     if (debug_trace) {
         trace_fp = fopen(debug_trace, "w");
@@ -225,14 +200,14 @@ int main(int argc, char* argv[]) {
         else fprintf(stderr, "WARN: cannot open trace file '%s'\n", debug_trace);
     }
 
-    Aec aec;
-    if (aec_create(&aec, &cfg) != 0) {
+    Aec* aec = aec_create(&cfg);
+    if (!aec) {
         print_config_rejected("aec_create", sr, &cfg);
         wav_close_read(mr); wav_close_read(rr);
         if (trace_fp) { aec_debug_set_trace(NULL); fclose(trace_fp); }
         return 4;
     }
-    int hop = aec_hop_size(&aec);
+    int hop = aec_hop_size(aec);
     aec_debug_set_frame(0, hop, sr);
 
     /* Default to float32 output; AEC_OUT_FLOAT=0 selects 16-bit PCM. */
@@ -253,13 +228,13 @@ int main(int argc, char* argv[]) {
         wav_read_float(mr, mic, hop);
         wav_read_float(rr, ref, hop);
         aec_debug_set_frame(frame_idx, hop, sr);
-        aec_process(&aec, mic, ref, out);
+        aec_process(aec, mic, ref, out);
         wav_write_float(ww, out, hop);
         frame_idx++;
 
         if (debug_status && frame_idx % frames_per_sec == 0) {
             AecDebugStatus st;
-            aec_debug_status(&aec, &st);
+            aec_debug_status(aec, &st);
             fprintf(stderr,
                 "[dbg %5.1fs] delay=%d (conf %.1f, upd %d) erle=%.1fdB "
                 "usable_lin=%d conv=%d near=%.2e out=%.2e\n",
@@ -273,9 +248,7 @@ int main(int argc, char* argv[]) {
     fprintf(stderr, "Processed %d frames @ hop=%d sr=%d level=%s cng=%d delay_est=%d "
             "delay_mode=%s num_filters=%d fixed_delay_samples=%d\n",
             frame_idx, hop, sr,
-            level == AEC_LEVEL_MILD ? "mild" :
-            level == AEC_LEVEL_BALANCED ? "balanced" :
-            level == AEC_LEVEL_AGGRESSIVE ? "aggressive" : "no_floor",
+            aec_level_name(level),
             cfg.enable_cng, cfg.delay_mode == AEC_DELAY_MATCHED,
             delay_mode_name(cfg.delay_mode), cfg.delay_num_filters,
             cfg.fixed_delay_samples);
@@ -283,7 +256,7 @@ int main(int argc, char* argv[]) {
     /* Duty-cycle engagement census for this run (see the duty_hops_* fields in aec.h). */
     {
         AecDebugStatus st;
-        aec_debug_status(&aec, &st);
+        aec_debug_status(aec, &st);
         if (st.duty_hops_total == 0) {
             /* No matched filter is constructed in this mode, so no saving is reported. */
             fprintf(stderr, "duty: matched_filter_ran=0/0 hops "
@@ -301,7 +274,7 @@ int main(int argc, char* argv[]) {
     free(mic); free(ref); free(out);
     wav_close_write(ww);
     wav_close_read(mr); wav_close_read(rr);
-    aec_destroy(&aec);
+    aec_destroy(aec);
     if (trace_fp) { aec_debug_set_trace(NULL); fclose(trace_fp); }
     return 0;
 }

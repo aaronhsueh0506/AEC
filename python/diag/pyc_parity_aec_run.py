@@ -14,7 +14,7 @@ sample for sample:
                                        comfort_noise -- same order as the C dump
     <pre>.base.bin (with --base)       per hop: int32 guard_active, uint32 post_reset_serial, the
                                        rendering base output_base_spec (n_freqs complex, float32 re/im)
-                                       -- the layout aec_run.c --base writes (aec_get_output_base,
+                                       -- the layout aec_run.c --base writes (aec_get_residual().base_spec,
                                        aec_post_reset_serial); needs --ctx
     <pre>.formed.f32 (with --base)      per hop: the formed hop under error_spec (hop_size float32;
                                        ctx.formed_output / AecResContext.formed_hop)

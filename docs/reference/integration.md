@@ -34,16 +34,16 @@
 AecConfig cfg;
 aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, 16000);
 cfg.residual = AEC_RESIDUAL_FULL;   /* 後級算出 r2 / 舒適噪音 / G_res，但由呼叫端套用 */
-aec_create(&aec, &cfg);
+Aec *aec = aec_create(&cfg);
 
 while (app_read_hop(mic, ref, hop)) {
-    aec_process_linear(&aec, mic, ref);
-    aec_process_residual(&aec, NULL);
+    aec_process_linear(aec, mic, ref);
+    aec_process_residual(aec, NULL);
 
     AecLinearView lin;  lin.struct_size = sizeof lin;
     AecResidualView rv; rv.struct_size  = sizeof rv;
-    aec_get_linear(&aec, &lin);
-    aec_get_residual(&aec, &rv);
+    aec_get_linear(aec, &lin);
+    aec_get_residual(aec, &rv);
     /* 在這裡讀 lin／rv，必須在下一次處理呼叫之前 */
 }
 ```
@@ -88,10 +88,13 @@ while (app_read_hop(mic, ref, hop)) {
 多個實例每個 hop 都看到**完全相同**的參考訊號時，可讓其中一個算 FFT、其餘共用：
 
 ```c
-aec_process_linear(&lane[0], mic[0], ref);      /* lane 0 自己算 */
+Aec *lane[4];                                    /* 各自 aec_create(&cfg)（單聲道、同一組態）得到的指標 */
+const float *mic[4];                             /* 每條 lane 本 hop 的麥克風 */
+int n_lanes = 4;
+aec_process_linear(lane[0], mic[0], ref);        /* lane 0 自己算 */
 for (int ch = 1; ch < n_lanes; ++ch)
-    aec_process_linear_shared_far_from(&lane[ch], mic[ch], ref, &lane[0]);   /* aec_internal.h */
-/* 之後每條 lane 各自 aec_process_residual(&lane[ch], NULL)（residual 不是 OFF 時） */
+    aec_process_linear_shared_far_from(lane[ch], mic[ch], ref, lane[0]);   /* aec_internal.h */
+/* 之後每條 lane 各自 aec_process_residual(lane[ch], NULL)（residual 不是 OFF 時） */
 ```
 
 契約：
@@ -145,9 +148,9 @@ AEC magnitude² 必須來自同一個 AEC kernel，不能任意以其他 power �
 
 ```c
 Complex out_spec[N];                       /* N >= n_freqs */
-aec_apply_gain(&aec, extra_gain_or_NULL, out_spec);   /* out = base_spec * min(G_res, extra_gain) */
-aec_apply_cng(&aec, extra_gain_or_NULL, out_spec);    /* 在被增益切掉的 bin 加舒適噪音 */
-uint32_t serial = aec_post_reset_serial(&aec);        /* 不消耗、可重複讀、uint32 回繞 */
+aec_apply_gain(aec, extra_gain_or_NULL, out_spec);   /* out = base_spec * min(G_res, extra_gain)；aec 是 Aec* */
+aec_apply_cng(aec, extra_gain_or_NULL, out_spec);    /* 在被增益切掉的 bin 加舒適噪音 */
+uint32_t serial = aec_post_reset_serial(aec);        /* 不消耗、可重複讀、uint32 回繞 */
 ```
 
 - `aec_apply_gain()` 需要 `AEC_RESIDUAL_FULL` 且該 hop 已處理完（否則 `AEC_ERR_MODE`／`AEC_ERR_SEQUENCE`）；
@@ -189,6 +192,7 @@ duty-cycle 機制在估計穩定（confidence 1.0）且 `delay_est_init_s` 秒�
 重新武裝，實際降頻比例取決於回音路徑。這兩個計數器提供**實測**
 engagement（`duty_hops_run / duty_hops_total`）。
 
+- 降頻週期是函式庫內部值，預設 0（每個 hop 全速分析），沒有公開設定；預設組態下 `duty_hops_run == duty_hops_total`。
 - 只在 `delay_mode == AEC_DELAY_MATCHED` 時累積（`has_delay == 1` 才會進入
   計數的程式路徑）；`FIXED`／`EXTERNAL_ALIGNED` 從未建過 matched filter，
   兩個計數器永遠是 0——不是「估計器跑了但沒省到」，而是根本沒有機制可省。
@@ -236,7 +240,7 @@ RES 增益階段的實作（`src/aec_res.c`，內部標頭 `src/aec_res_internal
 ```c
 AecLinearView lin;
 lin.struct_size = sizeof lin;
-aec_get_linear(&aec, &lin);   /* 在該 hop 的處理呼叫之後、下一次處理呼叫之前讀 */
+aec_get_linear(aec, &lin);    /* 在該 hop 的處理呼叫之後、下一次處理呼叫之前讀 */
 ```
 
 | 欄位 | 說明 |
@@ -299,14 +303,14 @@ mic, ref (hop 個 float)
   （`AEC_CNG_NR_GAIN_FLOOR`，`0.31622777f`）為下限縮放填補量。
 - **渲染 `rv.base_spec`，不是 `rv.error_spec`**：底座已套用輸出守衛（§8.1），`aec_apply_gain()` 已經替你這麼做。`anr_process_gain*()` 的頻譜輸入
   用哪一個由整合者明確選擇並在自己的程式裡寫清楚；分析用的 `error_spec` 與渲染用的底座在守衛 hop 上不同。
-- **舒適噪音產生器在 `Aec` 裡**（`aec_apply_cng()`），起點是 `AEC_CNG_SEED`（42，`aec.h`／`aec_post.h`），與 `aec_process()`
+- **舒適噪音產生器在 `Aec` 裡**（`aec_apply_cng()`），起點是 `AEC_CNG_SEED`（42，`aec.h`），與 `aec_process()`
   內部相同，硬 post 鏈 reset 時函式庫自己重設。每個 hop 在 `ac_istft_push` 之前先比對 `aec_post_reset_serial()`：值變了就
   `ac_istft_reset()`、存下新值（§8.3）；**不要**為此呼叫 `aec_reset()`。自己持有產生器狀態、改走 `aec_apply_cng_spec()` 的整合者
   則要同時把 `rng` 設回 `AEC_CNG_SEED`。NR 狀態、暫存增益要不要一起清，是應用自己的政策，函式庫不動它們。
 - **`aec_set_level()` 對這條鏈有效**：單聲道鏈的 `G_res` 來自 `Aec` 自己的
   post 區塊，所以強度旋鈕直接用 `aec_set_level()`（[§7.1](levels.md#71-執行期切換-levelaec_set_level)）；四麥克風陣列實例的
   `G_res` 在實例內，同樣用 `aec_set_level()`（它重設融合後增益階段的強度，lane 自己的強度沒有作用，§8.8）。
-- 下游若另有噪音抑制或 CNG，不要在 `aec_apply_cng_spec` 之外再疊一層（[§6.2](configuration.md#62-模組開關除-residual-外只接受-0-或-1)）。
+- 下游若另有噪音抑制或 CNG，不要在 `aec_apply_cng_spec` 之外再疊一層（[§6.2](configuration.md#62-殘留階段與舒適噪音)）。
 
 測試：單聲道鏈的行為由 `Audio_ALG` 的 `pipelines/mono/aec_nr_res/tests`（`test_mono_chain.c`）涵蓋；本函式庫端的
 對應契約是 `make test-aec-res`、`make test-linear-context`、`make test-process-context` 與 `make test-split-entry`。
@@ -320,16 +324,15 @@ mic, ref (hop 個 float)
 自己算權重，再交給 `aec_process_residual()`；合成（反轉換與 overlap-add）同樣留在函式庫外。
 本節只描述陣列實例本身。
 
-**設定**（其餘欄位原樣交給每條 lane）：
+**設定**（其餘的內部調校值原樣交給每條 lane）：
 
 | 欄位 | 預設 | 陣列實例的規則 |
 |---|---|---|
 | `n_mics` | `1` | `1` 或 `AEC_ARRAY_MICS`（4），其他值被拒絕。 |
 | `capture_proxy_channel` | `0` | `[0, 3]`：共用 delay 估計器的 capture 輸入取哪一路麥克風。單聲道必須是 `0`。`MATCHED` 時**只有這一路**餵給估計器；該路失效或被遮住，陣列就鎖不到 delay，四條 lane 以未對齊的 far 運作。 |
 | `residual` | `FULL` | `STATE`／`ESTIMATE`／`FULL`；`OFF` 被拒絕。**陣列的記憶池大小隨它改變**（見 [§4](lifecycle.md#陣列實例的記憶池)）。 |
-| `delay_mode`、`delay_num_filters`、`fixed_delay_samples`、`delay_est_period_s`、`max_delay_ms` | 同單聲道 | 描述**共用**的對齊；每條 lane 一律以 `EXTERNAL_ALIGNED` 吃共用的對齊後 far。`max_delay_ms` 必須 ≤ 4096。 |
-| `delay_est_init_s`、`delay_buffer_ms` | 同單聲道 | 陣列實例**不讀**：duty-cycle 的保持時間固定為 0.3 s，`MATCHED` 的環形緩衝為 `ceil(max_delay_ms × sample_rate / 1000) + 2 × hop + 1` 個 sample（`FIXED` 為 `fixed_delay_samples + hop_size`）。 |
-| `dt_aware_res_floor_enabled`、`ne_recent_threshold`／`_hold`／`_sustain` | 同單聲道 | 對融合增益**不讀**：融合增益的 DT 下限在最差 lane 的雙講指標高於 0.2 時一律啟用。lane 自己仍用 `ne_recent_*` 決定回音路徑變化後的恢復方式。融合增益是獨立的增益階段（近端功率取 `|near|²`，所有貢獻 lane 都收斂後再以 `|E|²` 為上限；融合後的 r2 同時當有界與無界估計），不保證與單聲道實例的增益相同。 |
+| `delay_mode`、`delay_num_filters`、`fixed_delay_samples` | 同單聲道 | 描述**共用**的對齊；每條 lane 一律以 `EXTERNAL_ALIGNED` 吃共用的對齊後 far。`MATCHED` 的共用環形緩衝為 `ceil(1024 ms × sample_rate / 1000) + 2 × hop + 1` 個 sample（`FIXED` 為 `fixed_delay_samples + hop_size`），duty-cycle 的保持時間固定為 0.3 s。 |
+| `level` | `BALANCED` | 只作用在融合後的一次增益階段（`aec_set_level()` 同）；lane 自己的 level 沒有效果。融合增益的 DT 下限在最差 lane 的雙講指標高於 0.2 時一律啟用；lane 自己仍用內部的近端保護門檻決定回音路徑變化後的恢復方式。融合增益是獨立的增益階段（近端功率取 `|near|²`，所有貢獻 lane 都收斂後再以 `|E|²` 為上限；融合後的 r2 同時當有界與無界估計），不保證與單聲道實例的增益相同。 |
 | `delay_backward_quarantine_enabled`、`delay_backward_quarantine_s` | `0`、`1.0` | 只在 `MATCHED` 有意義，`_s` 範圍 `[0, 3600]`。開啟時，比目前 delay **更早**的新估計在 capture-proxy lane 仍在消除期間先被保留 `_s` 秒再採用；消除失效就立刻採用。前向移動與首次取得不受影響。單聲道必須維持 `0`。 |
 | 格點 | — | 只接受 16 kHz／256、16 kHz／512、48 kHz／1024；8 kHz 被拒絕。 |
 
@@ -354,7 +357,7 @@ Aec *aec = aec_init_ex(pool, (size_t)req.bytes, &cfg, &req);
 if (!aec) { /* 記憶池太小／未對齊，或描述子與目前建置不符 */ }
 ```
 
-`aec_init(pool, bytes, &cfg)` 與 `aec_init_ex(..., NULL)` 相同，只是不檢查描述子。`aec_create()` 也接受 `n_mics = 4`（heap，單一 16-byte 對齊的 arena）。
+`aec_init(pool, bytes, &cfg)` 與 `aec_init_ex(..., NULL)` 相同，只是不檢查描述子。`aec_create()` 也接受 `n_mics = 4`（heap，一次 16-byte 對齊的配置，回傳實例指標）。
 描述子不可存檔或自行拼湊，每次建置重新查。
 
 **每個 hop 的呼叫序列**：
@@ -470,7 +473,7 @@ int app_run_hop(Aec *aec, const float *mics, const float *ref,
 
 ```c
 int delta = new_alignment_samples - old_alignment_samples;   /* 新減舊，單位：樣本 */
-int rc = aec_apply_external_realign(&aec, delta);
+int rc = aec_apply_external_realign(aec, delta);       /* aec 是 Aec* */
 if (rc < 0) {
     /* NULL、delay_mode 不是 EXTERNAL_ALIGNED，或這是陣列實例（它自己對四條 lane 做 realign） */
 } else if (rc == 1) {
@@ -501,25 +504,19 @@ if (rc < 0) {
 
 1. **先分離問題。** 設 `cfg.residual = AEC_RESIDUAL_OFF` 跑一次，聽線性殘差。
    - 回音仍然很大 → 問題在**線性側**：`ref` 送錯、延遲超出 [§3](../c_user_manual_zh_TW.md#3-資料契約) 的可擷取上限、
-     回音路徑比 `filter_length` 長，或兩路取樣率不同。往下走第 2、3 點。
+     回音路徑比濾波器長度（52 ms；48 kHz 為 64 ms）長，或兩路取樣率不同。往下走第 2、3 點。
    - 線性殘差已經很乾淨 → 問題在**抑制強度**，跳到第 4 點。
 2. **檢查延遲。** 用 `aec_debug_status()` 讀 `delay_samples`：`-1` 代表還沒擷取到延遲。
    若始終是 `-1`，確認遠端有足夠能量，並確認實際延遲落在 [§3](../c_user_manual_zh_TW.md#3-資料契約) 表列的可擷取上限內。
-3. **加長 filter。** 大房間或長殘響時調高 `filter_length`（單位是 **sample**）。
-   必須 destroy 後重新 create，並重新評估記憶體與運算量。
-4. **加強抑制。** 改用 `AEC_LEVEL_AGGRESSIVE`；或直接把
-   `min_gain_floor_far_active_db` **調低**。代價是 double-talk 時近端更容易被壓。
+3. **回音路徑比濾波器長。** 濾波器長度由取樣率決定，不是設定值；回音路徑明顯超過它（大房間、長殘響）時，
+   在上游縮短路徑或先做 bulk delay 補償（`FIXED` / `EXTERNAL_ALIGNED`），不能在這個函式庫內加長。
+4. **加強抑制。** 改用 `AEC_LEVEL_AGGRESSIVE`（`aec_set_level()` 可在執行期切換）。代價是 double-talk 時近端更容易被壓。
 
 ### 9.2 Double-talk 時近端被壓掉
 
 | 動作 | 方向 |
 |---|---|
-| 換較溫和的 level | `AEC_LEVEL_BALANCED` → `AEC_LEVEL_MILD` |
-| 或直接調 `min_gain_floor_far_active_db` | **調高**（例如 -28 → -20） |
-| 放寬 double-talk 專用下限 `min_gain_floor_dt_db` | **調高**（例如 -20 → -16），需 `dt_aware_res_floor_enabled = 1` |
-| 近端一停就被壓掉 → 延長保護 `ne_recent_hold` | **調高**（單位是 10 ms） |
-| 近端偵測太不敏感 → `ne_recent_threshold` | **調低** |
-| 確認 `dt_aware_recovery_soft = 1` | 維持開啟 |
+| 換較溫和的 level | `AEC_LEVEL_BALANCED` → `AEC_LEVEL_MILD`（level 是唯一的強度設定；floor 值與近端保護門檻是內部常數，不可單獨調整） |
 
 **不要**用 `AEC_RESIDUAL_OFF`（關閉後級）來解決這個問題——那會讓回音殘留大幅上升。
 
@@ -527,9 +524,7 @@ if (rc < 0) {
 
 | 動作 | 方向 |
 |---|---|
-| 確認 `delay_acquire_warm_transfer = 1` | 維持開啟。關閉會在首次擷取到延遲時把已學到的模型歸零，正是「開場一秒有回音」的典型成因。 |
-| 延長啟動期 `warmup_frames` | **調高**（單位是 10 ms，預設 ≈ 1000 ms） |
-| 若冷啟動時 `delay_acquire_inst_erle_db` 門檻擋住了平移 | **調低**（預設 4.0 dB） |
+| 啟動期長度、首次延遲擷取時把已學到的模型平移過去（而不是歸零）的 warm transfer 等收斂相關常數 | 內部常數，已調好且不可設定；「開場一秒有回音」的常見成因是延遲還沒擷取到（`aec_debug_status()` 的 `delay_samples` 為 `-1`）。 |
 | 應用層面 | filter 收斂需要一段有意義的遠端能量。可在暖機期間先靜音輸出或播提示音。 |
 
 `aec_debug_status()` 的 `erle_windowed_db` 與 `filter_converged` 可用來觀察收斂進度。
@@ -540,11 +535,8 @@ if (rc < 0) {
 
 | 動作 | 方向 |
 |---|---|
-| 確認 `enable_shadow = 1` | 維持開啟——關掉它偵測路徑變化的能力會明顯變差 |
-| 延長加速恢復期 `epc_hangover` | **調高**（單位是 10 ms，預設 ≈ 200 ms） |
-| 路徑變化偵測太鈍 → `epc_total_rise` | **調低**（預設 1.5） |
-| 延遲變動偵測變慢（`delay_est_period_s` > 0 時） | **調低**，或維持預設 `0.0`（每個 hop 都分析） |
-| 加長 `filter_length` | **調高**，讓模型涵蓋更多可能的路徑 |
+| 回音路徑變化偵測、加速恢復期、shadow filter 與延遲變動偵測的常數 | 內部常數，不可設定；恢復時間由它們與 hop 決定（換算後的時長見 [§6.5](configuration.md#65-以-10-ms-為單位撰寫的時間常數內部唯讀參考)） |
+| 延遲真的在變（藍牙、HAL 重取樣） | 改用 `EXTERNAL_ALIGNED`，由上游提供對齊後的 far，並在對齊改變時呼叫 `aec_apply_external_realign()` |
 
 ### 9.5 其他
 
@@ -552,10 +544,10 @@ if (rc < 0) {
 |---|---|---|
 | 長時間後回音逐漸變差 | mic/ref clock drift | 改用共同時鐘，或在上游做 drift 補償。函式庫不處理。 |
 | 批次處理第二個檔案結果異常 | 沿用了前一個檔案的狀態 | 每個獨立串流前呼叫 `aec_reset()` |
-| 輸出有突波／發散 | 削波、`ref` 送錯、延遲劇烈變化 | 維持 `enable_saturation`、`enable_shadow` 開啟；檢查輸入是否已削波 |
+| 輸出有突波／發散 | 削波、`ref` 送錯、延遲劇烈變化 | 檢查輸入是否已削波、`ref` 是否送對；削波偵測與 shadow filter 一律開啟，沒有可關的開關 |
 | 自己渲染後級頻譜的舊程式，升級 SDK 後守衛 hop 偏大聲或 `aec_reset()` 後有舊尾巴 | 還在渲染 `error_spec`、沒處理 `aec_post_reset_serial()`、視窗或 CNG 種子與函式庫不同 | 照 [`sdk_migration_output_guard.md`](../sdk_migration_output_guard.md) 的清單遷移，並跑其中的逐位元驗收 |
 | 噪音底聽起來不自然、會抽動 | CNG 疊了兩層 | 下游若已有噪音處理，設 `enable_cng = 0` |
-| 建立實例一直失敗 | 設定被驗證拒絕 | 對照 [§6](configuration.md#6-aecconfig-完整參考) 的允許範圍；特別注意 `sample_rate`/`fft_size` 必須成對合法，以及 `residual` 必須在 `AEC_RESIDUAL_OFF`…`AEC_RESIDUAL_FULL` 範圍內；陣列實例（`n_mics = 4`）另外要求 `residual` 不是 `OFF`、格點是 16k/256、16k/512、48k/1024 之一、`max_delay_ms` ≤ 4096、`capture_proxy_channel` 在 0–3（[§8.8](#88-麥克風陣列實例n_mics--4)） |
+| 建立實例一直失敗 | 設定被驗證拒絕 | 對照 [§6](configuration.md#6-aecconfig-完整參考) 的允許範圍；特別注意 `sample_rate`/`fft_size` 必須成對合法，以及 `residual` 必須在 `AEC_RESIDUAL_OFF`…`AEC_RESIDUAL_FULL` 範圍內；陣列實例（`n_mics = 4`）另外要求 `residual` 不是 `OFF`、格點是 16k/256、16k/512、48k/1024 之一、`capture_proxy_channel` 在 0–3（[§8.8](#88-麥克風陣列實例n_mics--4)） |
 | `SIMD=0` 與 `SIMD=1` 的輸出不同 | NEON kernel 與純量 kernel 的加總順序、融合乘加不同 | 這是預期行為。同一組建置旗標下 heap 與記憶池路徑才保證逐位元相同。 |
 
 ---

@@ -30,11 +30,11 @@ int main(void) {
     AecConfig cfg;
     aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, 16000);
 
-    Aec a;
-    if (aec_create(&a, &cfg) != 0) return 1;
+    Aec *a = NULL;
+    if ((a = aec_create(&cfg)) == NULL) return 1;
 
-    int hop = aec_hop_size(&a);
-    if (hop <= 0 || hop > 4096) { aec_destroy(&a); return 2; }
+    int hop = aec_hop_size(a);
+    if (hop <= 0 || hop > 4096) { aec_destroy(a); return 2; }
 
     float mic[4096];
     float ref[4096];
@@ -42,9 +42,9 @@ int main(void) {
     memset(mic, 0, sizeof(mic));
     memset(ref, 0, sizeof(ref));
 
-    aec_process(&a, mic, ref, out);
+    aec_process(a, mic, ref, out);
 
-    aec_destroy(&a);
+    aec_destroy(a);
 
 #ifndef AEC_NO_ARRAY
     {

@@ -76,7 +76,6 @@ typedef struct PBFDAF {
     long    initial_state_active_render_hops;
     long    initial_state_threshold_hops;
     float   initial_state_far_energy_floor;
-    int     last_initial_state_active;
 
     /* FFT scratch (private) */
     FftHandle* fft;
@@ -116,8 +115,8 @@ int    pbfdaf_init_static(PBFDAF* p, void* mem, size_t mem_size,
                            float mu, float delta, int hop_size,
                     int with_process_scratch, int sample_rate,
                     FftHandle* shared_fft);
-/* Follower: a lightweight shadow of far_owner (an initialised filter at the same n_partitions and hop_size). It lacks near_spec,
- * error_spec_windowed and spec_scratch, and shares far_owner's X_buf and x2_cache, so both must see the same far input and the
+/* Follower: a lightweight shadow of far_owner (an initialised filter at the same n_partitions and hop_size). It lacks sqrt_hann
+ * (NULL), near_spec, error_spec_windowed and spec_scratch, and shares far_owner's X_buf and x2_cache, so both must see the same far input and the
  * same far-history clears and partition steps every hop. Process scratch is included. */
 size_t pbfdaf_get_mem_size_follower(int block_size, int n_partitions, int hop_size);
 int    pbfdaf_init_static_follower(PBFDAF* p, void* mem, size_t mem_size,
@@ -165,12 +164,6 @@ int pbfdaf_warm_shift_ir(PBFDAF* p, int shift_samples);
 typedef struct PBFDKF {
     PBFDAF base;
 
-    /* Process noise [n_freqs]: config state, not used by the H_error update. */
-    float* Q_high;
-    float* Q_low;
-    float* Q;
-    /* Measurement-noise EMA [n_freqs]; R does not feed the H_error gain. */
-    float* R;
     float* error_psd;
     float  alpha_r;            /* error-PSD EMA retention, retimed from the 160 @ 16 kHz authoring grid */
 
@@ -213,7 +206,7 @@ int    pbfdkf_init_static(PBFDKF* p, void* mem, size_t mem_size,
                            int sample_rate, FftHandle* shared_fft);
 void pbfdkf_free(PBFDKF* p);
 void pbfdkf_reset(PBFDKF* p);
-/* pbfdaf_reset_taps plus the R / error_psd / Q re-arm. */
+/* pbfdaf_reset_taps plus the error_psd re-arm. */
 void pbfdkf_reset_taps(PBFDKF* p);
 /* pbfdaf_reset_carried_state plus the orchestrator-fed refresh inputs and the per-bin H_error. */
 void pbfdkf_reset_carried_state(PBFDKF* p);
@@ -234,15 +227,12 @@ static inline int pbfdaf_tap_span(const PBFDAF* p) {
     return p->n_partitions * p->hop_size;
 }
 
-/* Concatenates irfft(W[p])[:hop] per partition into out[n_partitions * hop_size]; the _range
- * variant writes only partitions [first_partition, first_partition + n_parts) and leaves other taps
- * untouched. */
+/* Concatenates irfft(W[p])[:hop] per partition into out[n_partitions * hop_size]; writes only
+ * partitions [first_partition, first_partition + n_parts) and leaves other taps untouched. */
 void pbfdaf_get_time_domain_filter_range(PBFDAF* p, int first_partition,
                                          int n_parts, float* out);
-void pbfdaf_get_time_domain_filter(PBFDAF* p, float* out);
 
 /* W *= scale, all partitions. */
-void pbfdaf_scale_filter(PBFDAF* p, float scale);
 void pbfdkf_scale_filter(PBFDKF* p, float scale);
 
 #ifdef __cplusplus

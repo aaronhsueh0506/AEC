@@ -16,7 +16,7 @@ combination raises. Asserted:
   - ring sizing per mode: MATCHED ``max(delay_buffer_ms, max_delay_ms + 4096)``
     (also gates which estimates the controller may accept), FIXED
     ``fixed_delay_samples + hop`` (inert to those two knobs), EXTERNAL_ALIGNED 0,
-    mirroring C's ``aec_ref_ring_samples()``;
+    as in C's ``aec_ref_ring_samples()`` (whose MATCHED ring is the estimator's reach plus one hop, with the same outputs);
   - the exact-fit ring serves the caller's far delayed by exactly
     ``fixed_delay_samples`` across hundreds of wraps and through ``reset()``'s
     refill, and a synthetic echo is cancelled only when the delay is right.
@@ -310,7 +310,7 @@ def _cfg(sr, fft, **kw):
 
 class AlignmentRingSizingTests(unittest.TestCase):
     """``config.ref_ring_samples`` -- one helper, mirrored by C's
-    ``aec_ref_ring_samples()``. MATCHED keeps the search ring, FIXED carves the
+    ``aec_ref_ring_samples()`` (FIXED and EXTERNAL_ALIGNED term for term; C sizes MATCHED from the estimator's reach). MATCHED keeps the search ring, FIXED carves the
     tight bound it can prove (``fixed + hop``), EXTERNAL_ALIGNED carves nothing.
     """
 

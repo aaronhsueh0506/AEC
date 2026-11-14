@@ -25,10 +25,8 @@ typedef struct {
     float *prev_output_time;
     int    prev_output_valid;
     int    form_last_selection;       /* LFS_SEL_* chosen by the previous hop (init LFS_SEL_REFINED) */
-    int    refined_last_selected;
 
     float   *e_form;
-    float   *block_win;
     Complex *sel_esw;
 
     float   *scr_sq;

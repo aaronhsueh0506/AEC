@@ -107,7 +107,7 @@ EOF
 echo
 echo "tolerances are the checker's own constants (TOL_E2E=2e-2, TOL_E2E_48K=1e-1); this wrapper never edits them."
 echo "EXPECTED_RED(S-19): the 8 kHz row exceeds TOL_E2E; classification (sync bug vs documented HPF f32/fp64 effect) and"
-echo "the tolerance are the user's decision (PY_C_SYNC_AUDIT.md S-19)."
+echo "the tolerance are the user's decision (docs/c_python_function_map.md, appendix A, S-19)."
 if [ -n "$JSON_OUT" ]; then
     printf '{"gate":"parity_aec_e2e","rows":[%s\n  ]}\n' "$JSON_ROWS" > "$JSON_OUT"
 fi

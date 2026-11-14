@@ -25,19 +25,20 @@ pre code{background:none;padding:0}
 </head>
 <body>
 <nav aria-label="文件導覽"><a href="../index.html">AEC 文件首頁</a></nav>
-<h1>AEC C library(單聲道)— <code>AEC/c_impl</code></h1>
+<h1>AEC C library(單聲道實例的訊號流程)— <code>AEC/c_impl</code></h1>
 
 <h2>概要</h2>
+<p class="small">本頁描述單聲道實例(<code>AecConfig.n_mics = 1</code>)的處理鏈與 state;四麥克風陣列實例(<code>n_mics = 4</code>,四條各自走這條線性鏈的 lane、共用 delay 估計器、融合與一次 <code>G_res</code>)見 <a href="aec_c_api.html#array">AEC API §5a</a> 與 <a href="aec_sequence.html">aec_sequence</a> §6a。</p>
 <p>單聲道 PBFDKF 回音消除器的 float32 C 實作(Python <code>aec.py</code> 為演算法規格)。一個 hop 的處理鏈:mic 端 HPF → 飽和偵測 → AEC3 matched-filter 延遲估計 + 參考訊號 ring buffer 對齊 → PBFDAF shadow / PBFDKF main 線性濾波 → AEC3 post(殘留回音抑制 RES + CNG)。全部 state 收在單一 <code>Aec</code> struct(caller pool 或單一 heap arena),process 熱路徑零 malloc(<code>make test-zero-heap</code> 實測 50 個 init/process/reset/destroy 週期 allocator 呼叫為 0)。heap 與 caller-pool 兩條建構路徑輸出逐位元相同(<code>test_static_aec</code> 驗證 byte-equal)。</p>
 <p>沒有任何 NN/NPU 成分:本函式庫是純 DSP,跨 hop 的 state 全部由 C struct 保存,host 不需另存任何 state。<code>AecResidualView</code> / <code>AecLinearView</code> 兩個 seam(<code>aec_get_residual()</code>／<code>aec_get_linear()</code>,搭配 <code>aec_process_linear()</code> + <code>aec_process_residual()</code>)是外接 NN 後級(RES/NR)時的接點,見 <code>AEC/docs/nn_integration_interface.md</code>。</p>
 <div class="tblwrap"><table>
 <tr><th>sr</th><th>fft_size</th><th>hop</th><th>hop 時長</th><th>n_freqs</th><th>filter_length</th><th>n_partitions</th><th>aec_get_mem_size(balanced, MATCHED n=5, NE10 後端實測)</th></tr>
-<tr><td>8000</td><td>256(legacy)</td><td>128</td><td>16 ms</td><td>129</td><td>416(52 ms)</td><td>4</td><td>249,856 B</td></tr>
-<tr><td>16000</td><td>256(預設)</td><td>128</td><td>8 ms</td><td>129</td><td>832(52 ms)</td><td>7</td><td>343,760 B</td></tr>
-<tr><td>16000</td><td>512</td><td>256</td><td>16 ms</td><td>257</td><td>832(52 ms)</td><td>4</td><td>456,640 B</td></tr>
-<tr><td>48000</td><td>1024</td><td>512</td><td>10.667 ms</td><td>513</td><td>3072(64 ms)</td><td>6</td><td>1,078,560 B</td></tr>
+<tr><td>8000</td><td>256(legacy)</td><td>128</td><td>16 ms</td><td>129</td><td>416(52 ms)</td><td>4</td><td>211,552 B</td></tr>
+<tr><td>16000</td><td>256(預設)</td><td>128</td><td>8 ms</td><td>129</td><td>832(52 ms)</td><td>7</td><td>239,920 B</td></tr>
+<tr><td>16000</td><td>512</td><td>256</td><td>16 ms</td><td>257</td><td>832(52 ms)</td><td>4</td><td>352,288 B</td></tr>
+<tr><td>48000</td><td>1024</td><td>512</td><td>10.667 ms</td><td>513</td><td>3072(64 ms)</td><td>6</td><td>776,224 B</td></tr>
 </table></div>
-<p class="small">取樣率白名單 = {8000, 16000, 48000}(<code>aec_is_valid_sample_rate()</code>);sr/fft 配對由 <code>aec_resolve_signal_grid()</code> 強制(上表四組;8 kHz 為 legacy grid,只有本函式庫與 Audio_ALG 的 mono 範例支援,陣列實例(<code>n_mics = 4</code>)不收,只接受 16 kHz／256、16 kHz／512、48 kHz／1024)。hop = fft_size/2,n_freqs = fft_size/2+1。上表 bytes 是 <code>cfg.delay_mode = AEC_DELAY_MATCHED、delay_num_filters = 5</code>(預設)的總量;三態 delay mode 與 n 如何改變這個數字見下方「Delay mode / 記憶體」節。這些絕對值會隨 <code>Aec</code>/<code>AecConfig</code> 的結構大小整批移動(<code>sizeof(AecConfig)</code> = 228 B),而所有 delta(每 filter 5,728 B、mode 間差值)不變——必須重新查 <code>aec_get_mem_size()</code> 並重新 init,不可沿用記下的常數。</p>
+<p class="small">取樣率白名單 = {8000, 16000, 48000}(<code>aec_is_valid_sample_rate()</code>);sr/fft 配對由 <code>aec_resolve_signal_grid()</code> 強制(上表四組;8 kHz 為 legacy grid,只有本函式庫與 Audio_ALG 的 mono 範例支援,陣列實例(<code>n_mics = 4</code>)不收,只接受 16 kHz／256、16 kHz／512、48 kHz／1024)。hop = fft_size/2,n_freqs = fft_size/2+1。上表 bytes 是 <code>cfg.delay_mode = AEC_DELAY_MATCHED、delay_num_filters = 5</code>(預設)的總量;三態 delay mode 與 n 如何改變這個數字見下方「Delay mode / 記憶體」節。這些絕對值會隨 <code>Aec</code> 內部結構與 <code>AecConfig</code> 的大小整批移動(池內標頭 6,208 B、<code>sizeof(AecConfig)</code> = 48 B),而所有 delta(單通道每 filter 11,264 B(48 kHz 23,552 B)、mode 間差值)不變——必須重新查 <code>aec_get_mem_size()</code> 並重新 init,不可沿用記下的常數。</p>
 
 <div class="note"><b>快速入口</b>:<a href="aec_usage.html">如何呼叫使用</a>(呼叫順序、可編譯範例、錯誤處理)、<a href="aec_sequence.html">流程時序圖</a>(init／穩態 hop／refused／reset)、<a href="aec_params.html">外部參數與公開函式</a>、<a href="aec_params_internal.html">內部參數</a>。</div>
 
@@ -118,29 +119,29 @@ seam 讀者     view(N-1) 有效至 ↘      view(N) 有效至 ↘        view(N
 </table></div>
 
 <h2>State 表(跨呼叫 state;全部由 C struct 保存)</h2>
-<p class="small">存放者一律是 <code>Aec</code> struct 本體 + 同一塊 pool/arena(<code>aec_init</code>=caller pool、<code>aec_create</code>=單一 <code>heap_arena</code>)。無 NPU runtime state、host 不需保存任何東西;<code>aec_reset()</code> 清 runtime state 但保留設定與記憶體。主要區塊(16 kHz/256 格點的實際大小):</p>
+<p class="small">存放者一律是 <code>Aec</code> struct 本體 + 同一塊 pool/arena(<code>aec_init</code>=caller pool、<code>aec_create</code>=一次配置的單一區塊)。無 NPU runtime state、host 不需保存任何東西;<code>aec_reset()</code> 清 runtime state 但保留設定與記憶體。主要區塊(16 kHz/256 格點的實際大小):</p>
 <div class="tblwrap"><table>
 <tr><th>state 區塊</th><th>shape / 大小</th><th>內容</th></tr>
-<tr><td><code>ref_ring</code></td><td>依 <code>delay_mode</code> 而定:<code>MATCHED</code> = [32768] ≈ 131,072 B @16k;<code>FIXED</code> = <code>ALIGN16((fixed_delay_samples+hop)×4)</code> B;<code>EXTERNAL_ALIGNED</code> = 0</td><td>遠端參考回看環;<code>current_delay</code> 對齊來源。唯一 helper(C <code>aec_ref_ring_samples()</code>)算容量,<code>get_mem_size</code> 與 carve 共用同一次呼叫</td></tr>
+<tr><td><code>ref_ring</code></td><td>依 <code>delay_mode</code> 而定:<code>MATCHED</code> = (4×((n−1)×384+501)+hop) 個 float(n=5、16k/256:8,276 ≈ 33,104 B);<code>FIXED</code> = <code>ALIGN16((fixed_delay_samples+hop)×4)</code> B;<code>EXTERNAL_ALIGNED</code> = 0</td><td>遠端參考回看環;<code>current_delay</code> 對齊來源。唯一 helper(C <code>aec_ref_ring_samples()</code>)算容量,<code>get_mem_size</code> 與 carve 共用同一次呼叫</td></tr>
 <tr><td><code>delay</code>(DelayAec)</td><td>struct 內含 matched filter 累積器</td><td>AEC3 matched-filter 延遲估計 + duty-cycle 欄位(<code>duty_*</code>)</td></tr>
 <tr><td><code>main_filter</code>(PBFDKF)</td><td>taps Complex[n_partitions×n_freqs] + Kalman H_error 等</td><td>主線性濾波器(頻域分割塊摺積 + Kalman 步長)</td></tr>
 <tr><td><code>shadow_filter</code>(PBFDAF)</td><td>同階 taps</td><td>shadow(NLMS);收斂比較/regime 複製來源</td></tr>
-<tr><td><code>observer_filter</code>(PBFDAF,<code>live_observer_enabled</code> 時才建)</td><td>同階 taps(lightweight,省 2 個近端 FFT)+ 2 個 double 誤差 EMA 純量(<code>post.observer_obs_err_ema</code>/<code>observer_main_err_ema</code>)</td><td>第三個獨立 NLMS,讀遠端 ring 比主濾波器早 <code>live_observer_shift_ms</code>;證據經 corroboration 守門注入 R²,見上方「Live observer」段</td></tr>
+<tr><td><code>observer_filter</code>(PBFDAF,<code>live_observer_enabled</code> 時才建)</td><td>同階 taps(lightweight,省 2 個近端 FFT)+ 2 個 double 誤差 EMA 純量(<code>post.observer_obs_err_ema</code>/<code>observer_main_err_ema</code>)</td><td>第三個獨立 NLMS,讀遠端 ring 比主濾波器早 <code>live_observer_shift_ms</code>;證據經 corroboration 守門注入 R²,見 <a href="aec_detail.html">aec_detail</a> 的 Live observer 段(內部調校值,預設關,產品路徑不能開)</td></tr>
 <tr><td>AEC3 post 鏈(<code>a3_state/a3_ree/a3_sg/a3_stat/a3_lfs/a3_sc/post</code>)</td><td>數十條 float32[n_freqs] + OLA float32[fft_size]</td><td>ERLE/ERL 表、R² 歷史、SuppressionGain 平滑、stationarity 噪聲底、LinearFilterSelect 交叉淡化、CNG</td></tr>
 <tr><td>純量/計數器</td><td>~60 個 int/float 欄位</td><td>EMA 功率、ERLE 視窗、DT/EPC/warm-up/misadjustment 計數器(皆於 <code>aec_carve()</code> 依實際 hop 重定時)</td></tr>
-<tr><td><b>合計</b></td><td colspan="2">見概要表 <code>aec_get_mem_size</code> 欄(實測);與 <code>test_static_aec</code> 印出的 Pool 343,760 B @16k/256(MATCHED n=5)一致</td></tr>
+<tr><td><b>合計</b></td><td colspan="2">見概要表 <code>aec_get_mem_size</code> 欄(實測);與 <code>test_static_aec</code> 印出的 Pool 239,920 B @16k/256(MATCHED n=5)一致</td></tr>
 </table></div>
 
 <h2>延遲與 warm-up</h2>
 <div class="tblwrap"><table>
-<tr><th>格點</th><th>演算法延遲 residual=FULL(實測)</th><th>residual=OFF</th><th>可擷取延遲上限</th></tr>
+<tr><th>格點</th><th>演算法延遲 residual=FULL(實測)</th><th>residual=OFF</th><th>搜尋範圍的幾何全 span</th></tr>
 <tr><td>8 kHz / 256</td><td>16.000 ms(1 hop)</td><td>0 ms</td><td>1216 ms</td></tr>
 <tr><td>16 kHz / 256</td><td>8.000 ms(1 hop)</td><td>0 ms</td><td>608 ms</td></tr>
 <tr><td>16 kHz / 512</td><td>16.000 ms(1 hop)</td><td>0 ms</td><td>608 ms</td></tr>
 <tr><td>48 kHz / 1024</td><td>10.667 ms(1 hop)</td><td>0 ms</td><td>608 ms</td></tr>
 </table></div>
-<p class="small">延遲為脈衝實測(<code>AEC/docs/c_user_manual_zh_TW.md</code> §3「演算法延遲(實測)」),無 look-ahead。可擷取上限是編譯期常數(matched filter 搜尋長度 × 4 倍降取樣),<b>調 <code>max_delay_ms</code> 不會提高</b>;48 kHz 內部先降到 16 kHz 估計再 ×3 回傳。另注意 <code>aec.h</code> 寫的 ~509 ms 是「可靠峰值」定義、608 ms 是幾何全跨度——兩種定義,非矛盾(見 nn_integration_interface.md)。delay estimator(matched filter)本身的機制/語意/語料延遲統計詳見 <code>AEC/docs/delay_estimator_design_zh_TW.md</code>。<code>delay_num_filters</code> config(Python+C,n=1..5,預設 5=行為不變)可依場景縮小 matched filter 算力:可靠搜尋上限 125/221/317/413/509 ms 對應 n=1..5,預設 <code>delay_est_period_s = 0</code>(每 hop 全速分析)時每少一組省 ~4.2 MMAC/s 的搜尋算力,**且固定省 5,728 B/filter(四個格點都一樣)**,見上方「Delay mode」節;僅在系統延遲已由 <code>fixed_delay_samples</code> 補償的部署縮小,bench/dataset 維持 5。</p>
-<p><b>Warm-up</b>:<code>warmup_frames=100</code>(10 ms 基準著作 ≈1000 ms;於 <code>aec_carve()</code> 對實際 hop 重定時,例如 16k/256 內部變 125 hop)期間濾波器以較積極方式收斂。延遲估計需 <code>delay_aec_n_updates() ≥ 3</code> 且 solid 才擷取;<code>delay_est_period_s &gt; 0</code> 時,估計穩定 <code>delay_est_init_s=0.3</code> 秒後 duty-cycle 把 matched-filter 分析降到 1-in-K(ERLE 看門狗回退);預設 0.0 = 每 hop 全速分析。<code>delay_acquire_warm_transfer=1</code>(預設)在首次擷取時平移已學到的 IR 而非歸零,避免開場「垂直線」回音。</p>
+<p class="small">延遲為脈衝實測(<code>AEC/docs/c_user_manual_zh_TW.md</code> §3「演算法延遲(實測)」),無 look-ahead。搜尋範圍是編譯期常數(matched filter 搜尋長度 × 4 倍降取樣),<b>環形緩衝大小不會提高它</b>;48 kHz 內部先降到 16 kHz 估計再 ×3 回傳。單聲道 MATCHED 實際能回報的最大延遲是 <code>delay_aec_max_delay_samples()</code>(n = 5 時 8,148 sample,<code>make test-delay-num-filters</code> 釘住):8 kHz 約 1,018 ms,16 kHz 與 48 kHz 約 509 ms;參考環就是這個值加 <code>hop_size</code>,所以環不會成為額外的限制。另注意 <code>aec.h</code> 寫的 ~509 ms 是「可靠峰值」定義、608 ms 是幾何全跨度——兩種定義,非矛盾(見 nn_integration_interface.md)。delay estimator(matched filter)本身的機制/語意/語料延遲統計詳見 <code>AEC/docs/delay_estimator_design_zh_TW.md</code>。<code>delay_num_filters</code> config(Python+C,n=1..5,預設 5=行為不變)可依場景縮小 matched filter 算力:可靠搜尋上限 125/221/317/413/509 ms 對應 n=1..5,內部的分析週期預設 0(每 hop 全速分析)時每少一組省 ~4.2 MMAC/s 的搜尋算力(舊版量測,未重測),<b>且 estimator 固定省 5,120 B/filter(四個格點都一樣);單通道 MATCHED 的參考環另縮短,合計每 filter 省 11,264 B(16／8 kHz)／23,552 B(48 kHz)</b>,見 <a href="aec_c_api.html">AEC API</a> §4「Delay mode」;僅在系統延遲已由 <code>fixed_delay_samples</code> 補償的部署縮小,bench/dataset 維持 5。</p>
+<p><b>Warm-up</b>(內部調校值,呼叫端不能設定):<code>warmup_frames=100</code>(10 ms 基準著作 ≈1000 ms;於 <code>aec_carve()</code> 對實際 hop 重定時,例如 16k/256 內部變 125 hop)期間濾波器以較積極方式收斂。延遲估計需 <code>delay_aec_n_updates() ≥ 3</code> 且 solid 才擷取;<code>delay_est_period_s &gt; 0</code> 時,估計穩定 <code>delay_est_init_s=0.3</code> 秒後 duty-cycle 把 matched-filter 分析降到 1-in-K(ERLE 看門狗回退);預設 0.0 = 每 hop 全速分析。<code>delay_acquire_warm_transfer=1</code>(預設)在首次擷取時平移已學到的 IR 而非歸零,避免開場「垂直線」回音。</p>
 
 </body>
 </html>

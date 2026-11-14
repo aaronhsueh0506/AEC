@@ -6,12 +6,11 @@ StationarityEstimator with a large set of derived constants (hz_to_bin,
 fft_density_scale, wall-clock-rescaled CNG/ratchet constants, per-bin tuning
 interpolation). Rather than re-derive all of that in C (and risk a 1-ULP drift),
 the LIVE balanced instance's exact values are captured once and emitted as C
-literals; aec_create() bakes them straight into the sub-module init calls.
+literals; aec_init() bakes them straight into the sub-module init calls.
 
-mild differs from balanced ONLY in split_floor_far_active_db (mild -20 /
-balanced -28); aggressive also differs in split_floor_dt (-38 / -30 vs
-balanced's -28 / -20). Both fields are applied at runtime in
-aec_config_from_preset, so only the balanced base is baked here.
+The levels differ from balanced only in the split-floor far-active and DT
+floors; they are applied at runtime (aec_config_from_level, aec_set_level),
+so only the balanced base is baked here.
 
 The unsuffixed block is the 16 kHz capture; the live instance is also captured
 at 8 kHz and 48 kHz and emitted as ``AECB_R8K_*`` / ``AECB_R48K_*`` blocks + a
@@ -19,6 +18,12 @@ runtime ``AECB_RATE_TABLE`` lookup. Only rate-varying quantities are duplicated
 per rate: ``_assert_cross_rate_invariance`` diffs the complete captured value
 set across 8/16/48 kHz and aborts if anything outside the declared
 (``RATE_VARYING_MACROS`` / ``RATE_VARYING_ARRAYS``) set differs.
+
+Two tables are stored compressed and rebuilt by aec_init() into the instance pool, bit for bit:
+the synthesis window (one half table of the longest grid; every shorter window is a stride subsample, the second half
+mirrors the first) and the SuppressionGain ENR/SU thresholds (run-length coded). Both encodings are checked here against
+the captured Python tables (``decode(encode(x)) == x``), and the original full tables are written to the test-only header
+c_impl/test/aec_ref_tables.h, which gives the unit tests an oracle independent of the decoders.
 
 Run: python3 python/diag/gen_aec_balanced_config_h.py
 """
@@ -37,6 +42,7 @@ from gen_aec3_post_run_golden import (                        # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 OUT = os.path.join(ROOT, 'c_impl', 'include', 'aec_balanced_config.h')
+OUT_REF = os.path.join(ROOT, 'c_impl', 'test', 'aec_ref_tables.h')
 
 SR = 16000
 DEFAULT_FRAME = 512
@@ -99,24 +105,97 @@ def _plan_shared_tables(cap16, extra_caps):
 
     emr: every *_EMR_TR table of every grid is a prefix of the longest one (they are the
     constant 0.3); emitted unconditionally so the 16 kHz block never depends on a rate flag.
-    windows: extra-grid synthesis windows that are bytewise equal, emitted once under an
-    OR of their enable flags.
     """
     all_caps = [cap16] + [extra_caps[(sr, fs)] for sr, fs, _t, _f in EXTRA_GRIDS]
     emr = [c['arrays'][n] for c in all_caps for n in ('SG_NEAREND_EMR_TR', 'SG_NORMAL_EMR_TR')]
     emr_base = _f32(max(emr, key=len))
     shared_emr = emr_base if all(_is_prefix(a, emr_base) for a in emr) else None
+    return dict(emr=shared_emr)
 
-    groups = {}
-    for sr, fs, tag, flag in EXTRA_GRIDS:
-        win = _f32(extra_caps[(sr, fs)]['arrays']['SYNTH_WINDOW'])
-        groups.setdefault(win.tobytes(), []).append((tag, flag, win))
-    shared_win = {}
-    for members in groups.values():
-        if len(members) > 1:
-            name = 'AECB_SYNTH_WINDOW_%d' % len(members[0][2])
-            shared_win[name] = (members[0][2], [m[1] for m in members], [m[0] for m in members])
-    return dict(emr=shared_emr, windows=shared_win)
+
+# ---- compressed tables ------------------------------------------------------------------------------------------------
+
+SG_RLE_TABLES = ('SG_NEAREND_ENR_TR', 'SG_NEAREND_ENR_SU', 'SG_NORMAL_ENR_TR', 'SG_NORMAL_ENR_SU')
+
+
+def window_build(half, n):
+    """The C builder (aec_synth_window_build): w[i] = half[i * stride] for i <= n/2, w[n - i] = w[i] above."""
+    half = _f32(half)
+    n_full = 2 * (len(half) - 1)
+    assert n_full % n == 0, (n_full, n)
+    stride = n_full // n
+    w = np.zeros(n, dtype=np.float32)
+    for i in range(n // 2 + 1):
+        w[i] = half[i * stride]
+    for i in range(n // 2 + 1, n):
+        w[i] = w[n - i]
+    return w
+
+
+def window_half(win_by_n):
+    """Half table of the longest captured window; asserts that every captured window is rebuilt bit for bit from it
+    (symmetry and stride subsampling), so the C builder needs no per-grid table."""
+    n_max = max(win_by_n)
+    half = _f32(win_by_n[n_max])[:n_max // 2 + 1].copy()
+    for n, win in sorted(win_by_n.items()):
+        built = window_build(half, n)
+        assert built.tobytes() == _f32(win).tobytes(), 'synthesis window n=%d is not rebuilt from the half table' % n
+    return half
+
+
+def rle_encode(tables):
+    """Run-length code of equally long tables with shared run boundaries: (ends, vals) where run r covers bins
+    [ends[r-1], ends[r]) (ends[-1] = 0), ends[-1] == n, vals[t][r] is table t's value on run r. Compared on float32 bits."""
+    tabs = [_f32(t) for t in tables]
+    n = len(tabs[0])
+    assert all(len(t) == n for t in tabs)
+    bits = [t.view(np.uint32) for t in tabs]
+    ends = [k for k in range(1, n) if any(b[k] != b[k - 1] for b in bits)] + [n]
+    assert ends[-1] < 65536 and n < 65536
+    starts = [0] + ends[:-1]
+    vals = [[float(t[s]) for s in starts] for t in tabs]
+    return ends, vals
+
+
+def rle_decode(ends, vals, n):
+    """The C decoder (aec_sg_tables_decode): fills bins [0, n) run by run, stopping at n."""
+    out = [np.zeros(n, dtype=np.float32) for _ in vals]
+    for t, v in enumerate(vals):
+        k = 0
+        for r, e in enumerate(ends):
+            if k >= n:
+                break
+            e = min(e, n)
+            while k < e:
+                out[t][k] = np.float32(v[r])
+                k += 1
+    return out
+
+
+def rle_checked(cap):
+    """(ends, vals) for one grid's four ENR/SU tables, asserting decode(encode(x)) == x."""
+    tabs = [cap['arrays'][n] for n in SG_RLE_TABLES]
+    ends, vals = rle_encode(tabs)
+    for t, got in zip(tabs, rle_decode(ends, vals, len(tabs[0]))):
+        assert got.tobytes() == _f32(t).tobytes(), 'ENR/SU run-length code does not round-trip'
+    return ends, vals
+
+
+def rle_is_alias(base, cap):
+    """True when decoding `base` (ends, vals) clipped to this grid's length reproduces its four ENR/SU tables."""
+    ends, vals = base
+    tabs = [cap['arrays'][n] for n in SG_RLE_TABLES]
+    n = len(tabs[0])
+    return all(g.tobytes() == _f32(t).tobytes() for t, g in zip(tabs, rle_decode(ends, vals, n)))
+
+
+def emit_rle(w, prefix, rle):
+    """Emits <prefix>SG_RUN_END (uint16 run ends), <prefix>SG_RUN_VAL (4 x runs floats, table-major) and <prefix>SG_RUNS."""
+    ends, vals = rle
+    w('static const uint16_t %sSG_RUN_END[%d] = { %s };\n' % (prefix, len(ends), ', '.join(str(e) for e in ends)))
+    flat = [v for row in vals for v in row]
+    w(emit_array('%sSG_RUN_VAL' % prefix, flat))
+    w('#define %sSG_RUNS %d\n' % (prefix, len(ends)))
 
 
 def _lf_clamp_comment(n_bins, sr, val):
@@ -172,7 +251,6 @@ def _capture_all(sr, frame_size, filter_length=None):
     values['ERLE_RENDER_X2_PSD_SCALE'] = int(bool(getattr(cfg, 'erle_render_x2_psd_scale', False)))
     values['OUTPUT_CAPTURE_WHEN_LINEAR_UNUSABLE'] = int(
         bool(getattr(cfg, 'output_capture_when_linear_unusable', False)))
-    values['ENABLE_CNG'] = int(bool(cfg.enable_cng))
     values['USE_STATIONARITY_PROPERTIES'] = int(
         bool(aec._aec3_sg_config.echo_audibility.use_stationarity_properties))
     values['STATIONARITY_CONVERGE_HOPS'] = int(aec._aec3_stationarity_converge_hops)
@@ -212,7 +290,6 @@ def _capture_all(sr, frame_size, filter_length=None):
     values['ST_ERLE_MAX_H'] = float(st['erle_max_h'])
 
     # ── ResidualEchoEstimator config ──
-    values['REE_HOP_SIZE'] = int(rc['hop_size'])
     values['REE_MODEL_REVERB_IN_NL'] = int(rc['model_reverb_in_nl'])
     values['REE_ERLE_ONSET_COMP'] = int(rc['erle_onset_comp'])
     values['REE_REVERB_ENABLED'] = int(rc['reverb_enabled'])
@@ -246,7 +323,6 @@ def _capture_all(sr, frame_size, filter_length=None):
     values['REE_REVERB_SMOOTHING_BASE'] = float(rc['reverb_smoothing_base'])
 
     # ── SuppressionGain config ──
-    values['SG_SPLIT_FLOOR_FAR_ACTIVE'] = float(sg['split_floor_far_active'])
     values['SG_SPLIT_FLOOR_FAR_SILENT'] = float(sg['split_floor_far_silent'])
     values['SG_SPLIT_FLOOR_LATCH_POWER'] = float(sg['split_floor_latch_power'])
     # NOTE: genuinely rate-varying (fft_density_scale) -- see RATE_VARYING_MACROS.
@@ -257,8 +333,6 @@ def _capture_all(sr, frame_size, filter_length=None):
     values['SG_SOFT_BLEND_PER_BIN'] = int(sg['soft_blend_per_bin'])
     values['SG_SOFT_BLEND_ENR_THR'] = float(sg['soft_blend_enr_thr'])
     values['SG_SOFT_BLEND_SOFTNESS'] = float(sg['soft_blend_softness'])
-    values['SG_LAST_LF_BAND'] = int(sg['last_lf_band'])
-    values['SG_FIRST_HF_BAND'] = int(sg['first_hf_band'])
     values['SG_LAST_LF_SMOOTHING_BAND'] = int(sg['last_lf_smoothing_band'])
     values['SG_LAST_PERMANENT'] = int(sg['last_permanent'])
     values['SG_LF_SMOOTHING_INITIAL'] = int(sg['lf_smoothing_initial'])
@@ -310,8 +384,7 @@ def _capture_all(sr, frame_size, filter_length=None):
 RATE_VARYING_MACROS = {
     'N_BINS', 'FFT_SIZE', 'BLOCK_SIZE', 'HOP_SIZE', 'N_PARTITIONS',
     'FILTER_TAPS_SIZE', 'FILTER_LENGTH',
-    'REE_HOP_SIZE',
-    'SG_LAST_LF_BAND', 'SG_FIRST_HF_BAND', 'SG_LAST_LF_SMOOTHING_BAND',
+    'SG_LAST_LF_SMOOTHING_BAND',
     'SG_LF_CLAMP_BIN', 'SG_DNE_LF_END', 'SG_DNE_LF_ENDPOINT_BIN',
     'SG_AUD_LF_END_BIN', 'SG_AUD_MF_END_BIN', 'SG_HF_LGB',
     # density-scaled absolute-power constants:
@@ -386,15 +459,7 @@ def _emr_bases(shared):
     return [(EMR_COMMON, shared['emr'])] if shared['emr'] is not None else []
 
 
-def legacy_bases(cap, shared):
-    """Always-emitted tables a later grid may alias: the shared EMR table and the 16 kHz ENR tables."""
-    bases = _emr_bases(shared)
-    for n in ('SG_NEAREND_ENR_TR', 'SG_NEAREND_ENR_SU', 'SG_NORMAL_ENR_TR', 'SG_NORMAL_ENR_SU'):
-        bases.append(('AECB_' + n, cap['arrays'][n]))
-    return bases
-
-
-def emit_legacy_block(w, cap, shared):
+def emit_legacy_block(w, cap, shared, rle):
     """Emits the unsuffixed (16 kHz) block."""
     v = cap['values']
 
@@ -413,7 +478,6 @@ def emit_legacy_block(w, cap, shared):
     w('#define AECB_ERLE_WINDOWED_CAPTURE_PSD %d\n' % v['ERLE_WINDOWED_CAPTURE_PSD'])
     w('#define AECB_ERLE_RENDER_X2_PSD_SCALE %d\n' % v['ERLE_RENDER_X2_PSD_SCALE'])
     w('#define AECB_OUTPUT_CAPTURE_WHEN_LINEAR_UNUSABLE %d\n' % v['OUTPUT_CAPTURE_WHEN_LINEAR_UNUSABLE'])
-    w('#define AECB_ENABLE_CNG %d\n' % v['ENABLE_CNG'])
     w('#define AECB_USE_STATIONARITY_PROPERTIES %d\n' % v['USE_STATIONARITY_PROPERTIES'])
     w('#define AECB_STATIONARITY_CONVERGE_HOPS %d\n' % v['STATIONARITY_CONVERGE_HOPS'])
     w('#define AECB_ACTIVE_RENDER_THRESHOLD (%s)\n\n' % f64(v['ACTIVE_RENDER_THRESHOLD']))
@@ -431,8 +495,7 @@ def emit_legacy_block(w, cap, shared):
     w('#define AECB_ERLE_COH_GATE_ALPHA (%s)\n' % f64(v['ERLE_COH_GATE_ALPHA']))
     w('#define AECB_ERLE_COH_GATE_THRESHOLD (%s)\n\n' % f64(v['ERLE_COH_GATE_THRESHOLD']))
 
-    # ── synth window + sqrt2 sin LUT ──
-    w(emit_array('AECB_SYNTH_WINDOW', cap['arrays']['SYNTH_WINDOW']))
+    # ── sqrt2 sin LUT (the synthesis window is rebuilt at init: see emit_window_half) ──
     w(emit_array('AECB_SQRT2_SIN_LUT', cap['arrays']['SQRT2_SIN_LUT']))
     w('\n')
 
@@ -457,7 +520,6 @@ def emit_legacy_block(w, cap, shared):
 
     # ── ResidualEchoEstimator config ──
     w('/* ResidualEchoEstimator config */\n')
-    w('#define AECB_REE_HOP_SIZE %d\n' % v['REE_HOP_SIZE'])
     w('#define AECB_REE_MODEL_REVERB_IN_NL %d\n' % v['REE_MODEL_REVERB_IN_NL'])
     w('#define AECB_REE_ERLE_ONSET_COMP %d\n' % v['REE_ERLE_ONSET_COMP'])
     w('#define AECB_REE_REVERB_ENABLED %d\n' % v['REE_REVERB_ENABLED'])
@@ -485,7 +547,6 @@ def emit_legacy_block(w, cap, shared):
     # ── SuppressionGain config ──
     w('/* SuppressionGain config (split_floor_far_active is the preset axis,\n')
     w(' * recomputed at runtime; the baked value is the balanced -28 dB one). */\n')
-    w('#define AECB_SG_SPLIT_FLOOR_FAR_ACTIVE (%s)\n' % f64(v['SG_SPLIT_FLOOR_FAR_ACTIVE']))
     w('#define AECB_SG_SPLIT_FLOOR_FAR_SILENT (%s)\n' % f64(v['SG_SPLIT_FLOOR_FAR_SILENT']))
     w('#define AECB_SG_SPLIT_FLOOR_LATCH_POWER (%s)\n' % f64(v['SG_SPLIT_FLOOR_LATCH_POWER']))
     w('#define AECB_SG_LOW_RENDER_THRESHOLD (%s)\n' % f64(v['SG_LOW_RENDER_THRESHOLD']))
@@ -495,8 +556,6 @@ def emit_legacy_block(w, cap, shared):
     w('#define AECB_SG_SOFT_BLEND_PER_BIN %d\n' % v['SG_SOFT_BLEND_PER_BIN'])
     w('#define AECB_SG_SOFT_BLEND_ENR_THR (%s)\n' % f64(v['SG_SOFT_BLEND_ENR_THR']))
     w('#define AECB_SG_SOFT_BLEND_SOFTNESS (%s)\n' % f64(v['SG_SOFT_BLEND_SOFTNESS']))
-    w('#define AECB_SG_LAST_LF_BAND %d\n' % v['SG_LAST_LF_BAND'])
-    w('#define AECB_SG_FIRST_HF_BAND %d\n' % v['SG_FIRST_HF_BAND'])
     w('#define AECB_SG_LAST_LF_SMOOTHING_BAND %d\n' % v['SG_LAST_LF_SMOOTHING_BAND'])
     w('#define AECB_SG_LAST_PERMANENT %d\n' % v['SG_LAST_PERMANENT'])
     w('#define AECB_SG_LF_SMOOTHING_INITIAL %d\n' % v['SG_LF_SMOOTHING_INITIAL'])
@@ -530,13 +589,15 @@ def emit_legacy_block(w, cap, shared):
     emr_bases = _emr_bases(shared)
     if emr_bases:
         w(emit_array(EMR_COMMON, shared['emr']))
-    for n in ('SG_NEAREND_ENR_TR', 'SG_NEAREND_ENR_SU', 'SG_NEAREND_EMR_TR',
-              'SG_NORMAL_ENR_TR', 'SG_NORMAL_ENR_SU', 'SG_NORMAL_EMR_TR'):
-        emit_array_or_alias(w, 'AECB_' + n, cap['arrays'][n],
-                            emr_bases if n.endswith('EMR_TR') else [])
+    for n in ('SG_NEAREND_EMR_TR', 'SG_NORMAL_EMR_TR'):
+        emit_array_or_alias(w, 'AECB_' + n, cap['arrays'][n], emr_bases)
+    w('/* ENR/SU thresholds, run-length coded (aec_sg_tables_decode() expands them into the pool): run r covers bins\n')
+    w(' * [SG_RUN_END[r-1], SG_RUN_END[r]) with SG_RUN_END[-1] = 0; SG_RUN_VAL holds SG_RUNS floats for each of\n')
+    w(' * nearend_enr_tr, nearend_enr_su, normal_enr_tr, normal_enr_su, in that order. */\n')
+    emit_rle(w, 'AECB_', rle)
 
 
-def emit_rate_block(w, tag, enable_flag, cap, bases, shared_win_name):
+def emit_rate_block(w, tag, enable_flag, cap, emr_bases, base_rle, own_rle):
     """Emits the AECB_<tag>_* block for one extra rate (8k/48k): only the
     rate-varying subset, guarded by `enable_flag` so firmware can strip it.
     """
@@ -562,17 +623,9 @@ def emit_rate_block(w, tag, enable_flag, cap, bases, shared_win_name):
     w('#define AECB_%s_FILTER_TAPS_SIZE %d\n' % (tag, v['FILTER_TAPS_SIZE']))
     w('#define AECB_%s_FILTER_LENGTH %d\n\n' % (tag, v['FILTER_LENGTH']))
 
-    if shared_win_name:
-        w('#define AECB_%s_SYNTH_WINDOW %s\n' % (tag, shared_win_name))
-    else:
-        w(emit_array('AECB_%s_SYNTH_WINDOW' % tag, cap['arrays']['SYNTH_WINDOW']))
     w('#define AECB_%s_SYNTH_WINDOW_LEN %d\n\n' % (tag, len(cap['arrays']['SYNTH_WINDOW'])))
 
-    w('#define AECB_%s_REE_HOP_SIZE %d\n\n' % (tag, v['REE_HOP_SIZE']))
-
     w('/* Hz-anchored SuppressionGain bin indices (rate-varying). */\n')
-    w('#define AECB_%s_SG_LAST_LF_BAND %d\n' % (tag, v['SG_LAST_LF_BAND']))
-    w('#define AECB_%s_SG_FIRST_HF_BAND %d\n' % (tag, v['SG_FIRST_HF_BAND']))
     w('#define AECB_%s_SG_LAST_LF_SMOOTHING_BAND %d\n' % (tag, v['SG_LAST_LF_SMOOTHING_BAND']))
     w(_lf_clamp_comment(v['N_BINS'], sr, v['SG_LF_CLAMP_BIN']))
     w('#define AECB_%s_SG_LF_CLAMP_BIN %d\n' % (tag, v['SG_LF_CLAMP_BIN']))
@@ -606,13 +659,73 @@ def emit_rate_block(w, tag, enable_flag, cap, bases, shared_win_name):
         w('#define AECB_%s_%s (%s)\n' % (tag, name, f64(v[name])))
     w('\n')
 
-    w('/* SuppressionGain per-bin tuning arrays at %d Hz (length = n_bins; a #define names an\n' % sr)
-    w(' * earlier table that starts with the same floats). */\n')
-    for n in ('SG_NEAREND_ENR_TR', 'SG_NEAREND_ENR_SU', 'SG_NEAREND_EMR_TR',
-              'SG_NORMAL_ENR_TR', 'SG_NORMAL_ENR_SU', 'SG_NORMAL_EMR_TR'):
-        emit_array_or_alias(w, 'AECB_%s_%s' % (tag, n), cap['arrays'][n], bases)
+    w('/* SuppressionGain per-bin tuning at %d Hz (length = n_bins). The EMR tables are #defines naming the shared\n' % sr)
+    w(' * table; the ENR/SU run-length code is either its own or the 16 kHz one, which decodes to these tables when\n')
+    w(' * clipped to this length. */\n')
+    for n in ('SG_NEAREND_EMR_TR', 'SG_NORMAL_EMR_TR'):
+        emit_array_or_alias(w, 'AECB_%s_%s' % (tag, n), cap['arrays'][n], emr_bases)
+    if own_rle is not None:
+        emit_rle(w, 'AECB_%s_' % tag, own_rle)
+    else:
+        for part in ('RUN_END', 'RUN_VAL', 'RUNS'):
+            w('#define AECB_%s_SG_%s AECB_SG_%s\n' % (tag, part, part))
     w('#define AECB_%s_SG_TABLE_LEN %d\n' % (tag, v['N_BINS']))
     w('#endif /* %s */\n\n' % enable_flag)
+
+
+def window_sets(caps):
+    """{n: window} over every captured grid; grids of equal length must have bitwise equal windows."""
+    by_n = {}
+    for cap in caps:
+        win = _f32(cap['arrays']['SYNTH_WINDOW'])
+        n = len(win)
+        assert by_n.setdefault(n, win).tobytes() == win.tobytes(), 'windows of length %d differ across grids' % n
+    return by_n
+
+
+def emit_window_half(w, by_n):
+    """The half table of the longest window (48 kHz grid, when enabled) and of the longest window without it."""
+    full_half = window_half(by_n)
+    short_n = max(n for n in by_n if n != max(by_n))
+    short_half = window_half({n: v for n, v in by_n.items() if n <= short_n})
+    w('/* Synthesis window: the first n/2 + 1 floats of the longest enabled grid\'s window. aec_synth_window_build() rebuilds\n')
+    w(' * the window of any grid length n (a power of two dividing AECB_SYNTH_HALF_N) bit for bit: w[i] = half[i * (HALF_N / n)]\n')
+    w(' * for i <= n/2, w[n - i] = w[i] above. This generator checks every captured window against that rule. */\n')
+    w('#if AECB_ENABLE_48K\n')
+    w('#define AECB_SYNTH_HALF_N %d\n' % max(by_n))
+    w(emit_array('AECB_SYNTH_WINDOW_HALF', full_half))
+    w('#else\n')
+    w('#define AECB_SYNTH_HALF_N %d\n' % short_n)
+    w(emit_array('AECB_SYNTH_WINDOW_HALF', short_half))
+    w('#endif\n\n')
+
+
+def ref_header_lines(grids):
+    """grids: [(tag, cap)]. The original full tables, for tests only (never compiled into the library)."""
+    out = []
+    w = out.append
+    w('/* aec_ref_tables.h -- AUTO-GENERATED by python/diag/gen_aec_balanced_config_h.py. DO NOT EDIT BY HAND.\n')
+    w(' *\n')
+    w(' * TEST ONLY, not part of libaec: the full synthesis windows and ENR/SU thresholds captured from the Python twin, i.e. what\n')
+    w(' * aec_init() must rebuild from the compressed tables in aec_balanced_config.h. The unit tests compare against these, so\n')
+    w(' * they do not check the decoders with themselves. */\n')
+    w('#ifndef AEC_REF_TABLES_H\n#define AEC_REF_TABLES_H\n\n')
+    for tag, cap in grids:
+        w(emit_array('AECREF_%s_WINDOW' % tag, cap['arrays']['SYNTH_WINDOW']))
+        for n in SG_RLE_TABLES:
+            w(emit_array('AECREF_%s_%s' % (tag, n), cap['arrays'][n]))
+    w('\ntypedef struct {\n')
+    w('    int sample_rate, fft_size, n_bins;\n')
+    w('    const float* window;   /* fft_size floats */\n')
+    w('    const float *nearend_enr_tr, *nearend_enr_su, *normal_enr_tr, *normal_enr_su;   /* n_bins floats each */\n')
+    w('} AecRefTables;\n\n')
+    w('static const AecRefTables AECREF_GRIDS[%d] __attribute__((unused)) = {\n' % len(grids))
+    for tag, cap in grids:
+        w('    { %d, %d, %d, AECREF_%s_WINDOW, AECREF_%s_SG_NEAREND_ENR_TR, AECREF_%s_SG_NEAREND_ENR_SU,\n'
+          '      AECREF_%s_SG_NORMAL_ENR_TR, AECREF_%s_SG_NORMAL_ENR_SU },\n'
+          % (cap['sr'], int(cap['values']['FFT_SIZE']), int(cap['values']['N_BINS']), tag, tag, tag, tag, tag))
+    w('};\n#define AECREF_N_GRIDS %d\n\n#endif /* AEC_REF_TABLES_H */\n' % len(grids))
+    return out
 
 
 def emit_rate_table(w):
@@ -633,17 +746,13 @@ def emit_rate_table(w):
     w('    int n_partitions;\n')
     w('    int filter_taps_size;\n')
     w('    int filter_length;\n')
-    w('    const float* synth_window;\n')
     w('    int synth_window_len;\n')
-    w('    const float* sg_nearend_enr_tr;\n')
-    w('    const float* sg_nearend_enr_su;\n')
+    w('    const uint16_t* sg_run_end;\n')
+    w('    const float* sg_run_val;\n')
+    w('    int sg_runs;\n')
     w('    const float* sg_nearend_emr_tr;\n')
-    w('    const float* sg_normal_enr_tr;\n')
-    w('    const float* sg_normal_enr_su;\n')
     w('    const float* sg_normal_emr_tr;\n')
     w('    int sg_table_len;\n')
-    w('    int sg_last_lf_band;\n')
-    w('    int sg_first_hf_band;\n')
     w('    int sg_last_lf_smoothing_band;\n')
     w('    int sg_lf_clamp_bin;\n')
     w('    int sg_dne_lf_end;\n')
@@ -651,7 +760,6 @@ def emit_rate_table(w):
     w('    int sg_aud_lf_end_bin;\n')
     w('    int sg_aud_mf_end_bin;\n')
     w('    int sg_hf_lgb;\n')
-    w('    int ree_hop_size;\n')
     w('    /* Found genuinely rate-varying by the cross-rate invariance\n')
     w('     * assertion (gen_aec_balanced_config_h.py RATE_VARYING_MACROS) --\n')
     w('     * moved here rather than left as a single "constant". */\n')
@@ -690,14 +798,13 @@ def emit_rate_table(w):
     w('      16000,\n')
     w('      AECB_N_BINS, AECB_FFT_SIZE, AECB_BLOCK_SIZE, AECB_HOP_SIZE,\n')
     w('      AECB_N_PARTITIONS, AECB_FILTER_TAPS_SIZE, 832,\n')
-    w('      AECB_SYNTH_WINDOW, AECB_BLOCK_SIZE,\n')
-    w('      AECB_SG_NEAREND_ENR_TR, AECB_SG_NEAREND_ENR_SU, AECB_SG_NEAREND_EMR_TR,\n')
-    w('      AECB_SG_NORMAL_ENR_TR, AECB_SG_NORMAL_ENR_SU, AECB_SG_NORMAL_EMR_TR,\n')
+    w('      AECB_BLOCK_SIZE,\n')
+    w('      AECB_SG_RUN_END, AECB_SG_RUN_VAL, AECB_SG_RUNS,\n')
+    w('      AECB_SG_NEAREND_EMR_TR, AECB_SG_NORMAL_EMR_TR,\n')
     w('      AECB_N_BINS,\n')
-    w('      AECB_SG_LAST_LF_BAND, AECB_SG_FIRST_HF_BAND, AECB_SG_LAST_LF_SMOOTHING_BAND,\n')
+    w('      AECB_SG_LAST_LF_SMOOTHING_BAND,\n')
     w('      AECB_SG_LF_CLAMP_BIN, AECB_SG_DNE_LF_END, AECB_SG_DNE_LF_ENDPOINT_BIN,\n')
     w('      AECB_SG_AUD_LF_END_BIN, AECB_SG_AUD_MF_END_BIN, AECB_SG_HF_LGB,\n')
-    w('      AECB_REE_HOP_SIZE,\n')
     w('      AECB_SG_LOW_RENDER_THRESHOLD, AECB_SG_FLOOR_POWER, AECB_SG_LOW_RENDER_LIMIT,\n')
     w('      AECB_SG_NORMAL_RENDER_LIMIT, AECB_REE_MIN_NOISE_FLOOR_POWER,\n')
     w('      AECB_REE_NL_NORM_POWER, AECB_REE_RESIDUAL_NOISE_GATE_POWER,\n')
@@ -719,19 +826,15 @@ def emit_rate_table(w):
           % (tag, tag, tag, tag))
         w('      AECB_%s_N_PARTITIONS, AECB_%s_FILTER_TAPS_SIZE, AECB_%s_FILTER_LENGTH,\n'
           % (tag, tag, tag))
-        w('      AECB_%s_SYNTH_WINDOW, AECB_%s_SYNTH_WINDOW_LEN,\n' % (tag, tag))
-        w('      AECB_%s_SG_NEAREND_ENR_TR, AECB_%s_SG_NEAREND_ENR_SU, AECB_%s_SG_NEAREND_EMR_TR,\n'
-          % (tag, tag, tag))
-        w('      AECB_%s_SG_NORMAL_ENR_TR, AECB_%s_SG_NORMAL_ENR_SU, AECB_%s_SG_NORMAL_EMR_TR,\n'
-          % (tag, tag, tag))
+        w('      AECB_%s_SYNTH_WINDOW_LEN,\n' % tag)
+        w('      AECB_%s_SG_RUN_END, AECB_%s_SG_RUN_VAL, AECB_%s_SG_RUNS,\n' % (tag, tag, tag))
+        w('      AECB_%s_SG_NEAREND_EMR_TR, AECB_%s_SG_NORMAL_EMR_TR,\n' % (tag, tag))
         w('      AECB_%s_SG_TABLE_LEN,\n' % tag)
-        w('      AECB_%s_SG_LAST_LF_BAND, AECB_%s_SG_FIRST_HF_BAND, AECB_%s_SG_LAST_LF_SMOOTHING_BAND,\n'
-          % (tag, tag, tag))
+        w('      AECB_%s_SG_LAST_LF_SMOOTHING_BAND,\n' % tag)
         w('      AECB_%s_SG_LF_CLAMP_BIN, AECB_%s_SG_DNE_LF_END, AECB_%s_SG_DNE_LF_ENDPOINT_BIN,\n'
           % (tag, tag, tag))
         w('      AECB_%s_SG_AUD_LF_END_BIN, AECB_%s_SG_AUD_MF_END_BIN, AECB_%s_SG_HF_LGB,\n'
           % (tag, tag, tag))
-        w('      AECB_%s_REE_HOP_SIZE,\n' % tag)
         w('      AECB_%s_SG_LOW_RENDER_THRESHOLD, AECB_%s_SG_FLOOR_POWER, AECB_%s_SG_LOW_RENDER_LIMIT,\n'
           % (tag, tag, tag))
         w('      AECB_%s_SG_NORMAL_RENDER_LIMIT, AECB_%s_REE_MIN_NOISE_FLOOR_POWER,\n' % (tag, tag))
@@ -786,26 +889,23 @@ def main():
     w(' * this to 8 kHz / 48 kHz -- see the generator\'s cross-rate invariance\n')
     w(' * assertion for the complete rate-varying field list.\n')
     w(' */\n')
-    w('#ifndef AEC_BALANCED_CONFIG_H\n#define AEC_BALANCED_CONFIG_H\n\n')
+    w('#ifndef AEC_BALANCED_CONFIG_H\n#define AEC_BALANCED_CONFIG_H\n\n#include <stdint.h>\n\n')
 
     shared = _plan_shared_tables(cap16, extra_caps)
-    emit_legacy_block(w, cap16, shared)
+    rle16 = rle_checked(cap16)
+    emit_legacy_block(w, cap16, shared, rle16)
     w('\n')
 
     for _sr, _fs, _tag, flag in EXTRA_GRIDS:
         w('#ifndef %s\n#define %s 1\n#endif\n' % (flag, flag))
     w('\n')
-    win_of_tag = {}
-    for name, (win, flags, tags) in shared['windows'].items():
-        w('#if %s\n' % ' || '.join(flags))
-        w(emit_array(name, win))
-        w('#endif\n\n')
-        for t in tags:
-            win_of_tag[t] = name
+    emit_window_half(w, window_sets(list(all_caps.values())))
 
-    bases = legacy_bases(cap16, shared)
+    emr_bases = _emr_bases(shared)
     for sr, fft_size, tag, flag in EXTRA_GRIDS:
-        emit_rate_block(w, tag, flag, extra_caps[(sr, fft_size)], bases, win_of_tag.get(tag))
+        cap = extra_caps[(sr, fft_size)]
+        own = None if rle_is_alias(rle16, cap) else rle_checked(cap)
+        emit_rate_block(w, tag, flag, cap, emr_bases, rle16, own)
 
     emit_rate_table(w)
 
@@ -813,8 +913,12 @@ def main():
 
     with open(OUT, 'w') as fh:
         fh.writelines(lines)
+    os.makedirs(os.path.dirname(OUT_REF), exist_ok=True)
+    with open(OUT_REF, 'w') as fh:
+        fh.writelines(ref_header_lines([('R16K512', cap16)] + [(tag, extra_caps[(sr, fs)])
+                                                               for sr, fs, tag, _f in EXTRA_GRIDS]))
     print('wrote %s (%d lines, n_bins=%d filter_taps=%d; +8k=%d +16k/256=%d +48k=%d)'
-          % (OUT, len(lines), cap16['values']['N_BINS'], cap16['filter_taps_size'],
+          % (OUT, sum(chunk.count('\n') for chunk in lines), cap16['values']['N_BINS'], cap16['filter_taps_size'],
              extra_caps[(8000, 256)]['values']['N_BINS'],
              extra_caps[(16000, 256)]['values']['N_BINS'],
              extra_caps[(48000, 1024)]['values']['N_BINS']))

@@ -1,10 +1,10 @@
-/* aec_array_internal.h -- private to aec.c, aec_array.c and the array tests (not installed): the entry points aec.c dispatches
+/* aec_array_internal.h -- private to aec.c, aec_array.c and the white-box tests (not installed): the entry points aec.c dispatches
  * to on an array instance (AecConfig.n_mics == AEC_ARRAY_MICS), the shared-alignment admission rule and the post-beam
  * projection kernels. The public contract is the "Array instance" section of aec.h. */
 #ifndef AEC_ARRAY_INTERNAL_H
 #define AEC_ARRAY_INTERNAL_H
 
-#include "aec.h"
+#include "aec_impl.h"
 #include "utility/simd_kernels.h"
 
 #include <float.h>
@@ -39,18 +39,18 @@ static inline int aec_unusable(const Aec* a) { return !a || !a->ready; }
 
 typedef struct AecArray AecArray;      /* the flow state, defined in aec_array.c */
 
-/* ---- dispatch from aec.c (cfg is validated unless noted) -------------------------------------------------------------- */
+/* ---- dispatch from aec.c (the AecResolved is validated unless noted) -------------------------------------------------------------- */
 
 #ifndef AEC_NO_ARRAY
 /* Checks the array-related fields of a cfg (n_mics in {1, 4}, capture_proxy_channel, the quarantine-enabled rule and, for an
  * array, the flow's own rules: residual != OFF, the three product grids, max_delay_ms <= 4096, an estimator that can be sized,
- * a valid derived lane). Called at the end of aec_resolve_valid_config() on the resolved cfg, after the quarantine ranges. 1 = acceptable. */
-int    aec_array_impl_config_ok(const AecConfig* resolved);
-size_t aec_array_impl_get_mem_size(const AecConfig* resolved);                    /* 0 on failure */
-int    aec_array_impl_get_mem_breakdown(const AecConfig* resolved, AecMemBreakdown* out);   /* AecStatus as aec_get_mem_breakdown */
-Aec*   aec_array_impl_init(void* mem, size_t mem_size, const AecConfig* resolved); /* Aec at mem[0]; NULL on failure */
-int    aec_array_impl_create(Aec* a, const AecConfig* resolved);                   /* 0 / -1; heap arena */
-void   aec_array_impl_destroy(Aec* a);                                            /* a live array handle; clears a->ready */
+ * a valid derived lane). Called at the end of aec_resolve_tuned() on the resolved configuration, after the quarantine ranges.
+ * 1 = acceptable. */
+int    aec_array_impl_config_ok(const AecResolved* resolved);
+size_t aec_array_impl_get_mem_size(const AecResolved* resolved);                    /* 0 on failure */
+int    aec_array_impl_get_mem_breakdown(const AecResolved* resolved, AecMemBreakdown* out);   /* AecStatus as aec_get_mem_breakdown */
+Aec*   aec_array_impl_init(void* mem, size_t mem_size, const AecResolved* resolved); /* Aec at mem[0]; NULL on failure */
+void   aec_array_impl_destroy(Aec* a);                                            /* a live array handle; clears a->ready, frees a heap block */
 void   aec_array_impl_reset(Aec* a);
 int    aec_array_impl_set_level(Aec* a, AecLevel level);
 
@@ -72,7 +72,6 @@ int    aec_array_impl_is_cancelling(const Aec* a);
 #define aec_array_impl_get_mem_size(cfg)             ((size_t)0)
 #define aec_array_impl_get_mem_breakdown(cfg, out)   AEC_ERR_ARG
 #define aec_array_impl_init(mem, mem_size, cfg)      ((Aec*)NULL)
-#define aec_array_impl_create(a, cfg)                (-1)
 #define aec_array_impl_destroy(a)                    ((void)0)
 #define aec_array_impl_reset(a)                      ((void)0)
 #define aec_array_impl_set_level(a, level)           (-1)
@@ -90,12 +89,12 @@ int    aec_array_impl_is_cancelling(const Aec* a);
 #endif
 
 /* ---- lane construction (aec.c) -------------------------------------------------------------------------------------- *
- * A lane is a single-channel Aec of the array flow: n_mics 1, EXTERNAL_ALIGNED, residual STATE or ESTIMATE (any other cfg is
+ * A lane is a single-channel Aec of the array flow: n_mics 1, EXTERNAL_ALIGNED, residual STATE or ESTIMATE (any other configuration is
  * refused). Its pool omits what that contract never runs and it borrows the array's FFT handle (same fft_size, calls strictly
  * sequential across lanes). aec_lane_init() takes the mem at least aec_lane_get_mem_size() bytes, 16-byte aligned. */
 #ifndef AEC_NO_ARRAY
-size_t aec_lane_get_mem_size(const AecConfig* lane_cfg);
-Aec*   aec_lane_init(void* mem, size_t mem_size, const AecConfig* lane_cfg, FftHandle* shared_fft);
+size_t aec_lane_get_mem_size(const AecResolved* lane);
+Aec*   aec_lane_init(void* mem, size_t mem_size, const AecResolved* lane, FftHandle* shared_fft);
 #endif
 
 /* ---- far-only analysis shared across lanes ------------------------------------------------------------------------- *
@@ -197,12 +196,15 @@ static inline int aec_array_far_spec_agrees(int shared_far_provenance, const Com
 
 /* Matched-filter duty cycle, shared by the single-channel instance and the array: the analysis period is the configured period
  * divided by AEC_DUTY_PERIOD_DIVISOR, and a windowed-ERLE drop of AEC_DUTY_ERLE_COLLAPSE_DB below the leaky peak resumes full rate.
- * The caller derives hold_hops, period_hops and erle_leak_db once (aec_duty_leak_db) and keeps its own census. */
+ * The caller configures the gate once (aec_duty_configure) and keeps its own census. */
 #define AEC_DUTY_PERIOD_DIVISOR    5
 #define AEC_DUTY_ERLE_COLLAPSE_DB  6.0f
 
 /* Per-hop leak of the duty watchdog the grid implies: 0.001 dB at the 10 ms reference hop, scaled with the hop duration. */
 float aec_duty_leak_db(int hop_size, int sample_rate);
+/* Seconds -> hops (round, floor 1) against the grid: hold_hops from hold_s, period_hops from period_s / AEC_DUTY_PERIOD_DIVISOR,
+ * and the grid's erle_leak_db. */
+void  aec_duty_configure(AecDutyGate* g, float hold_s, float period_s, int hop_size, int sample_rate);
 /* Clears the gate's state (not its hold / period / leak). */
 void  aec_duty_reset(AecDutyGate* g);
 /* Before the estimator is fed: advances the decimation phase and returns 1 when this hop's analysis runs (counts it). */

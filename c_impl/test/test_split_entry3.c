@@ -10,6 +10,7 @@
  * The expectation checks run on the NEON and the scalar build only. */
 #include "aec.h"
 #include "../src/aec_res_internal.h"
+#include "aec_test_tuning.h"
 #include "utility/simd_kernels.h"
 
 #include <stdio.h>

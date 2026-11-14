@@ -28,8 +28,8 @@
 # Usage:
 #   eval/run_c_ab.sh BASE_WORKTREE CAND_WORKTREE OUT_DIR ["256 512"] [aec_wav args...]
 #
-# e.g. a change only reachable with the shadow filter disabled:
-#   eval/run_c_ab.sh /tmp/wt-base /tmp/wt-cand /tmp/out "256 512" --no-shadow
+# e.g. a change only reachable on the external-aligned path (no delay estimator):
+#   eval/run_c_ab.sh /tmp/wt-base /tmp/wt-cand /tmp/out "256 512" --delay-mode external
 set -euo pipefail
 
 if [ "$#" -lt 3 ]; then

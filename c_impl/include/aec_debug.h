@@ -1,4 +1,4 @@
-/* aec_debug.h -- debug level, log and per-frame CSV trace.
+/* aec_debug.h -- per-frame CSV trace.
  * AEC_NO_STDIO: the header does not include <stdio.h>, declares no FILE*-based API and provides
  * static-inline no-op stubs, so a stdio-free library build links cleanly.
  * aec_debug_set_trace() arms the trace; with no trace file the hot path pays one NULL test. */
@@ -15,13 +15,10 @@ extern "C" {
 
 #ifndef AEC_NO_STDIO
 /* State is global, one AEC per thread. */
-void aec_debug_set_level(int level);
-void aec_debug_set_log(FILE* fp);                /* NULL -> stderr */
 void aec_debug_set_frame(int frame_idx, int hop, int sample_rate);
 #else
 /* AEC_NO_STDIO stubs. The FILE*-based setters are deliberately not declared, so a call under
  * this macro fails to compile. */
-static inline void aec_debug_set_level(int level) { (void)level; }
 static inline void aec_debug_set_frame(int frame_idx, int hop, int sample_rate) {
     (void)frame_idx; (void)hop; (void)sample_rate;
 }

@@ -37,6 +37,8 @@
  * No algorithm lives here: it is a thin driver over aec.h. The hop loop matches the Python runner
  * (`for i in range(0, n - hop, hop)`), i.e. the same number of hops from the same samples. */
 #include "aec.h"
+#include "../aec_white_box.h"
+#include "../aec_test_tuning.h"
 #include "cli_level.h"
 #include "hpf.h"
 #include <stdint.h>
@@ -97,25 +99,26 @@ int main(int argc, char **argv) {
         return 2;
     }
 
-    AecConfig cfg;
-    aec_config_from_level(&cfg, level, sr);
-    cfg.fft_size = fft;
+    AecTestCfg tc;
+    AecConfig *cfg = &tc.c;
+    aec_tcfg_from_level(&tc, level, sr);
+    cfg->fft_size = fft;
     int want_ctx = 0, want_base = 0, with_res = 1;
     for (int i = 7; i < argc; ++i) {
-        if (!strcmp(argv[i], "--obs")) cfg.live_observer_enabled = 1;
-        else if (!strcmp(argv[i], "--no-hpf")) cfg.enable_highpass = 0;
+        if (!strcmp(argv[i], "--obs")) tc.t.live_observer_enabled = 1;
+        else if (!strcmp(argv[i], "--no-hpf")) tc.t.enable_highpass = 0;
         else if (!strcmp(argv[i], "--no-res")) with_res = 0;
-        else if (!strcmp(argv[i], "--no-cng")) cfg.enable_cng = 0;
+        else if (!strcmp(argv[i], "--no-cng")) cfg->enable_cng = 0;
         else if (!strcmp(argv[i], "--ctx")) want_ctx = 1;
         else if (!strcmp(argv[i], "--base")) want_base = 1;
         else { fprintf(stderr, "aec_run: bad flag %s\n", argv[i]); return 2; }
     }
     /* --no-res without --ctx has no residual stage; every other combination needs FULL (the residual views). */
     const int split = !with_res && want_ctx;
-    cfg.residual = (with_res || want_ctx) ? AEC_RESIDUAL_FULL : AEC_RESIDUAL_OFF;
-    Aec a;
-    if (aec_create(&a, &cfg) != 0) { fprintf(stderr, "aec_run: aec_create failed (sr=%d fft=%d)\n", sr, fft); return 3; }
-    int hop = aec_hop_size(&a);
+    cfg->residual = (with_res || want_ctx) ? AEC_RESIDUAL_FULL : AEC_RESIDUAL_OFF;
+    Aec *a = NULL;
+    if ((a = aec_tcfg_create(&tc)) == NULL) { fprintf(stderr, "aec_run: aec_create failed (sr=%d fft=%d)\n", sr, fft); return 3; }
+    int hop = aec_hop_size(a);
     long n = nm < nr ? nm : nr;
 
     FILE *fo = open_out(pre, ".out.f32", "wb");
@@ -130,22 +133,22 @@ int main(int argc, char **argv) {
     long h = 0;
     for (long i = 0; i + hop < n; i += hop, ++h) {
         if (split) {
-            if (aec_process_linear(&a, mic + i, ref + i) != AEC_OK || aec_process_residual(&a, NULL) != AEC_OK) {
+            if (aec_process_linear(a, mic + i, ref + i) != AEC_OK || aec_process_residual(a, NULL) != AEC_OK) {
                 fprintf(stderr, "aec_run: split process failed at hop %ld\n", h); return 3;
             }
-            memcpy(out, a.raw_output, (size_t)hop * sizeof(float));
-        } else if (aec_process(&a, mic + i, ref + i, out) != AEC_OK) {
+            memcpy(out, a->raw_output, (size_t)hop * sizeof(float));
+        } else if (aec_process(a, mic + i, ref + i, out) != AEC_OK) {
             fprintf(stderr, "aec_run: aec_process failed at hop %ld\n", h); return 3;
         }
         fwrite(out, 4, (size_t)hop, fo);
-        fwrite(a.raw_output, 4, (size_t)hop, fr);
+        fwrite(a->raw_output, 4, (size_t)hop, fr);
         int ctx_conv = -1;
         if (want_ctx) {
             AecLinearView lv;
             AecResidualView c;
             memset(&lv, 0, sizeof lv); lv.struct_size = sizeof lv;
             memset(&c, 0, sizeof c);   c.struct_size = sizeof c;
-            if (aec_get_linear(&a, &lv) != AEC_OK || aec_get_residual(&a, &c) != AEC_OK) {
+            if (aec_get_linear(a, &lv) != AEC_OK || aec_get_residual(a, &c) != AEC_OK) {
                 fprintf(stderr, "aec_run: --ctx view refused at hop %ld\n", h); return 2;
             }
             ctx_conv = lv.filter_converged;
@@ -164,18 +167,18 @@ int main(int argc, char **argv) {
             AecResidualView ob;
             memset(&ob, 0, sizeof ob);
             ob.struct_size = sizeof ob;
-            if (aec_get_residual(&a, &ob) != AEC_OK) { fprintf(stderr, "aec_run: --base needs a residual stage (not --no-res without --ctx)\n"); return 2; }
+            if (aec_get_residual(a, &ob) != AEC_OK) { fprintf(stderr, "aec_run: --base needs a residual stage (not --no-res without --ctx)\n"); return 2; }
             const int32_t g = ob.guard_active;
-            const uint32_t sn = aec_post_reset_serial(&a);
+            const uint32_t sn = aec_post_reset_serial(a);
             fwrite(&g, 4, 1, fb); fwrite(&sn, 4, 1, fb);
             fwrite(ob.base_spec, sizeof(Complex), (size_t)ob.n_freqs, fb);
             fwrite(ob.formed_hop ? ob.formed_hop : zeros, 4, (size_t)hop, ff);
-            fprintf(fd, "%d %d\n", a.current_delay, a.delay_reject_count);
+            fprintf(fd, "%d %d\n", a->current_delay, a->delay_reject_count);
         }
         fprintf(ft, "%ld %ld %ld %d %d %d\n", h,
-                a.has_observer ? (long)a.observer_filter.call_counter : -1L,
-                (long)a.main_filter.base.call_counter, a.convergence.converged, ctx_conv,
-                a.epc_render_forced_remaining);
+                a->has_observer ? (long)a->observer_filter.call_counter : -1L,
+                (long)a->main_filter.base.call_counter, a->convergence.converged, ctx_conv,
+                a->epc_render_forced_remaining);
     }
     fclose(fo); fclose(fr); fclose(ft);
     if (fc) fclose(fc);
@@ -183,8 +186,8 @@ int main(int argc, char **argv) {
     if (ff) fclose(ff);
     if (fd) fclose(fd);
     fprintf(stderr, "aec_run: %ld hops hop=%d sr=%d fft=%d level=%s obs=%d hpf=%d res=%d cng=%d ctx=%d\n", h, hop, sr, fft,
-            argv[6], cfg.live_observer_enabled, cfg.enable_highpass, with_res, cfg.enable_cng, want_ctx);
-    aec_destroy(&a);
+            argv[6], tc.t.live_observer_enabled, tc.t.enable_highpass, with_res, cfg->enable_cng, want_ctx);
+    aec_destroy(a);
     free(out); free(zeros); free(mic); free(ref);
     return 0;
 }

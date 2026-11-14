@@ -1,5 +1,6 @@
 /* Force the allocator alignment that ILP32 malloc is allowed to provide. */
 #include "aec.h"
+#include "aec_white_box.h"
 #include <errno.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -60,31 +61,30 @@ int main(void) {
         AecConfig cfg;
         aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, grids[i][0]);
         cfg.fft_size = grids[i][1];
-        Aec a, untouched;
-        memset(&a, 0xa5, sizeof(a));
-        memcpy(&untouched, &a, sizeof(a));
+        Aec *a = NULL;
+        const int allocations_before = allocations;
         requested_alignment = 0;
         fail_alloc = 1;
-        if (aec_create(&a, &cfg) == 0 || memcmp(&a, &untouched, sizeof(a)) ||
-            requested_alignment != 16u || alloc_payload) {
+        if ((a = aec_create(&cfg)) != NULL || requested_alignment != 16u || alloc_payload ||
+            allocations != allocations_before) {
             fprintf(stderr, "FAIL allocation rejection grid %zu\n", i);
             ++failures;
         }
         fail_alloc = 0;
         requested_alignment = 0;
-        if (aec_create(&a, &cfg) != 0) {
+        if ((a = aec_create(&cfg)) == NULL) {
             fprintf(stderr, "FAIL aligned create grid %zu\n", i);
             ++failures;
             test_free(alloc_payload);
             continue;
         }
-        if (requested_alignment != 16u || !a.heap_arena ||
-            ((uintptr_t)a.heap_arena & 15u) != 0u) {
+        /* one block holds the instance: it starts the allocation, 16-byte aligned */
+        if (requested_alignment != 16u || (void*)a != alloc_payload || a->heap_arena != (void*)a ||
+            ((uintptr_t)a & 15u) != 0u || allocations != allocations_before + 1) {
             fprintf(stderr, "FAIL explicit alignment grid %zu\n", i);
             ++failures;
         }
-        aec_destroy(&a);
-        aec_destroy(&a);
+        aec_destroy(a);
         if (alloc_payload || allocations != releases) {
             fprintf(stderr, "FAIL arena release grid %zu\n", i);
             ++failures;

@@ -14,7 +14,7 @@ void erle_estimator_init(ErleEstimator *e,
                          unsigned char *low_render_st) {
     e->startup_hops       = startup_phase_length_hops;
     e->blocks_since_reset = 0;
-    fb_erle_init(&e->fullband, n_bins, min_erle, max_erle_l, hop_size, sample_rate);
+    fb_erle_init(&e->fullband, n_bins, min_erle, hop_size, sample_rate);
     subband_erle_init(&e->subband, n_bins,
                       min_erle, max_erle_l, max_erle_h,
                       use_onset_detection, /*use_min_erle_during_onsets=*/1,

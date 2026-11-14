@@ -583,53 +583,31 @@ static int da_matched_filter_core(const DaRing *ring, int alignment_shift_back,
     return filters_updated;
 }
 
-/* Row accessors for the pool-carved banks (strides 2048 B and 512 B, both 16-byte aligned). */
+/* Row accessor for the pool-carved bank (stride 2048 B, 16-byte aligned). */
 static float *da_mf_row(const DaMatchedFilter *mf, int n) {
     return mf->filters + (size_t)n * DA_FILTER_SIZE;
-}
-static float *da_mf_acc(const DaMatchedFilter *mf, int n) {
-    return mf->accumulated_error + (size_t)n * DA_ACC_ERR_SIZE;
 }
 
 /* num_filters is the runtime bank size; the pool holds exactly that many rows and every carved
  * byte is written here. */
 static void da_matched_filter_init(DaMatchedFilter *mf, int num_filters) {
-    int n, k;
     mf->num_filters = num_filters;
     memset(mf->filters, 0,
            (size_t)num_filters * DA_FILTER_SIZE * sizeof(float));
-    for (n = 0; n < num_filters; ++n) {
-        float *acc = da_mf_acc(mf, n);
-        for (k = 0; k < DA_ACC_ERR_SIZE; ++k) acc[k] = 1.0f;
-    }
-    memset(mf->instantaneous_error, 0, (size_t)DA_ACC_ERR_SIZE * sizeof(float));
-    mf->last_detected_best_lag_filter = -1;
-    mf->number_pre_echo_updates = 0;
     mf->reported_valid = 0;
     mf->reported_lag = 0;
-    mf->reported_pre_echo_lag = 0;
     mf->winner_lag_valid = 0;
     mf->winner_lag = 0;
 }
 
-static void da_matched_filter_reset(DaMatchedFilter *mf, int full_reset) {
+static void da_matched_filter_reset(DaMatchedFilter *mf) {
     memset(mf->filters, 0,
            (size_t)mf->num_filters * DA_FILTER_SIZE * sizeof(float));
     mf->winner_lag_valid = 0;
     mf->reported_valid = 0;
-    if (full_reset) {
-        int n, k;
-        for (n = 0; n < mf->num_filters; ++n) {
-            float *acc = da_mf_acc(mf, n);
-            for (k = 0; k < DA_ACC_ERR_SIZE; ++k) acc[k] = 1.0f;
-        }
-        mf->number_pre_echo_updates = 0;
-    }
 }
 
-/* MatchedFilter.update without the pre-echo onset search (the reported delay is always the
- * dominant peak), so the accumulated-error and instantaneous-error buffers keep their initialised
- * values. */
+/* MatchedFilter.update without the pre-echo onset search: the reported delay is the winner's lag. */
 static void da_matched_filter_update(DaMatchedFilter *mf, const DaRing *ring,
                                      const float *capture, int use_slow_smoothing) {
     float smoothing = use_slow_smoothing ? DA_SMOOTHING_SLOW : DA_SMOOTHING_FAST;
@@ -678,15 +656,6 @@ static void da_matched_filter_update(DaMatchedFilter *mf, const DaRing *ring,
     if (winner_index != -1 && mf->winner_lag_valid) {
         mf->reported_valid = 1;
         mf->reported_lag = mf->winner_lag;
-        /* number_pre_echo_updates counts, saturating at DA_PRE_ECHO_UPDATES_TO_REPORT, the blocks
-         * on which the winner filter repeated over a non-degenerate anchor (1 / 32768^2 in float
-         * scale). It is zeroed only by init and a full reset. */
-        if (mf->last_detected_best_lag_filter == winner_index
-            && error_sum_anchor > 1.0f / (32768.0f * 32768.0f)
-            && mf->number_pre_echo_updates < DA_PRE_ECHO_UPDATES_TO_REPORT) {
-            mf->number_pre_echo_updates += 1;
-        }
-        mf->last_detected_best_lag_filter = winner_index;
     }
 }
 
@@ -754,43 +723,13 @@ static void da_highest_peak_aggregate(DaHighestPeak *hp, int lag) {
                                  &hp->candidate, &hp->candidate_valid);
 }
 
-/* Carved and reset like the other state but never fed: the reported delay is the dominant peak. */
-
-static int da_get_ds_block_size_log2(int down_sampling_factor) {
-    int ds_log2 = 0;
-    int f = down_sampling_factor >> 1;
-    int v;
-    while (f > 0) { ds_log2 += 1; f >>= 1; }
-    v = DA_BLOCK_SIZE_LOG2 - ds_log2;
-    return v < 0 ? 0 : v;
-}
-
-static void da_pre_echo_reset(DaPreEcho *pe) {
-    int i;
-    memset(pe->histogram, 0, (size_t)pe->hist_size * sizeof(int));
-    for (i = 0; i < pe->window; ++i) pe->ring[i] = -1;
-    pe->ring_index = 0;
-    pe->number_updates = 0;
-    pe->pre_echo_candidate = 0;
-    pe->argmax_idx = 0;
-    pe->argmax_valid = 0;
-}
-
-static void da_pre_echo_init(DaPreEcho *pe, int window) {
-    pe->window = window;
-    pe->block_size_log2 = da_get_ds_block_size_log2(DA_DOWN_SAMPLING_FACTOR);
-    da_pre_echo_reset(pe);
-}
-
 static void da_aggregator_init(DaLagAggregator *agg, int window) {
     da_highest_peak_init(&agg->highest_peak, window);
-    da_pre_echo_init(&agg->pre_echo, window);
     agg->significant_candidate_found = 0;
 }
 
 static void da_aggregator_reset(DaLagAggregator *agg, int hard_reset) {
     da_highest_peak_reset(&agg->highest_peak);
-    da_pre_echo_reset(&agg->pre_echo);
     if (hard_reset) agg->significant_candidate_found = 0;
 }
 
@@ -821,8 +760,7 @@ static int da_aggregator_aggregate(DaLagAggregator *agg, int lag_estimate_valid,
         *quality_out = agg->significant_candidate_found ? DELAY_QUALITY_REFINED
                                                         : DELAY_QUALITY_COARSE;
         /* The reported delay is the dominant histogram peak, so `quality` describes the delay it is
-         * attached to. The earliest-onset candidate has no consumer here (it would feed a render
-         * delay controller), so the pre-echo aggregator carries no live candidate. */
+         * attached to. */
         *delay_out = candidate;
         return 1;
     }
@@ -897,7 +835,6 @@ static void da_estimator_init(DaEstimator *e, int sample_rate, int num_filters) 
         aec_ms_to_hops(500.0f, DA_BLOCK_SIZE, sample_rate);
     e->old_agg_valid = 0;
     e->old_agg_delay = 0;
-    e->old_agg_quality = DELAY_QUALITY_COARSE;
     e->consistent_estimate_counter = 0;
     e->pending_count = 0;
 }
@@ -906,7 +843,7 @@ static void da_estimator_reset_internal(DaEstimator *e, int reset_lag_aggregator
                                         int reset_delay_confidence) {
     if (reset_lag_aggregator)
         da_aggregator_reset(&e->aggregator, reset_delay_confidence);
-    da_matched_filter_reset(&e->matched_filter, reset_lag_aggregator);
+    da_matched_filter_reset(&e->matched_filter);
     e->old_agg_valid = 0;
     e->consistent_estimate_counter = 0;
 }
@@ -968,7 +905,6 @@ static int da_estimator_process_inner_block(DaEstimator *e, const float *render_
         e->consistent_estimate_counter = 0;
     e->old_agg_valid = agg_valid;
     e->old_agg_delay = agg_delay;
-    e->old_agg_quality = agg_quality;
 
     if (e->consistent_estimate_counter > e->consistent_estimate_threshold)
         da_estimator_reset_internal(e, 0, 0);
@@ -1046,7 +982,6 @@ typedef struct {
     int    num_filters;     /* validated: [1, DA_NUM_FILTERS] */
     int    ring_capacity;
     int    hp_hist_size;
-    int    pe_hist_size;
     int    resample_cap;    /* 0 unless the 48 kHz sidechain is built */
     size_t total;
 } DaLayout;
@@ -1070,19 +1005,13 @@ static int da_compute_layout(int sample_rate, int hop_size, int num_filters,
     L->num_filters   = n;
     L->ring_capacity = DA_RING_CAPACITY_FOR(n);
     L->hp_hist_size  = DA_HP_HIST_SIZE_FOR(n);
-    L->pe_hist_size  = DA_PE_HIST_SIZE_FOR(n);
     L->resample_cap  = (sample_rate == 48000)
                      ? DA_RESAMPLE48_CAP_FOR(hop_size) : 0;
 
     t = ck_field_size(t, ck_mul_size((size_t)n, (size_t)DA_FILTER_SIZE),
                       sizeof(float));
-    t = ck_field_size(t, ck_mul_size((size_t)n, (size_t)DA_ACC_ERR_SIZE),
-                      sizeof(float));
-    t = ck_field_size(t, (size_t)DA_ACC_ERR_SIZE, sizeof(float));
     t = ck_field_size(t, (size_t)L->ring_capacity, sizeof(float));
     t = ck_field_size(t, (size_t)L->hp_hist_size, sizeof(int));
-    t = ck_field_size(t, (size_t)DA_HIST_WINDOW, sizeof(int));
-    t = ck_field_size(t, (size_t)L->pe_hist_size, sizeof(int));
     t = ck_field_size(t, (size_t)DA_HIST_WINDOW, sizeof(int));
     if (L->resample_cap > 0) {
         t = ck_field_size(t, (size_t)L->resample_cap, sizeof(float));
@@ -1100,14 +1029,9 @@ static size_t da_delay_carve(DelayAec *d, uint8_t *mem, const DaLayout *L) {
     uint8_t *p = mem;
     DaMatchedFilter *mf = &d->est.matched_filter;
     DaHighestPeak   *hp = &d->est.aggregator.highest_peak;
-    DaPreEcho       *pe = &d->est.aggregator.pre_echo;
 
     mf->filters = (float *)p;
     p += ALIGN16((size_t)L->num_filters * DA_FILTER_SIZE * sizeof(float));
-    mf->accumulated_error = (float *)p;
-    p += ALIGN16((size_t)L->num_filters * DA_ACC_ERR_SIZE * sizeof(float));
-    mf->instantaneous_error = (float *)p;
-    p += ALIGN16((size_t)DA_ACC_ERR_SIZE * sizeof(float));
 
     d->est.render_ring.buffer   = (float *)p;
     d->est.render_ring.capacity = L->ring_capacity;
@@ -1118,12 +1042,6 @@ static size_t da_delay_carve(DelayAec *d, uint8_t *mem, const DaLayout *L) {
     hp->ring = (int *)p;
     p += ALIGN16((size_t)DA_HIST_WINDOW * sizeof(int));
     hp->hist_size = L->hp_hist_size;
-
-    pe->histogram = (int *)p;
-    p += ALIGN16((size_t)L->pe_hist_size * sizeof(int));
-    pe->ring = (int *)p;
-    p += ALIGN16((size_t)DA_HIST_WINDOW * sizeof(int));
-    pe->hist_size = L->pe_hist_size;
 
     if (L->resample_cap > 0) {
         d->near16_scratch = (float *)p;
@@ -1143,6 +1061,14 @@ size_t delay_aec_get_mem_size(int sample_rate, int hop_size, int num_filters) {
     DaLayout L;
     if (!da_compute_layout(sample_rate, hop_size, num_filters, &L)) return 0;
     return L.total;
+}
+
+int delay_aec_max_delay_samples(int sample_rate, int num_filters) {
+    int rate_factor;
+    if (sample_rate <= 0 || !da_valid_num_filters(num_filters)) return 0;
+    rate_factor = (sample_rate == 48000) ? DA_RESAMPLE48_FACTOR : 1;
+    return ((num_filters - 1) * DA_FILTER_INTRA_SHIFT + DA_FILTER_SIZE - 11)
+           * DA_DOWN_SAMPLING_FACTOR * rate_factor;
 }
 
 int delay_aec_init(DelayAec *d, void *mem, size_t bytes,

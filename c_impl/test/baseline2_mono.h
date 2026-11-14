@@ -2,7 +2,7 @@
  * (test/test_split_entry2.c; test/test_split_entry3.c adds baseline3_mono.h on top).
  *
  * The includer provides, before including this header: <aec.h> and the header of the stand-alone residual gain stage
- * (AecRes: src/aec_res_internal.h), <utility/simd_kernels.h>, and
+ * (AecRes: src/aec_res_internal.h), <utility/simd_kernels.h>, and (the cases switch internal tuning, so it is built with AEC_TESTING=1)
  *   static void g2_mode_cfg(AecConfig* c, int ctx);     ctx = 1: the lane that exposes its residual view with every field
  *                                                       (residual FULL, driven by aec_process_linear + aec_process_residual);
  *                                                       ctx = 0: the instance that applies its own gain (aec_process)
@@ -21,6 +21,8 @@
 #define AEC_TEST_GOLDEN2_MONO_H
 
 #include "baseline2_common.h"
+#include "aec_white_box.h"
+#include "aec_test_tuning.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -309,19 +311,19 @@ static void g2_census_print(const char* grid, const char* cs, const G2Census* c,
 }
 
 /* ---- one case ------------------------------------------------------------------------------------------------------- */
-static void g2m_apply_cfg(AecConfig* cfg, const G2MonoCase* c, int ctx) {
-    aec_config_from_level(cfg, (AecLevel)c->level, c->sr);
-    cfg->fft_size = c->fft;
-    cfg->delay_mode = c->delay_mode == 0 ? AEC_DELAY_MATCHED : c->delay_mode == 1 ? AEC_DELAY_FIXED : AEC_DELAY_EXTERNAL_ALIGNED;
-    cfg->fixed_delay_samples = c->delay_mode == 1 ? (int)((int64_t)c->stim.dly[0].d16 * c->sr / 16000) : -1;
-    if (c->tog & G2T_NOSHADOW)  cfg->enable_shadow = 0;
-    if (c->tog & G2T_NOHPF)     cfg->enable_highpass = 0;
-    if (c->tog & G2T_NOCNG)     cfg->enable_cng = 0;
-    if (c->tog & G2T_NOSAT)     cfg->enable_saturation = 0;
-    if (c->tog & G2T_OBSERVER)  cfg->live_observer_enabled = 1;
-    if (c->tog & G2T_N2WIN)     cfg->cng_n2_windowed_psd = 1;
-    cfg->delay_est_period_s = c->duty_s;
-    g2_mode_cfg(cfg, ctx);
+static void g2m_apply_cfg(AecTestCfg* tc, const G2MonoCase* c, int ctx) {
+    aec_tcfg_from_level(tc, (AecLevel)c->level, c->sr);
+    tc->c.fft_size = c->fft;
+    tc->c.delay_mode = c->delay_mode == 0 ? AEC_DELAY_MATCHED : c->delay_mode == 1 ? AEC_DELAY_FIXED : AEC_DELAY_EXTERNAL_ALIGNED;
+    tc->c.fixed_delay_samples = c->delay_mode == 1 ? (int)((int64_t)c->stim.dly[0].d16 * c->sr / 16000) : -1;
+    if (c->tog & G2T_NOSHADOW)  tc->t.enable_shadow = 0;
+    if (c->tog & G2T_NOHPF)     tc->t.enable_highpass = 0;
+    if (c->tog & G2T_NOCNG)     tc->c.enable_cng = 0;
+    if (c->tog & G2T_NOSAT)     tc->t.enable_saturation = 0;
+    if (c->tog & G2T_OBSERVER)  tc->t.live_observer_enabled = 1;
+    if (c->tog & G2T_N2WIN)     tc->t.cng_n2_windowed_psd = 1;
+    tc->t.delay_est_period_s = c->duty_s;
+    g2_mode_cfg(&tc->c, ctx);
 }
 
 /* G2_ONLY=<substring>: run only the cases whose "<grid> <name>" contains it (development aid; take a baseline without it). */
@@ -334,7 +336,7 @@ static int g2m_want(const G2MonoCase* c) {
 }
 
 static int g2m_run_case(const G2MonoCase* c) {
-    AecConfig cfg_c, cfg_o;
+    AecTestCfg cfg_c, cfg_o;
     void *mem_c = NULL, *mem_o = NULL, *mem_r = NULL;
     AecRes* res = NULL;
     char grid[24];
@@ -342,9 +344,9 @@ static int g2m_run_case(const G2MonoCase* c) {
     snprintf(grid, sizeof grid, "%d/%d", c->sr, c->fft);
     g2m_apply_cfg(&cfg_c, c, 1);
     g2m_apply_cfg(&cfg_o, c, 0);
-    size_t sz_c = aec_get_mem_size(&cfg_c), sz_o = aec_get_mem_size(&cfg_o);
-    Aec* a = sz_c ? (mem_c = g2_pool(sz_c), mem_c ? aec_init(mem_c, sz_c, &cfg_c) : NULL) : NULL;
-    Aec* o = sz_o ? (mem_o = g2_pool(sz_o), mem_o ? aec_init(mem_o, sz_o, &cfg_o) : NULL) : NULL;
+    size_t sz_c = aec_tcfg_mem_size(&cfg_c), sz_o = aec_tcfg_mem_size(&cfg_o);
+    Aec* a = sz_c ? (mem_c = g2_pool(sz_c), mem_c ? aec_tcfg_init(mem_c, sz_c, &cfg_c) : NULL) : NULL;
+    Aec* o = sz_o ? (mem_o = g2_pool(sz_o), mem_o ? aec_tcfg_init(mem_o, sz_o, &cfg_o) : NULL) : NULL;
     if (!a || !o) { fprintf(stderr, "aec_init failed %s %s\n", grid, c->name); return -1; }
     const int hop = c->fft / 2;
     const int n_hops = (int)((int64_t)c->dur_ms * c->sr / 1000 / hop);
@@ -365,9 +367,9 @@ static int g2m_run_case(const G2MonoCase* c) {
     for (int g = 0; g < G2G_COUNT; ++g) chain[g] = G2_FNV_BASIS;
     for (int e = 0; e < c->n_ev; ++e) ev_hop[e] = (int)((int64_t)c->ev[e].t_ms * c->sr / 1000 / hop);
     if (c->ares) {
-        size_t rsz = aec_res_get_mem_size(&cfg_c);
+        size_t rsz = aec_res_get_mem_size(&cfg_c.c);
         mem_r = g2_pool(rsz);
-        res = (rsz && mem_r) ? aec_res_init(mem_r, rsz, &cfg_c) : NULL;
+        res = (rsz && mem_r) ? aec_res_init(mem_r, rsz, &cfg_c.c) : NULL;
         if (!res) { fprintf(stderr, "aec_res_init failed\n"); return -1; }
     }
     {

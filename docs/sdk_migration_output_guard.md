@@ -8,7 +8,8 @@ context API 的應用。只呼叫 `aec_process()`（`AecConfig.residual` 維持�
 > `aec_get_output_base()`、`aec_get_linear_context()`、`AecResContext`、`AecOutputBase`、`AecLinearContext`，
 > 以及 `AecConfig` 的 `enable_res`／`return_res_context`／`spatial_linear_context` 三個旗標與 `AEC_CONTEXT_*` 常數都已移除，
 > 改為 `AecConfig.residual` 與 `aec_process_linear()`／`aec_process_residual()`／`aec_get_linear()`／`aec_get_residual()`。
-> 本文出現的上述**舊名**都只在對照表與「舊寫法」中，標明為舊名。
+> 本文出現的上述**舊名**都只在對照表與「舊寫法」中，標明為舊名。同一輪還有建立、設定與標頭配置的不相容變更（`Aec` 不透明、
+> `aec_create()` 回傳指標、`AecConfig` 只剩 12 個欄位等），舊名與新寫法在 §3.3。
 
 相關文件：`reference/integration.md` §8.1（進入點與分析 seam／渲染底座）、§8.3
 （`aec_get_residual()`／`aec_apply_gain()`／`aec_post_reset_serial()` 的完整語意）、§8.7（單聲道整鏈）；
@@ -40,7 +41,7 @@ context API 的應用。只呼叫 `aec_process()`（`AecConfig.residual` 維持�
 `aec.h` 定義 `#define AEC_OUTPUT_GUARD_API_VERSION 2`，代表下列同時存在：
 `aec_get_residual().base_spec`（舊版是 `aec_get_output_base()`）、`aec_apply_gain()`／`aec_apply_cng()`、
 `aec_post_reset_serial()`、`aec_synthesis_window()`、`aec_apply_cng_spec()` 與 `AEC_CNG_SEED`
-（`aec_post.h`，由 `aec.h` 引入）。版本 1 是舊的 `aec_get_output_base()` 形式。
+（都在 `aec.h`）。版本 1 是舊的 `aec_get_output_base()` 形式。
 把下面幾行放進你渲染後級頻譜的那個檔案；SDK 比這一版舊時會在編譯期停下來，而不是靜默通過：
 
 ```c
@@ -73,6 +74,27 @@ context API 的應用。只呼叫 `aec_process()`（`AecConfig.residual` 維持�
 | `AecResContext` 的純量狀態（`far_power`、`erle_factor`、`dt_indicator`、`divergence`、`saturation_level`、`erl_estimate`、`shadow_dt`、`is_stationary_dt`、`filter_converged`、`filter_once_converged`、`epc_active`） | `AecLinearView` 的同名欄位；`res_floor_protect`、`usable_linear` 在 `AecResidualView` |
 | 舊的組合限制（`spatial_linear_context` 必須搭配 `enable_res = 0`、`return_res_context = 1`） | 取消；只剩 `residual` 必須在 `OFF`…`FULL` 範圍內 |
 | 回傳值：`aec_process()` 回 `void`，getter 回 `0`／`-1` | 回 `AecStatus`（`AEC_OK`＝0，錯誤為負值：`AEC_ERR_ARG`、`AEC_ERR_MODE`、`AEC_ERR_SEQUENCE`、`AEC_ERR_DSP`） |
+
+### 3.3 設定、建立與生命週期（同一輪的其他不相容變更）
+
+下表的舊名都已移除，名稱取自上一版公開標頭（`c_impl/include/aec.h`、`aec_res.h`）。輸出位元不變；改的是呼叫端程式碼要怎麼寫。
+各項的現行語意見 `reference/lifecycle.md`、`reference/configuration.md` 與 `reference/levels.md`。
+
+| 舊名（已移除） | 新寫法 |
+|---|---|
+| `Aec x; aec_create(&x, &cfg);`、`calloc(1, sizeof(Aec))`、`sizeof(Aec)`、`x.field`／`x->field` | `Aec` 不透明：`Aec* a = aec_create(&cfg);`（`aec.h` 只剩 `typedef struct Aec Aec;`）。呼叫端不能以值持有它，也不能取大小或讀欄位 |
+| `aec_destroy(&x);` 再 `free(...)`（heap 實例） | `aec_destroy(a);` 剛好一次，它釋放那一整塊；之後指標失效，**不可再 `free`、再 destroy 或再讀**。`aec_init()` 的 pool 實例不變：`aec_destroy()` 不釋放記憶體，pool 仍由呼叫端回收 |
+| `aec_config_defaults(&cfg, sr)` 與手動填 `cfg.filter_length`、`cfg.mu`、`cfg.enable_shadow`、`cfg.enable_highpass`、`cfg.max_delay_ms`、`cfg.delay_est_period_s` 等 | `aec_config_from_level(&cfg, level, sr)`。`AecConfig` 只剩 12 個欄位（`aec.h`），其餘是函式庫內部由 `(sample_rate, fft_size, n_mics, level)` 推導的調校值，呼叫端不能設定 |
+| `cfg.min_gain_floor_far_active_db`、`cfg.min_gain_floor_dt_db`、`cfg.min_gain_split_floor_enabled` | `cfg.level`（`AecLevel`，0–3）；三個值由 level 查表帶出 |
+| `AEC_PRESET_MILD`／`_BALANCED`／`_AGGRESSIVE`／`_NO_FLOOR`、`AecPreset` | `AEC_LEVEL_*`、`AecLevel`（值相同：0、1、2、3）。名稱解析（字串轉 level）不在函式庫內；CLI 的 `--level` 只收 0–3 的數字，其他值以結束碼 2 拒絕 |
+| `aec_set_level(a, level, ramp_ms)` | `aec_set_level(a, level)`：far-active 地板的 ramp 固定 100 ms |
+| `DA_NUM_FILTERS`、`DA_FILTER_SIZE`、`DA_FILTER_INTRA_SHIFT`、`DA_DOWN_SAMPLING_FACTOR` | `AEC_DELAY_NUM_FILTERS_MAX`、`AEC_DELAY_FILTER_SIZE`、`AEC_DELAY_FILTER_INTRA_SHIFT`、`AEC_DELAY_DOWN_SAMPLING_FACTOR`（`aec.h`，無別名） |
+| `aec_res.h`：`AecRes`、`AecResInput`、`aec_res_init()`、`aec_res_process()`、`aec_res_set_level()` | 增益階段不再是公開介面。單聲道的 `G_res` 在 `Aec` 裡（`aec_get_residual().res_gain`）；多路融合用陣列實例（`AecConfig.n_mics = 4`，`aec_process_residual(a, &beam)`），強度用 `aec_set_level()` |
+| Audio_ALG 的 `mcab_*` 四聲道流程 | `AecConfig.n_mics = AEC_ARRAY_MICS`（4）的陣列實例：`aec_process_linear()` → `aec_get_array()` → 呼叫端的 beamformer → `aec_process_residual()`；見 `reference/integration.md` §8.8 |
+| 由 `include/` 取用內部標頭（`aec_post.h`、`pbfdkf.h` 等）裡的常數與型別 | `AEC_CNG_SEED`、`AEC_PSD_SCALE_F`／`AEC_PSD_SCALE_INV_F`、`AecStageTiming`、`aec_level_name()` 在 `aec.h`；`include/` 只剩 `aec.h`、`aec_internal.h`、`aec_balanced_config.h`、`aec_debug.h`，其餘內部標頭在 `src/` |
+| `aec_debug_set_level()`、`aec_debug_set_log()`、`aec_wav` 的 `--debug-level`、`--debug-log`、`--no-shadow`、`--no-hpf`、`--delay-est-period` | 已刪除（前兩者只儲存、從不讀取；後三個對應的欄位已是內部值）。`aec_debug_set_trace()` 與 `--debug-trace` 仍在 |
+| 合成視窗 `aec_synthesis_window()` 指向靜態表 | 指向實例自己的 pool（init／create 時建好）：借用它的 `AcIstft` 不得比 `Aec` 活得久（§6） |
+| 存檔的 `AecMemReq` 描述子（`AEC_LAYOUT_VERSION` 1） | `AEC_LAYOUT_VERSION` 2：舊描述子被 `aec_init_ex()` 拒絕；每次建置重新查詢（`aec_init()`／`aec_create()` 不比對描述子） |
 
 位元結果：同一份輸入、同樣的組態，新舊對應的模式輸出逐位元相同（函式庫端曾以 `make test-split-entry`、`make test-split-entry-2` 與 `make test-split-entry-3` 對舊 API 產生的
 雜湊逐行驗證；這些一次性的對照檔已於 2026-11-13 確認一致後除役，之後的改動由新版本取基準，見 `c_impl/README.md` 的 “Line-stream baselines”）。
@@ -327,8 +349,8 @@ bad-relock 還原、warm transfer、soft 取得／realign、`aec_apply_external_
  * 2: identical but the stimulus never fired the guard or never moved the serial (the test proved nothing). */
 static int guard_acceptance(const float* mic, const float* ref, int n_hops, int sample_rate, int fft_size) {
     AecConfig cfg;
-    Aec* full = (Aec*)calloc(1, sizeof(Aec));
-    Aec* split = (Aec*)calloc(1, sizeof(Aec));
+    Aec* full = NULL;
+    Aec* split = NULL;
     OutputRenderer r;
     float *out_full = NULL, *out_split = NULL;
     int hop, h, rc = 0;
@@ -338,7 +360,7 @@ static int guard_acceptance(const float* mic, const float* ref, int n_hops, int 
     aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, sample_rate);   /* use the level your product ships */
     cfg.fft_size = fft_size;
     cfg.residual = AEC_RESIDUAL_FULL;                               /* both instances: same config */
-    if (!full || !split || aec_create(full, &cfg) != 0 || aec_create(split, &cfg) != 0) return 1;
+    if ((full = aec_create(&cfg)) == NULL || (split = aec_create(&cfg)) == NULL) return 1;
     hop = aec_hop_size(full);
     out_full = (float*)calloc((size_t)hop, sizeof(float));
     out_split = (float*)calloc((size_t)hop, sizeof(float));
@@ -376,7 +398,7 @@ static int guard_acceptance(const float* mic, const float* ref, int n_hops, int 
 
     renderer_free(&r);                 /* the AcIstft borrows the Aec's window: free it first */
     aec_destroy(split); aec_destroy(full);
-    free(split); free(full); free(out_full); free(out_split);
+    free(out_full); free(out_split);
     return rc;
 }
 ```
@@ -400,6 +422,7 @@ static int guard_acceptance(const float* mic, const float* ref, int n_hops, int 
 ## 10. 清單
 
 - [ ] 設定改為 `AecConfig.residual`，進入點與檢視改為 §3.1 的新名；程式裡沒有任何已移除的舊名。
+- [ ] §3.3 的建立與設定舊名也已清除：`Aec` 只以指標持有、heap 實例只 `aec_destroy()` 一次（沒有再 `free`）、強度只用 `level`。
 - [ ] 渲染後級頻譜的檔案加了 §2 的 `#if`／`#error`（版本 2）。
 - [ ] 渲染用 `rv.base_spec`（或 `aec_apply_gain()`）；分析仍用 `error_spec`。
 - [ ] 每個要渲染的 `Aec` 都有 serial 比對，且順序在 CNG 抽樣與 `ac_istft_push` 之前；沒有因此呼叫 `aec_reset()`。

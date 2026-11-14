@@ -1,5 +1,7 @@
 /* Exact paired far-spectrum/magnitude reuse, including silent and reset hops. */
 #include "aec.h"
+#include "aec_white_box.h"
+#include "aec_test_tuning.h"
 #include "aec_internal.h"
 #include "aec_pool_test_util.h"
 #include "utility/simd_aec.h"
@@ -42,7 +44,7 @@ static void same_aec(const Aec *a, const Aec *b) {
     same_filter(&x->base, &y->base);
     if (a->has_shadow) same_filter(&a->shadow_filter, &b->shadow_filter);
 #define STATE(field) same(x->field, y->field, k * sizeof(*x->field), #field)
-    STATE(H_error_per_bin); STATE(error_psd); STATE(R); STATE(Q);
+    STATE(H_error_per_bin); STATE(error_psd);
     STATE(e2_ref_scratch); STATE(e2_coarse_per_bin); STATE(erl_per_bin);
 #undef STATE
     /* The no-shadow path does not initialize this entire scratch array. */
@@ -73,12 +75,12 @@ static void hop_shared(Aec *a, const float *mic, const float *far, const Aec *ow
 }
 
 static void hop_local(Aec *a, const float *mic, const float *far) {
-    if (aec_process_linear(a, mic, far) != AEC_OK || aec_process_residual(a, NULL) != AEC_OK) exit(2);
+    if (aec_test_split_hop(a, mic, far) != AEC_OK) exit(2);
 }
 
-static Aec *new_aec(const AecConfig *cfg) {
-    Aec *a = calloc(1, sizeof(*a));
-    if (!a || aec_create(a, cfg) != 0) exit(2);
+static Aec *new_aec(const AecTestCfg *cfg) {
+    Aec *a = aec_tcfg_create(cfg);
+    if (!a) exit(2);
     ++checks;
     if (((uintptr_t)a->heap_arena & 15u) != 0u) {
         fprintf(stderr, "FAIL heap arena alignment\n");
@@ -89,15 +91,14 @@ static Aec *new_aec(const AecConfig *cfg) {
 
 static void free_aec(Aec *a) {
     aec_destroy(a);
-    free(a);
 }
 
 static void run_grid(int sr, int fft, int shadow) {
-    AecConfig cfg;
-    aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, sr);
-    cfg.fft_size = fft; cfg.enable_shadow = shadow;
-    cfg.delay_mode = AEC_DELAY_EXTERNAL_ALIGNED;
-    cfg.fixed_delay_samples = -1; cfg.residual = AEC_RESIDUAL_ESTIMATE;
+    AecTestCfg cfg;
+    aec_tcfg_from_level(&cfg, AEC_LEVEL_BALANCED, sr);
+    cfg.c.fft_size = fft; cfg.t.enable_shadow = shadow;
+    cfg.c.delay_mode = AEC_DELAY_EXTERNAL_ALIGNED;
+    cfg.c.fixed_delay_samples = -1; cfg.c.residual = AEC_RESIDUAL_ESTIMATE;
     Aec *owner = new_aec(&cfg), *ref = new_aec(&cfg), *borrower = new_aec(&cfg);
     Aec *fallback = new_aec(&cfg);
     if (!owner || !ref || !borrower || !fallback) exit(2);
@@ -149,8 +150,8 @@ static void run_grid(int sr, int fft, int shadow) {
         }
     }
     /* A wrong grid owner must not supply its differently sized spectrum. */
-    AecConfig wrong_cfg = cfg; wrong_cfg.fft_size = fft == 256 ? 512 : 256;
-    if (sr == 48000) wrong_cfg.sample_rate = 16000;
+    AecTestCfg wrong_cfg = cfg; wrong_cfg.c.fft_size = fft == 256 ? 512 : 256;
+    if (sr == 48000) wrong_cfg.c.sample_rate = 16000;
     Aec *wrong = new_aec(&wrong_cfg);
     if (!wrong) exit(2);
     hop_local(ref, mic, far);

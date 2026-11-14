@@ -47,7 +47,7 @@ render () {  # render <worktree> <label> <frame_size>
   rm -rf "$dir"; mkdir -p "$dir"
   ( cd "$wt" && NO_PREALIGN=1 AEC_CFG_OVERRIDE="frame_size=$fft" \
       "$PYBIN" python/eval_aec_challenge.py "$DATASET" \
-        --preset balanced --filter 52 --cng \
+        --preset balanced --filter 832 --cng \
         --cases-list "$STEMS" --workers "$WORKERS" -o "$dir" ) \
     > "$OUT/render_$label.log" 2>&1
   local n

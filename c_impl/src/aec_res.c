@@ -1,6 +1,7 @@
 /* aec_res.c -- residual-echo suppression gain stage; see aec_res_internal.h. */
 #include "aec_res_internal.h"
 #include "aec_config_build.h"
+#include "aec_tuning.h"
 #include "aec_internal.h"
 #include "aec_balanced_config.h"
 #include "utility/simd_aec.h"
@@ -35,27 +36,26 @@ static size_t sg_float_count(int n_bins, int smoother_n) {
     return ck_mul_size((size_t)(10 + smoother_n), (size_t)n_bins);
 }
 
-static int resolve(const AecConfig* cfg, AecConfig* resolved,
-                   SuppressionGainConfig* sg_cfg, SuppressionGainTuning* sg_tun) {
-    if (!cfg || !aec_resolve_valid_config(cfg, resolved)) return 0;
-    return aec_build_sg_config(resolved, sg_cfg, sg_tun) == 0;
-}
-
-size_t aec_res_get_mem_size(const AecConfig* cfg) {
-    AecConfig resolved;
+size_t aec_res_get_mem_size_resolved(const AecResolved* resolved) {
     SuppressionGainConfig sg_cfg;
     SuppressionGainTuning sg_tun;
     AecSignalGrid grid;
     size_t total;
-    if (!resolve(cfg, &resolved, &sg_cfg, &sg_tun)) return 0;
-    if (aec_resolve_signal_grid(resolved.sample_rate, resolved.fft_size, &grid) != AEC_OK) return 0;
+    if (!resolved || aec_build_sg_config(resolved, &sg_cfg, &sg_tun) != 0) return 0;
+    if (aec_resolve_signal_grid(resolved->cfg.sample_rate, resolved->cfg.fft_size, &grid) != AEC_OK) return 0;
     if (sg_cfg.nearend_smoother_n < 1) return 0;
     total = ck_align16_size(sizeof(struct AecRes));
     total = ck_field_size(total, sg_float_count(grid.n_freqs, sg_cfg.nearend_smoother_n),
                           sizeof(float));
     total = ck_field_size(total, (size_t)grid.n_freqs, sizeof(float));
     total = ck_field_size(total, (size_t)grid.hop_size, sizeof(float));
+    total = ck_add_size(total, aec_sg_tables_bytes(grid.n_freqs));
     return MEM_SIZE_INVALID(total) ? 0 : total;
+}
+
+size_t aec_res_get_mem_size(const AecConfig* cfg) {
+    AecResolved resolved;
+    return aec_resolve(cfg, &resolved) ? aec_res_get_mem_size_resolved(&resolved) : 0;
 }
 
 /* Re-creates the suppressor from the stored configuration over zeroed state. */
@@ -81,8 +81,7 @@ static void rebuild(AecRes* r) {
                           raw_gain, gain, sum);
 }
 
-AecRes* aec_res_init(void* mem, size_t bytes, const AecConfig* cfg) {
-    AecConfig resolved;
+AecRes* aec_res_init_resolved(void* mem, size_t bytes, const AecResolved* resolved) {
     SuppressionGainConfig sg_cfg;
     SuppressionGainTuning sg_tun;
     AecSignalGrid grid;
@@ -90,10 +89,10 @@ AecRes* aec_res_init(void* mem, size_t bytes, const AecConfig* cfg) {
     uint8_t* p;
     AecRes* r;
     if (!mem || !MEM_IS_ALIGNED16(mem)) return NULL;
-    need = aec_res_get_mem_size(cfg);
+    need = aec_res_get_mem_size_resolved(resolved);
     if (need == 0 || bytes < need) return NULL;
-    if (!resolve(cfg, &resolved, &sg_cfg, &sg_tun)) return NULL;
-    if (aec_resolve_signal_grid(resolved.sample_rate, resolved.fft_size, &grid) != AEC_OK) return NULL;
+    if (aec_build_sg_config(resolved, &sg_cfg, &sg_tun) != 0) return NULL;
+    if (aec_resolve_signal_grid(resolved->cfg.sample_rate, resolved->cfg.fft_size, &grid) != AEC_OK) return NULL;
 
     r = (AecRes*)mem;
     memset(r, 0, sizeof *r);
@@ -107,8 +106,17 @@ AecRes* aec_res_init(void* mem, size_t bytes, const AecConfig* cfg) {
     r->near_power = (float*)p;
     p += ck_align16_size((size_t)r->n_bins * sizeof(float));
     r->render_scaled = (float*)p;
+    p += ck_align16_size((size_t)r->hop_size * sizeof(float));
+    /* The decoded ENR/SU tables sit outside sg_storage, which rebuild() clears; the tuning keeps pointing at them. */
+    if (aec_sg_tables_decode(resolved, p, &r->sg_tun) != 0) return NULL;
     rebuild(r);
     return r;
+}
+
+AecRes* aec_res_init(void* mem, size_t bytes, const AecConfig* cfg) {
+    AecResolved resolved;
+    if (!aec_resolve(cfg, &resolved)) return NULL;
+    return aec_res_init_resolved(mem, bytes, &resolved);
 }
 
 void aec_res_reset(AecRes* r) {

@@ -11,8 +11,8 @@
 extern "C" {
 #endif
 
-/* Memory contract: every array sized by the bank (filter bank, error rows, render ring, both
- * histograms) is carved from a caller-owned, 16-byte-aligned block by delay_aec_init(), sized by
+/* Memory contract: every array sized by the bank (filter bank, render ring, histogram and its
+ * estimate ring) is carved from a caller-owned, 16-byte-aligned block by delay_aec_init(), sized by
  * delay_aec_get_mem_size() for the same (sample_rate, hop_size, num_filters). No heap allocation;
  * the triple is init-time immutable. DA_NUM_FILTERS is only the upper bound used by validation. */
 
@@ -31,8 +31,8 @@ typedef enum {
 
 /* Defaults: num_filters=5, window 32 and alignment shift 24 sub-blocks, excitation limit
  * 150/32768, smoothing 0.7 (fast) / 0.1 (slow), matching threshold 0.3, headroom 32 samples,
- * thresholds (5, 20), consistent-estimate threshold 125. The reported delay is always the dominant
- * highest-peak candidate; the pre-echo onset search is not run. */
+ * thresholds (5, 20), consistent-estimate threshold 125. The reported delay is the dominant
+ * highest-peak candidate. */
 #define DA_DOWN_SAMPLING_FACTOR 4
 #define DA_BLOCK_SIZE           64
 #define DA_SUB_BLOCK_SIZE       (DA_BLOCK_SIZE / DA_DOWN_SAMPLING_FACTOR)
@@ -42,7 +42,6 @@ typedef enum {
 #define DA_ALIGNMENT_SHIFT_SB   24
 #define DA_FILTER_SIZE          (DA_WINDOW_SIZE_SB * DA_SUB_BLOCK_SIZE)
 #define DA_FILTER_INTRA_SHIFT   (DA_ALIGNMENT_SHIFT_SB * DA_SUB_BLOCK_SIZE)
-#define DA_ACC_ERR_SIZE         (DA_FILTER_SIZE / 4)
 /* Capacity of both aggregator rings (about 1 s of estimates at 64-sample cadence); the window in
  * use is round(feed rate / 64): 250 at 16 kHz (48 kHz is decimated to a 16 kHz feed), 125 at 8 kHz. */
 #define DA_HIST_WINDOW          250
@@ -54,12 +53,8 @@ typedef enum {
     ((DA_WINDOW_SIZE_SB + DA_ALIGNMENT_SHIFT_SB * ((n) - 1) + 1) * DA_SUB_BLOCK_SIZE)
 #define DA_MAX_FILTER_LAG_FOR(n) ((n) * DA_FILTER_INTRA_SHIFT + DA_FILTER_SIZE)
 #define DA_HP_HIST_SIZE_FOR(n)   (DA_MAX_FILTER_LAG_FOR(n) + 1)
-#define DA_PE_HIST_SIZE_FOR(n) \
-    (((DA_MAX_FILTER_LAG_FOR(n) + 1) * DA_DOWN_SAMPLING_FACTOR) >> 6)
 #define DA_THRESH_INITIAL       5
 #define DA_THRESH_CONVERGED     20
-#define DA_PRE_ECHO_UPDATES_TO_REPORT 50
-#define DA_BLOCK_SIZE_LOG2      6
 
 /* Biquad cascade, at most 4 sections. */
 #define DA_BQ_MAX_SECTIONS 4
@@ -95,17 +90,10 @@ typedef struct {
 typedef struct {
     /* Runtime bank size, [1, DA_NUM_FILTERS]. */
     int   num_filters;
-    /* Pool-carved, row-major: filters + i * DA_FILTER_SIZE, accumulated_error + i *
-     * DA_ACC_ERR_SIZE. */
+    /* Pool-carved, row-major: filters + i * DA_FILTER_SIZE. */
     float *filters;
-    float *accumulated_error;
-    /* Per-tap-prefix error; carved and initialised, not written per update. */
-    float *instantaneous_error;
-    int   last_detected_best_lag_filter;
-    int   number_pre_echo_updates;
     int   reported_valid;
     int   reported_lag;
-    int   reported_pre_echo_lag;
     int   winner_lag_valid;
     int   winner_lag;
 } DaMatchedFilter;
@@ -121,21 +109,7 @@ typedef struct {
 } DaHighestPeak;
 
 typedef struct {
-    int *histogram;
-    int *ring;
-    int hist_size;
-    int window;
-    int ring_index;
-    int number_updates;
-    int pre_echo_candidate;
-    int block_size_log2;
-    int argmax_idx;
-    int argmax_valid;
-} DaPreEcho;
-
-typedef struct {
     DaHighestPeak highest_peak;
-    DaPreEcho     pre_echo;
     int           significant_candidate_found;
 } DaLagAggregator;
 
@@ -157,7 +131,6 @@ typedef struct {
     DaClockdrift    clockdrift;
     int old_agg_valid;
     int old_agg_delay;
-    DelayQuality old_agg_quality;
     int consistent_estimate_counter;
     int consistent_estimate_threshold;
     /* Edge buffers (raw samples awaiting a 64-sample block). */
@@ -191,6 +164,11 @@ typedef struct {
 
 /* Bytes needed; 0 for invalid input or size overflow. Always a multiple of 16. */
 size_t delay_aec_get_mem_size(int sample_rate, int hop_size, int num_filters);
+
+/* Reach in samples at sample_rate: an upper bound of delay_aec_estimated_delay() for this bank,
+ * 4 * ((n-1) * DA_FILTER_INTRA_SHIFT + DA_FILTER_SIZE - 11), times 3 at 48 kHz. 0 for a
+ * non-positive rate or an out-of-range num_filters. */
+int delay_aec_max_delay_samples(int sample_rate, int num_filters);
 
 /* Place the estimator in `mem` (>= delay_aec_get_mem_size() bytes, 16-byte aligned). Returns 0,
  * or -1 on NULL, misaligned, undersized or invalid input. */

@@ -41,6 +41,8 @@
  * Also wired into the Makefile: `make test-duty-census`.
  */
 #include "aec.h"
+#include "aec_pool_test_util.h"
+#include "aec_test_tuning.h"
 #include "../src/aec_array_internal.h"
 #include <math.h>
 #include <stdio.h>
@@ -66,13 +68,7 @@ static float g_near[N_SAMPLES + DELAY];
 static float g_out[HOP];
 
 static unsigned g_rng_state = 0x5EED1234u;
-static float rng_uniform(float amp) {
-    g_rng_state ^= g_rng_state << 13;
-    g_rng_state ^= g_rng_state >> 17;
-    g_rng_state ^= g_rng_state << 5;
-    float u = (float)(g_rng_state & 0xFFFFFFu) / (float)0xFFFFFFu;
-    return amp * (2.0f * u - 1.0f);
-}
+static float rng_uniform(float amp) { return aec_test_rng_uniform(&g_rng_state, amp); }
 
 /* far = white noise; near = far delayed by DELAY and attenuated. A FIXED
  * delay for the whole run: the duty machine only decimates once the estimate
@@ -116,28 +112,28 @@ static void build_watchdog_signals(void) {
 static int run_case(AecDelayMode mode, int fixed_delay_samples, int hops,
                     unsigned long long* total, unsigned long long* run,
                     float* conf) {
-    AecConfig cfg;
-    Aec aec;
+    AecTestCfg cfg;
+    Aec *aec = NULL;
     AecDebugStatus st;
     int i;
 
-    aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, SR);
+    aec_tcfg_from_level(&cfg, AEC_LEVEL_BALANCED, SR);
     /* The DEFAULT is 0.0 (full-rate, matches Python). This test's whole
      * point is measuring the decimation machine itself, which only engages
      * when opted into explicitly, so opt in here for the census below. */
-    cfg.delay_est_period_s = 0.5f;
-    cfg.delay_mode = mode;
-    if (mode == AEC_DELAY_FIXED) cfg.fixed_delay_samples = fixed_delay_samples;
-    if (aec_create(&aec, &cfg) != 0) return -1;
+    cfg.t.delay_est_period_s = 0.5f;
+    cfg.c.delay_mode = mode;
+    if (mode == AEC_DELAY_FIXED) cfg.c.fixed_delay_samples = fixed_delay_samples;
+    if ((aec = aec_tcfg_create(&cfg)) == NULL) return -1;
 
     for (i = 0; i < hops; ++i)
-        aec_process(&aec, &g_near[i * HOP], &g_far[i * HOP], g_out);
+        aec_process(aec, &g_near[i * HOP], &g_far[i * HOP], g_out);
 
-    aec_debug_status(&aec, &st);
+    aec_debug_status(aec, &st);
     *total = st.duty_hops_total;
     *run   = st.duty_hops_run;
     *conf  = st.delay_confidence;
-    aec_destroy(&aec);
+    aec_destroy(aec);
     return 0;
 }
 
@@ -234,33 +230,33 @@ int main(void) {
     /* ---- 5: reset zeroes the census, MATCHED mode -------------------------- */
     {
         AecConfig cfg;
-        Aec aec;
+        Aec *aec = NULL;
         AecDebugStatus st;
         int i;
 
         aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, SR);
-        if (aec_create(&aec, &cfg) != 0) {
+        if ((aec = aec_create(&cfg)) == NULL) {
             printf("FAIL: aec_create (reset case)\n");
             return 1;
         }
         for (i = 0; i < hops; ++i)
-            aec_process(&aec, &g_near[i * HOP], &g_far[i * HOP], g_out);
-        aec_debug_status(&aec, &st);
+            aec_process(aec, &g_near[i * HOP], &g_far[i * HOP], g_out);
+        aec_debug_status(aec, &st);
         CHECK(st.duty_hops_total > 0, "census non-zero before reset (control)");
 
-        aec_reset(&aec);
-        aec_debug_status(&aec, &st);
+        aec_reset(aec);
+        aec_debug_status(aec, &st);
         CHECK(st.duty_hops_total == 0 && st.duty_hops_run == 0,
               "aec_reset zeroes the census");
 
         /* And it counts again afterwards -- a reset that left the counters
          * permanently stuck at zero would also pass the check above. */
         for (i = 0; i < 10; ++i)
-            aec_process(&aec, &g_near[i * HOP], &g_far[i * HOP], g_out);
-        aec_debug_status(&aec, &st);
+            aec_process(aec, &g_near[i * HOP], &g_far[i * HOP], g_out);
+        aec_debug_status(aec, &st);
         CHECK(st.duty_hops_total == 10,
               "census resumes counting after reset");
-        aec_destroy(&aec);
+        aec_destroy(aec);
     }
 
     /* ---- 7: the ERLE watchdog leaks the RETIMED amount, on the audio path.
@@ -274,11 +270,11 @@ int main(void) {
      * satisfy an empty loop. ------------------------------- */
     {
         AecConfig cfg;
-        Aec aec;
+        Aec *aec = NULL;
         int i, leak_hops = 0, mismatches = 0;
 
         aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, SR);
-        if (aec_create(&aec, &cfg) != 0) {
+        if ((aec = aec_create(&cfg)) == NULL) {
             printf("FAIL: aec_create (watchdog leak case)\n");
             return 1;
         }
@@ -288,26 +284,26 @@ int main(void) {
          * bit-exactness claim belongs to the authoring grid, not this one. */
         snprintf(msg, sizeof msg,
                  "duty_erle_leak_db = 0.1 dB/s x %d/%d s hop (%.9g/hop)",
-                 HOP, SR, (double)aec.duty.erle_leak_db);
-        CHECK(fabs((double)aec.duty.erle_leak_db * SR / HOP - 0.1) <= 1e-6,
+                 HOP, SR, (double)aec->duty.erle_leak_db);
+        CHECK(fabs((double)aec->duty.erle_leak_db * SR / HOP - 0.1) <= 1e-6,
               msg);
         snprintf(msg, sizeof msg,
                  "the 8 ms hop does NOT carry the 10 ms literal (%.9g != "
-                 "0.001)", (double)aec.duty.erle_leak_db);
-        CHECK(aec.duty.erle_leak_db != 0.001f, msg);
+                 "0.001)", (double)aec->duty.erle_leak_db);
+        CHECK(aec->duty.erle_leak_db != 0.001f, msg);
 
         for (i = 0; i < WD_HOPS; ++i) {
-            float prev_peak = aec.duty.erle_peak;
-            int   prev_active = aec.duty.active;
-            aec_process(&aec, &g_wd_near[i * HOP], &g_wd_far[i * HOP], g_out);
+            float prev_peak = aec->duty.erle_peak;
+            int   prev_active = aec->duty.active;
+            aec_process(aec, &g_wd_near[i * HOP], &g_wd_far[i * HOP], g_out);
             /* Only the steady decay branch is reconstructible here: arming
              * jumps the peak to the current ERLE, a rise re-seeds it from
              * the same, and a watchdog trip zeroes it and disarms. Each of
              * those is excluded by its own state change, not by a threshold. */
-            if (prev_active && aec.duty.active &&
-                aec.duty.erle_peak < prev_peak) {
+            if (prev_active && aec->duty.active &&
+                aec->duty.erle_peak < prev_peak) {
                 leak_hops++;
-                if (aec.duty.erle_peak != prev_peak - aec.duty.erle_leak_db)
+                if (aec->duty.erle_peak != prev_peak - aec->duty.erle_leak_db)
                     mismatches++;
             }
         }
@@ -320,7 +316,7 @@ int main(void) {
                  "the decay branch was actually exercised (%d leak hops > 0)",
                  leak_hops);
         CHECK(leak_hops > 0, msg);
-        aec_destroy(&aec);
+        aec_destroy(aec);
     }
 
     /* 8a. Gate stepping, pinned to hold_hops and period_hops. */

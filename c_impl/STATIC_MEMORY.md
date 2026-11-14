@@ -1,8 +1,8 @@
 # Static-memory API
 
-AEC supports both heap construction (`aec_create`) and caller-owned static
-memory (`aec_get_mem_size` + `aec_init`). The processing algorithm and output
-are identical within the same FFT backend.
+AEC supports both heap construction (`aec_create`, one allocation that `aec_destroy` frees) and caller-owned static
+memory (`aec_get_mem_size` + `aec_init`). `Aec` is opaque: a caller never holds one by value or asks for its size; the
+pool size is `aec_get_mem_size()`. The processing algorithm and output are identical within the same FFT backend.
 
 ## Contract
 
@@ -15,7 +15,7 @@ are identical within the same FFT backend.
   owns and releases the pool.
 - The static path performs no heap allocation from initialization through
   destruction. `test/test_zero_heap_aec.c` enforces this.
-- Heap construction also aligns its arena to 16 bytes explicitly; an ILP32
+- Heap construction also aligns its block to 16 bytes explicitly; an ILP32
   allocator's natural 8-byte alignment is insufficient for carved subobjects.
 - Pool sizes and public structure layouts belong to the compiled ABI. Query
   them on the target; do not reuse an ARM64 pool-size literal or raw instance
@@ -65,7 +65,7 @@ free(pool);
 ```
 <!-- docs-smoke:end -->
 
-The sample is compiled and run by `test/docs_smoke.sh`.
+The sample is compiled and run by `make test-docs-smoke` (`test/docs_smoke.sh`).
 
 ## Supported grids
 
@@ -80,25 +80,32 @@ In Audio_ALG the mono samples also accept the 8 kHz row; the 4ch flow and the UL
 
 Pool size depends on the complete config, backend and target ABI. Do not copy a
 checked-in byte count into firmware. Query `aec_get_mem_size` and reserve that
-exact result in the board memory map. For orientation, the balanced 16 kHz
-build with the NE10 FFT backend (the only backend) at the default
-`delay_mode = MATCHED` / `delay_num_filters = 5` is (`make test-delay-num-filters`
-prints these):
+exact result in the board memory map. For orientation, the balanced single-channel
+instance with the NE10 FFT backend (the only backend) at the default
+`delay_mode = MATCHED` / `delay_num_filters = 5`, measured with `aec_get_mem_size()` on the 64-bit
+host (the same for every `AecConfig.residual`, for `SIMD=0/1` and for `AEC_NO_ARRAY`):
 
-| FFT / hop | Pool size |
-|---:|---:|
-| 256 / 128 | 343,760 B |
-| 512 / 256 | 456,640 B |
+| Sample rate / FFT / hop | Pool size | `EXTERNAL_ALIGNED` |
+|---|---:|---:|
+| 16 kHz / 256 / 128 | 239,920 B | 177,568 B |
+| 16 kHz / 512 / 256 | 352,288 B | 289,424 B |
+| 48 kHz / 1024 / 512 | 776,224 B | 645,776 B |
+| 8 kHz / 256 / 128 (legacy) | 211,552 B | 149,200 B |
 
-These figures depend on the struct sizes of `Aec`/`AecConfig`; re-run
-`aec_get_mem_size()` (or `make test-delay-num-filters`) rather than carrying
-them forward.
+These figures depend on the struct sizes of the library's internals; re-run
+`aec_get_mem_size()` (or `aec_wav --print-mem-size`) rather than carrying
+them forward. The pool holds the instance and everything it carves, including the synthesis window and the decoded
+gain-threshold tables (see "Ownership model"); the code and flash side is separate: `libaec.a` `__TEXT` is 164,227 B at `SIMD=1`
+and 145,667 B at `SIMD=0`, and 142,015 B / 126,643 B built with `AEC_NO_ARRAY=1` (host Apple clang, arm64, `size` summed over the
+members as in `README.md`; the target toolchain's numbers differ).
 
 The delay configuration moves these numbers, because the matched-filter bank,
-the down-sampled render ring and both lag histograms are carved from this same
+the down-sampled render ring and the lag histogram are carved from this same
 pool at the configured size rather than at a compile-time maximum. Each filter
-dropped from the bank costs 5,728 B less on every grid (n=1 is 22,912 B below
-the n=5 default); `FIXED` carves no estimator at all, and
+dropped from the bank costs 5,120 B less in the estimator on every grid, plus
+(single channel, `MATCHED`) a reference ring shorter by 1,536 samples: 11,264 B
+per filter at 16 / 8 kHz and 23,552 B at 48 kHz (n=1 is 45,056 B / 94,208 B
+below the n=5 default); `FIXED` carves no estimator at all, and
 `EXTERNAL_ALIGNED` additionally carves no reference ring. `delay_mode` and
 `delay_num_filters` are therefore init-time immutable alongside the signal
 grid: changing either means re-querying `aec_get_mem_size` and re-initialising.
@@ -127,45 +134,47 @@ if (!aec) { /* pool too small / unaligned, or descriptor from a different build 
 ```
 
 Unlike a single-channel instance, the array pool **depends on `AecConfig.residual`** (`OFF` is refused). Measured with
-`aec_get_mem_requirements()` on the 64-bit host (balanced, `MATCHED`, `delay_num_filters = 5`, NE10, `sizeof(Aec)` 6,368 B):
+`aec_get_mem_requirements()` on the 64-bit host (balanced, `MATCHED`, `delay_num_filters = 5`, NE10, `Aec` header 6,208 B):
 
 | Grid | `STATE` | `ESTIMATE` | `FULL` (default) |
 |---|---:|---:|---:|
-| 16 kHz / 256 | 616,912 B | 712,448 B | 720,352 B |
-| 16 kHz / 512 | 920,464 B | 1,110,208 B | 1,124,256 B |
-| 48 kHz / 1024 | 2,062,960 B | 2,441,120 B | 2,470,528 B |
+| 16 kHz / 256 | 595,744 B | 691,280 B | 701,280 B |
+| 16 kHz / 512 | 883,936 B | 1,073,680 B | 1,091,872 B |
+| 48 kHz / 1024 | 1,995,712 B | 2,373,872 B | 2,411,520 B |
 
-`aec_get_mem_breakdown()` splits the `FULL` pool as follows. The `Aec` header (`sizeof(Aec)` rounded to 16 B, 6,368 B here) belongs
+`aec_get_mem_breakdown()` splits the `FULL` pool as follows. The `Aec` header (6,208 B here, a multiple of 16) belongs
 to none of the four sub-fields, so they sum to `total_bytes` minus the header:
 
 | Grid | `total_bytes` | `estimator_bytes` | `ring_bytes` | `lane_bytes` | `fusion_bytes` |
 |---|---:|---:|---:|---:|---:|
-| 16 kHz / 256 | 720,352 | 33,936 | 66,576 | 588,800 | 24,672 |
-| 16 kHz / 512 | 1,124,256 | 33,936 | 67,600 | 971,968 | 44,384 |
-| 48 kHz / 1024 | 2,470,528 | 35,312 | 200,720 | 2,141,248 | 86,880 |
+| 16 kHz / 256 | 701,280 | 29,248 | 66,576 | 571,520 | 27,728 |
+| 16 kHz / 512 | 1,091,872 | 29,248 | 67,600 | 938,304 | 50,512 |
+| 48 kHz / 1024 | 2,411,520 | 30,624 | 200,720 | 2,074,816 | 99,152 |
 
 - **Lane contract.** The flow stamps the same config on each lane: the array's grid and tunables, `delay_mode = EXTERNAL_ALIGNED`
   (the lanes take the shared aligned far), `residual = ESTIMATE` (`STATE` for a `STATE` array), `n_mics = 1`. Each lane pool is
-  147,200 / 242,992 / 535,312 B (`ESTIMATE` and `FULL`; a `STATE` lane omits the residual-echo estimator and comfort-noise arrays its early exit never reads: 124,880 / 198,656 / 446,944 B) and `lane_bytes` is four of them. A lane is built by the internal
-  `aec_lane_init()`; against a stand-alone single-channel `EXTERNAL_ALIGNED` instance (178,752 / 291,632 / 650,032 B)
+  142,880 / 234,576 / 518,704 B (`ESTIMATE` and `FULL`; a `STATE` lane omits the residual-echo estimator and comfort-noise arrays its early exit never reads: 120,560 / 190,240 / 430,336 B) and `lane_bytes` is four of them. A lane is built by the internal
+  `aec_lane_init()`; against a stand-alone single-channel `EXTERNAL_ALIGNED` instance (177,568 / 289,424 / 645,776 B)
   it borrows the array's one FFT handle and omits what its contract never runs: the delay-shift snapshots (only the `MATCHED`
-  estimator takes them), the synthesis and gain buffers (OLA, `eout`, the SuppressionGain arrays; only `FULL` applies a gain) and
+  estimator takes them), the synthesis and gain buffers (synthesis window, OLA, `eout`, the SuppressionGain arrays and the decoded ENR/SU threshold tables; only `FULL` applies a gain) and
   the FFT handle; a `STATE` lane also omits the residual-echo estimator and comfort-noise arrays (its early exit never reads them).
   Every single-channel instance, lane or not, also omits the render-history rows (read only without the echo-generating window),
   has no `x2_past`, keeps the stationarity history at exactly the ring's length, and its shadow filter follows the main filter (same
   input, same clears, same partition steps), so it shares the main filter's far history and has no `near_spec` /
   `error_spec_windowed` / `spec_scratch` (its frontend is lightweight).
 - `fusion_bytes` is the control block, the microphone / aligned-far / fusion buffers, the one FFT handle the four lanes share
-  (7,152 / 13,552 / 26,352 B) and, in `FULL`, the gain stage (internal `aec_res_get_mem_size()` 7,904 / 14,048 / 29,408 B). It
-  does not include the lane pools. `STATE` has no fusion buffers (10,512 / 17,936 / 32,784 B); `ESTIMATE` has them but no gain
-  stage (16,768 / 30,336 / 57,472 B).
-- `ring_bytes`: `MATCHED` is `ceil(max_delay_ms * sample_rate / 1000) + 2 * hop + 1` samples (`max_delay_ms` <= 4096), `FIXED` is
-  `fixed_delay_samples + hop_size`, `EXTERNAL_ALIGNED` none. `FULL` with `EXTERNAL_ALIGNED`: 619,840 / 1,022,720 / 2,234,496 B.
+  (7,152 / 13,552 / 26,352 B) and, in `FULL`, the gain stage (internal `aec_res_get_mem_size()` 10,000 / 18,192 / 37,648 B). It
+  does not include the lane pools. `STATE` has no fusion buffers (11,472 / 19,920 / 36,816 B); `ESTIMATE` has them but no gain
+  stage (17,728 / 32,320 / 61,504 B).
+- `ring_bytes`: for the array, `MATCHED` is `ceil(1024 ms * sample_rate / 1000) + 2 * hop + 1` samples (the library's internal
+  `max_delay_ms` of 1024), `FIXED` is `fixed_delay_samples + hop_size`, `EXTERNAL_ALIGNED` none. A single-channel `MATCHED`
+  instance sizes its ring from the estimator's reach, `4 * ((n - 1) * 384 + 501) + hop_size` samples (three times the first term at
+  48 kHz). `FULL` array with `EXTERNAL_ALIGNED`: 605,456 / 995,024 / 2,180,176 B.
 
 **Not done yet.** The far-side state is still held per lane (what the lanes share is the delay estimator, the aligned far,
 the FFT handle and, within a hop, the far FFT result and the far-only per-hop analysis computed by lane 0, which changes
 no pool size: lanes 1-3 keep their own copies of that state and update them only when they stop following lane 0); the lanes are
-about 82 / 86 / 87 % of the `FULL` array pool. These sizes are host measurements; the target build's
+about 81 / 86 / 86 % of the `FULL` array pool. These sizes are host measurements; the target build's
 `aec_get_mem_requirements()` is authoritative.
 
 ## Ownership model
@@ -175,6 +184,12 @@ main and shadow filter state, AEC3 post-filter state and processing scratch.
 All placement follows the same 16-byte alignment rules used by
 `aec_get_mem_size`. An array instance holds, in the same way, the four lane pools, the shared estimator and ring, and the
 fusion buffers; the lanes are initialised inside the array's pool and nothing is allocated outside it.
+
+Two tables are built into the pool by `aec_init()` / `aec_create()` instead of living in flash at full size: the synthesis window
+(`fft_size` floats, mirrored from a 513-float half table without libm; the pointer `aec_synthesis_window()` returns lives in the
+pool, so a borrower such as an `AcIstft` must not outlive the `Aec`) and the ENR/SU gain-threshold tables of the residual gain
+stage (run-length coded in flash, `4 * ALIGN16(n_bins * 4)` B decoded: 2,112 / 4,160 / 8,256 B at 16 kHz / 256, 16 kHz / 512, 48 kHz / 1024). Both exist once
+per single-channel instance and once per array, and none in a lane. The EMR thresholds stay a flash constant.
 
 Internal modules may expose their own `*_get_mem_size`/`*_init_static`
 functions, but application code should use only the top-level AEC API unless it
@@ -198,7 +213,7 @@ make test-config-validation
 make test-linear-context
 make test-zero-heap
 make test-static-aec TEST_STATIC_MIC=mic.wav TEST_STATIC_REF=ref.wav TEST_STATIC_SR=16000
-test/docs_smoke.sh
+make test-docs-smoke
 ```
 
 `aec_get_mem_breakdown(&cfg, &out)` splits the same total into `estimator_bytes` and

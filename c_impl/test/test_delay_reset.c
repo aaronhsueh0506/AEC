@@ -135,16 +135,11 @@ static void test_reset_clears_inner_signal_chain_state(void) {
      * differently-shaped buffer than the one that was carved. */
     CHECK(d.est.render_ring.capacity == DA_RING_CAPACITY_FOR(DA_NUM_FILTERS) &&
           d.est.matched_filter.num_filters == DA_NUM_FILTERS &&
-          d.est.aggregator.highest_peak.hist_size == DA_HP_HIST_SIZE_FOR(DA_NUM_FILTERS) &&
-          d.est.aggregator.pre_echo.hist_size == DA_PE_HIST_SIZE_FOR(DA_NUM_FILTERS),
-          "reset: pool geometry (ring capacity, bank size, both histogram sizes) survives");
+          d.est.aggregator.highest_peak.hist_size == DA_HP_HIST_SIZE_FOR(DA_NUM_FILTERS),
+          "reset: pool geometry (ring capacity, bank size, histogram size) survives");
     CHECK(d.est.render_ring.buffer && d.est.matched_filter.filters &&
-          d.est.matched_filter.accumulated_error &&
-          d.est.matched_filter.instantaneous_error &&
           d.est.aggregator.highest_peak.histogram &&
           d.est.aggregator.highest_peak.ring &&
-          d.est.aggregator.pre_echo.histogram &&
-          d.est.aggregator.pre_echo.ring &&
           d.near16_scratch && d.far16_scratch,
           "reset: every pool pointer survives (incl. the 48 kHz sidechain scratch)");
 

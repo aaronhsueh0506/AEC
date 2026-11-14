@@ -49,16 +49,16 @@ int main(int argc, char** argv) {
     aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, sr);
 
     /* Dynamic path */
-    Aec aec_dyn;
-    if (aec_create(&aec_dyn, &cfg) != 0) {
+    Aec *aec_dyn = NULL;
+    if ((aec_dyn = aec_create(&cfg)) == NULL) {
         fprintf(stderr, "aec_create failed\n"); free(mic); free(ref); return 1;
     }
-    int hop = aec_hop_size(&aec_dyn);
+    int hop = aec_hop_size(aec_dyn);
     int frames = n / hop;
     float* out_dyn = (float*)calloc((size_t)frames * hop, sizeof(float));
     for (int i = 0; i < frames; ++i)
-        aec_process(&aec_dyn, mic + i*hop, ref + i*hop, out_dyn + i*hop);
-    aec_destroy(&aec_dyn);
+        aec_process(aec_dyn, mic + i*hop, ref + i*hop, out_dyn + i*hop);
+    aec_destroy(aec_dyn);
 
     /* Static path */
     size_t pool_sz = aec_get_mem_size(&cfg);

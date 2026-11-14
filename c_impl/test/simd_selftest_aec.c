@@ -15,6 +15,8 @@
 #include <float.h>
 #include <time.h>
 
+#include "test/simd_test_harness.h"
+
 /* ═══════════════════════════════ config ═══════════════════════════════ */
 
 #define SK_TEST_MAX_N 512
@@ -36,65 +38,6 @@ static const int N_LIST[] = {
  * special-value pool (the special pool is drawn 25% of the time, see gen_float()). NaN bit patterns
  * from the raw-bits path are remapped to 0.0f: NaN payload propagation is outside the bit-exactness
  * contract. */
-
-static uint32_t g_lcg = 0x9E3779B9u;
-
-static uint32_t lcg_next(void) {
-    g_lcg = g_lcg * 1664525u + 1013904223u;
-    return g_lcg;
-}
-
-static float bits_to_float(uint32_t b) {
-    float f;
-    memcpy(&f, &b, sizeof f);
-    return f;
-}
-
-#define SPECIAL_POOL_COUNT 12
-static float special_pool[SPECIAL_POOL_COUNT];
-
-static void init_special_pool(void) {
-    special_pool[0]  = 0.0f;
-    special_pool[1]  = -0.0f;
-    special_pool[2]  = FLT_MIN;
-    special_pool[3]  = bits_to_float(0x00000001u); /* smallest subnormal */
-    special_pool[4]  = bits_to_float(0x007FFFFFu); /* largest subnormal */
-    special_pool[5]  = FLT_MAX;
-    special_pool[6]  = 1.0f;
-    special_pool[7]  = -1.0f;
-    special_pool[8]  = 1e-30f;
-    special_pool[9]  = 3e38f;
-    special_pool[10] = (float)INFINITY;
-    special_pool[11] = -(float)INFINITY;
-}
-
-static float gen_float(void) {
-    uint32_t r = lcg_next();
-    if ((r & 3u) == 0u) {
-        uint32_t idx = (lcg_next() >> 8) % SPECIAL_POOL_COUNT;
-        return special_pool[idx];
-    } else {
-        uint32_t bits = lcg_next();
-        float f = bits_to_float(bits);
-        if (f != f) f = 0.0f; /* exclude NaN */
-        return f;
-    }
-}
-
-static void gen_complex(Complex *c) {
-    c->r = gen_float();
-    c->i = gen_float();
-}
-
-static void fill_floats(float *a, int n) {
-    int i;
-    for (i = 0; i < n; ++i) a[i] = gen_float();
-}
-
-static void fill_complex(Complex *a, int n) {
-    int i;
-    for (i = 0; i < n; ++i) gen_complex(&a[i]);
-}
 
 /* ═══════════════════════ int32 input generation (kernels 24-26) ═══════════════════════
  * hold_counters is int32: a separate generator from gen_float() (an int32 has no NaN/Inf, so no
@@ -280,35 +223,6 @@ static void fill_complex_nan_sprinkle(Complex *z, int n) {
  * chokepoints every check funnels through (check_bits_or_die, check_scalar_bits_or_die,
  * check_bits_classify, check_mask_classify and the canary checks), so main()'s printout is a
  * reproducible measure of how much the run verified. */
-
-static long g_total_checks = 0;
-
-static int first_diff_bits(const float *a, const float *b, int count) {
-    int i;
-    for (i = 0; i < count; ++i) {
-        uint32_t ba, bb;
-        memcpy(&ba, &a[i], sizeof ba);
-        memcpy(&bb, &b[i], sizeof bb);
-        if (ba != bb) return i;
-    }
-    return -1;
-}
-
-static void check_bits_or_die(const char *kernel, int n, int trial,
-                               const float *simd, const float *scalar, int count) {
-    int idx;
-    g_total_checks += count;
-    idx = first_diff_bits(simd, scalar, count);
-    if (idx >= 0) {
-        uint32_t gb, wb;
-        memcpy(&gb, &simd[idx], sizeof gb);
-        memcpy(&wb, &scalar[idx], sizeof wb);
-        fprintf(stderr,
-            "MISMATCH kernel=%s n=%d trial=%d idx=%d simd=0x%08x (%.9g) scalar=0x%08x (%.9g)\n",
-            kernel, n, trial, idx, (unsigned)gb, (double)simd[idx], (unsigned)wb, (double)scalar[idx]);
-        exit(1);
-    }
-}
 
 static void check_scalar_bits_or_die(const char *kernel, int n, int trial,
                                       float simd_val, float scalar_val) {
@@ -754,61 +668,18 @@ static void test_pairwise_sum_tailfold_b(void) {
  *
  * The scalar-vs-NEON comparison is inherent to every check_bits_or_die/check_scalar_bits_or_die call below. */
 
-#define EDGE_GUARD 32           /* guaranteed guard elements each side of the
-                                 * payload window, regardless of offset/n */
-#define EDGE_OFFSET_MAX 15      /* max float/Complex element offset under test */
 #define EDGE_MAX_N SK_TEST_MAX_N
 #define EDGE_ARENA_LEN (EDGE_GUARD + EDGE_OFFSET_MAX + EDGE_MAX_N + EDGE_GUARD)
 /* Larger arena for the tail-fold pairwise-sum pair (kernels 21/22), whose
  * own PW_TAILFOLD_N_LIST reaches 960 (> SK_TEST_MAX_N). */
 #define EDGE_ARENA_LEN_RED (EDGE_GUARD + EDGE_OFFSET_MAX + PW_TAILFOLD_MAX_N + EDGE_GUARD)
-#define EDGE_CANARY_BITS 0x7fc0deadu
 #define EDGE_MASK_CANARY 0xAAu
-#define EDGE_FORM_COUNT 3
-
-static float edge_canary_float(void) { return bits_to_float(EDGE_CANARY_BITS); }
-
-static void *edge_aligned_alloc(size_t bytes) {
-    void *p = NULL;
-    if (posix_memalign(&p, 64, bytes) != 0 || p == NULL) {
-        fprintf(stderr, "FATAL: posix_memalign(64, %zu) failed\n", bytes);
-        exit(1);
-    }
-    return p;
-}
-
-static void edge_fill_canary_f(float *arena, int len) {
-    int i;
-    float c = edge_canary_float();
-    for (i = 0; i < len; ++i) arena[i] = c;
-}
-
 /* Verifies every float in arena[0,len) OUTSIDE the payload window
  * [win_lo, win_lo+win_len) still holds the exact canary bit pattern -- an
  * empty window (win_len==0, i.e. n==0) means the ENTIRE arena must still be
  * canary, exactly the "n==0 performs zero reads/writes" contract this
  * section exists to check. exit(1) with a precise diagnostic on the first
  * violation, same house style as check_bits_or_die. */
-static void edge_check_canary_f(const char *label, const float *arena, int len,
-                                 int win_lo, int win_len) {
-    int i;
-    uint32_t want = EDGE_CANARY_BITS;
-    int win_hi = win_lo + win_len;
-    for (i = 0; i < len; ++i) {
-        uint32_t got;
-        if (i >= win_lo && i < win_hi) continue; /* payload window, not guarded */
-        g_total_checks++;
-        memcpy(&got, &arena[i], sizeof got);
-        if (got != want) {
-            fprintf(stderr,
-                "CANARY VIOLATION %s: arena[%d]=0x%08x (want canary 0x%08x) "
-                "-- out-of-bounds access, payload window=[%d,%d)\n",
-                label, i, (unsigned)got, (unsigned)want, win_lo, win_hi);
-            exit(1);
-        }
-    }
-}
-
 /* Complex-array counterparts: Complex is {float r; float i;} contiguous, so
  * a Complex arena is just a float arena with every length/offset doubled --
  * reuses the float helpers above instead of duplicating the canary logic. */
@@ -877,14 +748,6 @@ static void edge_check_canary_i(const char *label, const int *arena, int len,
  * midpoint (o==8 -> 16-8==8). `(o+7)%15` is a fixed-point-free derangement
  * over {1..15} (o+7 == o (mod 15) requires 7 == 0 (mod 15), false for every
  * o), so out_off != in_off for every o in 1..15 by construction. */
-static void edge_offsets_for_form(int form, int o, int *in_off, int *out_off) {
-    switch (form) {
-    case 0: *in_off = o; *out_off = 0; break;                   /* input offset only */
-    case 1: *in_off = 0; *out_off = o; break;                   /* output offset only */
-    default: *in_off = o; *out_off = ((o + 7) % 15) + 1; break;  /* both, different */
-    }
-}
-
 static void test_cabs_np_edge(void) {
     Complex *z_arena = (Complex *)edge_aligned_alloc((size_t)EDGE_ARENA_LEN * sizeof(Complex));
     float *out_scalar_arena = (float *)edge_aligned_alloc((size_t)EDGE_ARENA_LEN * sizeof(float));
@@ -1720,17 +1583,6 @@ static void test_no_audible_echo_gain_edge(void) {
 
 static volatile double g_bench_sink = 0.0;
 
-static double now_ns(void) {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (double)ts.tv_sec * 1e9 + (double)ts.tv_nsec;
-}
-
-static void report_bench(const char *name, double ns_scalar, double ns_simd) {
-    printf("kernel=%s ns_per_call_scalar=%.2f ns_per_call_simd=%.2f speedup=%.2f\n",
-           name, ns_scalar, ns_simd,
-           ns_simd > 0.0 ? ns_scalar / ns_simd : 0.0);
-}
 static void bench_cabs_np(void) {
     Complex z[BENCH_N]; float out[BENCH_N];
     fill_bench_complex(z, BENCH_N);

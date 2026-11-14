@@ -3,7 +3,7 @@
  * the NR / RES chain live in the 4ch sample-layer suite.
  *
  * Test-local wrappers (Af, AfFront, AfFrame, af_process_front, af_fuse, ...) sit over the entry points (aec_process_linear +
- * aec_get_array, aec_process_residual + aec_get_residual): see "compatibility layer" below. They add no behaviour.
+ * aec_get_array, aec_process_residual + aec_get_residual): see "short names" below. They add no behaviour.
  *
  * Built and run by `make test-aec-array-flow` (an AEC_TESTING build: the duty-cycle hooks of aec_test_hooks.h). */
 #ifndef AEC_TESTING
@@ -12,7 +12,7 @@
 
 #include "aec.h"
 #include "aec_internal.h"
-#include "aec_test_hooks.h"
+#include "aec_test_tuning.h"
 #include "audio_stft.h"
 #include "fft_wrapper.h"
 #include "../src/aec_array_internal.h"
@@ -41,7 +41,7 @@ static int passes = 0;
         }                                                                  \
     } while (0)
 
-/* ---- compatibility layer: short test-local names over the array instance ---------------------------------------- */
+/* ---- short names: test-local aliases over the array instance ---------------------------------------- */
 typedef Aec Af;
 #define AF_CHANNELS            AEC_ARRAY_MICS
 #define AF_OK                  AEC_OK
@@ -88,9 +88,9 @@ static unsigned long long af_duty_hops_run(const Aec* a) { AecDebugStatus ds; ae
 #define af_count_add_sat             aec_array_count_add_sat
 #define af_far_fft_delta_matches     aec_array_far_fft_delta_matches
 
-/* A flow description in the old suite's terms; af_to_aec() turns it into the array AecConfig (enable_post = 1: the
- * fusion without a gain, AEC_RESIDUAL_ESTIMATE, the old "post" lanes; enable_post = 0: AEC_RESIDUAL_STATE; with_gain = 1
- * adds the gain stage, AEC_RESIDUAL_FULL). The lane level is the balanced default, as af_lane_config() used. */
+/* A flow description; af_to_aec() turns it into the array AecConfig (enable_post = 1: the fusion without a gain,
+ * AEC_RESIDUAL_ESTIMATE; enable_post = 0: AEC_RESIDUAL_STATE; with_gain = 1 adds the gain stage, AEC_RESIDUAL_FULL).
+ * The lane level is the balanced default. */
 typedef struct AfConfig {
     int sample_rate;
     int fft_size;                          /* 0 = rate default */
@@ -119,68 +119,65 @@ static AfConfig af_default_config(int sample_rate) {
     return c;
 }
 
-static void af_to_aec(const AfConfig* c, AecConfig* a) {
-    aec_config_from_level(a, AEC_LEVEL_BALANCED, c->sample_rate);
+static void af_to_aec(const AfConfig* c, AecTestCfg* t) {
+    AecConfig* a = &t->c;
+    aec_tcfg_from_level(t, AEC_LEVEL_BALANCED, c->sample_rate);
     if (c->fft_size != 0) a->fft_size = c->fft_size;
     a->n_mics = AEC_ARRAY_MICS;
     a->residual = !c->enable_post ? AEC_RESIDUAL_STATE : (c->with_gain ? AEC_RESIDUAL_FULL : AEC_RESIDUAL_ESTIMATE);
-    if (c->enable_post > 1) a->residual = (AecResidualMode)7;      /* the old non-boolean enable: an out-of-range mode */
+    if (c->enable_post > 1) a->residual = (AecResidualMode)7;      /* a non-boolean enable: an out-of-range mode */
     a->delay_mode = c->delay_mode;
     a->delay_num_filters = c->delay_num_filters;
     a->fixed_delay_samples = c->fixed_delay_samples;
     a->capture_proxy_channel = c->capture_proxy_channel;
     a->delay_backward_quarantine_enabled = c->delay_backward_quarantine_enabled;
     a->delay_backward_quarantine_s = c->delay_backward_quarantine_s;
-    a->delay_est_period_s = c->delay_est_period_s;
-    a->max_delay_ms = c->max_delay_ms;
+    t->t.delay_est_period_s = c->delay_est_period_s;
+    t->t.max_delay_ms = c->max_delay_ms;
 }
 
 static int af_get_mem_requirements(const AfConfig* c, AfMemReq* out) {
-    AecConfig a;
+    AecTestCfg a;
     af_to_aec(c, &a);
-    return aec_get_mem_requirements(&a, out);
+    return aec_tcfg_mem_requirements(&a, out);
 }
 
-/* The whole pool of the instance (the old suite's "application-side total": the lanes and the estimator were separate
- * objects then). 0, or -1 for an invalid config. */
+/* The whole pool of the instance. 0, or -1 for an invalid config. */
 static int af_sample_flow_get_mem_size(const AfConfig* c, size_t* bytes) {
-    AecConfig a;
+    AecTestCfg a;
     af_to_aec(c, &a);
-    *bytes = aec_get_mem_size(&a);
+    *bytes = aec_tcfg_mem_size(&a);
     return *bytes ? 0 : -1;
 }
 
 /* The lane the array builds inside itself, written out here from the contract (single channel, the flow's grid, the shared
  * aligned far = EXTERNAL_ALIGNED, the residual stage at ESTIMATE / STATE, the flow's duty period): the stand-alone reference of
  * the lane-parity tests. -1 for an invalid config. */
-static int lane_config_for(const AfConfig* c, AecConfig* lane) {
-    AecConfig a;
+static int lane_config_for(const AfConfig* c, AecTestCfg* lane) {
+    AecTestCfg a;
     af_to_aec(c, &a);
-    if (aec_get_mem_size(&a) == 0) return -1;
+    if (aec_tcfg_mem_size(&a) == 0) return -1;
     *lane = a;
-    lane->n_mics = 1;
-    lane->capture_proxy_channel = 0;
-    lane->delay_backward_quarantine_enabled = 0;
-    lane->delay_mode = AEC_DELAY_EXTERNAL_ALIGNED;
-    lane->delay_num_filters = DA_NUM_FILTERS;
-    lane->fixed_delay_samples = -1;
-    lane->residual = c->enable_post ? AEC_RESIDUAL_ESTIMATE : AEC_RESIDUAL_STATE;
+    lane->c.n_mics = 1;
+    lane->c.capture_proxy_channel = 0;
+    lane->c.delay_backward_quarantine_enabled = 0;
+    lane->c.delay_mode = AEC_DELAY_EXTERNAL_ALIGNED;
+    lane->c.delay_num_filters = DA_NUM_FILTERS;
+    lane->c.fixed_delay_samples = -1;
+    lane->c.residual = c->enable_post ? AEC_RESIDUAL_ESTIMATE : AEC_RESIDUAL_STATE;
     return 0;
 }
 
 /* Heap instance (aec_create) for cfg; NULL for an invalid config. */
 static Af* af_test_create(const AfConfig* c) {
-    AecConfig a;
-    Aec* p = (Aec*)calloc(1, sizeof(Aec));
+    AecTestCfg a;
     af_to_aec(c, &a);
-    if (!p || aec_create(p, &a) != 0) { free(p); return NULL; }
-    return p;
+    return aec_tcfg_create(&a);
 }
 
 static void af_test_destroy(Af* p) {
     if (!p) return;
     aec_destroy(p);
-    free(p);
 }
 
 static int af_n_freqs(const Af* p) { return aec_hop_size(p) + 1; }
@@ -1037,7 +1034,7 @@ static void test_known_delay_mislock_is_detectable(void) {
 }
 
 /* Report the 4ch numbers by calling the pool queries. n drives the one shared estimator; the four lanes are
- * EXTERNAL_ALIGNED and must not move with it, so the mono "5,728 B per filter per AEC instance" contract is not multiplied by
+ * EXTERNAL_ALIGNED and must not move with it, so the mono "11,264 B per filter per AEC instance (16 kHz)" contract is not multiplied by
  * four here. */
 static void test_known_delay_memory_and_cost(void) {
     AecMemBreakdown b[6];
@@ -1051,11 +1048,11 @@ static void test_known_delay_memory_and_cost(void) {
     /* The pieces of the one pool: four lanes, the shared estimator, the ring and the flow's own buffers. */
     for (n = 1; n <= 5; ++n) {
         AfConfig cfg = af_default_config(16000);
-        AecConfig ac;
+        AecTestCfg ac;
         cfg.fft_size = 512;
         cfg.delay_num_filters = n;
         af_to_aec(&cfg, &ac);
-        if (aec_get_mem_breakdown(&ac, &b[n]) != AEC_OK || aec_get_mem_requirements(&ac, &req[n]) != 0 ||
+        if (aec_tcfg_mem_breakdown(&ac, &b[n]) != AEC_OK || aec_tcfg_mem_requirements(&ac, &req[n]) != 0 ||
             b[n].estimator_bytes == 0) {
             ok = 0;
             break;
@@ -2386,7 +2383,7 @@ static void mixed_hop_run(int sample_rate, int fft_size, int strong_delay,
                           MixedHopRun* out) {
     enum { MH_PAD = 4096 };
     AfConfig cfg = af_default_config(sample_rate);
-    AecConfig lane_cfg;
+    AecTestCfg lane_cfg;
     Af* p = NULL;
     Aec* ref_lane[AF_CHANNELS] = {NULL, NULL, NULL, NULL};
     void* ref_pool[AF_CHANNELS] = {NULL, NULL, NULL, NULL};
@@ -2416,11 +2413,11 @@ static void mixed_hop_run(int sample_rate, int fft_size, int strong_delay,
     hop = af_hop_size(p);
     n_freqs = af_n_freqs(p);
     {
-        size_t bytes = aec_get_mem_size(&lane_cfg);
+        size_t bytes = aec_tcfg_mem_size(&lane_cfg);
         for (ch = 0; ch < AF_CHANNELS; ++ch) {
             if (bytes == 0 ||
                 posix_memalign(&ref_pool[ch], 16, bytes) != 0) goto cleanup;
-            ref_lane[ch] = aec_init(ref_pool[ch], bytes, &lane_cfg);
+            ref_lane[ch] = aec_tcfg_init(ref_pool[ch], bytes, &lane_cfg);
             if (!ref_lane[ch]) goto cleanup;
         }
     }
@@ -3382,7 +3379,7 @@ static int render_matches_reference(const Complex* b, const Complex* w, const Co
 typedef struct RefLanes {
     Aec* lane[AF_CHANNELS];
     void* pool[AF_CHANNELS];
-    AecConfig cfg;
+    AecTestCfg cfg;
     int prev_solid, prev_delay, n_freqs, hop;
     float* mic;
 } RefLanes;
@@ -3391,9 +3388,9 @@ static int ref_lanes_init(RefLanes* r, const AfConfig* c) {
     size_t bytes;
     int ch;
     memset(r, 0, sizeof *r);
-    if (lane_config_for(c, &r->cfg) != 0 || (bytes = aec_get_mem_size(&r->cfg)) == 0) return -1;
+    if (lane_config_for(c, &r->cfg) != 0 || (bytes = aec_tcfg_mem_size(&r->cfg)) == 0) return -1;
     for (ch = 0; ch < AF_CHANNELS; ++ch) {
-        if (posix_memalign(&r->pool[ch], 16, bytes) != 0 || !(r->lane[ch] = aec_init(r->pool[ch], bytes, &r->cfg))) return -1;
+        if (posix_memalign(&r->pool[ch], 16, bytes) != 0 || !(r->lane[ch] = aec_tcfg_init(r->pool[ch], bytes, &r->cfg))) return -1;
     }
     r->hop = aec_hop_size(r->lane[0]);
     r->n_freqs = r->hop + 1;
@@ -3489,7 +3486,7 @@ static void test_lane_contract_parity(void) {
     CHECK(serial_ok, "lane contract: the array's serial is the lanes' counters summed, +4 per aec_reset");
 }
 
-/* A non-finite hop after a good linear stage: AEC_ERR_ARG, the old linear stage stays pending, and no state moved (a
+/* A non-finite hop after a good linear stage: AEC_ERR_ARG, the linear stage stays pending, and no state moved (a
  * twin that never saw the refused call stays bit-identical afterwards). */
 static void test_nonfinite_hop_invalidates_front(void) {
     AfConfig cfg = af_default_config(16000);
@@ -3529,16 +3526,16 @@ static void test_nonfinite_hop_invalidates_front(void) {
 /* aec_create(): the heap arena holds the whole array (lanes, estimator, fusion); the same flow as a caller pool. */
 static void test_create_heap_path(void) {
     AfConfig cfg = af_default_config(16000);
-    AecConfig ac;
+    AecTestCfg ac;
     AecMemReq req;
     void* pool = NULL;
     Aec *pooled = NULL, *heap;
     float mic[128 * AF_CHANNELS], ref[128];
     int frame, k, same = 1;
     af_to_aec(&cfg, &ac);
-    CHECK(aec_get_mem_requirements(&ac, &req) == 0 && posix_memalign(&pool, 16, (size_t)req.bytes) == 0, "create: pool and descriptor");
+    CHECK(aec_tcfg_mem_requirements(&ac, &req) == 0 && posix_memalign(&pool, 16, (size_t)req.bytes) == 0, "create: pool and descriptor");
     heap = af_test_create(&cfg);
-    if (pool) pooled = aec_init_ex(pool, (size_t)req.bytes, &ac, &req);
+    if (pool) pooled = aec_tcfg_init_ex(pool, (size_t)req.bytes, &ac, &req);
     CHECK(heap != NULL && pooled != NULL && af_hop_size(heap) == 128, "create: the heap array and the pooled array build");
     for (frame = 0; heap && pooled && frame < 20; ++frame) {
         AfFront fh, fp;
@@ -3549,11 +3546,11 @@ static void test_create_heap_path(void) {
     }
     CHECK(same, "create: the heap array equals a caller-pool array bit for bit");
     {
-        AecConfig bad = ac;
-        Aec tmp;
-        bad.capture_proxy_channel = 9;
-        CHECK(aec_create(&tmp, &bad) == -1 && aec_create(NULL, &ac) == -1 && aec_create(&tmp, NULL) == -1 &&
-                  aec_init(pool, (size_t)req.bytes, &bad) == NULL,
+        AecTestCfg bad = ac;
+        Aec *tmp = NULL;
+        bad.c.capture_proxy_channel = 9;
+        CHECK((tmp = aec_tcfg_create(&bad)) == NULL && (tmp = aec_create(NULL)) == NULL &&
+                  aec_tcfg_init(pool, (size_t)req.bytes, &bad) == NULL,
               "create: refused configs or NULL give no handle");
     }
     af_test_destroy(heap);
@@ -3561,8 +3558,7 @@ static void test_create_heap_path(void) {
     free(pool);
 }
 
-/* A reset instance acquires the delay exactly like a new one (the old suite's "re-init after the application reset its
- * objects": the lanes and the estimator are inside the array now, so the reset is aec_reset()). */
+/* A reset instance (aec_reset()) acquires the delay exactly like a new one. */
 static void test_reinit_after_reset(void) {
     enum { FRAMES = 300, TRUE_DELAY = 608 };
     AfConfig cfg = af_default_config(16000);
@@ -4088,8 +4084,8 @@ static void test_unit_weight_matches_full_mode(int sample_rate, int fft_size, in
     AfConfig cfg = af_default_config(sample_rate);
     GuardScene sc;
     Af* p = NULL;
-    Aec* twin = (Aec*)calloc(1, sizeof(Aec));
-    AecConfig lane;
+    Aec* twin = NULL;
+    AecTestCfg lane;
     OracleSynth good, m_e, m_serial, m_seed;
     Complex* w = NULL;
     float *out_twin = NULL, *out = NULL, *out_m = NULL, *mic0 = NULL;
@@ -4100,15 +4096,15 @@ static void test_unit_weight_matches_full_mode(int sample_rate, int fft_size, in
     cfg.fft_size = fft_size;
     cfg.delay_mode = AEC_DELAY_EXTERNAL_ALIGNED;
     p = af_test_create(&cfg);
-    twin_ok = p && twin && lane_config_for(&cfg, &lane) == 0;
+    twin_ok = p && lane_config_for(&cfg, &lane) == 0;
     if (twin_ok) {
-        lane.residual = AEC_RESIDUAL_FULL;       /* the full-mode twin of lane 0: aec_process() applies its own gain */
-        lane.enable_cng = cng;
-        twin_ok = aec_create(twin, &lane) == 0;
+        lane.c.residual = AEC_RESIDUAL_FULL;       /* the full-mode twin of lane 0: aec_process() applies its own gain */
+        lane.c.enable_cng = cng;
+        twin_ok = (twin = aec_tcfg_create(&lane)) != NULL;
     }
     if (!twin_ok || guard_scene_make(&sc, sample_rate, af_hop_size(p), 10) != 0) {
         CHECK(0, "full-mode twin: flow, twin and scene build");
-        free(twin);
+        aec_destroy(twin);
         af_test_destroy(p);
         guard_scene_free(&sc);
         return;
@@ -4176,7 +4172,6 @@ static void test_unit_weight_matches_full_mode(int sample_rate, int fft_size, in
     oracle_synth_free(&m_serial);
     oracle_synth_free(&m_seed);
     aec_destroy(twin);
-    free(twin);
     free(w);
     free(out_twin);
     free(out);
@@ -4227,7 +4222,7 @@ static void test_delay_request_rules(void) {
     int r, bad = 0, refused_untouched = 1;
     for (r = 0; r < count; ++r) {
         AfConfig cfg, host;
-        AecConfig ac;
+        AecTestCfg ac;
         AecMemReq req, host_req;
         unsigned char* pool = NULL;
         size_t i;
@@ -4252,7 +4247,7 @@ static void test_delay_request_rules(void) {
         if (af_get_mem_requirements(&host, &host_req) == 0 &&
             posix_memalign((void**)&pool, 16, (size_t)host_req.bytes) == 0) {
             memset(pool, 0xa5, (size_t)host_req.bytes);
-            p = aec_init(pool, (size_t)host_req.bytes, &ac);
+            p = aec_tcfg_init(pool, (size_t)host_req.bytes, &ac);
             got_init = p ? 0 : -1;
             if (!rows[r].accept)
                 for (i = 0; i < (size_t)host_req.bytes; ++i)

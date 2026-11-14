@@ -27,6 +27,8 @@
 #include <string.h>
 
 #include "aec.h"
+#include "aec_white_box.h"
+#include "aec_test_tuning.h"
 #include "utility/simd_aec.h"
 
 #define SR   16000
@@ -143,25 +145,25 @@ static void run_silent_hop(Aec* a, float* out)
 /* res_context=1 runs the post-filter chain through the split entry points (residual FULL, no gain applied): the emitted
  * samples are still exactly the linear residual (raw_output). That is the seam configuration a multi-lane wrapper -- the
  * caller this API exists for -- runs. */
-static int make_external_ctx(Aec* a, int warm_transfer, int res_context)
+static Aec* make_external_ctx(int warm_transfer, int res_context)
 {
-    AecConfig cfg;
-    aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, SR);
-    cfg.fft_size = FFT;
-    cfg.residual = res_context ? AEC_RESIDUAL_FULL : AEC_RESIDUAL_OFF;   /* output IS the linear residual */
-    cfg.delay_mode = AEC_DELAY_EXTERNAL_ALIGNED;
-    cfg.delay_acquire_warm_transfer = warm_transfer;
-    return aec_create(a, &cfg);
+    AecTestCfg cfg;
+    aec_tcfg_from_level(&cfg, AEC_LEVEL_BALANCED, SR);
+    cfg.c.fft_size = FFT;
+    cfg.c.residual = res_context ? AEC_RESIDUAL_FULL : AEC_RESIDUAL_OFF;   /* output IS the linear residual */
+    cfg.c.delay_mode = AEC_DELAY_EXTERNAL_ALIGNED;
+    cfg.t.delay_acquire_warm_transfer = warm_transfer;
+    return aec_tcfg_create(&cfg);
 }
 
-static int make_external(Aec* a, int warm_transfer)
+static Aec* make_external(int warm_transfer)
 {
-    return make_external_ctx(a, warm_transfer, 0);
+    return make_external_ctx(warm_transfer, 0);
 }
 
 int main(void)
 {
-    Aec aec, twin, back, soft;
+    Aec *aec = NULL, *twin = NULL, *back = NULL, *soft = NULL;
     float out[HOP];
     int h, rc;
     float resid, worst, echo;
@@ -169,51 +171,51 @@ int main(void)
     scene_init();
 
     /* --- Row 1: warm transfer holds cancellation across raw -> aligned. */
-    rc = make_external(&aec, 1);
-    CHECK(rc == 0 && aec_hop_size(&aec) == HOP, "external instance: create");
+    rc = ((aec = make_external(1)) ? 0 : -1);
+    CHECK(rc == 0 && aec_hop_size(aec) == HOP, "external instance: create");
     resid = 0.0f;
-    for (h = 0; h < HOPS; ++h) resid = run_hop(&aec, h, 0, out);
+    for (h = 0; h < HOPS; ++h) resid = run_hop(aec, h, 0, out);
     echo = echo_rms(HOPS - 1);
     CHECK(resid < 0.5f * echo, "raw-far convergence before the realign");
-    rc = aec_apply_external_realign(&aec, D - 0);
+    rc = aec_apply_external_realign(aec, D - 0);
     CHECK(rc == 1, "realign(+D) takes the warm tap-transfer path");
     worst = 0.0f;
     for (h = HOPS; h < HOPS + TAIL; ++h) {
-        resid = run_hop(&aec, h, D, out);
+        resid = run_hop(aec, h, D, out);
         if (resid > worst) worst = resid;
     }
     CHECK(worst < 0.5f * echo_rms(HOPS),
           "no echo re-exposure after the warm realign");
 
     /* --- Row 2: the defect reproduces on a twin with aec_reset(). */
-    rc = make_external(&twin, 1);
+    rc = ((twin = make_external(1)) ? 0 : -1);
     CHECK(rc == 0, "twin instance: create");
-    for (h = 0; h < HOPS; ++h) run_hop(&twin, h, 0, out);
-    aec_reset(&twin);
+    for (h = 0; h < HOPS; ++h) run_hop(twin, h, 0, out);
+    aec_reset(twin);
     worst = 0.0f;
     for (h = HOPS; h < HOPS + TAIL; ++h) {
-        resid = run_hop(&twin, h, D, out);
+        resid = run_hop(twin, h, D, out);
         if (resid > worst) worst = resid;
     }
     CHECK(worst >= 0.8f * echo_rms(HOPS),
           "aec_reset() control re-exposes the echo (defect reproduces)");
 
     /* --- Row 3: signed shift, aligned -> raw (delta < 0). */
-    rc = make_external(&back, 1);
+    rc = ((back = make_external(1)) ? 0 : -1);
     CHECK(rc == 0, "signed-shift instance: create");
-    for (h = 0; h < HOPS; ++h) run_hop(&back, h, D, out);
-    resid = run_hop(&back, HOPS, D, out);
+    for (h = 0; h < HOPS; ++h) run_hop(back, h, D, out);
+    resid = run_hop(back, HOPS, D, out);
     CHECK(resid < 0.5f * echo_rms(HOPS), "aligned-far convergence at lag 0");
-    rc = aec_apply_external_realign(&back, 0 - D);
+    rc = aec_apply_external_realign(back, 0 - D);
     CHECK(rc == 1, "realign(-D) takes the warm tap-transfer path");
     /* Asserted HERE, before the refill hops: the retard branch is the only
      * place the far history is wiped mid-stream, and the frontend rewrites one
      * mirror row per hop, so a few hops of processing would repair the very
      * inconsistency this is looking for. */
-    CHECK(x2_mirror_mismatches(&back.main_filter.base) == 0,
+    CHECK(x2_mirror_mismatches(&back->main_filter.base) == 0,
           "retard realign leaves the main filter's |X|² mirror consistent with X_buf");
-    CHECK(!back.has_shadow ||
-          x2_mirror_mismatches(&back.shadow_filter) == 0,
+    CHECK(!back->has_shadow ||
+          x2_mirror_mismatches(&back->shadow_filter) == 0,
           "retard realign leaves the shadow filter's |X|² mirror consistent with X_buf");
     /* The retard direction (delta < 0) clears the far spectra, so the echo is exposed until the
      * partition ring refills past the shifted response. The general bound is ceil((|delta| + tap
@@ -224,43 +226,43 @@ int main(void)
      * reset control that stays exposed for dozens of hops. */
     worst = 0.0f;
     for (h = HOPS + 1; h < HOPS + 3; ++h) {
-        resid = run_hop(&back, h, 0, out);
+        resid = run_hop(back, h, 0, out);
         if (resid > worst) worst = resid;
     }
     CHECK(worst <= 1.05f * echo_rms(HOPS),
           "negative-delta transient is bounded by the echo itself");
     worst = 0.0f;
     for (h = HOPS + 3; h < HOPS + TAIL; ++h) {
-        resid = run_hop(&back, h, 0, out);
+        resid = run_hop(back, h, 0, out);
         if (resid > worst) worst = resid;
     }
     CHECK(worst < 0.15f * echo_rms(HOPS),
           "negative-delta realign cancels outright after the 2-hop refill");
 
     /* --- Row 4: API contract + reset path. */
-    CHECK(aec_apply_external_realign(&aec, 0) == 0, "delta 0 is a no-op");
+    CHECK(aec_apply_external_realign(aec, 0) == 0, "delta 0 is a no-op");
     CHECK(aec_apply_external_realign(NULL, D) == -1, "NULL is rejected");
     {
         AecConfig cfg;
-        Aec matched;
+        Aec *matched = NULL;
         aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, SR);
         cfg.fft_size = FFT;
-        rc = aec_create(&matched, &cfg);
+        rc = ((matched = aec_create(&cfg)) ? 0 : -1);
         CHECK(rc == 0 &&
-              aec_apply_external_realign(&matched, D) == -1,
+              aec_apply_external_realign(matched, D) == -1,
               "MATCHED mode is rejected");
-        aec_destroy(&matched);
+        aec_destroy(matched);
     }
-    rc = make_external(&soft, 0);          /* warm transfer disabled */
+    rc = ((soft = make_external(0)) ? 0 : -1);          /* warm transfer disabled */
     CHECK(rc == 0, "soft instance: create");
-    for (h = 0; h < HOPS; ++h) run_hop(&soft, h, D, out);
+    for (h = 0; h < HOPS; ++h) run_hop(soft, h, D, out);
     {
         AecLinearView c0, c1;
         c0.struct_size = c1.struct_size = sizeof c0;
-        CHECK(aec_get_linear(&soft, &c0) == AEC_OK, "linear view before the realign");
-        CHECK(aec_apply_external_realign(&soft, 64) == 0,
+        CHECK(aec_get_linear(soft, &c0) == AEC_OK, "linear view before the realign");
+        CHECK(aec_apply_external_realign(soft, 64) == 0,
               "gate off falls to the reset path");
-        CHECK(aec_get_linear(&soft, &c1) == AEC_OK, "linear view after the realign");
+        CHECK(aec_get_linear(soft, &c1) == AEC_OK, "linear view after the realign");
         /* EXTERNAL_ALIGNED owns no ring offset, so this call is the only thing
          * that can ever move the token a consumer polls to flush far caches.
          * Both outcomes must move it -- the warm instance from row 1 realigned
@@ -275,30 +277,30 @@ int main(void)
      * ring, so a ring-only gate reads "not cancelling" and throws away a
      * filter that is cancelling at ~13 dB windowed. */
     {
-        Aec gap;
+        Aec *gap = NULL;
         AecLinearView g0, g1;
         g0.struct_size = g1.struct_size = sizeof g0;
-        rc = make_external_ctx(&gap, 1, 1);
+        rc = ((gap = make_external_ctx(1, 1)) ? 0 : -1);
         CHECK(rc == 0, "silent-gap instance: create");
-        for (h = 0; h < HOPS; ++h) resid = run_hop(&gap, h, 0, out);
+        for (h = 0; h < HOPS; ++h) resid = run_hop(gap, h, 0, out);
         CHECK(resid < 0.5f * echo_rms(HOPS - 1),
               "silent-gap: raw-far convergence before the silence");
-        for (h = 0; h < GAP; ++h) run_silent_hop(&gap, out);
-        CHECK(aec_get_linear(&gap, &g0) == AEC_OK, "silent-gap: linear view before the realign");
-        rc = aec_apply_external_realign(&gap, D - 0);
+        for (h = 0; h < GAP; ++h) run_silent_hop(gap, out);
+        CHECK(aec_get_linear(gap, &g0) == AEC_OK, "silent-gap: linear view before the realign");
+        rc = aec_apply_external_realign(gap, D - 0);
         CHECK(rc == 1,
               "silent-gap realign still takes the warm tap-transfer path");
-        CHECK(aec_get_linear(&gap, &g1) == AEC_OK, "silent-gap: linear view after the realign");
+        CHECK(aec_get_linear(gap, &g1) == AEC_OK, "silent-gap: linear view after the realign");
         CHECK(g1.generation != g0.generation,
               "warm outcome advances the alignment generation");
         worst = 0.0f;
         for (h = HOPS + GAP; h < HOPS + GAP + OBS; ++h) {
-            resid = run_hop(&gap, h, D, out);
+            resid = run_hop(gap, h, D, out);
             if (resid / echo_rms(h) > worst) worst = resid / echo_rms(h);
         }
         CHECK(worst < 0.5f,
               "silent-gap warm realign keeps the residual under half the echo");
-        aec_destroy(&gap);
+        aec_destroy(gap);
     }
 
     /* --- Row 6: the reset branch reconverges like an aec_reset() twin.
@@ -308,26 +310,26 @@ int main(void)
      * trajectory a full restart achieves, and the filter-only reset has to
      * match it while leaving synthesis alone. */
     {
-        Aec sres, sref;
+        Aec *sres = NULL, *sref = NULL;
         static const int CK[] = { 5, 10, 20, 40, 80, 120 };
         float rs[TRAJ + 1], rt[TRAJ + 1];
         size_t ci;
         char msg[96];
-        CHECK(make_external_ctx(&sres, 0, 1) == 0 &&
-              make_external_ctx(&sref, 0, 1) == 0, "reset-trajectory pair: create");
-        for (h = 0; h < HOPS; ++h) { run_hop(&sres, h, 0, out); run_hop(&sref, h, 0, out); }
-        resid = run_hop(&sres, HOPS, 0, out);
-        (void)run_hop(&sref, HOPS, 0, out);
+        CHECK((sres = make_external_ctx(0, 1)) != NULL &&
+              (sref = make_external_ctx(0, 1)) != NULL, "reset-trajectory pair: create");
+        for (h = 0; h < HOPS; ++h) { run_hop(sres, h, 0, out); run_hop(sref, h, 0, out); }
+        resid = run_hop(sres, HOPS, 0, out);
+        (void)run_hop(sref, HOPS, 0, out);
         CHECK(resid < 0.1f * echo_rms(HOPS),
               "reset-trajectory: converged before the realign");
-        CHECK(aec_apply_external_realign(&sres, D - 0) == 0,
+        CHECK(aec_apply_external_realign(sres, D - 0) == 0,
               "reset-trajectory: warm transfer off takes the reset path");
-        aec_reset(&sref);
+        aec_reset(sref);
         for (h = 1; h <= TRAJ; ++h) {
             int hh = HOPS + h;
             float e = echo_rms(hh);
-            rs[h] = run_hop(&sres, hh, D, out) / e;
-            rt[h] = run_hop(&sref, hh, D, out) / e;
+            rs[h] = run_hop(sres, hh, D, out) / e;
+            rt[h] = run_hop(sref, hh, D, out) / e;
         }
         for (ci = 0; ci < sizeof(CK) / sizeof(CK[0]); ++ci) {
             int k = CK[ci];
@@ -340,8 +342,8 @@ int main(void)
         snprintf(msg, sizeof msg,
                  "reset-trajectory settles at %.4f x echo (< 0.1)", worst);
         CHECK(worst < 0.1f, msg);
-        aec_destroy(&sres);
-        aec_destroy(&sref);
+        aec_destroy(sres);
+        aec_destroy(sref);
     }
 
     /* --- Row 7: the reset path leaves no coarse/leakage sustain evidence behind. Those counters accumulate evidence about the
@@ -355,33 +357,33 @@ int main(void)
      * poor_coarse_counter cannot be observed non-zero on this grid, since its threshold is one hop and it self-clears within
      * the hop that sets it, and coarse_reset_hangover only arms behind that fire; those two carry no can-fail evidence. */
     {
-        Aec ctr;
+        Aec *ctr = NULL;
         int k;
-        CHECK(make_external_ctx(&ctr, 0, 1) == 0, "counter-hygiene instance: create");
-        for (h = 0; h <= HOPS; ++h) run_hop(&ctr, h, 0, out);
-        CHECK(ctr.leakage_div_sustained_counter > 0,
+        CHECK((ctr = make_external_ctx(0, 1)) != NULL, "counter-hygiene instance: create");
+        for (h = 0; h <= HOPS; ++h) run_hop(ctr, h, 0, out);
+        CHECK(ctr->leakage_div_sustained_counter > 0,
               "counter-hygiene: the scene really does dirty the leakage counter");
-        CHECK(aec_apply_external_realign(&ctr, D - 0) == 0,
+        CHECK(aec_apply_external_realign(ctr, D - 0) == 0,
               "counter-hygiene: takes the reset path");
-        CHECK(ctr.poor_coarse_counter == 0 &&
-              ctr.coarse_reset_hangover == 0 &&
-              ctr.leakage_div_sustained_counter == 0,
+        CHECK(ctr->poor_coarse_counter == 0 &&
+              ctr->coarse_reset_hangover == 0 &&
+              ctr->leakage_div_sustained_counter == 0,
               "counter-hygiene: coarse/leakage counters cleared by the realign");
         char msg[112];
         for (k = 1; k <= 3; ++k) {
-            run_hop(&ctr, HOPS + k, D, out);
+            run_hop(ctr, HOPS + k, D, out);
             snprintf(msg, sizeof msg,
                      "counter-hygiene +%d: leakage counter %d <= %d (no pre-realign drain)",
-                     k, ctr.leakage_div_sustained_counter, k);
-            CHECK(ctr.leakage_div_sustained_counter <= k, msg);
+                     k, ctr->leakage_div_sustained_counter, k);
+            CHECK(ctr->leakage_div_sustained_counter <= k, msg);
         }
-        aec_destroy(&ctr);
+        aec_destroy(ctr);
     }
 
-    aec_destroy(&aec);
-    aec_destroy(&twin);
-    aec_destroy(&back);
-    aec_destroy(&soft);
+    aec_destroy(aec);
+    aec_destroy(twin);
+    aec_destroy(back);
+    aec_destroy(soft);
     free(g_far_hist);
     if (g_failures) { fprintf(stderr, "%d failure(s)\n", g_failures); return 1; }
     printf("test_external_realign: ALL PASS\n");

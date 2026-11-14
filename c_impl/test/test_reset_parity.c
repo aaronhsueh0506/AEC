@@ -104,7 +104,7 @@ static void view(const Aec* a, AecResidualView* v) {
 /* One (grid, mode) case. Returns 1 on byte identity. */
 static int case_run(int sr, int fft_size, int ctx_only) {   /* ctx_only: the split-entry consumption mode */
     AecConfig cfg;
-    Aec fresh, warmed;
+    Aec *fresh = NULL, *warmed = NULL;
     Scene sc_warm, sc_a, sc_b;
     float *mic, *ref, *out_a, *out_b, *formed_a;
     Complex *espec_a;
@@ -116,12 +116,12 @@ static int case_run(int sr, int fft_size, int ctx_only) {   /* ctx_only: the spl
     cfg.fft_size = fft_size;
     cfg.residual = AEC_RESIDUAL_FULL;
 
-    if (aec_create(&fresh, &cfg) != 0 || aec_create(&warmed, &cfg) != 0) {
+    if ((fresh = aec_create(&cfg)) == NULL || (warmed = aec_create(&cfg)) == NULL) {
         printf("FAIL: aec_create sr=%d fft=%d\n", sr, fft_size);
         g_fail++;
         return 0;
     }
-    hop = aec_hop_size(&fresh);
+    hop = aec_hop_size(fresh);
     n_freqs = fft_size / 2 + 1;
 
     mic      = (float*)malloc((size_t)hop * sizeof(float));
@@ -136,9 +136,9 @@ static int case_run(int sr, int fft_size, int ctx_only) {   /* ctx_only: the spl
     scene_init(&sc_warm, 1234567u, 611, 0.65f);
     for (h = 0; h < WARM_HOPS; ++h) {
         scene_hop(&sc_warm, mic, ref, hop, h);
-        step(&warmed, ctx_only, mic, ref, out_b);
+        step(warmed, ctx_only, mic, ref, out_b);
     }
-    aec_reset(&warmed);
+    aec_reset(warmed);
 
     /* Identical seeds: the two instances see the same bytes hop for hop. */
     scene_init(&sc_a, 0x89abcdefu, 293, 0.5f);
@@ -147,8 +147,8 @@ static int case_run(int sr, int fft_size, int ctx_only) {   /* ctx_only: the spl
         AecResidualView ctx_a, ctx_b;
 
         scene_hop(&sc_a, mic, ref, hop, h);
-        step(&fresh, ctx_only, mic, ref, out_a);
-        view(&fresh, &ctx_a);
+        step(fresh, ctx_only, mic, ref, out_a);
+        view(fresh, &ctx_a);
         /* The context pointers alias per-hop internals both instances
          * overwrite, so snapshot the reference side before driving the
          * subject. */
@@ -156,8 +156,8 @@ static int case_run(int sr, int fft_size, int ctx_only) {   /* ctx_only: the spl
         memcpy(espec_a, ctx_a.error_spec, (size_t)n_freqs * sizeof(Complex));
 
         scene_hop(&sc_b, mic, ref, hop, h);
-        step(&warmed, ctx_only, mic, ref, out_b);
-        view(&warmed, &ctx_b);
+        step(warmed, ctx_only, mic, ref, out_b);
+        view(warmed, &ctx_b);
 
         if (!ctx_only && memcmp(out_a, out_b, (size_t)hop * sizeof(float))) {
             d_out++; if (first_bad < 0) first_bad = h;
@@ -180,8 +180,8 @@ static int case_run(int sr, int fft_size, int ctx_only) {   /* ctx_only: the spl
            first_bad);
     if (ok) g_pass++; else g_fail++;
 
-    aec_destroy(&fresh);
-    aec_destroy(&warmed);
+    aec_destroy(fresh);
+    aec_destroy(warmed);
     free(mic); free(ref); free(out_a); free(out_b);
     free(formed_a); free(espec_a);
     return ok;

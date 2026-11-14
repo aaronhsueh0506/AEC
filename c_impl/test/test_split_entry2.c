@@ -9,6 +9,7 @@
  * Run from c_impl/:  make test-split-entry-2   (G2_VERBOSE=<file> writes every hop's unchained group hashes) */
 #include "aec.h"
 #include "../src/aec_res_internal.h"
+#include "aec_test_tuning.h"
 #include "utility/simd_kernels.h"
 
 #include <math.h>
@@ -110,7 +111,7 @@ static uint64_t view_hash(const Aec* a, const AecLinearView* lv, const AecResidu
 }
 
 static void test_alternation(const G2MonoCase* c, int enable_cng, const char* label) {
-    AecConfig cfg;
+    AecTestCfg cfg;
     void *m0 = NULL, *m1 = NULL;
     float out0[1024], out1[1024];
     int hop = c->fft / 2, n_hops, ns, same_out = 0, cmp_out = 0;
@@ -119,9 +120,9 @@ static void test_alternation(const G2MonoCase* c, int enable_cng, const char* la
     cc.tog = enable_cng ? 0 : G2T_NOCNG;
     cc.n_ev = 0;
     g2m_apply_cfg(&cfg, &cc, 0);
-    size_t sz = aec_get_mem_size(&cfg);
-    Aec* p = (m0 = g2_pool(sz)) ? aec_init(m0, sz, &cfg) : NULL;
-    Aec* x = (m1 = g2_pool(sz)) ? aec_init(m1, sz, &cfg) : NULL;
+    size_t sz = aec_tcfg_mem_size(&cfg);
+    Aec* p = (m0 = g2_pool(sz)) ? aec_tcfg_init(m0, sz, &cfg) : NULL;
+    Aec* x = (m1 = g2_pool(sz)) ? aec_tcfg_init(m1, sz, &cfg) : NULL;
     CHECK(p && x, "alternation: init %s", label);
     if (!p || !x) return;
     n_hops = (int)((int64_t)cc.dur_ms * cc.sr / 1000 / hop); ns = n_hops * hop;
@@ -154,8 +155,8 @@ static void test_alternation(const G2MonoCase* c, int enable_cng, const char* la
 
 /* ---- the carve of every instance kind ends exactly at aec_get_mem_size() ---------------------------------------------------- */
 #define GUARD 256
-static void check_pool_end(const AecConfig* cfg, const char* label) {
-    size_t sz = aec_get_mem_size(cfg);
+static void check_pool_end(const AecTestCfg* cfg, const char* label) {
+    size_t sz = aec_tcfg_mem_size(cfg);
     uint8_t* mem = NULL;
     int ok = 1;
     CHECK(sz > 0, "carve %s: size", label);
@@ -163,11 +164,11 @@ static void check_pool_end(const AecConfig* cfg, const char* label) {
     if (posix_memalign((void**)&mem, 64u, sz + GUARD) != 0) { CHECK(0, "carve %s: alloc", label); return; }
     memset(mem, 0xC5, sz + GUARD);
     {
-        Aec* a = aec_init(mem, sz, cfg);
+        Aec* a = aec_tcfg_init(mem, sz, cfg);
         CHECK(a != NULL, "carve %s: aec_init with exactly aec_get_mem_size() bytes", label);
         if (a) {
             float mic[4096], ref[2048], out[2048];
-            const int hop = aec_hop_size(a), mics = cfg->n_mics > 0 ? cfg->n_mics : 1;
+            const int hop = aec_hop_size(a), mics = cfg->c.n_mics > 0 ? cfg->c.n_mics : 1;
             for (int h = 0; h < 6; ++h) {
                 for (int i = 0; i < hop; ++i) {
                     ref[i] = 0.1f * (float)(((i * 7 + h * 13) % 17) - 8) / 8.0f;
@@ -183,7 +184,7 @@ static void check_pool_end(const AecConfig* cfg, const char* label) {
     for (size_t i = 0; i < GUARD; ++i) if (mem[sz + i] != 0xC5) { ok = 0; break; }
     CHECK(ok, "carve %s: the pool was written past aec_get_mem_size()", label);
     /* one byte short: refused */
-    CHECK(aec_init(mem, sz - 16, cfg) == NULL, "carve %s: a pool 16 bytes short must be refused", label);
+    CHECK(aec_tcfg_init(mem, sz - 16, cfg) == NULL, "carve %s: a pool 16 bytes short must be refused", label);
     free(mem);
 }
 
@@ -193,11 +194,11 @@ static void test_carve_end(void) {
     for (int g = 0; g < 4; ++g) {
         for (int m = 0; m < 3; ++m) {                                   /* delay modes */
             for (int r = 0; r < 4; ++r) {
-                AecConfig cfg; char label[64];
-                aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, grid[g].sr);
-                cfg.fft_size = grid[g].fft; cfg.residual = rm[r];
-                cfg.delay_mode = m == 0 ? AEC_DELAY_MATCHED : m == 1 ? AEC_DELAY_FIXED : AEC_DELAY_EXTERNAL_ALIGNED;
-                cfg.fixed_delay_samples = m == 1 ? 40 * grid[g].sr / 1000 : -1;
+                AecTestCfg cfg; char label[64];
+                aec_tcfg_from_level(&cfg, AEC_LEVEL_BALANCED, grid[g].sr);
+                cfg.c.fft_size = grid[g].fft; cfg.c.residual = rm[r];
+                cfg.c.delay_mode = m == 0 ? AEC_DELAY_MATCHED : m == 1 ? AEC_DELAY_FIXED : AEC_DELAY_EXTERNAL_ALIGNED;
+                cfg.c.fixed_delay_samples = m == 1 ? 40 * grid[g].sr / 1000 : -1;
                 snprintf(label, sizeof label, "%d/%d mode%d res%d", grid[g].sr, grid[g].fft, m, r);
                 check_pool_end(&cfg, label);
             }
@@ -207,7 +208,7 @@ static void test_carve_end(void) {
         static const struct { const char* name; int tog; } tg[7] = { {"noshadow", G2T_NOSHADOW}, {"nohpf", G2T_NOHPF}, {"nocng", G2T_NOCNG},
             {"nosat", G2T_NOSAT}, {"observer", G2T_OBSERVER}, {"n2win", G2T_N2WIN}, {"all-off", G2T_NOSHADOW | G2T_NOHPF | G2T_NOCNG | G2T_NOSAT} };
         for (int k = 0; k < 7; ++k) {
-            AecConfig cfg; G2MonoCase c; char label[64];
+            AecTestCfg cfg; G2MonoCase c; char label[64];
             memset(&c, 0, sizeof c); c.sr = 16000; c.fft = 256; c.level = 1; c.tog = tg[k].tog;
             g2m_apply_cfg(&cfg, &c, 1);
             snprintf(label, sizeof label, "16000/256 %s", tg[k].name);
@@ -218,23 +219,23 @@ static void test_carve_end(void) {
     {                                                                    /* arrays: refused by every construction path */
         AecConfig cfg;
         void* mem = NULL;
-        Aec heap;
+        Aec *heap = NULL;
         aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, 16000);
         cfg.n_mics = AEC_ARRAY_MICS;
         cfg.residual = AEC_RESIDUAL_FULL;
         CHECK(aec_get_mem_size(&cfg) == 0, "no-array: n_mics 4 has no pool size");
         CHECK(aec_init(&mem, sizeof mem, &cfg) == NULL, "no-array: aec_init refuses n_mics 4");
-        CHECK(aec_create(&heap, &cfg) == -1, "no-array: aec_create refuses n_mics 4");
+        CHECK((heap = aec_create(&cfg)) == NULL, "no-array: aec_create refuses n_mics 4");
     }
 #else
     for (int g = 0; g < 3; ++g) {                                        /* arrays */
         for (int r = 1; r < 4; ++r) {
             for (int m = 0; m < 3; ++m) {
-                AecConfig cfg; char label[64];
-                aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, grid[g].sr);
-                cfg.fft_size = grid[g].fft; cfg.n_mics = AEC_ARRAY_MICS; cfg.residual = rm[r];
-                cfg.delay_mode = m == 0 ? AEC_DELAY_MATCHED : m == 1 ? AEC_DELAY_FIXED : AEC_DELAY_EXTERNAL_ALIGNED;
-                cfg.fixed_delay_samples = m == 1 ? 40 * grid[g].sr / 1000 : -1;
+                AecTestCfg cfg; char label[64];
+                aec_tcfg_from_level(&cfg, AEC_LEVEL_BALANCED, grid[g].sr);
+                cfg.c.fft_size = grid[g].fft; cfg.c.n_mics = AEC_ARRAY_MICS; cfg.c.residual = rm[r];
+                cfg.c.delay_mode = m == 0 ? AEC_DELAY_MATCHED : m == 1 ? AEC_DELAY_FIXED : AEC_DELAY_EXTERNAL_ALIGNED;
+                cfg.c.fixed_delay_samples = m == 1 ? 40 * grid[g].sr / 1000 : -1;
                 snprintf(label, sizeof label, "array %d/%d mode%d res%d", grid[g].sr, grid[g].fft, m, r);
                 check_pool_end(&cfg, label);
             }

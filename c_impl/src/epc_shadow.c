@@ -40,13 +40,13 @@ void epc_reset(EpcDetector* e) {
 EpcEvent epc_force_delay(EpcDetector* e) {
     e->active   = 1;
     e->hangover = e->epc_hangover;
-    EpcEvent ev = { .fired = 1, .source = EPC_DELAY };
+    EpcEvent ev = { .fired = 1 };
     return ev;
 }
 
 EpcEvent epc_update_epv(EpcDetector* e, float far_pwr_global,
                              int filter_converged, int main_paused) {
-    EpcEvent ev = { .fired = 0, .source = EPC_NONE };
+    EpcEvent ev = { .fired = 0 };
     if (far_pwr_global <= 1e-6f) return ev;
     if (e->epv_gain_fast < 1e-12f) {
         e->epv_gain_fast = e->epv_gain_slow = far_pwr_global;
@@ -62,7 +62,7 @@ EpcEvent epc_update_epv(EpcDetector* e, float far_pwr_global,
         if (ratio < EPV_LOW || ratio > EPV_HIGH) {
             e->active   = 1;
             e->hangover = e->epc_hangover;
-            ev.fired = 1; ev.source = EPC_EPV;
+            ev.fired = 1;
             return ev;
         }
     }
@@ -73,7 +73,7 @@ EpcEvent epc_update_shadow_rise(EpcDetector* e,
                                      float main_err_smooth,
                                      float shadow_err_smooth,
                                      int is_stationary) {
-    EpcEvent ev = { .fired = 0, .source = EPC_NONE };
+    EpcEvent ev = { .fired = 0 };
     float total_err = main_err_smooth + shadow_err_smooth;
     float delta_ratio;
     if (total_err > 1e-10f) {
@@ -90,7 +90,7 @@ EpcEvent epc_update_shadow_rise(EpcDetector* e,
     if (is_echo_change) {
         e->active   = 1;
         e->hangover = e->epc_hangover;
-        ev.fired = 1; ev.source = EPC_SHADOW_RISE;
+        ev.fired = 1;
     }
     return ev;
 }
@@ -166,7 +166,7 @@ ShadowCopyDecision shadow_copy_update(
     float  dt_from_coherence,
     int    delay_reliable) {
 
-    ShadowCopyDecision d = {0,0,0};
+    ShadowCopyDecision d = {0,0};
     if (shadow_frame_count < warmup_hops) return d;
 
     float threshold = s->shadow_copy_threshold;
@@ -194,7 +194,6 @@ ShadowCopyDecision shadow_copy_update(
                 s->copy_counter = 0;
                 s->main_paused = 1;
                 s->pause_resume = s->epc_hangover;
-                d.boost_q = 1;
             }
         } else {
             s->copy_counter = 0;
@@ -222,7 +221,6 @@ ShadowCopyDecision shadow_copy_update(
             s->copy_counter = 0;
             s->main_paused  = 1;
             s->pause_resume = s->epc_hangover;
-            d.boost_q = 1;
         }
         if (s->main_paused) {
             if (s->pause_resume > 0) s->pause_resume--;

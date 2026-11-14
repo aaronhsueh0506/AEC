@@ -1,6 +1,6 @@
 /* test_rate_structural.c -- per-rate structural checks, run by `make test-rate-structural` on each whitelisted
  * grid (8000/256, 16000/256, 16000/512, 48000/1024):
- *   (a)  COLA: the rate's synthesis window (AecBalancedRateDims::synth_window, via aecb_rate_cfg()) satisfies
+ *   (a)  COLA: the rate's synthesis window (the reference table of aec_ref_tables.h, not the library's own rebuild) satisfies
  *        w[i]^2 + w[i+hop_size]^2 == 1 within 1e-6.
  *   (b)  impulse through the linear path (residual OFF, enable_cng = 0): finite output from hop 0 and residual
  *        energy well below mic energy after convergence. (b2): the same excitation through the full post chain
@@ -30,10 +30,12 @@
  *   ./bin/test_rate_structural
  */
 #include "aec.h"
+#include "aec_white_box.h"
 #include "aec_pool_test_util.h"
 #include "aec_balanced_config.h"
+#include "aec_ref_tables.h"
 #include "aec_scale.h"
-#include "aec_test_hooks.h"   /* AEC_TESTING-only; see check (d6) */
+#include "aec_test_tuning.h"   /* AEC_TESTING-only; see check (d6); the tuning overrides */
 
 #include <math.h>
 #include <stdio.h>
@@ -55,16 +57,23 @@ static const TestGrid GRIDS[] = {
 };
 #define N_GRIDS (int)(sizeof(GRIDS) / sizeof(GRIDS[0]))
 
+static const AecRefTables *ref_tables(int sr, int fft_size) {
+    for (int i = 0; i < AECREF_N_GRIDS; ++i)
+        if (AECREF_GRIDS[i].sample_rate == sr && AECREF_GRIDS[i].fft_size == fft_size) return &AECREF_GRIDS[i];
+    return NULL;
+}
+
 /* ── (a) COLA: sqrt-Hann 50%-overlap perfect reconstruction ───────────── */
 static void test_cola(void) {
     for (int r = 0; r < N_GRIDS; ++r) {
         int sr = GRIDS[r].sample_rate;
         int fft_size = GRIDS[r].fft_size;
         const AecBalancedRateDims *rd = aecb_rate_cfg(sr, fft_size);
+        const AecRefTables *ref = ref_tables(sr, fft_size);
         char what[96];
-        snprintf(what, sizeof(what), "sr=%d fft=%d: aecb_rate_cfg() found", sr, fft_size);
-        CHECK(rd != NULL, what);
-        if (!rd) continue;
+        snprintf(what, sizeof(what), "sr=%d fft=%d: aecb_rate_cfg() and the reference window found", sr, fft_size);
+        CHECK(rd != NULL && ref != NULL, what);
+        if (!rd || !ref) continue;
 
         snprintf(what, sizeof(what), "sr=%d: synth_window_len == 2*hop_size", sr);
         CHECK(rd->synth_window_len == 2 * rd->hop_size, what);
@@ -72,8 +81,8 @@ static void test_cola(void) {
         double max_err = 0.0;
         int hop = rd->hop_size;
         for (int i = 0; i < hop; ++i) {
-            double w0 = rd->synth_window[i];
-            double w1 = rd->synth_window[i + hop];
+            double w0 = ref->window[i];
+            double w1 = ref->window[i + hop];
             double recon = w0 * w0 + w1 * w1;
             double err = fabs(recon - 1.0);
             if (err > max_err) max_err = err;
@@ -169,13 +178,13 @@ static void run_impulse_test(int res_enabled, const char *label) {
         cfg.residual = res_enabled ? AEC_RESIDUAL_FULL : AEC_RESIDUAL_OFF;
         cfg.enable_cng = 0;   /* deterministic -- no dither noise floor */
 
-        Aec aec;
-        int rc = aec_create(&aec, &cfg);
+        Aec *aec = NULL;
+        int rc = ((aec = aec_create(&cfg)) ? 0 : -1);
         snprintf(what, sizeof(what), "sr=%d %s: aec_create() for impulse test", sr, label);
         CHECK(rc == 0, what);
         if (rc != 0) continue;
 
-        int hop = aec_hop_size(&aec);
+        int hop = aec_hop_size(aec);
         float *far = (float*)malloc((size_t)hop * sizeof(float));
         float *mic = (float*)malloc((size_t)hop * sizeof(float));
         float *out = (float*)malloc((size_t)hop * sizeof(float));
@@ -205,7 +214,7 @@ static void run_impulse_test(int res_enabled, const char *label) {
                  * write this hop (ring is strictly larger than the lookback). */
                 mic[k] = ECHO_SCALE * echo_src;
             }
-            aec_process(&aec, mic, far, out);
+            aec_process(aec, mic, far, out);
 
             for (int k = 0; k < hop; ++k) {
                 if (!isfinite(out[k])) all_finite = 0;
@@ -228,7 +237,7 @@ static void run_impulse_test(int res_enabled, const char *label) {
                  sr, label, ratio);
         CHECK(ratio <= 0.5, what);
 
-        aec_destroy(&aec);
+        aec_destroy(aec);
         free(far); free(mic); free(out); free(far_hist);
     }
 }
@@ -253,8 +262,8 @@ static void test_res_context_wola_identity(void) {
             int sr = GRIDS[r].sample_rate;
             int fft_size = GRIDS[r].fft_size;
             const AecBalancedRateDims *rd = aecb_rate_cfg(sr, fft_size);
-            AecConfig cfg;
-            Aec aec;
+            AecTestCfg cfg;
+            Aec *aec = NULL;
             FftHandle *fft = NULL;
             float *far = NULL, *mic = NULL, *out = NULL;
             float *previous = NULL, *ifft = NULL, *ola = NULL;
@@ -262,30 +271,34 @@ static void test_res_context_wola_identity(void) {
             float max_recon_error = 0.0f;
             float max_sum_error = 0.0f;
             int context_valid = 1;
+            const float *synth = NULL;
+            int synth_n = 0;
 
-            aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, sr);
-            cfg.fft_size = fft_size;
-            cfg.enable_shadow = shadow;
-            cfg.residual = AEC_RESIDUAL_FULL;
-            cfg.enable_cng = 0;
-            cfg.delay_mode = AEC_DELAY_EXTERNAL_ALIGNED;
-            cfg.enable_highpass = 0;
-            cfg.enable_saturation = 0;
+            aec_tcfg_from_level(&cfg, AEC_LEVEL_BALANCED, sr);
+            cfg.c.fft_size = fft_size;
+            cfg.t.enable_shadow = shadow;
+            cfg.c.residual = AEC_RESIDUAL_FULL;
+            cfg.c.enable_cng = 0;
+            cfg.c.delay_mode = AEC_DELAY_EXTERNAL_ALIGNED;
+            cfg.t.enable_highpass = 0;
+            cfg.t.enable_saturation = 0;
 
-            int rc = rd ? aec_create(&aec, &cfg) : -1;
+            int rc = rd ? ((aec = aec_tcfg_create(&cfg)) ? 0 : -1) : -1;
             if (rc == 0) fft = fft_create(fft_size);
             snprintf(what, sizeof(what),
                      "sr=%d fft=%d shadow=%d: construct WOLA seam test",
                      sr, fft_size, shadow);
             CHECK(rc == 0 && fft != NULL, what);
             if (rc != 0 || !fft) {
-                if (rc == 0) aec_destroy(&aec);
+                if (rc == 0) aec_destroy(aec);
                 fft_destroy(fft);
                 continue;
             }
 
-            int hop = aec_hop_size(&aec);
+            int hop = aec_hop_size(aec);
             int n_freqs = fft_size / 2 + 1;
+            /* The library's own window (rebuilt at init, owned by `aec`): used only before aec_destroy() below. */
+            if (aec_synthesis_window(aec, &synth, &synth_n) != 0 || synth_n != fft_size) context_valid = 0;
             far = (float*)malloc((size_t)hop * sizeof(float));
             mic = (float*)malloc((size_t)hop * sizeof(float));
             out = (float*)malloc((size_t)hop * sizeof(float));
@@ -303,8 +316,8 @@ static void test_res_context_wola_identity(void) {
                     mic[i] = 0.45f * far[i]
                            + 0.025f * (2.0f * lcg_uniform() - 1.0f);
                 }
-                split_hop(&aec, mic, far);
-                if (!residual_view(&aec, &ctx) || !ctx.error_spec || !ctx.echo_spec || !ctx.near_spec ||
+                split_hop(aec, mic, far);
+                if (!residual_view(aec, &ctx) || !ctx.error_spec || !ctx.echo_spec || !ctx.near_spec ||
                     !ctx.formed_hop || ctx.n_freqs != n_freqs ||
                     ctx.hop_size != hop) {
                     context_valid = 0;
@@ -322,7 +335,7 @@ static void test_res_context_wola_identity(void) {
 
                 fft_inverse(fft, ctx.error_spec, ifft);
                 for (int i = 0; i < fft_size; ++i)
-                    ola[i] += ifft[i] * rd->synth_window[i];
+                    ola[i] += ifft[i] * synth[i];
                 for (int i = 0; i < hop; ++i) {
                     float d = fabsf(ola[i] - previous[i]);
                     if (d > max_recon_error) max_recon_error = d;
@@ -352,7 +365,7 @@ static void test_res_context_wola_identity(void) {
 
             free(far); free(mic); free(out); free(previous); free(ifft); free(ola);
             fft_destroy(fft);
-            aec_destroy(&aec);
+            aec_destroy(aec);
         }
     }
 }
@@ -373,8 +386,8 @@ static void test_residual_estimate_matches_baseline(void) {
         for (int r = 0; r < N_GRIDS; ++r) {
             int sr = GRIDS[r].sample_rate;
             int fft_size = GRIDS[r].fft_size;
-            AecConfig cfg;
-            Aec base, spatial;
+            AecTestCfg cfg;
+            Aec *base = NULL, *spatial = NULL;
             float *far = NULL, *mic = NULL, *out_base = NULL, *out_spatial = NULL;
             char what[192];
             int base_res_gain_ever_null = 0;
@@ -386,29 +399,29 @@ static void test_residual_estimate_matches_baseline(void) {
             int saw_dominant_nearend = 0;
             int valid = 1;
 
-            aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, sr);
-            cfg.fft_size = fft_size;
-            cfg.enable_shadow = shadow;
-            cfg.residual = AEC_RESIDUAL_FULL;
-            cfg.enable_cng = 0;
-            cfg.delay_mode = AEC_DELAY_EXTERNAL_ALIGNED;
-            cfg.enable_highpass = 0;
-            cfg.enable_saturation = 0;
+            aec_tcfg_from_level(&cfg, AEC_LEVEL_BALANCED, sr);
+            cfg.c.fft_size = fft_size;
+            cfg.t.enable_shadow = shadow;
+            cfg.c.residual = AEC_RESIDUAL_FULL;
+            cfg.c.enable_cng = 0;
+            cfg.c.delay_mode = AEC_DELAY_EXTERNAL_ALIGNED;
+            cfg.t.enable_highpass = 0;
+            cfg.t.enable_saturation = 0;
 
-            int rc_base = aec_create(&base, &cfg);
-            cfg.residual = AEC_RESIDUAL_ESTIMATE;
-            int rc_spatial = aec_create(&spatial, &cfg);
+            int rc_base = ((base = aec_tcfg_create(&cfg)) ? 0 : -1);
+            cfg.c.residual = AEC_RESIDUAL_ESTIMATE;
+            int rc_spatial = ((spatial = aec_tcfg_create(&cfg)) ? 0 : -1);
             snprintf(what, sizeof(what),
                      "sr=%d fft=%d shadow=%d: construct FULL / ESTIMATE pair",
                      sr, fft_size, shadow);
             CHECK(rc_base == 0 && rc_spatial == 0, what);
             if (rc_base != 0 || rc_spatial != 0) {
-                if (rc_base == 0) aec_destroy(&base);
-                if (rc_spatial == 0) aec_destroy(&spatial);
+                if (rc_base == 0) aec_destroy(base);
+                if (rc_spatial == 0) aec_destroy(spatial);
                 continue;
             }
 
-            int hop = aec_hop_size(&base);
+            int hop = aec_hop_size(base);
             int n_freqs = fft_size / 2 + 1;
             far = (float*)malloc((size_t)hop * sizeof(float));
             mic = (float*)malloc((size_t)hop * sizeof(float));
@@ -434,10 +447,10 @@ static void test_residual_estimate_matches_baseline(void) {
                 }
                 /* Identical inputs fed to both instances every hop -- mic/far
                  * are read-only, so one pair of buffers is safe to reuse. */
-                split_hop(&base, mic, far);
-                memcpy(out_base, base.raw_output, (size_t)hop * sizeof(float));   /* the linear residual */
-                if (aec_process(&spatial, mic, far, out_spatial) != AEC_OK) CHECK(0, "ESTIMATE aec_process");   /* ditto */
-                if (!residual_view(&base, &ctx_base) || !residual_view(&spatial, &ctx_spatial) ||
+                split_hop(base, mic, far);
+                memcpy(out_base, base->raw_output, (size_t)hop * sizeof(float));   /* the linear residual */
+                if (aec_process(spatial, mic, far, out_spatial) != AEC_OK) CHECK(0, "ESTIMATE aec_process");   /* ditto */
+                if (!residual_view(base, &ctx_base) || !residual_view(spatial, &ctx_spatial) ||
                     !ctx_base.r2 || !ctx_base.comfort_noise ||
                     !ctx_base.near_spec || !ctx_base.echo_spec ||
                     !ctx_base.error_spec || !ctx_base.formed_hop ||
@@ -452,7 +465,7 @@ static void test_residual_estimate_matches_baseline(void) {
                 if (ctx_base.res_gain == NULL) base_res_gain_ever_null = 1;
                 if (ctx_spatial.res_gain != NULL) spatial_res_gain_seen_null = 0;
 
-                if (suppression_gain_is_dominant_nearend(&base.a3_sg))
+                if (suppression_gain_is_dominant_nearend(&base->a3_sg))
                     saw_dominant_nearend = 1;
 
                 /* Byte-identical checks (memcmp over the raw arrays), not a numeric-equality proxy: fabsf(a-b) > 0 is false
@@ -531,8 +544,8 @@ static void test_residual_estimate_matches_baseline(void) {
             CHECK(valid && out_identical, what);
 
             free(far); free(mic); free(out_base); free(out_spatial);
-            aec_destroy(&base);
-            aec_destroy(&spatial);
+            aec_destroy(base);
+            aec_destroy(spatial);
         }
     }
 }
@@ -550,7 +563,7 @@ static void test_suppression_gain_dne_prefix_matches_get_gain(void) {
         int sr = GRIDS[r].sample_rate;
         int fft_size = GRIDS[r].fft_size;
         AecConfig cfg;
-        Aec full, prefix_only;
+        Aec *full = NULL, *prefix_only = NULL;
         float *nearend = NULL, *echo = NULL, *echo_unb = NULL, *cn = NULL;
         float *render_block = NULL;
         char what[192];
@@ -563,26 +576,26 @@ static void test_suppression_gain_dne_prefix_matches_get_gain(void) {
         cfg.enable_cng = 0;
         cfg.delay_mode = AEC_DELAY_EXTERNAL_ALIGNED;
 
-        int rc_full = aec_create(&full, &cfg);
-        int rc_prefix = aec_create(&prefix_only, &cfg);
+        int rc_full = ((full = aec_create(&cfg)) ? 0 : -1);
+        int rc_prefix = ((prefix_only = aec_create(&cfg)) ? 0 : -1);
         snprintf(what, sizeof(what),
                  "sr=%d fft=%d: construct DNE-prefix pair", sr, fft_size);
         CHECK(rc_full == 0 && rc_prefix == 0, what);
         if (rc_full != 0 || rc_prefix != 0) {
-            if (rc_full == 0) aec_destroy(&full);
-            if (rc_prefix == 0) aec_destroy(&prefix_only);
+            if (rc_full == 0) aec_destroy(full);
+            if (rc_prefix == 0) aec_destroy(prefix_only);
             continue;
         }
         /* dne_use_during_initial_phase=1 in balanced makes trigger_initial_
          * gate always true regardless -- forcing initial_state off just
          * removes that as a variable to reason about. */
-        suppression_gain_set_initial_state(&full.a3_sg, 0);
-        suppression_gain_set_initial_state(&prefix_only.a3_sg, 0);
+        suppression_gain_set_initial_state(&full->a3_sg, 0);
+        suppression_gain_set_initial_state(&prefix_only->a3_sg, 0);
 
-        int n_bins = full.a3_sg.cfg.n_bins;
-        int hop = aec_hop_size(&full);
-        int trig_hops = full.a3_sg.cfg.dne_trigger_threshold_hops;
-        int hold_hops = full.a3_sg.cfg.dne_hold_duration_hops;
+        int n_bins = full->a3_sg.cfg.n_bins;
+        int hop = aec_hop_size(full);
+        int trig_hops = full->a3_sg.cfg.dne_trigger_threshold_hops;
+        int hold_hops = full->a3_sg.cfg.dne_hold_duration_hops;
         nearend = (float*)malloc((size_t)n_bins * sizeof(float));
         echo = (float*)malloc((size_t)n_bins * sizeof(float));
         echo_unb = (float*)malloc((size_t)n_bins * sizeof(float));
@@ -621,22 +634,22 @@ static void test_suppression_gain_dne_prefix_matches_get_gain(void) {
                 cn[k] = cn_val;
             }
 
-            suppression_gain_get_gain(&full.a3_sg, nearend, echo, echo_unb, cn,
+            suppression_gain_get_gain(&full->a3_sg, nearend, echo, echo_unb, cn,
                                       render_block, /*clock_drift=*/0,
                                       /*saturated_echo=*/0);
-            suppression_gain_update_dominant_nearend(&prefix_only.a3_sg,
+            suppression_gain_update_dominant_nearend(&prefix_only->a3_sg,
                                                       nearend, echo, echo_unb, cn);
 
-            if (full.a3_sg.dne_trigger_counter != prefix_only.a3_sg.dne_trigger_counter)
+            if (full->a3_sg.dne_trigger_counter != prefix_only->a3_sg.dne_trigger_counter)
                 trig_identical = 0;
-            if (full.a3_sg.dne_hold_counter != prefix_only.a3_sg.dne_hold_counter)
+            if (full->a3_sg.dne_hold_counter != prefix_only->a3_sg.dne_hold_counter)
                 hold_identical = 0;
-            if (full.a3_sg.dne_nearend_state != prefix_only.a3_sg.dne_nearend_state)
+            if (full->a3_sg.dne_nearend_state != prefix_only->a3_sg.dne_nearend_state)
                 state_identical = 0;
 
-            if (hi == enter_end - 1 && full.a3_sg.dne_nearend_state) saw_enter = 1;
-            if (hi == hold_check && full.a3_sg.dne_nearend_state) saw_hold = 1;
-            if (hi == total_hops - 1 && !full.a3_sg.dne_nearend_state) saw_exit = 1;
+            if (hi == enter_end - 1 && full->a3_sg.dne_nearend_state) saw_enter = 1;
+            if (hi == hold_check && full->a3_sg.dne_nearend_state) saw_hold = 1;
+            if (hi == total_hops - 1 && !full->a3_sg.dne_nearend_state) saw_exit = 1;
         }
 
         snprintf(what, sizeof(what),
@@ -650,8 +663,8 @@ static void test_suppression_gain_dne_prefix_matches_get_gain(void) {
         CHECK(valid && trig_identical && hold_identical && state_identical, what);
 
         free(nearend); free(echo); free(echo_unb); free(cn); free(render_block);
-        aec_destroy(&full);
-        aec_destroy(&prefix_only);
+        aec_destroy(full);
+        aec_destroy(prefix_only);
     }
 }
 
@@ -672,8 +685,8 @@ static void test_static_pool_matches_heap(void) {
         cfg.residual = AEC_RESIDUAL_FULL;   /* exercise the full post-chain, not just the linear filter */
         cfg.enable_cng = 0;   /* deterministic */
 
-        Aec aec_heap;
-        int rc = aec_create(&aec_heap, &cfg);
+        Aec *aec_heap = NULL;
+        int rc = ((aec_heap = aec_create(&cfg)) ? 0 : -1);
         snprintf(what, sizeof(what), "sr=%d fft=%d: aec_create() for static-vs-heap test", sr, fft_size);
         CHECK(rc == 0, what);
         if (rc != 0) continue;
@@ -683,9 +696,9 @@ static void test_static_pool_matches_heap(void) {
         Aec *aec_static = aec_init(pool, pool_sz, &cfg);
         snprintf(what, sizeof(what), "sr=%d fft=%d: aec_init() for static-vs-heap test", sr, fft_size);
         CHECK(aec_static != NULL, what);
-        if (!aec_static) { aec_destroy(&aec_heap); free(pool); continue; }
+        if (!aec_static) { aec_destroy(aec_heap); free(pool); continue; }
 
-        int hop = aec_hop_size(&aec_heap);
+        int hop = aec_hop_size(aec_heap);
         float *far = (float*)malloc((size_t)hop * sizeof(float));
         float *mic = (float*)malloc((size_t)hop * sizeof(float));
         float *out_heap = (float*)malloc((size_t)hop * sizeof(float));
@@ -697,7 +710,7 @@ static void test_static_pool_matches_heap(void) {
                 far[k] = (lcg_uniform() < (1.0f / 37.0f)) ? (0.5f + 0.4f * lcg_uniform()) : 0.0f;
                 mic[k] = 0.3f * far[k] + 0.02f * (lcg_uniform() - 0.5f);
             }
-            aec_process(&aec_heap, mic, far, out_heap);
+            aec_process(aec_heap, mic, far, out_heap);
             aec_process(aec_static, mic, far, out_static);
             if (memcmp(out_heap, out_static, (size_t)hop * sizeof(float)) != 0) mismatch = 1;
         }
@@ -707,7 +720,7 @@ static void test_static_pool_matches_heap(void) {
                  sr, fft_size, N_HOPS);
         CHECK(!mismatch, what);
 
-        aec_destroy(&aec_heap);
+        aec_destroy(aec_heap);
         aec_destroy(aec_static);   /* frees nothing for a pool instance */
         free(pool); free(far); free(mic); free(out_heap); free(out_static);
     }
@@ -786,39 +799,39 @@ static void test_top_level_constant_retiming(void) {
          * aec_legacy10ms_alpha() doc comment). */
         cfg.fft_size = fft;
 
-        Aec aec;
+        Aec *aec = NULL;
         char what[128];
-        int rc = aec_create(&aec, &cfg);
+        int rc = ((aec = aec_create(&cfg)) ? 0 : -1);
         snprintf(what, sizeof(what), "sr=%d fft=%d: aec_create() for retiming test", sr, fft);
         CHECK(rc == 0, what);
         if (rc != 0) continue;
 
-        int hop = aec_hop_size(&aec);
+        int hop = aec_hop_size(aec);
         double hop_ms = 1000.0 * hop / sr;
 
-        check_close("warmup_frames", sr, fft, aec.cfg.warmup_frames * hop_ms, 1000.0, HOP_MS_TOL);
-        check_close("epc_hangover", sr, fft, aec.cfg.epc_hangover * hop_ms, 200.0, HOP_MS_TOL);
-        check_close("ne_recent_hold", sr, fft, aec.cfg.ne_recent_hold * hop_ms, 1500.0, HOP_MS_TOL);
+        check_close("warmup_frames", sr, fft, aec->tun.warmup_frames * hop_ms, 1000.0, HOP_MS_TOL);
+        check_close("epc_hangover", sr, fft, aec->tun.epc_hangover * hop_ms, 200.0, HOP_MS_TOL);
+        check_close("ne_recent_hold", sr, fft, aec->tun.ne_recent_hold * hop_ms, 1500.0, HOP_MS_TOL);
         check_close("filter_misadjustment_stable_frames", sr, fft,
-                    aec.cfg.filter_misadjustment_stable_frames * hop_ms, 300.0, HOP_MS_TOL);
+                    aec->tun.filter_misadjustment_stable_frames * hop_ms, 300.0, HOP_MS_TOL);
         check_close("filter_misadjustment_hangover_frames", sr, fft,
-                    aec.cfg.filter_misadjustment_hangover_frames * hop_ms, 1000.0, HOP_MS_TOL);
+                    aec->tun.filter_misadjustment_hangover_frames * hop_ms, 1000.0, HOP_MS_TOL);
 
         /* Time-constant form (EMA "RETENTION" convention -- see
          * aec_growth_rehop's doc comment) for the three alpha-shaped
          * constants: TC = -hop_seconds / ln(retention). Continuous (no
          * integer rounding), so this should track the target far
          * tighter than the hop-count fields above. */
-        double tc_shadow = -(hop_ms / 1000.0) / log((double)aec.cfg.shadow_err_alpha) * 1000.0;
+        double tc_shadow = -(hop_ms / 1000.0) / log((double)aec->tun.shadow_err_alpha) * 1000.0;
         check_close("shadow_err_alpha (TC)", sr, fft, tc_shadow, 44.82, ALPHA_TOL);
 
-        double tc_fast = -(hop_ms / 1000.0) / log((double)aec.epc.epv_fast_tc) * 1000.0;
+        double tc_fast = -(hop_ms / 1000.0) / log((double)aec->epc.epv_fast_tc) * 1000.0;
         check_close("EPV_FAST_TC (TC)", sr, fft, tc_fast, 495.0, ALPHA_TOL);
 
-        double tc_slow = -(hop_ms / 1000.0) / log((double)aec.epc.epv_slow_tc) * 1000.0;
+        double tc_slow = -(hop_ms / 1000.0) / log((double)aec->epc.epv_slow_tc) * 1000.0;
         check_close("EPV_SLOW_TC (TC)", sr, fft, tc_slow, 9995.0, ALPHA_TOL);
 
-        aec_destroy(&aec);
+        aec_destroy(aec);
     }
 
     /* ne_recent_sustain stays the untouched literal 3 at every grid --
@@ -826,14 +839,14 @@ static void test_top_level_constant_retiming(void) {
      * correctly left OUT of the retiming batch above, not merely that it
      * wasn't exercised there. */
     for (int r = 0; r < N_GRIDS; ++r) {
-        AecConfig cfg;
-        aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, GRIDS[r].sample_rate);
-        cfg.fft_size = GRIDS[r].fft_size;
+        AecTestCfg cfg;
+        aec_tcfg_from_level(&cfg, AEC_LEVEL_BALANCED, GRIDS[r].sample_rate);
+        cfg.c.fft_size = GRIDS[r].fft_size;
         char what[128];
         snprintf(what, sizeof(what),
                  "sr=%d fft=%d: ne_recent_sustain stays literal 3 (not retimed; see comment)",
                  GRIDS[r].sample_rate, GRIDS[r].fft_size);
-        CHECK(cfg.ne_recent_sustain == 3, what);
+        CHECK(cfg.t.ne_recent_sustain == 3, what);
     }
 }
 
@@ -879,56 +892,53 @@ static void test_adaptation_constant_retiming(void) {
         AecConfig cfg;
         aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, sr);
         cfg.fft_size = fft;             /* post-defaults override; see (d) */
-        cfg.enable_shadow = 1;          /* the shadow is built through its own
-                                         * call site; a retime applied to only
-                                         * one of the two must not pass */
-        cfg.enable_saturation = 1;      /* else sat_mic/sat_ref are never
-                                         * initialized and would read as zero */
+        /* The shadow (built through its own call site: a retime applied to only one of the two must not pass) and the
+         * saturation state (else sat_mic/sat_ref are never initialized and would read as zero) are on by default. */
 
-        Aec aec;
+        Aec *aec = NULL;
         char what[160];
-        int rc = aec_create(&aec, &cfg);
+        int rc = ((aec = aec_create(&cfg)) ? 0 : -1);
         snprintf(what, sizeof(what),
                  "sr=%d fft=%d: aec_create() for adaptation retiming test", sr, fft);
         CHECK(rc == 0, what);
         if (rc != 0) continue;
 
-        int hop = aec_hop_size(&aec);
+        int hop = aec_hop_size(aec);
         double hop_s = (double)hop / sr;
 
         /* Per-SAMPLE constant: its TC is one SAMPLE period over ln(alpha), not
          * one hop period. Feeding hop_s here would "pass" at 16k/256 by
          * coincidence and be wrong everywhere else. */
         double tc_alpha_pow =
-            -(1.0 / sr) / log((double)aec.alpha_pow) * 1000.0;
+            -(1.0 / sr) / log((double)aec->alpha_pow) * 1000.0;
         check_close("alpha_pow (per-sample TC)", sr, fft, tc_alpha_pow,
                     1.218483, ALPHA_TOL);
 
         /* Per-hop, 10 ms reference. */
         check_close("alpha_erl_tracking (TC)", sr, fft,
-                    -hop_s / log((double)aec.alpha_erl_tracking) * 1000.0,
+                    -hop_s / log((double)aec->alpha_erl_tracking) * 1000.0,
                     994.991625, ALPHA_TOL);
         check_close("alpha_erl_converged (TC)", sr, fft,
-                    -hop_s / log((double)aec.alpha_erl_converged) * 1000.0,
+                    -hop_s / log((double)aec->alpha_erl_converged) * 1000.0,
                     9994.999166, ALPHA_TOL);
         snprintf(what, sizeof(what), "sr=%d fft=%d: shadow filter present", sr, fft);
-        CHECK(aec.has_shadow, what);
+        CHECK(aec->has_shadow, what);
 
         check_close("alpha_r (TC)", sr, fft,
-                    -hop_s / log((double)aec.main_filter.alpha_r) * 1000.0,
+                    -hop_s / log((double)aec->main_filter.alpha_r) * 1000.0,
                     194.957302, ALPHA_TOL);
 
         /* Per-hop, 16 ms reference. */
         check_close("saturation alpha_attack (TC)", sr, fft,
-                    -hop_s / log((double)aec.sat_mic.alpha_attack) * 1000.0,
+                    -hop_s / log((double)aec->sat_mic.alpha_attack) * 1000.0,
                     13.289337, ALPHA_TOL);
         check_close("saturation alpha_release (TC)", sr, fft,
-                    -hop_s / log((double)aec.sat_mic.alpha_release) * 1000.0,
+                    -hop_s / log((double)aec->sat_mic.alpha_release) * 1000.0,
                     791.973063, ALPHA_TOL);
         snprintf(what, sizeof(what),
                  "sr=%d fft=%d: sat_ref retimed identically to sat_mic", sr, fft);
-        CHECK(aec.sat_ref.alpha_attack == aec.sat_mic.alpha_attack &&
-              aec.sat_ref.alpha_release == aec.sat_mic.alpha_release, what);
+        CHECK(aec->sat_ref.alpha_attack == aec->sat_mic.alpha_attack &&
+              aec->sat_ref.alpha_release == aec->sat_mic.alpha_release, what);
 
         /* Duty-cycle ERLE watchdog leak, per-hop, 10 ms reference. An ADDITIVE per-hop amount, so its wall-clock meaning is a
          * RATE (dB/s) and it scales linearly, not by the power law of the retentions above. Asserted through the span that
@@ -939,11 +949,11 @@ static void test_adaptation_constant_retiming(void) {
             /* Expressed as the span the anchor is stated in (how long the peak takes to leak the watchdog's whole 6 dB collapse
              * threshold), so it goes through check_close like every other wall-clock row and reads against the 60 s figure
              * the inventory records. */
-            double leak_db_per_s = (double)aec.duty.erle_leak_db / hop_s;
+            double leak_db_per_s = (double)aec->duty.erle_leak_db / hop_s;
             check_close("duty_erle watchdog 6 dB collapse span", sr, fft,
                         6.0 / leak_db_per_s * 1000.0, 60000.0, ALPHA_TOL);
             check_moved("duty_erle_leak_db", sr, fft,
-                        (double)aec.duty.erle_leak_db, 0.001);
+                        (double)aec->duty.erle_leak_db, 0.001);
 
             /* The hook (d2b) reads the authoring grid through must not drift
              * from what aec_carve() actually stored; asserted here, where the
@@ -951,8 +961,8 @@ static void test_adaptation_constant_retiming(void) {
             snprintf(what, sizeof(what),
                      "sr=%d fft=%d: duty_erle_leak_db (%.9g) is the retiming "
                      "helper's own answer for this grid", sr, fft,
-                     (double)aec.duty.erle_leak_db);
-            CHECK(aec.duty.erle_leak_db ==
+                     (double)aec->duty.erle_leak_db);
+            CHECK(aec->duty.erle_leak_db ==
                       aec_testing_legacy10ms_rate(0.001f, hop, sr), what);
         }
 
@@ -962,9 +972,9 @@ static void test_adaptation_constant_retiming(void) {
          * move them HERE. */
         if (hop * 1000 == 16 * sr) {
             check_identity("saturation alpha_attack", sr, fft,
-                           aec.sat_mic.alpha_attack, 0.3);
+                           aec->sat_mic.alpha_attack, 0.3);
             check_identity("saturation alpha_release", sr, fft,
-                           aec.sat_mic.alpha_release, 0.98);
+                           aec->sat_mic.alpha_release, 0.98);
         }
 
         /* Negative space, half 2 -- guard against a whole-table identity map.
@@ -972,22 +982,22 @@ static void test_adaptation_constant_retiming(void) {
          * reference grid happens to equal the live grid, so pin the cases that
          * cannot be explained that way. */
         if (sr == 16000 && fft == 256) {          /* 8 ms hop vs 10 ms ref */
-            check_moved("alpha_erl_tracking", sr, fft, aec.alpha_erl_tracking, 0.99);
+            check_moved("alpha_erl_tracking", sr, fft, aec->alpha_erl_tracking, 0.99);
             check_moved("saturation alpha_attack", sr, fft,
-                        aec.sat_mic.alpha_attack, 0.3);
+                        aec->sat_mic.alpha_attack, 0.3);
         }
         if (sr == 48000) {                        /* per-sample constant */
-            check_moved("alpha_pow", sr, fft, aec.alpha_pow, 0.95);
+            check_moved("alpha_pow", sr, fft, aec->alpha_pow, 0.95);
         }
         if (hop * 1000 == 16 * sr) {
             /* alpha_r is anchored at 10 ms, so a 16 ms grid is not its identity
              * point -- it must MOVE here. This assertion is the one that fails if the
              * anchor is ever silently reverted to 256/16000. */
             check_moved("alpha_r (10 ms anchor)", sr, fft,
-                        aec.main_filter.alpha_r, 0.95);
+                        aec->main_filter.alpha_r, 0.95);
         }
 
-        aec_destroy(&aec);
+        aec_destroy(aec);
     }
 }
 
@@ -1051,43 +1061,43 @@ static void test_retimed_constants_reach_the_audio_path(void) {
     for (int r = 0; r < N_GRIDS; ++r) {
         int sr = GRIDS[r].sample_rate;
         int fft = GRIDS[r].fft_size;
-        AecConfig cfg;
-        Aec aec;
+        AecTestCfg cfg;
+        Aec *aec = NULL;
         char what[224];
 
-        aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, sr);
-        cfg.fft_size = fft;
-        cfg.delay_mode = AEC_DELAY_EXTERNAL_ALIGNED;
-        cfg.enable_highpass = 0;    /* a DC near level must survive to near_hop */
-        cfg.enable_saturation = 0;
-        cfg.enable_cng = 0;
-        int rc = aec_create(&aec, &cfg);
+        aec_tcfg_from_level(&cfg, AEC_LEVEL_BALANCED, sr);
+        cfg.c.fft_size = fft;
+        cfg.c.delay_mode = AEC_DELAY_EXTERNAL_ALIGNED;
+        cfg.t.enable_highpass = 0;    /* a DC near level must survive to near_hop */
+        cfg.t.enable_saturation = 0;
+        cfg.c.enable_cng = 0;
+        int rc = ((aec = aec_tcfg_create(&cfg)) ? 0 : -1);
         snprintf(what, sizeof(what), "sr=%d fft=%d: aec_create() for audio-path test", sr, fft);
         CHECK(rc == 0, what);
         if (rc != 0) continue;
 
-        int hop = aec_hop_size(&aec);
+        int hop = aec_hop_size(aec);
         float *mic = (float*)malloc((size_t)hop * sizeof(float));
         float *far = (float*)calloc((size_t)hop, sizeof(float));
         float *out = (float*)malloc((size_t)hop * sizeof(float));
         snprintf(what, sizeof(what), "sr=%d fft=%d: audio-path test allocations", sr, fft);
         CHECK(mic && far && out, what);
         if (!mic || !far || !out) {
-            free(mic); free(far); free(out); aec_destroy(&aec); continue;
+            free(mic); free(far); free(out); aec_destroy(aec); continue;
         }
 
         for (int i = 0; i < hop; ++i) mic[i] = C_SETTLE;
-        for (int h = 0; h < SETTLE_HOPS; ++h) aec_process(&aec, mic, far, out);
-        const double p_old = (double)aec.near_power;
+        for (int h = 0; h < SETTLE_HOPS; ++h) aec_process(aec, mic, far, out);
+        const double p_old = (double)aec->near_power;
 
         for (int i = 0; i < hop; ++i) mic[i] = C_STEP;
-        aec_process(&aec, mic, far, out);
-        const double p_new = (double)aec.near_power;
+        aec_process(aec, mic, far, out);
+        const double p_new = (double)aec->near_power;
 
         const double target = (double)C_STEP * (double)C_STEP;
         const double den = p_old - target;
         const double num = p_new - target;
-        const double a_field_d = (double)aec.alpha_pow;
+        const double a_field_d = (double)aec->alpha_pow;
 
         /* Both halves are asserted, not assumed: a settle phase that failed to
          * move near_power, or a step hop that overshot the target, would make
@@ -1097,7 +1107,7 @@ static void test_retimed_constants_reach_the_audio_path(void) {
                  "(P_old=%.6g P_new=%.6g target=%.6g)", sr, fft, p_old, p_new, target);
         CHECK(den > 1e-3 && num > 0.0 && num < den, what);
         if (!(den > 1e-3 && num > 0.0 && num < den)) {
-            free(mic); free(far); free(out); aec_destroy(&aec); continue;
+            free(mic); free(far); free(out); aec_destroy(aec); continue;
         }
 
         const double a_meas = pow(num / den, 1.0 / (double)hop);
@@ -1108,7 +1118,7 @@ static void test_retimed_constants_reach_the_audio_path(void) {
         CHECK(fabs(a_meas - a_field_d) <= TOL, what);
 
         free(mic); free(far); free(out);
-        aec_destroy(&aec);
+        aec_destroy(aec);
     }
 }
 
@@ -1119,23 +1129,23 @@ static void test_mu_holdoff_rearm_guard(void) {
         int sr = GRIDS[r].sample_rate;
         int fft = GRIDS[r].fft_size;
         AecConfig cfg;
-        Aec aec;
+        Aec *aec = NULL;
         char what[192];
 
         aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, sr);
         cfg.fft_size = fft;
-        int rc = aec_create(&aec, &cfg);
+        int rc = ((aec = aec_create(&cfg)) ? 0 : -1);
         snprintf(what, sizeof(what), "sr=%d fft=%d: aec_create() for holdoff test", sr, fft);
         CHECK(rc == 0, what);
         if (rc != 0) continue;
 
-        int hop = aec_hop_size(&aec);
+        int hop = aec_hop_size(aec);
         float *mic = (float*)malloc((size_t)hop * sizeof(float));
         float *far = (float*)malloc((size_t)hop * sizeof(float));
         float *out = (float*)malloc((size_t)hop * sizeof(float));
-        if (!mic || !far || !out) { free(mic); free(far); free(out); aec_destroy(&aec); continue; }
+        if (!mic || !far || !out) { free(mic); free(far); free(out); aec_destroy(aec); continue; }
 
-        int prev = aec.simple_mu_holdoff;
+        int prev = aec->simple_mu_holdoff;
         int illegal_rearm = 0, armed_hops = 0, saw_decrement = 0;
 
         g_lcg_state = 0x4632u + (unsigned)r;
@@ -1147,9 +1157,9 @@ static void test_mu_holdoff_rearm_guard(void) {
                 far[i] = 0.002f * (2.0f * lcg_uniform() - 1.0f);
                 mic[i] = 0.5f   * (2.0f * lcg_uniform() - 1.0f);
             }
-            aec_process(&aec, mic, far, out);
+            aec_process(aec, mic, far, out);
 
-            int v = aec.simple_mu_holdoff;
+            int v = aec->simple_mu_holdoff;
             if (v > prev && prev != 0) illegal_rearm++;   /* the defect */
             if (v < prev) saw_decrement = 1;
             if (v > 0) armed_hops++;
@@ -1172,7 +1182,7 @@ static void test_mu_holdoff_rearm_guard(void) {
         CHECK(saw_decrement, what);
 
         free(mic); free(far); free(out);
-        aec_destroy(&aec);
+        aec_destroy(aec);
     }
 }
 
@@ -1431,18 +1441,18 @@ static void test_simple_mu_frozen_exception(void) {
         int sr = GRIDS[r].sample_rate;
         int fft = GRIDS[r].fft_size;
         AecConfig cfg;
-        Aec aec;
+        Aec *aec = NULL;
         char what[224];
 
         aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, sr);
         cfg.fft_size = fft;
-        int rc = aec_create(&aec, &cfg);
+        int rc = ((aec = aec_create(&cfg)) ? 0 : -1);
         snprintf(what, sizeof(what), "sr=%d fft=%d: aec_create() for simple-mu test",
                  sr, fft);
         CHECK(rc == 0, what);
         if (rc != 0) continue;
 
-        int hop = aec_hop_size(&aec);
+        int hop = aec_hop_size(aec);
 
         /* Prove the default grid distinguishes the frozen policy from the
          * rejected wall-clock retime. */
@@ -1458,12 +1468,12 @@ static void test_simple_mu_frozen_exception(void) {
         }
 
         /* Reset owns the runtime pair. */
-        aec.simple_mu_holdoff = 9;
-        aec.simple_mu_ratio = 0.123f;
-        aec_reset(&aec);
+        aec->simple_mu_holdoff = 9;
+        aec->simple_mu_ratio = 0.123f;
+        aec_reset(aec);
         snprintf(what, sizeof(what),
                  "sr=%d fft=%d: reset clears the runtime pair", sr, fft);
-        CHECK(aec.simple_mu_holdoff == 0 && aec.simple_mu_ratio == 1.0f, what);
+        CHECK(aec->simple_mu_holdoff == 0 && aec->simple_mu_ratio == 1.0f, what);
         /* ── the coefficient each branch ACTUALLY APPLIED ─────────────────
          * ratio_new = a*ratio_old + (1-a)*r, and r depends on the frame and
          * the filter state but NOT on ratio_old, so running the same stimulus
@@ -1477,12 +1487,12 @@ static void test_simple_mu_frozen_exception(void) {
             float es = (b == 0) ? 0.5f   : 0.001f;
             double s[2] = { 0.90, 0.95 }, got[2];
             for (int j = 0; j < 2; ++j) {
-                aec_reset(&aec);
-                aec.simple_mu_ratio = (float)s[j];
-                aec.simple_mu_holdoff = (b == 1) ? 5 : 0;
+                aec_reset(aec);
+                aec->simple_mu_ratio = (float)s[j];
+                aec->simple_mu_holdoff = (b == 1) ? 5 : 0;
                 unsigned seed = 0xC0FFEEu + (unsigned)r;
-                mu_step(&aec, fs, es, &seed);
-                got[j] = aec.simple_mu_ratio;
+                mu_step(aec, fs, es, &seed);
+                got[j] = aec->simple_mu_ratio;
             }
             double applied = (got[1] - got[0]) / (s[1] - s[0]);
             snprintf(what, sizeof(what),
@@ -1492,17 +1502,17 @@ static void test_simple_mu_frozen_exception(void) {
         }
 
         /* The arm site is independent of the alpha recovery above. */
-        aec_reset(&aec);
-        aec.simple_mu_ratio = 1.0f;
-        aec.simple_mu_holdoff = 0;
+        aec_reset(aec);
+        aec->simple_mu_ratio = 1.0f;
+        aec->simple_mu_holdoff = 0;
         {
             unsigned seed = 0xA55A00u + (unsigned)r;
-            mu_step(&aec, 0.001f, 0.5f, &seed);   /* error >> far -> attack */
+            mu_step(aec, 0.001f, 0.5f, &seed);   /* error >> far -> attack */
         }
         snprintf(what, sizeof(what),
                  "sr=%d fft=%d: a fresh attack arms frozen 20 hops (got %d)",
-                 sr, fft, aec.simple_mu_holdoff);
-        CHECK(aec.simple_mu_holdoff == 20, what);
+                 sr, fft, aec->simple_mu_holdoff);
+        CHECK(aec->simple_mu_holdoff == 20, what);
 
         /* ── all three branches reachable, identified without instrumentation
          * The holdoff counter's transition names the branch, so branch coverage
@@ -1512,14 +1522,14 @@ static void test_simple_mu_frozen_exception(void) {
          *   nonzero flat  attack, ongoing          0 flat  release
          * (an attack at 0 would arm it, and the limit is always >= 1.) */
         int hit_attack = 0, hit_hold = 0, hit_release = 0;
-        aec_reset(&aec);
+        aec_reset(aec);
         {
             unsigned seed = 0xBEEF01u + (unsigned)r;
-            int prev = aec.simple_mu_holdoff;
+            int prev = aec->simple_mu_holdoff;
             for (int i = 0; i < 400; ++i) {
                 int dt = ((i / 7) % 2) == 0;
-                mu_step(&aec, dt ? 0.001f : 0.5f, dt ? 0.5f : 0.001f, &seed);
-                int now = aec.simple_mu_holdoff;
+                mu_step(aec, dt ? 0.001f : 0.5f, dt ? 0.5f : 0.001f, &seed);
+                int now = aec->simple_mu_holdoff;
                 if (now > prev) hit_attack = 1;
                 else if (now < prev) hit_hold = 1;
                 else if (now == 0) hit_release = 1;
@@ -1533,7 +1543,7 @@ static void test_simple_mu_frozen_exception(void) {
                  sr, fft, hit_attack, hit_hold, hit_release);
         CHECK(hit_attack && hit_hold && hit_release, what);
 
-        aec_destroy(&aec);
+        aec_destroy(aec);
     }
 }
 
@@ -1543,30 +1553,30 @@ static void test_filter_restart_clears_derived_counters(void) {
         int sr = GRIDS[r].sample_rate;
         int fft = GRIDS[r].fft_size;
         AecConfig cfg;
-        Aec aec;
+        Aec *aec = NULL;
         char what[192];
 
         aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, sr);
         cfg.fft_size = fft;
-        int rc = aec_create(&aec, &cfg);
+        int rc = ((aec = aec_create(&cfg)) ? 0 : -1);
         snprintf(what, sizeof(what),
                  "sr=%d fft=%d: aec_create() for filter-latch reset", sr, fft);
         CHECK(rc == 0, what);
         if (rc != 0) continue;
 
-        aec.poor_coarse_counter = 17;
-        aec.coarse_reset_hangover = 23;
-        aec.leakage_div_sustained_counter = 31;
-        aec_testing_reset_filter_latches(&aec);
+        aec->poor_coarse_counter = 17;
+        aec->coarse_reset_hangover = 23;
+        aec->leakage_div_sustained_counter = 31;
+        aec_testing_reset_filter_latches(aec);
 
         snprintf(what, sizeof(what),
                  "sr=%d fft=%d: common restart clears coarse/leakage evidence",
                  sr, fft);
-        CHECK(aec.poor_coarse_counter == 0 &&
-              aec.coarse_reset_hangover == 0 &&
-              aec.leakage_div_sustained_counter == 0, what);
+        CHECK(aec->poor_coarse_counter == 0 &&
+              aec->coarse_reset_hangover == 0 &&
+              aec->leakage_div_sustained_counter == 0, what);
 
-        aec_destroy(&aec);
+        aec_destroy(aec);
     }
 }
 

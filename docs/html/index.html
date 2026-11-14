@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>AEC · 單聲道回音消除</title>
+<title>AEC · 回音消除</title>
 <style>
 body { max-width: 50rem; margin: 2rem auto; padding: 0 1.25rem; color: #182521; font: 1rem/1.65 system-ui, sans-serif; }
 h1 { font-size: 1.8rem; margin-bottom: .25rem; } h2 { margin: 1.75rem 0 .5rem; font-size: 1.25rem; }
@@ -11,8 +11,8 @@ dl,dd { margin: 0; } dt { margin-top: .7rem; } a { color: #165c47; } pre { backg
 </style>
 </head>
 <body><main>
-<h1>AEC · 單聲道回音消除</h1>
-<p>一支麥克風與一路播放參考，每 hop 消除回音。板端可取得線性殘差給後級模型，也可由 AEC 完成 RES 與合成。</p>
+<h1>AEC · 回音消除</h1>
+<p>一支麥克風與一路播放參考，每 hop 消除回音；<code>AecConfig.n_mics = 4</code> 時是四麥克風陣列實例（四條線性 lane、共用 delay 估計器與融合，beamformer 與合成由呼叫端提供）。板端可取得線性殘差給後級模型，也可由 AEC 完成 RES 與合成。</p>
 <h2>先處理一段 WAV</h2>
 <p>將 <code>audiolib/</code> 放在本庫旁邊，從 AEC 根目錄執行。</p>
 <pre><code>make -C c_impl
@@ -24,7 +24,7 @@ bin="$(make -s -C c_impl print-bin-dir)"
 <dt><a href="reference/aec_usage.html">初始化與逐 hop 呼叫</a></dt>
 <dd>選擇 heap 或 caller pool，串接麥克風與播放參考。</dd>
 <dt><a href="reference/aec_c_api.html">API 與資料契約</a></dt>
-<dd>查 grid、delay mode、三種輸出模式與診斷。</dd>
+<dd>查 grid、delay mode、四種後級模式（<code>residual</code>）、回傳碼、陣列實例與診斷。</dd>
 <dt><a href="reference/aec_sequence.html">時序與 reset</a></dt>
 <dd>查看第一個 hop、切流、延遲變更和錯誤路徑。</dd>
 </dl>
@@ -41,6 +41,21 @@ bin="$(make -s -C c_impl print-bin-dir)"
 </dl>
 </section>
 <section>
+<h2>文字手冊與維護</h2>
+<dl>
+<dt><a href="../c_user_manual_zh_TW.md">C 使用手冊</a></dt>
+<dd>入口：header、格點、建置、最小範例、資料契約與延遲契約；以下分冊都從這裡連出。</dd>
+<dt><a href="../reference/configuration.md">設定</a> · <a href="../reference/levels.md">Level</a> · <a href="../reference/lifecycle.md">生命週期與錯誤碼</a> · <a href="../reference/integration.md">後級串接、陣列實例與故障排查</a> · <a href="../reference/wav_cli.md">WAV 工具</a></dt>
+<dd>12 個公開欄位、強度 level、create／init／destroy 與記憶池大小、錯誤語意表、三個處理入口與四麥克風陣列實例、<code>aec_wav</code> 命令列。</dd>
+<dt><a href="../sdk_migration_output_guard.md">舊名遷移</a></dt>
+<dd>舊 context API、<code>aec_create(&amp;x, cfg)</code>、<code>AEC_PRESET_*</code>、<code>AecRes</code> 等已移除名稱的新寫法，以及自己渲染頻譜時的輸出守衛。</dd>
+<dt><a href="../../c_impl/STATIC_MEMORY.md">靜態記憶體</a> · <a href="../../c_impl/README.md">C 實作說明</a> · <a href="../maintenance/development.md">開發與驗證</a> · <a href="../../CHANGELOG.md">變更紀錄</a></dt>
+<dd>pool 契約與各格點大小、建置旗標（<code>SIMD</code>、<code>PROFILE</code>、<code>NO_STDIO</code>、<code>AEC_NO_ARRAY</code>）、測試分層與基準比對、逐輪紀錄。</dd>
+<dt><a href="../nn_integration_interface.md">NN 後級介面</a> · <a href="../aec_methods.md">演算法</a> · <a href="../delay_estimator_design_zh_TW.md">延遲估計</a> · <a href="../c_python_function_map.md">C／Python 函式對照</a></dt>
+<dd>外接模型的 seam 規格、演算法與預設值（Python 孿生）、matched filter 的語意與語料統計、對照表。</dd>
+</dl>
+</section>
+<section>
 <h2>進階參考</h2>
 <dl>
 <dt><a href="reference/aec_detail.html">記憶體與觀測</a></dt>
@@ -50,7 +65,7 @@ bin="$(make -s -C c_impl print-bin-dir)"
 </dl>
 </section>
 <section>
-<h2>使用 Python 參考實作</h2>
+<h2>使用 Python 參考實作（單聲道孿生，以下不屬於 C 函式庫）</h2>
 <pre><code>python3 python/aec.py mic.wav ref.wav out.wav --mode pbfdkf --preset balanced --enable-res</code></pre>
 <p>將 <code>python/</code> 加入 <code>PYTHONPATH</code> 後，也可在 Python 程式中逐 hop 呼叫。</p>
 <pre><code>from aec import AEC, AecConfig, AecMode, AecPreset

@@ -19,7 +19,6 @@ static float sum_sq_f32(const float *a, int n, float *scratch) {
 void linear_filter_select_reset(LinearFilterSelect *s) {
     s->prev_output_valid    = 0;
     s->form_last_selection  = LFS_SEL_REFINED;
-    s->refined_last_selected = 1;
     if (s->prev_output_time)
         memset(s->prev_output_time, 0, (size_t)s->hop * sizeof(float));
 }
@@ -65,8 +64,6 @@ void linear_filter_select(LinearFilterSelect *s,
         int cond_refined_diverged =
             (e2_coarse < e2_refined) && (y2 < e2_refined);
         int use_refined = !(cond_coarse_cleaner || cond_refined_diverged);
-
-        s->refined_last_selected = use_refined;
 
         int selection = use_refined ? LFS_SEL_REFINED : LFS_SEL_COARSE;
 

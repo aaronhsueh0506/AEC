@@ -48,8 +48,8 @@ pre code{background:none;padding:0}
  |                                                |&lt; handle ----------------------------------------|
  |&lt; Aec* (NULL = rejected) -----------------------|                                                 |
   ==== 或 heap 路徑 ====
- |- aec_create(&amp;aec, &amp;cfg) ----------------------&gt;|                                                 | 同上驗證;一次 16-byte 對齊 malloc(單一 arena)
- |&lt; 0 / -1 ---------------------------------------|                                                 |
+ |- aec_create(&amp;cfg) ---------------------------&gt;|                                                 | 同上驗證;一次 16-byte 對齊 malloc(Aec 與所有子模組同一塊)
+ |&lt; Aec* (NULL = rejected) -----------------------|                                                 |
  |- aec_hop_size(aec) ---------------------------&gt;|                                                 |
  |&lt; hop (= fft_size / 2) -------------------------|                                                 |
   ==== 穩態:見 §2 / §3;串流邊界:見 §5 ====
@@ -111,8 +111,8 @@ pre code{background:none;padding:0}
  |&lt; 0 --------------------------------------------------------| 不是負值;務必檢查 == 0
  |- aec_init(unaligned_or_small_pool, ...) ------------------&gt;|
  |&lt; NULL -----------------------------------------------------| 未 16-byte 對齊 / mem_size &lt; need / cfg 無效:寫入 pool 之前就拒絕
- |- aec_create(&amp;aec, &amp;bad_cfg) ------------------------------&gt;|
- |&lt; -1 -------------------------------------------------------| cfg 無效或 malloc 失敗
+ |- aec_create(&amp;bad_cfg) -----------------------------------&gt;|
+ |&lt; NULL ------------------------------------------------------| cfg 無效或 malloc 失敗
  |- aec_process(...) ----------------------------------------&gt;|
  |&lt; AecStatus --------------------------------------------| 設定錯誤在建立階段擋下;呼叫錯誤回 AEC_ERR_ARG／AEC_ERR_MODE／AEC_ERR_SEQUENCE,實例原封不動、不寫 out
  |- aec_set_level(aec, bad_level) -------------------------&gt;|
@@ -125,7 +125,7 @@ pre code{background:none;padding:0}
  |&lt; AEC_ERR_ARG ------------------------------------------------| NULL 輸出或 struct_size 太小:你的結構不被寫入
  |- aec_reset(NULL) -----------------------------------------&gt;|
  |                                                            | NULL 為 no-op;aec_process(NULL, ...) 回 AEC_ERR_ARG</pre>
-<div class="note"><code>aec_set_level</code> 對 <code>residual</code> 低於 <code>FULL</code>(<code>STATE</code>／<code>ESTIMATE</code>)的 lane 結果依構造無效,但<b>不是</b>回 -1(本機實測回 0):它只寫該 lane 的 cfg 與其 <code>SuppressionGain</code> 目標,而該 lane 從不計算增益。需要改強度時,對陣列實例呼叫 <code>aec_set_level()</code>(它重設融合後共用的增益階段)。</div>
+<div class="note"><code>aec_set_level</code> 對 <code>residual</code> 低於 <code>FULL</code>(<code>STATE</code>／<code>ESTIMATE</code>)的 lane 結果依構造無效,但<b>不是</b>回 -1(本機實測回 0):它只更新該 lane 記錄的 level 與其 <code>SuppressionGain</code> 目標,而該 lane 從不計算增益。需要改強度時,對陣列實例呼叫 <code>aec_set_level()</code>(它重設融合後共用的增益階段)。</div>
 
 <h2>5. 串流邊界、外部對齊改變、執行期強度</h2>
 <pre> Application                                                  Aec
@@ -133,6 +133,7 @@ pre code{background:none;padding:0}
  | stream A 的最後一個 hop 已處理完
  |- aec_reset(aec) ------------------------------------------&gt;|
  |                                                            | 清延遲估計 / ref ring / 濾波器 / 偵測器 / OLA / CNG 種子;generation +1
+ |                                                            | residual = FULL 的 aec_process:reset 後第一個輸出 hop 全是 0(1 hop 延遲),與剛建立時相同
  |                                                            | 保留 cfg、記憶體與 aec_set_level 設的目標
  |- aec_process(... stream B ...) ---------------------------&gt;|
   ==== EXTERNAL_ALIGNED:呼叫端把 far 的對齊量改了 delta 個樣本 ====
@@ -167,7 +168,7 @@ pre code{background:none;padding:0}
  |- aec_apply_gain(a, g_nr, spec) --------&gt;|                                                  | spec = base * min(G_res, g_nr)(FULL)
  |- aec_apply_cng(a, g_nr, spec) ---------&gt;|                                                  | 實例內產生器,serial 變動時由實例自己重設為 AEC_CNG_SEED
  |- 反轉換 + overlap-add(呼叫端)</pre>
-<p class="small">被拒絕的呼叫:陣列實例的 <code>aec_process()</code> 與 <code>aec_process_linear_shared_far_from()</code> 回 <code>AEC_ERR_MODE</code>,<code>aec_apply_external_realign()</code> 回 -1。第一次取得的共用 delay 立即採用;之後的移動必須超過 32 個 sample,且在候選值存活的 3 個 hop 內以差距小於 16 個 sample 再被提出一次才接納。範例見 <a href="aec_usage.html">aec_usage</a> 範例 E,契約見 <code>AEC/docs/reference/integration.md</code> §8.8。目前遠端側狀態仍是每條 lane 各一份,lane 池也尚未縮減。</p>
+<p class="small">被拒絕的呼叫:陣列實例的 <code>aec_process()</code> 與 <code>aec_process_linear_shared_far_from()</code> 回 <code>AEC_ERR_MODE</code>,<code>aec_apply_external_realign()</code> 回 -1。第一次取得的共用 delay 立即採用;之後的移動必須超過 32 個 sample,且在候選值存活的 3 個 hop 內以差距小於 16 個 sample 再被提出一次才接納。範例見 <a href="aec_usage.html">aec_usage</a> 範例 E,契約見 <code>AEC/docs/reference/integration.md</code> §8.8。目前遠端側狀態仍是每條 lane 各一份。</p>
 
 <h2>6. 4 聲道:陣列實例</h2>
 <pre> Application                                                    Aec 陣列實例 (n_mics = 4)
@@ -203,13 +204,13 @@ RES / post     residual = FULL:輸出比線性路徑晚 1 hop(WOLA);residual = O
 seam 讀者      ctx / lin 有效到「下一次任何 process 或 reset 呼叫」
 </pre>
 <div class="tblwrap"><table>
-<tr><th>格點</th><th>hop</th><th><code>residual = FULL</code> 演算法延遲(脈衝實測,手冊 §3)</th><th>MATCHED 可擷取上限</th></tr>
+<tr><th>格點</th><th>hop</th><th><code>residual = FULL</code> 演算法延遲(脈衝實測,手冊 §3)</th><th>MATCHED 搜尋範圍的幾何全 span</th></tr>
 <tr><td>8 kHz／256(legacy)</td><td>128</td><td>16.000 ms</td><td>1216 ms</td></tr>
 <tr><td>16 kHz／256</td><td>128</td><td>8.000 ms</td><td>608 ms</td></tr>
 <tr><td>16 kHz／512</td><td>256</td><td>16.000 ms</td><td>608 ms</td></tr>
 <tr><td>48 kHz／1024</td><td>512</td><td>10.667 ms</td><td>608 ms</td></tr>
 </table></div>
-<p class="small">FIXED 的 13 個 UNLOCKED hop 與第 14 個 hop 起 LOCKED,是在暫存複本實跑 <code>aec_get_linear</code> 的結果(16k/256、<code>fixed_delay_samples = 1600</code>)。MATCHED 的實際擷取所需 hop 數隨訊號而定:待量測。可靠搜尋範圍 509 ms(<code>delay_num_filters = 5</code>)與 608 ms 幾何全 span 是兩種定義,見 <a href="aec_c_api.html">AEC API</a> §4 與 <code>AEC/docs/delay_estimator_design_zh_TW.md</code>。</p>
+<p class="small">FIXED 的 13 個 UNLOCKED hop 與第 14 個 hop 起 LOCKED,是在暫存複本實跑 <code>aec_get_linear</code> 的結果(16k/256、<code>fixed_delay_samples = 1600</code>)。MATCHED 的實際擷取所需 hop 數隨訊號而定:待量測。可靠搜尋範圍 509 ms(<code>delay_num_filters = 5</code>;單聲道參考環就是依它配置:8,148 + hop sample)與 608 ms 幾何全 span 是兩種定義,見 <a href="aec_c_api.html">AEC API</a> §4 與 <code>AEC/docs/delay_estimator_design_zh_TW.md</code>。</p>
 
 </body>
 </html>

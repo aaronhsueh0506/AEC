@@ -121,8 +121,7 @@ static void update_quality_estimate(FullBandErleEstimator *s) {
 }
 
 void fb_erle_init(FullBandErleEstimator *s, int n_freqs,
-                        float min_erle, float max_erle_l, int hop_size,
-                        int sample_rate) {
+                        float min_erle, int hop_size, int sample_rate) {
     s->n_freqs = n_freqs;
     /* The EMAs are per 4 ms block and fire once per 6-hop accumulation window. The factor of 6
      * cancels, so plain hop_size is used against the single-block denominator. */
@@ -139,7 +138,6 @@ void fb_erle_init(FullBandErleEstimator *s, int n_freqs,
     s->x2_band_energy_threshold =
         aec_per_bin_psd_threshold(FBERLE_X2_BAND_ENERGY_THRESHOLD, hop_size, 160);
     s->min_erle_log2 = fast_log2(min_erle + FBERLE_EPSILON);
-    s->max_erle_lf_log2 = fast_log2(max_erle_l + FBERLE_EPSILON);
     s->hold_counter_inst_erle = 0;
     s->erle_time_domain_log2 = s->min_erle_log2;
     inst_init(&s->inst, s->quality_alpha, maxmin_forget);

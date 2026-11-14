@@ -11,11 +11,13 @@
  * Run from c_impl/:  make test-aec-array */
 #include "aec.h"
 #include "aec_internal.h"
+#include "aec_white_box.h"
 #include "../src/aec_res_internal.h"
 #include "utility/simd_kernels.h"
 #include "array_signal.h"
 #include "res_gain_of.h"
-#include "aec_test_hooks.h"   /* AEC_TESTING build: the admission candidate */
+#include "aec_pool_test_util.h"
+#include "aec_test_tuning.h"   /* AEC_TESTING build: the admission candidate, the tuning overrides */
 
 #include <math.h>
 #include <stdio.h>
@@ -43,13 +45,6 @@ static void emit(const char* cid, const char* field, int hop, uint64_t h) {
 }
 
 /* ---- helpers --------------------------------------------------------------------------------------------------------- */
-static void* pool_alloc(size_t bytes, int fill) {
-    void* p = NULL;
-    if (!bytes || posix_memalign(&p, 64u, bytes) != 0) return NULL;
-    memset(p, fill, bytes);
-    return p;
-}
-
 static void array_cfg(AecConfig* cfg, int sr, int fft, int mode, AecResidualMode residual) {
     aec_config_from_level(cfg, AEC_LEVEL_BALANCED, sr);
     cfg->fft_size = fft;
@@ -59,32 +54,26 @@ static void array_cfg(AecConfig* cfg, int sr, int fft, int mode, AecResidualMode
     cfg->fixed_delay_samples = mode == ARR_FIXED ? ARR_ECHO_MS * sr / 1000 : -1;
 }
 
-static void case_cfg(AecConfig* cfg, const ArrCase* c, AecResidualMode residual) {
+static void case_cfg(AecTestCfg* tc, const ArrCase* c, AecResidualMode residual) {
+    AecConfig* cfg = &tc->c;
     array_cfg(cfg, c->sr, c->fft, c->mode, residual);
+    aec_tcfg_refresh(tc);
     if (c->scene == 1) {
         cfg->delay_backward_quarantine_enabled = 1;
         cfg->delay_backward_quarantine_s = 0.5f;
     }
     if (c->duty) {
-        cfg->delay_est_period_s = 1.0f;
+        tc->t.delay_est_period_s = 1.0f;
         cfg->delay_backward_quarantine_enabled = 1;
         cfg->delay_backward_quarantine_s = 0.5f;
     }
-}
-
-static Aec* new_aec(const AecConfig* cfg, void** mem_out, int fill) {
-    size_t sz = aec_get_mem_size(cfg);
-    void* mem = pool_alloc(sz, fill);
-    Aec* a = (sz && mem) ? aec_init(mem, sz, cfg) : NULL;
-    *mem_out = mem;
-    return a;
 }
 
 /* ---- one case, one residual mode ------------------------------------------------------------------------------ */
 typedef struct { uint32_t rng, handled; } CngState;
 
 static int run_case(const ArrCase* c, int id, AecResidualMode residual) {
-    AecConfig cfg;
+    AecTestCfg cfg;
     void *mem = NULL, *rmem = NULL;
     char cid[16];
     AecRes* res = NULL;
@@ -96,7 +85,7 @@ static int run_case(const ArrCase* c, int id, AecResidualMode residual) {
     long start_idx = g_idx;
     snprintf(cid, sizeof cid, "c%02d", id);
     case_cfg(&cfg, c, residual);
-    Aec* a = new_aec(&cfg, &mem, 0xA5);
+    Aec* a = aec_tcfg_new_aec(&cfg, &mem, 0xA5);
     if (!a) { printf("FAIL: aec_init %s\n", c->name); g_fail++; return -1; }
     const int hop = aec_hop_size(a);
     const int n_hops = array_case_hops(c);
@@ -110,7 +99,7 @@ static int run_case(const ArrCase* c, int id, AecResidualMode residual) {
         aec_config_from_level(&rc_cfg, AEC_LEVEL_BALANCED, c->sr);
         rc_cfg.fft_size = c->fft;
         size_t rsz = aec_res_get_mem_size(&rc_cfg);
-        rmem = pool_alloc(rsz, 0x5A);
+        rmem = aec_test_pool_alloc_fill(rsz, 0x5A);
         res = (rsz && rmem) ? aec_res_init(rmem, rsz, &rc_cfg) : NULL;
         CHECK(res != NULL, "test-side aec_res_init");
         if (!res) return -1;
@@ -349,7 +338,7 @@ static void test_status_and_sequence(void) {
     float mics[SPLIT_SIGNAL_MAX_HOP * ARR_CH], ref[SPLIT_SIGNAL_MAX_HOP], out[SPLIT_SIGNAL_MAX_HOP];
     ArraySig sig;
     array_cfg(&cfg, 16000, 256, ARR_EXTERNAL, AEC_RESIDUAL_FULL);
-    Aec* a = new_aec(&cfg, &mem, 0xA5);
+    Aec* a = aec_test_new_aec(&cfg, &mem, 0xA5);
     CHECK(a != NULL, "status: init");
     if (!a) return;
     const int hop = aec_hop_size(a), n = hop + 1;
@@ -427,7 +416,7 @@ static void test_status_and_sequence(void) {
         static const AecResidualMode modes[2] = { AEC_RESIDUAL_STATE, AEC_RESIDUAL_ESTIMATE };
         for (int i = 0; i < 2; ++i) {
             array_cfg(&cfg, 16000, 256, ARR_EXTERNAL, modes[i]);
-            a = new_aec(&cfg, &mem, 0xA5);
+            a = aec_test_new_aec(&cfg, &mem, 0xA5);
             CHECK(a != NULL, "modes: init %d", i);
             if (!a) continue;
             W = (Complex*)malloc((size_t)ARR_CH * n * sizeof(Complex));
@@ -456,7 +445,7 @@ static void test_status_and_sequence(void) {
     {
         AecConfig sc; Aec* s; void* smem = NULL; float m1[SPLIT_SIGNAL_MAX_HOP], r1[SPLIT_SIGNAL_MAX_HOP];
         aec_config_from_level(&sc, AEC_LEVEL_BALANCED, 16000);
-        s = new_aec(&sc, &smem, 0xA5);
+        s = aec_test_new_aec(&sc, &smem, 0xA5);
         CHECK(s != NULL, "single-channel init");
         if (s) {
             split_signal_fill(16000, aec_hop_size(s), 0, r1, m1);
@@ -480,8 +469,8 @@ static void test_nonfinite_input_leaves_state_untouched(void) {
     AecConfig cfg;
     void *m1 = NULL, *m2 = NULL;
     array_cfg(&cfg, 16000, 256, ARR_MATCHED, AEC_RESIDUAL_FULL);
-    Aec* a = new_aec(&cfg, &m1, 0xA5);
-    Aec* b = new_aec(&cfg, &m2, 0xA5);
+    Aec* a = aec_test_new_aec(&cfg, &m1, 0xA5);
+    Aec* b = aec_test_new_aec(&cfg, &m2, 0xA5);
     CHECK(a && b, "nonfinite: init");
     if (!a || !b) return;
     short_stream(a, 16000, 256, 120, -1, -1, &clean);
@@ -498,8 +487,8 @@ static void test_dsp_error_resets_the_instance(void) {
     ArraySig sig;
     float mics[SPLIT_SIGNAL_MAX_HOP * ARR_CH], ref[SPLIT_SIGNAL_MAX_HOP];
     array_cfg(&cfg, 16000, 256, ARR_EXTERNAL, AEC_RESIDUAL_FULL);
-    Aec* a = new_aec(&cfg, &mem, 0xA5);
-    Aec* fresh = new_aec(&cfg, &mem2, 0x5A);
+    Aec* a = aec_test_new_aec(&cfg, &mem, 0xA5);
+    Aec* fresh = aec_test_new_aec(&cfg, &mem2, 0x5A);
     CHECK(a && fresh, "dsp: init");
     if (!a || !fresh) return;
     const int hop = aec_hop_size(a), n = hop + 1;
@@ -568,51 +557,11 @@ static void test_dsp_error_resets_the_instance(void) {
 
 /* ---- use after destroy, NULL handles, in-place gain ------------------------------------------------------------------ */
 
-/* A refused view call leaves struct_size = sizeof(view) and every other byte zero (struct_size is the first member). */
-static int view_zeroed_but_size(const void* view, size_t size) {
-    const unsigned char* b = (const unsigned char*)view;
-    size_t n, declared;
-    memcpy(&declared, view, sizeof declared);
-    if (declared != size) return 0;
-    for (n = sizeof declared; n < size; ++n) if (b[n]) return 0;
-    return 1;
-}
-
+/* test_handle_ready checks every entry point's refusal of a destroyed pool handle; this checks what only a flow test can read. */
 static void check_destroyed_refuses(Aec* a, const char* what) {
-    float mics[SPLIT_SIGNAL_MAX_HOP * ARR_CH] = {0}, ref[SPLIT_SIGNAL_MAX_HOP] = {0}, out[SPLIT_SIGNAL_MAX_HOP];
-    Complex W[ARR_CH * NB_MAX], spec[NB_MAX];
-    AecBeam beam = { W, NULL };
-    AecResidualView rv; AecLinearView lv; AecArrayView av; AecDebugStatus ds; AecArrayTiming tm;
-    const float* win = NULL; int len = 0;
-    memset(W, 0, sizeof W);
-    memset(&rv, 0x5A, sizeof rv); rv.struct_size = sizeof rv;      /* garbage in: a refusal has to leave a zeroed record */
-    memset(&lv, 0x5A, sizeof lv); lv.struct_size = sizeof lv;
-    memset(&av, 0x5A, sizeof av); av.struct_size = sizeof av;
-    memset(&ds, 0x5A, sizeof ds);
-    CHECK(aec_process_linear(a, mics, ref) == AEC_ERR_ARG, "%s: process_linear", what);
-    CHECK(aec_process_linear_shared_far_from(a, mics, ref, NULL) == AEC_ERR_ARG, "%s: process_linear_shared_far_from", what);
-    CHECK(aec_process(a, mics, ref, out) == AEC_ERR_ARG, "%s: process", what);
-    CHECK(aec_process_residual(a, &beam) == AEC_ERR_ARG, "%s: process_residual", what);
-    CHECK(aec_get_residual(a, &rv) == AEC_ERR_ARG && view_zeroed_but_size(&rv, sizeof rv), "%s: get_residual", what);
-    CHECK(aec_get_linear(a, &lv) == AEC_ERR_ARG && view_zeroed_but_size(&lv, sizeof lv), "%s: get_linear zeroes *out", what);
-    CHECK(aec_get_array(a, &av) == AEC_ERR_ARG && view_zeroed_but_size(&av, sizeof av), "%s: get_array", what);
     CHECK(res_gain_of(a) == NULL, "%s: residual gain", what);
-    CHECK(aec_apply_gain(a, NULL, spec) == AEC_ERR_ARG, "%s: apply_gain", what);
-    CHECK(aec_apply_cng(a, NULL, spec) == AEC_ERR_ARG, "%s: apply_cng", what);
-    CHECK(aec_set_level(a, AEC_LEVEL_MILD) == -1, "%s: set_level", what);
-    CHECK(aec_synthesis_window(a, &win, &len) == -1 && win == NULL && len == 0, "%s: synthesis_window", what);
-    CHECK(aec_post_reset_serial(a) == 0u, "%s: post_reset_serial", what);
-    CHECK(aec_far_fft_real_compute_count(a) == 0 && aec_linear_is_cancelling(a) == 0, "%s: counters", what);
-    aec_debug_status(a, &ds);
-    CHECK(ds.delay_samples == 0 && ds.duty_hops_total == 0ull && ds.erle_windowed_db == 0.0f, "%s: debug_status is zeroed", what);
-    CHECK(aec_array_realign_warm_lane_count(a) == 0 && aec_array_realign_soft_lane_count(a) == 0 &&
-          aec_testing_array_pending_delay_candidate(a) == -1, "%s: array diagnostics", what);
-    memset(&tm, 0x5A, sizeof tm);
-    aec_array_get_timing(a, &tm);
-    CHECK(tm.delay_us == 0 && tm.fuse_us == 0, "%s: timing is zeroed", what);
-    aec_reset(a);                                   /* a no-op, not a fault */
+    CHECK(aec_testing_array_pending_delay_candidate(a) == -1, "%s: pending delay candidate", what);
     CHECK(aec_hop_size(a) == 0, "%s: hop_size", what);
-    CHECK(aec_apply_external_realign(a, 3) == -1, "%s: external realign", what);
     aec_destroy(a);                                 /* repeatable */
 }
 
@@ -620,44 +569,39 @@ static void test_use_after_destroy_and_null(void) {
     AecConfig cfg;
     float mics[SPLIT_SIGNAL_MAX_HOP * ARR_CH], ref[SPLIT_SIGNAL_MAX_HOP];
     ArraySig sig;
-    /* heap array: the caller's Aec outlives the arena, and the next call must see a destroyed handle (not a mono path on zeros) */
+    /* heap array: aec_destroy frees the block (the pointer is dead afterwards), and a new aec_create builds a working instance */
     array_cfg(&cfg, 16000, 256, ARR_MATCHED, AEC_RESIDUAL_FULL);
     {
-        Aec heap;
+        Aec *heap = NULL;
         const int hop = 128, n = 129;
         Complex W[ARR_CH * NB_MAX];
         AecBeam beam = { W, NULL };
-        memset(&heap, 0x77, sizeof heap);
-        CHECK(aec_create(&heap, &cfg) == 0, "destroy: aec_create of an array");
+        CHECK((heap = aec_create(&cfg)) != NULL, "destroy: aec_create of an array");
         array_weights(ARR_W_EQUAL, n, W);
         array_sig_init(&sig, 16000, hop, 0);
         array_sig_next(&sig, mics, ref);
-        CHECK(aec_process_linear(&heap, mics, ref) == AEC_OK && aec_process_residual(&heap, &beam) == AEC_OK, "destroy: one hop");
-        aec_destroy(&heap);
-        check_destroyed_refuses(&heap, "destroyed heap array");
-        CHECK(aec_hop_size(&heap) == 0, "a destroyed heap handle has no hop size");
-        CHECK(aec_create(&heap, &cfg) == 0, "a destroyed handle can be created again");
+        CHECK(aec_process_linear(heap, mics, ref) == AEC_OK && aec_process_residual(heap, &beam) == AEC_OK, "destroy: one hop");
+        aec_destroy(heap);
+        CHECK((heap = aec_create(&cfg)) != NULL, "after a destroy, aec_create builds an instance again");
         array_sig_next(&sig, mics, ref);
-        CHECK(aec_process_linear(&heap, mics, ref) == AEC_OK, "re-created handle works");
-        aec_destroy(&heap);
+        CHECK(aec_process_linear(heap, mics, ref) == AEC_OK, "re-created handle works");
+        aec_destroy(heap);
     }
-    /* static array */
+    /* static array: the pool outlives the destroy, and the handle stays refused */
     {
         void* mem = NULL;
-        Aec* a = new_aec(&cfg, &mem, 0xA5);
+        Aec* a = aec_test_new_aec(&cfg, &mem, 0xA5);
         CHECK(a != NULL, "destroy: static init");
         if (a) { aec_destroy(a); check_destroyed_refuses(a, "destroyed static array"); }
         free(mem);
     }
     /* heap and static single-channel instances */
     {
-        AecConfig sc; Aec heap; void* mem = NULL; Aec* s;
+        AecConfig sc; Aec* heap = NULL; void* mem = NULL; Aec* s;
         aec_config_from_level(&sc, AEC_LEVEL_BALANCED, 16000);
-        memset(&heap, 0x77, sizeof heap);
-        CHECK(aec_create(&heap, &sc) == 0, "destroy: single-channel create");
-        aec_destroy(&heap);
-        check_destroyed_refuses(&heap, "destroyed heap single-channel");
-        s = new_aec(&sc, &mem, 0xA5);
+        CHECK((heap = aec_create(&sc)) != NULL, "destroy: single-channel create");
+        aec_destroy(heap);
+        s = aec_test_new_aec(&sc, &mem, 0xA5);
         CHECK(s != NULL, "destroy: single-channel static init");
         if (s) { aec_destroy(s); check_destroyed_refuses(s, "destroyed static single-channel"); }
         free(mem);
@@ -701,7 +645,7 @@ static void test_apply_gain_in_place(void) {
     void* mem = NULL;
     int in_place_hops = 0;
     array_cfg(&cfg, 16000, 256, ARR_MATCHED, AEC_RESIDUAL_FULL);
-    Aec* a = new_aec(&cfg, &mem, 0xA5);
+    Aec* a = aec_test_new_aec(&cfg, &mem, 0xA5);
     CHECK(a != NULL, "in-place: init");
     if (!a) return;
     const int hop = aec_hop_size(a), n = hop + 1;
@@ -761,13 +705,13 @@ static void test_descriptor(void) {
         CHECK(req.descriptor_version == AEC_DESCRIPTOR_VERSION && req.layout_version == AEC_LAYOUT_VERSION &&
               req.backend_id == AEC_BACKEND_NE10 && req.alignment == 16u && req.reserved == 0u &&
               req.bytes == aec_get_mem_size(&cfg) && req.build_flags_hash != 0u, "descriptor fields (%s)", which ? "array" : "single");
-        mem = pool_alloc((size_t)req.bytes + 64, 0x11);
+        mem = aec_test_pool_alloc_fill((size_t)req.bytes + 64, 0x11);
         CHECK(aec_init_ex(mem, (size_t)req.bytes, &cfg, &req) != NULL, "init_ex with the current descriptor (%s)", which ? "array" : "single");
         CHECK(aec_init_ex(mem, (size_t)req.bytes, &cfg, NULL) != NULL, "init_ex without a descriptor");
         CHECK(aec_init(mem, (size_t)req.bytes, &cfg) != NULL, "aec_init is init_ex(NULL)");
         { AecMemReq big = req; big.bytes += 4096;
           CHECK(aec_init_ex(mem, (size_t)req.bytes, &cfg, &big) != NULL, "a descriptor from a larger pool is accepted"); }
-        { void* roomy = pool_alloc((size_t)req.bytes + 4096, 0x5A);
+        { void* roomy = aec_test_pool_alloc_fill((size_t)req.bytes + 4096, 0x5A);
           Aec* r = aec_init(roomy, (size_t)req.bytes + 4096, &cfg);
           CHECK(r != NULL, "a pool larger than aec_get_mem_size() is accepted (%s)", which ? "array" : "single");
           aec_destroy(r);
@@ -816,19 +760,20 @@ static void test_descriptor(void) {
 static void test_estimate_beyond_ring(void) {
     static const int max_delay_ms[2] = { 20, 0 };
     for (int c = 0; c < 2; ++c) {
-        AecConfig cfg;
+        AecTestCfg cfg;
         void* mem = NULL;
         const int hop = 128, delay = 1600, hops = 400;
         float far_all[(400 + 20) * 128], mics[128 * ARR_CH], ref[128];
         uint32_t seed = 12345u;
         int bad = 0;
-        array_cfg(&cfg, 16000, 256, ARR_MATCHED, AEC_RESIDUAL_STATE);
-        cfg.max_delay_ms = (float)max_delay_ms[c];
+        array_cfg(&cfg.c, 16000, 256, ARR_MATCHED, AEC_RESIDUAL_STATE);
+        aec_tcfg_refresh(&cfg);
+        cfg.t.max_delay_ms = (float)max_delay_ms[c];
         for (int i = 0; i < (hops + 20) * hop; ++i) {
             seed = seed * 1664525u + 1013904223u;
             far_all[i] = ((float)(seed >> 8) / 8388608.0f - 1.0f) * 0.125f;
         }
-        Aec* a = new_aec(&cfg, &mem, 0x00);
+        Aec* a = aec_tcfg_new_aec(&cfg, &mem, 0x00);
         CHECK(a != NULL, "beyond-ring: init");
         if (!a) continue;
         for (int h = 0; h < hops; ++h) {
@@ -851,7 +796,7 @@ static void test_static_vs_heap_and_poison(void) {
     array_cfg(&cfg, 16000, 256, ARR_MATCHED, AEC_RESIDUAL_FULL);
     {
         void* mem = NULL;
-        Aec* a = new_aec(&cfg, &mem, 0x00);
+        Aec* a = aec_test_new_aec(&cfg, &mem, 0x00);
         CHECK(a != NULL, "poison: init 0x00");
         if (a) { short_stream(a, 16000, 256, 90, -1, -1, &ref_hash); aec_destroy(a); }
         free(mem);
@@ -859,7 +804,7 @@ static void test_static_vs_heap_and_poison(void) {
     static const int fills[3] = { 0xA5, 0xFF, 0x3C };
     for (int i = 0; i < 3; ++i) {
         void* mem = NULL;
-        Aec* a = new_aec(&cfg, &mem, fills[i]);
+        Aec* a = aec_test_new_aec(&cfg, &mem, fills[i]);
         CHECK(a != NULL, "poison: init 0x%02X", fills[i]);
         if (!a) continue;
         short_stream(a, 16000, 256, 90, -1, -1, &h);
@@ -869,23 +814,21 @@ static void test_static_vs_heap_and_poison(void) {
     }
     /* heap path (aec_create) */
     {
-        Aec heap;
-        memset(&heap, 0x77, sizeof heap);
-        CHECK(aec_create(&heap, &cfg) == 0, "aec_create of an array");
-        short_stream(&heap, 16000, 256, 90, -1, -1, &h);
+        Aec *heap = NULL;
+        CHECK((heap = aec_create(&cfg)) != NULL, "aec_create of an array");
+        short_stream(heap, 16000, 256, 90, -1, -1, &h);
         CHECK(same_stream(&ref_hash, &h), "heap construction differs from caller-pool construction");
-        aec_destroy(&heap);
-        aec_destroy(&heap);                    /* repeatable on a heap-created array too */
+        aec_destroy(heap);
     }
     {
-        Aec heap; AecConfig bad = cfg; bad.residual = AEC_RESIDUAL_OFF;
-        CHECK(aec_create(&heap, &bad) == -1, "aec_create refuses an invalid array config");
-        CHECK(aec_create(NULL, &cfg) == -1 && aec_create(&heap, NULL) == -1, "aec_create NULL arguments");
+        Aec *heap = NULL; AecConfig bad = cfg; bad.residual = AEC_RESIDUAL_OFF;
+        CHECK((heap = aec_create(&bad)) == NULL, "aec_create refuses an invalid array config");
+        CHECK((heap = aec_create(NULL)) == NULL, "aec_create NULL config");
     }
     /* misaligned pool offset: the pool at several 16-byte multiples gives the same stream */
     for (int off = 16; off <= 48; off += 16) {
         size_t sz = aec_get_mem_size(&cfg);
-        uint8_t* raw = (uint8_t*)pool_alloc(sz + 64, 0xC3);
+        uint8_t* raw = (uint8_t*)aec_test_pool_alloc_fill(sz + 64, 0xC3);
         Aec* a = aec_init(raw + off, sz, &cfg);
         CHECK(a != NULL, "placement: init at +%d", off);
         if (!a) { free(raw); continue; }
@@ -904,8 +847,8 @@ static void test_reset_equals_fresh(void) {
             StreamHash first, again, fresh;
             void *m1 = NULL, *m2 = NULL;
             array_cfg(&cfg, grids[g][0], grids[g][1], mode, AEC_RESIDUAL_FULL);
-            Aec* a = new_aec(&cfg, &m1, 0xA5);
-            Aec* b = new_aec(&cfg, &m2, 0x5A);
+            Aec* a = aec_test_new_aec(&cfg, &m1, 0xA5);
+            Aec* b = aec_test_new_aec(&cfg, &m2, 0x5A);
             CHECK(a && b, "reset: init");
             if (!a || !b) continue;
             short_stream(a, grids[g][0], grids[g][1], 70, -1, -1, &first);
@@ -926,7 +869,7 @@ static void test_cng_reseeds_on_serial_change(void) {
     ArraySig sig;
     float mics[SPLIT_SIGNAL_MAX_HOP * ARR_CH], ref[SPLIT_SIGNAL_MAX_HOP];
     array_cfg(&cfg, 16000, 256, ARR_EXTERNAL, AEC_RESIDUAL_FULL);
-    Aec* a = new_aec(&cfg, &mem, 0xA5);
+    Aec* a = aec_test_new_aec(&cfg, &mem, 0xA5);
     CHECK(a != NULL, "cng: init");
     if (!a) return;
     const int hop = aec_hop_size(a), n = hop + 1;
@@ -958,23 +901,26 @@ static void test_set_level(void) {
     ArraySig sig;
     float mics[SPLIT_SIGNAL_MAX_HOP * ARR_CH], ref[SPLIT_SIGNAL_MAX_HOP];
     array_cfg(&cfg, 16000, 256, ARR_EXTERNAL, AEC_RESIDUAL_FULL);
-    Aec* a = new_aec(&cfg, &mem, 0xA5);
+    Aec* a = aec_test_new_aec(&cfg, &mem, 0xA5);
     CHECK(a != NULL, "level: init");
     if (!a) return;
     const int hop = aec_hop_size(a), n = hop + 1;
     aec_config_from_level(&rc_cfg, AEC_LEVEL_BALANCED, 16000);
     size_t rsz = aec_res_get_mem_size(&rc_cfg);
-    rmem = pool_alloc(rsz, 0x5A);
+    rmem = aec_test_pool_alloc_fill(rsz, 0x5A);
     AecRes* res = aec_res_init(rmem, rsz, &rc_cfg);
     Complex* W = (Complex*)malloc((size_t)ARR_CH * n * sizeof(Complex));
     array_weights(ARR_W_EQUAL, n, W);
     array_sig_init(&sig, 16000, hop, 0);
     CHECK(aec_set_level(a, (AecLevel)9) == -1 && aec_res_set_level(res, (AecLevel)9) == -1, "set_level refusals");
+    CHECK(a->cfg.level == AEC_LEVEL_BALANCED && a->tun.min_gain_floor_far_active_db == -28.0f, "a refused level leaves the stored level");
     for (int h = 0; h < 250; ++h) {
         AecBeam beam = { W, NULL };
         AecResidualView rv; AecResInput in;
         if (h == 100) {
             CHECK(aec_set_level(a, AEC_LEVEL_AGGRESSIVE) == 0, "set_level aggressive");
+            CHECK(a->cfg.level == AEC_LEVEL_AGGRESSIVE && a->tun.min_gain_floor_far_active_db == -38.0f &&
+                  a->tun.min_gain_floor_dt_db == -30.0f, "set_level stores the level and its floors on an array");
             CHECK(aec_res_set_level(res, AEC_LEVEL_AGGRESSIVE) == 0, "res set_level");
         }
         if (h == 170) {
@@ -998,9 +944,10 @@ static void test_set_level(void) {
     {
         AecConfig c2; void* m2 = NULL; Aec* b;
         array_cfg(&c2, 16000, 256, ARR_EXTERNAL, AEC_RESIDUAL_ESTIMATE);
-        b = new_aec(&c2, &m2, 0xA5);
+        b = aec_test_new_aec(&c2, &m2, 0xA5);
         CHECK(b && aec_set_level(b, AEC_LEVEL_AGGRESSIVE) == 0 && aec_set_level(b, (AecLevel)9) == -1,
               "set_level on an ESTIMATE array");
+        CHECK(b && b->cfg.level == AEC_LEVEL_AGGRESSIVE, "an ESTIMATE array stores the level too");
         if (b) aec_destroy(b);
         free(m2);
     }
@@ -1014,7 +961,7 @@ static void test_config_validation(void) {
     c = cfg; c.n_mics = 3;  CHECK(aec_get_mem_size(&c) == 0, "n_mics 3 refused");
     c = cfg; c.n_mics = 5;  CHECK(aec_get_mem_size(&c) == 0, "n_mics 5 refused");
     c = cfg; c.n_mics = -1; CHECK(aec_get_mem_size(&c) == 0, "n_mics -1 refused");
-    c = cfg; c.n_mics = 0;  CHECK(aec_get_mem_size(&c) == 0, "n_mics 0 (a config not built by aec_config_defaults) refused");
+    c = cfg; c.n_mics = 0;  CHECK(aec_get_mem_size(&c) == 0, "n_mics 0 (a config not built by aec_config_from_level) refused");
     { AecConfig s; aec_config_from_level(&s, AEC_LEVEL_BALANCED, 16000); AecConfig z = s;
       CHECK(aec_get_mem_size(&s) > 0, "the single-channel default config is valid");
       CHECK(s.n_mics == 1 && s.delay_backward_quarantine_s == 1.0f && s.delay_backward_quarantine_enabled == 0 &&
@@ -1035,19 +982,23 @@ static void test_config_validation(void) {
     CHECK(aec_get_mem_size(&c) > 0, "a valid enabled quarantine accepted");
     c = cfg; c.delay_backward_quarantine_enabled = 0; c.delay_backward_quarantine_s = 5000.0f;
     CHECK(aec_get_mem_size(&c) == 0, "the window is checked while the enable is 0");
-    c = cfg; c.delay_est_period_s = -1.0f;   CHECK(aec_get_mem_size(&c) == 0, "negative duty period refused");
-    c = cfg; c.delay_est_period_s = 3601.0f; CHECK(aec_get_mem_size(&c) == 0, "too long duty period refused");
-    c = cfg; c.delay_est_period_s = 1.0f;    CHECK(aec_get_mem_size(&c) > 0, "duty period 1 s accepted");
-    c = cfg; c.max_delay_ms = 4097.0f;       CHECK(aec_get_mem_size(&c) == 0, "max_delay_ms above 4096 refused (array)");
-    c = cfg; c.max_delay_ms = 4096.0f;       CHECK(aec_get_mem_size(&c) > 0, "max_delay_ms 4096 accepted");
-    c = cfg; c.max_delay_ms = -1.0f;         CHECK(aec_get_mem_size(&c) == 0, "negative max_delay_ms refused");
+    {   /* internal tuning values the array's own rules bound (through the hooks) */
+        AecTestCfg t; t.c = cfg; aec_tcfg_refresh(&t);
+        t.t.delay_est_period_s = -1.0f;   CHECK(aec_tcfg_mem_size(&t) == 0, "negative duty period refused");
+        t.t.delay_est_period_s = 3601.0f; CHECK(aec_tcfg_mem_size(&t) == 0, "too long duty period refused");
+        t.t.delay_est_period_s = 1.0f;    CHECK(aec_tcfg_mem_size(&t) > 0, "duty period 1 s accepted");
+        aec_tcfg_refresh(&t);
+        t.t.max_delay_ms = 4097.0f;       CHECK(aec_tcfg_mem_size(&t) == 0, "max_delay_ms above 4096 refused (array)");
+        t.t.max_delay_ms = 4096.0f;       CHECK(aec_tcfg_mem_size(&t) > 0, "max_delay_ms 4096 accepted");
+        t.t.max_delay_ms = -1.0f;         CHECK(aec_tcfg_mem_size(&t) == 0, "negative max_delay_ms refused");
+    }
     /* grids */
     c = cfg; c.sample_rate = 8000;  c.fft_size = 256;  CHECK(aec_get_mem_size(&c) == 0, "array: 8 kHz refused");
     c = cfg; c.fft_size = 128;  CHECK(aec_get_mem_size(&c) == 0, "array: 16k/128 refused");
     c = cfg; c.fft_size = 512;  CHECK(aec_get_mem_size(&c) > 0, "array: 16k/512 accepted");
     c = cfg; c.fft_size = 1024; CHECK(aec_get_mem_size(&c) == 0, "array: 16k/1024 refused");
-    c = cfg; c.sample_rate = 48000; c.fft_size = 1024; c.filter_length = 48000 * 64 / 1000; CHECK(aec_get_mem_size(&c) > 0, "array: 48k/1024 accepted");
-    c = cfg; c.sample_rate = 48000; c.fft_size = 512;  c.filter_length = 48000 * 64 / 1000; CHECK(aec_get_mem_size(&c) == 0, "array: 48k/512 refused");
+    c = cfg; c.sample_rate = 48000; c.fft_size = 1024; CHECK(aec_get_mem_size(&c) > 0, "array: 48k/1024 accepted");
+    c = cfg; c.sample_rate = 48000; c.fft_size = 512;  CHECK(aec_get_mem_size(&c) == 0, "array: 48k/512 refused");
     c = cfg; c.fft_size = 0;    CHECK(aec_get_mem_size(&c) == 0, "array: fft_size 0 refused");
     /* delay request rules (shared with the lanes' contract) */
     c = cfg; c.delay_num_filters = 0;  CHECK(aec_get_mem_size(&c) == 0, "bank size 0 refused");

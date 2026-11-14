@@ -5,33 +5,34 @@
 C 稱這條強度軸為 **level**（`AecLevel`、`AEC_LEVEL_*`、`--level`），Python 對應物稱為 **preset**（`AecPreset`、`AecConfig.from_preset`、`--preset`）：**C level == Python preset**，名稱（`mild`／`balanced`／`aggressive`／`no_floor`）與數字（0..3，預設 `1` = balanced）兩邊相同。Python 測試以文字讀取 `aec.h` 的 `AEC_LEVEL_*` 四行；CLI 的 `--preset` 仍可作為 `--level` 的別名。
 
 ```c
-aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, 16000);
+aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, 16000);   /* 存進 cfg.level */
 ```
 
-mild / balanced 兩個 level **只差一個欄位**：`min_gain_floor_far_active_db`。
-aggressive 則**再加一個欄位**：`min_gain_floor_dt_db`（double-talk 時改用的
+`AecConfig.level` 是唯一的強度設定，只收數字（0..3，範圍外被拒絕）。函式庫由它查表帶出三個內部值（庫內部 `AecTuning`，
+`aec_level_floor_db()`、`aec_level_dt_floor_db()`、`aec_level_split_floor_enabled()` 可讀），呼叫端不能單獨設定：
+mild / balanced 兩個 level **只差一個值**：`min_gain_floor_far_active_db`。
+aggressive 則**再加一個值**：`min_gain_floor_dt_db`（double-talk 時改用的
 地板）——否則 double-talk 偵測觸發時（遠端單講時也會誤觸發）三個
 level 會被硬蓋回同一個 `-20.0`，聽不出 level 之間的強度差。這三個 level
-其餘欄位完全相同。第四個 level `no_floor`
+其餘值完全相同。第四個 level `no_floor`
 （`AEC_LEVEL_NO_FLOOR`，enum 值 `3`）不是再調深同一個 dB 值，而是把地板
-機制整個關掉：第三個欄位 `min_gain_split_floor_enabled` 設為 `0`，這時前兩個
-dB 欄位變成**惰性值**（維持 balanced 的 bytes，但 `get_min_gain` 的三個
+機制整個關掉：第三個值 `min_gain_split_floor_enabled` 設為 `0`，這時前兩個
+dB 值變成**惰性值**（維持 balanced 的 bytes，但 `get_min_gain` 的三個
 `if (c->split_floor_enabled)` 分支都不會再讀它們）。所以完整的 level
 軸是「回音壓多乾淨」對「近端保留多完整」的單一取捨軸，`mild`／`balanced`／
-`aggressive` 用兩個 dB 欄位表達，`no_floor` 則是這條軸上最深的一個操作點
+`aggressive` 用兩個 dB 值表達，`no_floor` 則是這條軸上最深的一個操作點
 （地板關閉，gain 純粹由 audibility/R² 決定）。
 
-| Level | `min_gain_floor_far_active_db` | `min_gain_floor_dt_db` | `min_gain_split_floor_enabled` | 適用情境 |
+| Level | `min_gain_floor_far_active_db`（內部） | `min_gain_floor_dt_db`（內部） | `min_gain_split_floor_enabled`（內部） | 適用情境 |
 |---|---:|---:|---:|---|
 | `AEC_LEVEL_MILD` | `-20.0` | `-20.0` | `1` | 近端音質優先。喇叭音量小、耦合弱的場景；可接受較多回音殘留。 |
 | `AEC_LEVEL_BALANCED` | `-28.0` | `-20.0` | `1` | **預設，一般通話建議值。** |
 | `AEC_LEVEL_AGGRESSIVE` | `-38.0` | `-30.0` | `1` | 回音抑制優先。大音量、喇叭與麥克風靠很近、耦合強的場景；double-talk 時近端較容易被壓抑，這是刻意的。 |
 | `AEC_LEVEL_NO_FLOOR` | `-28.0`（惰性） | `-20.0`（惰性） | `0` | 這條軸上最深的操作點：三種地板（far-active、far-silent/純近端、DT-lifted）全部關閉，近端損失最大，換回最多回音抑制。 |
 
-先用 level 調整，不要一開始就自己填 `min_gain_floor_far_active_db` /
-`min_gain_floor_dt_db` / `min_gain_split_floor_enabled`。需要中間值時，才
-直接覆寫這些欄位。傳入超出 enum 範圍的 level 值會退回 balanced 的設定
-（三個欄位都退回，含 `min_gain_split_floor_enabled = 1`）。
+強度只能用 level 調整：三個內部值不是 `AecConfig` 欄位，沒有「中間值」；需要新的操作點時是新增一個 level，而不是讓呼叫端填數字。
+`aec_config_from_level()` 收到超出 enum 範圍的 level 值時存 `AEC_LEVEL_BALANCED`（三個值都退回 balanced，含 split floor 開）；
+直接把 `AecConfig.level` 填成範圍外的數字，建立時被拒絕。
 
 ### 7.1 執行期切換 level（`aec_set_level`）
 
@@ -41,13 +42,13 @@ int aec_set_level(Aec* a, AecLevel level);
 
 不需要重建實例。換 level 是**重新指定目標值**，不是重建：濾波器、延遲狀態、
 每一條平滑歷史、far-active latch 與 DominantNearend 計數器全部原封不動繼續
-跑。但三個欄位走不同的路：`min_gain_floor_far_active_db` 是抑制器每個 hop
+跑。但三個值走不同的路：`min_gain_floor_far_active_db` 是抑制器每個 hop
 只讀一次的純量下限，函式庫固定用 100 ms 讓它以 dB 線性走到新值；`min_gain_floor_dt_db`
 是 double-talk 時的硬性覆寫，不是逐 hop 收斂的量，沒有 ramp 可言，
 **立即套用**；`min_gain_split_floor_enabled` 是布林值，同樣
 **立即套用**（布林沒有連續路徑可以 ramp，與 DT 地板是同一種紀律，只是多套
 在第三個欄位上）——C 跟 Python 兩邊語意相同（Python 的 `AEC.set_preset()`
-同樣開放執行期切換 `no_floor`，見本節最後一段）。
+同樣開放執行期切換 `no_floor`，見本節最後一段）。切換成功後，實例記錄新的 level（`aec_apply_level()`：單聲道與陣列實例共用同一個寫入點）；失敗（`-1`）時什麼都不寫。
 
 切到 `no_floor`（`enabled: True -> False`）時，閂住的 gate 立即關閉；原本
 可能還在走的 far-active ramp 不受影響地繼續跑向它的舊目標，但因為三個
@@ -100,7 +101,7 @@ balanced**；這是 setter，有呼叫端可以回報，所以**直接拒絕**�
 是 `SuppressionGain`，其底層函式為（內部 header，整合端不需要直接呼叫）：
 
 ```c
-#include "suppression_gain.h"   /* 內部 header；一般整合改用 aec_set_level() */
+#include "suppression_gain.h"   /* 內部 header（c_impl/src/，不在 include/）；一般整合改用 aec_set_level() */
 
 int suppression_gain_set_split_floor_far_active_db(SuppressionGain* sg,
                                                    float db, float ramp_ms);
@@ -108,7 +109,7 @@ int suppression_gain_set_split_floor_dt_db(SuppressionGain* sg, float db);
 int suppression_gain_set_split_floor_enabled(SuppressionGain* sg, int enabled);
 ```
 
-`db` 分別對應 `AecConfig.min_gain_floor_far_active_db` / `min_gain_floor_dt_db`
+`db` 分別對應內部的 `min_gain_floor_far_active_db` / `min_gain_floor_dt_db`
 那兩個 dB-power 量，並且用**驗證器自己的**範圍 `[-300, 50]` 檢查——執行期呼叫
 不可能裝進一個 init 當初會拒絕的值。遠端地板的 `ramp_ms` 在 `[0, 60000]` 內，`0` 是下一個 hop 就套用，大於 0 以 dB 線性走到目標（`aec_set_level()` 固定傳 100）；DT
 地板**沒有** `ramp_ms` 參數，因為它是逐 hop 的硬性覆寫而不是逐 hop 收斂的量，

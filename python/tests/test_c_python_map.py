@@ -30,7 +30,7 @@ DOC = os.path.join(REPO, "docs", "c_python_function_map.md")
 
 COLUMNS = ["C 檔:函式", "Python 檔:符號", "關係", "已知落差", "對拍工具／測試"]
 RELATIONS = ("mirror", "partial", "C-only", "Python-only", "未能判斷")
-HEADERS = ("aec_balanced_config.h", "pbfdkf.h", "aec_debug.h")
+HEADERS = (("include", "aec_balanced_config.h"), ("src", "pbfdkf.h"), ("include", "aec_debug.h"))
 
 _PY_TOKEN = re.compile(
     r"^(?P<path>[\w/]+\.py)(?::(?P<sym>[\w.]+))?(?:#(?P<anchor>.+))?$")
@@ -205,9 +205,9 @@ def _c_universe():
     for n in sorted(os.listdir(src_dir)):
         if n.endswith(".c"):
             out |= {f"src/{n}:{f}" for f in _c_function_names(os.path.join(src_dir, n))}
-    for h in HEADERS:
-        names = _c_function_names(os.path.join(C_ROOT, "include", h))
-        out |= {f"include/{h}:{f}" for f in names}
+    for d, h in HEADERS:
+        names = _c_function_names(os.path.join(C_ROOT, d, h))
+        out |= {f"{d}/{h}:{f}" for f in names}
     return out
 
 
@@ -220,8 +220,9 @@ def test_document_has_the_expected_tables(rows):
 
 def test_row_shape_and_relation_rules(rows, doc_text):
     headers = " ".join(
-        open(os.path.join(C_ROOT, "include", h), encoding="utf-8").read()
-        for h in sorted(os.listdir(os.path.join(C_ROOT, "include")))
+        open(os.path.join(C_ROOT, d, h), encoding="utf-8").read()
+        for d in ("include", "src")
+        for h in sorted(os.listdir(os.path.join(C_ROOT, d)))
         if h.endswith(".h"))
     defined_gaps = set(re.findall(r"^\| ([SDT]-\d\d) \|", doc_text, re.M))
     bad = []

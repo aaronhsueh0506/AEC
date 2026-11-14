@@ -3,7 +3,7 @@
  * post-filter.
  *
  * Single-channel build. The library built with -DAEC_NO_ARRAY (make AEC_NO_ARRAY=1) has no array instance: AecConfig.n_mics
- * other than 1 is refused (aec_get_mem_size() 0, aec_init() NULL, aec_create() -1), and aec_get_array() and the aec_array_*()
+ * other than 1 is refused (aec_get_mem_size() 0, aec_init() NULL, aec_create() NULL), and aec_get_array() and the aec_array_*()
  * diagnostics are not defined (a call is a link error). Every other function behaves as for a single-channel instance of the
  * full library, byte for byte. The header is the same in both builds. */
 #ifndef AEC_AEC_H
@@ -13,27 +13,27 @@
 extern "C" {
 #endif
 
+#include <stddef.h>
 #include <stdint.h>
 
 #include "fft_wrapper.h"
-#include "hpf.h"
-#include "saturation.h"
-#include "delay_aec.h"
-#include "detectors.h"
-#include "pbfdkf.h"
-#include "epc_shadow.h"
-#include "render_signal_analyzer.h"
-#include "aec_post.h"   /* AecPost and its sub-modules */
 
-/* Residual-echo strength level, ordered 0..3 (default BALANCED = 1):
- * min_gain_floor_far_active_db = -20 / -28 / -38 dB for MILD / BALANCED /
- * AGGRESSIVE. NO_FLOOR sets min_gain_split_floor_enabled = 0 (dB fields unused). */
+/* The instance is opaque: create it with aec_create() or place it in a caller pool with aec_init(). */
+typedef struct Aec Aec;
+
+/* Residual-echo strength level, ordered 0..3 (default BALANCED = 1): the far-active minimum-gain floor is -20 / -28 / -38 dB
+ * for MILD / BALANCED / AGGRESSIVE; NO_FLOOR switches the split floor off. AecConfig.level is a plain number in 0..3; a value
+ * outside it is refused by create / init / the size query. */
 typedef enum {
     AEC_LEVEL_MILD       = 0,
     AEC_LEVEL_BALANCED   = 1,
     AEC_LEVEL_AGGRESSIVE = 2,
     AEC_LEVEL_NO_FLOOR   = 3
 } AecLevel;
+
+/* "mild", "balanced", "aggressive" or "no_floor"; any value outside the enum reads "balanced", as aec_config_from_level() treats
+ * it. Never NULL; the string is static. */
+const char* aec_level_name(AecLevel level);
 
 /* Delay mode (init-time, immutable): how the far-end is aligned to the mic.
  *   MATCHED           a matched-filter bank estimates the delay online and a
@@ -67,7 +67,7 @@ typedef enum AecResidualMode {
 
 /* Result of every aec_process_* / aec_apply_* call, of the view getters (aec_get_residual / aec_get_linear / aec_get_array) and
  * of aec_resolve_signal_grid() / aec_get_mem_breakdown(): 0, or a negative reason. A refused call writes nothing, except
- * AEC_ERR_DSP below. aec_create, aec_get_mem_requirements, aec_set_level and aec_synthesis_window
+ * AEC_ERR_DSP below. aec_get_mem_requirements, aec_set_level and aec_synthesis_window
  * follow the same sign (0 = success, -1 = failure). aec_apply_external_realign() returns an outcome (1 / 0 / -1), and
  * aec_is_valid_sample_rate() is a predicate (1 / 0). */
 typedef enum AecStatus {
@@ -79,122 +79,57 @@ typedef enum AecStatus {
                               * has been reset. A non-finite INPUT sample is AEC_ERR_ARG and changes nothing. */
 } AecStatus;
 
-/* Bad-relock judgment window (hops): a shifted delay is reverted if it
- * cancels worse after this long. */
-#define AEC_DELAY_SHIFT_JUDGMENT_HOPS 100
-/* Capacity of Aec::delay_reject_values. */
-#define AEC_DELAY_REJECT_CAP 8
+/* Delay estimator geometry. The matched-filter bank holds at most AEC_DELAY_NUM_FILTERS_MAX filters (AecConfig.delay_num_filters
+ * is in [1, AEC_DELAY_NUM_FILTERS_MAX]). AEC_DELAY_FILTER_SIZE and AEC_DELAY_FILTER_INTRA_SHIFT count decimated samples: one
+ * estimator sample is AEC_DELAY_DOWN_SAMPLING_FACTOR samples of the (at most 16 kHz) feed. */
+#define AEC_DELAY_NUM_FILTERS_MAX       5
+#define AEC_DELAY_FILTER_SIZE           512
+#define AEC_DELAY_FILTER_INTRA_SHIFT    384
+#define AEC_DELAY_DOWN_SAMPLING_FACTOR  4
+
+/* Seed of the comfort-noise generator of a fresh or hard-reset instance (see aec_post_reset_serial()). */
+#define AEC_CNG_SEED 42u
+
+/* int16^2 power scale of AecResidualView.r2 / comfort_noise: audio-scale power = value * AEC_PSD_SCALE_INV_F. Both are exact in
+ * float (powers of two). */
+#define AEC_PSD_SCALE_F      (32768.0f * 32768.0f)
+#define AEC_PSD_SCALE_INV_F  (1.0f / AEC_PSD_SCALE_F)
 
 typedef struct AecConfig {
     int    sample_rate;        /* Hz; 8000, 16000 or 48000 */
     int    fft_size;           /* samples; 256 or 512 @16k, 1024 @48k; 0 is rejected */
-    int    filter_length;      /* samples; 52 ms (64 ms at >= 44.1 kHz) */
-    int    n_partitions;       /* 0 = derived from filter_length */
-    float  mu;                 /* main filter step size; 0.3 */
-    float  delta;              /* division guard; 1e-8 */
-
-    int    enable_cng;             /* comfort-noise generation; 1 */
-    int    cng_n2_windowed_psd;    /* CNG noise-tracker windowed-PSD coordinate; 0 */
-    int    enable_highpass;        /* mic-path high-pass; 1 */
-    int    enable_saturation;      /* saturation limiter; 1 */
-    int    enable_shadow;          /* shadow filter; 1 */
-    int    saturation_softclip_ref;/* soft-clip the reference; 1 */
+    /* Microphone array: 1 (default) is the single-channel instance this header describes; AEC_ARRAY_MICS (4) builds an
+     * array instance: four linear lanes, one shared delay estimator and aligned far, and the fusion of the lanes by the
+     * caller's beamformer weights (see "Array instance" below). On an array instance delay_mode / delay_num_filters /
+     * fixed_delay_samples describe the SHARED alignment (each lane then takes the aligned far, EXTERNAL_ALIGNED) and
+     * `residual` must be STATE, ESTIMATE or FULL. */
+    int    n_mics;                              /* 1; 4 only in a library built without AEC_NO_ARRAY */
+    /* Residual-echo strength; the only strength setting (aec_set_level() changes it on a running instance). */
+    AecLevel level;                             /* AEC_LEVEL_BALANCED */
     /* How far the residual stage goes: AecResidualMode. aec_process_residual() and the getters follow it.
      * The pool size of a single-channel instance does not depend on it; an array's grows with it (STATE: lanes only,
      * ESTIMATE: + the fusion buffers, FULL: + the gain stage). */
     AecResidualMode residual;      /* AEC_RESIDUAL_FULL */
-
-    /* Microphone array: 1 (default) is the single-channel instance this header describes; AEC_ARRAY_MICS (4) builds an
-     * array instance: four linear lanes, one shared delay estimator and aligned far, and the fusion of the lanes by the
-     * caller's beamformer weights (see "Array instance" below). On an array instance delay_mode / delay_num_filters /
-     * fixed_delay_samples / delay_est_period_s / max_delay_ms describe the SHARED alignment (each lane then takes the
-     * aligned far, EXTERNAL_ALIGNED) and `residual` must be STATE, ESTIMATE or FULL. */
-    int    n_mics;                              /* 1; 4 only in a library built without AEC_NO_ARRAY */
+    /* Alignment mode; init-time immutable (the pool layout depends on it). */
+    AecDelayMode delay_mode;       /* AEC_DELAY_MATCHED */
+    /* FIXED only: measured delay in samples (>= 0), also sizes the reference ring; must be -1 in the other modes. */
+    int    fixed_delay_samples;    /* -1 */
+    /* MATCHED only: matched-filter bank size in [1, 5] (part of the pool layout, init-time immutable); n = 1..5 gives a
+     * reliable reach of 125/221/317/413/509 ms. A non-default value outside MATCHED is rejected. */
+    int    delay_num_filters;      /* 5 */
+    int    enable_cng;             /* comfort-noise generation; 1 */
     int    capture_proxy_channel;               /* array: the shared estimator's capture input, [0, n_mics-1]; 0 */
     /* array, MATCHED only, default off: an estimate earlier than the delay in force is held for
      * delay_backward_quarantine_s while the capture-proxy lane still cancels, then adopted; lost cancellation adopts it
      * at once. Forward moves and the first acquisition are never held. */
     int    delay_backward_quarantine_enabled;   /* 0 */
     float  delay_backward_quarantine_s;         /* [0, 3600]; 1.0 */
-
-    /* Tunables in hops are authored on the 10 ms / 16 kHz grid and retimed at
-     * create time. */
-    float  shadow_err_alpha;       /* shadow error EMA alpha; 0.80 @ 10 ms hop */
-    float  shadow_mu_min;          /* 0.5  */
-    float  shadow_mu_nlms;         /* 0.5  */
-    int    warmup_frames;          /* hops; 100 = 1000 ms @ 10 ms hop */
-    int    epc_hangover;           /* hops; 20 = 200 ms @ 10 ms hop */
-    float  epc_total_rise;         /* 1.5  */
-    float  epc_delta_threshold;    /* 0.3  */
-    float  epc_mu_floor;           /* 0.5  */
-    /* MATCHED only: size the reference search ring, max(delay_buffer_ms,
-     * max_delay_ms + 4096 samples). */
-    float  max_delay_ms;           /* ms; 1024 */
-    float  delay_buffer_ms;        /* ms; 2048 */
-    float  delay_est_init_s;       /* s; hold time before duty-cycling; 0.3 */
-    float  delay_est_period_s;     /* s; 0 = analyse every hop */
-    /* MATCHED only: matched-filter bank size in [1, 5] (part of the pool
-     * layout, init-time immutable); n = 1..5 gives a reliable reach of
-     * 125/221/317/413/509 ms. A non-default value outside MATCHED is
-     * rejected. */
-    int    delay_num_filters;      /* 5 */
-    float  highpass_cutoff_hz;     /* Hz; 80 */
-    float  saturation_threshold;   /* clipping amplitude threshold (full scale 1.0); 0.95 */
-    float  kalman_q_high;          /* model uncertainty while unconverged; 1e-3 */
-    float  kalman_q_low;           /* model uncertainty after convergence; 1e-6 */
-    int    delay_acquire_protect_converged;   /* 1 */
-    /* Warm tap-transfer on first delay acquisition: shift the learned IR
-     * instead of zeroing it (needs inst-ERLE peak >
-     * delay_acquire_inst_erle_db and delay < tap reach). */
-    int    delay_acquire_warm_transfer;       /* 1 */
-    float  delay_acquire_inst_erle_db;        /* dB; 4.0 */
-
-    /* DT-deg recovery: with the held near-end gate armed in double-talk,
-     * dt_aware_recovery_soft keeps realign recovery non-destructive and
-     * dt_aware_res_floor_enabled applies the DT min-gain floor. */
-    int    dt_aware_recovery_soft;            /* 1 */
-    int    dt_aware_res_floor_enabled;        /* 1 */
-    float  min_gain_floor_dt_db;              /* dB; -20.0 */
-    /* Near-end-recent gate: energy threshold, hold and sustain (hops). */
-    float  ne_recent_threshold;               /* 0.3 */
-    int    ne_recent_hold;                    /* hops; 150 = 1500 ms @ 10 ms hop */
-    int    ne_recent_sustain;                 /* hops; 3 */
-
-    /* Far-active min-gain floor, dB (-20 / -28 / -38 for mild / balanced /
-     * aggressive). */
-    float  min_gain_floor_far_active_db;
-
-    /* Filter-scale tracker: stable / hangover (hops, retimed) and scale
-     * bounds. */
-    int    filter_misadjustment_stable_frames;   /* hops; 30 = 300 ms @ 10 ms hop */
-    int    filter_misadjustment_hangover_frames;  /* hops; 100 = 1000 ms @ 10 ms hop */
-    float  filter_misadjustment_scale_min;        /* 0.5 */
-    float  filter_misadjustment_scale_max;        /* 2.0 */
-
-    /* Alignment mode; init-time immutable (the pool layout depends on it). */
-    AecDelayMode delay_mode;       /* AEC_DELAY_MATCHED */
-    /* FIXED only: measured delay in samples (>= 0), also sizes the reference
-     * ring; must be -1 in the other modes. */
-    int    fixed_delay_samples;    /* -1 */
-
-    /* Live observer: a second PBFDAF reading the far-end ring earlier by
-     * live_observer_shift_ms; adds R^2 evidence only while it corroborates
-     * the main filter. Default off. */
-    int    live_observer_enabled;           /* 0 */
-    float  live_observer_shift_ms;          /* ms; 24.0 */
-    float  live_observer_max_hz;            /* Hz; 1000.0 */
-    float  live_observer_mu;                /* observer filter step size; 0.3 */
-    float  live_observer_corrob_ms;         /* ms; 100.0 */
-    float  live_observer_corrob_margin_db;  /* dB; 0.0 */
-
-    /* Gates all three min-gain floor variants; NO_FLOOR clears it. Default 1. */
-    int    min_gain_split_floor_enabled;    /* 1 */
 } AecConfig;
 
-/* Both factories fill fft_size and filter_length from the rate. For a rate with
- * no grid (anything but 8000/16000/48000, including 0 and negative values) both
- * are 0, which aec_get_mem_size / aec_init / aec_create refuse. */
-void aec_config_defaults(AecConfig* cfg, int sample_rate);
+/* Fills the public configuration for a rate: the rate's product fft_size and level `level` (an out-of-enum level reads as
+ * AEC_LEVEL_BALANCED), every other field at its default. For a rate with no grid (anything but 8000/16000/48000, including 0
+ * and negative values) fft_size is 0, which aec_get_mem_size / aec_init / aec_create refuse. Everything the instance tunes
+ * beyond AecConfig follows from (sample_rate, fft_size, n_mics, level) and is not caller-settable. */
 void aec_config_from_level(AecConfig* cfg, AecLevel level, int sample_rate);
 
 /* Signal grid: (sample_rate, fft_size) fixes the geometry; frame_size = fft_size
@@ -224,174 +159,6 @@ int aec_is_valid_sample_rate(int sample_rate);
  * the rate is unsupported. */
 int aec_default_fft_size(int sample_rate);
 
-/* Matched-filter duty-cycle gate: full-rate analysis until the estimate has been solid and unchanged for hold_hops, then one
- * hop in period_hops, back to full rate on a windowed-ERLE collapse. Internal; shared by the single-channel instance and the
- * array flow (aec_duty_* in aec_array_internal.h). */
-typedef struct AecDutyGate {
-    int    active;
-    int    stable_hops;
-    int    pos;
-    int    last_delay;
-    float  erle_peak;
-    float  erle_leak_db;
-    int    hold_hops;
-    int    period_hops;
-    unsigned long long hops_run;
-} AecDutyGate;
-
-/* Instance state: fields are internal, not part of the API; use the functions
- * below. */
-typedef struct Aec {
-    AecConfig cfg;
-
-    int hop_size, block_size, fft_size, n_freqs, n_partitions;
-
-    Hpf  *hp_mic;             /* NULL when highpass disabled */
-    Saturation sat_ref, sat_mic;  int has_sat;
-
-    /* delay: matched-filter state, valid iff has_delay (delay_mode ==
-     * MATCHED). */
-    DelayAec delay;       int has_delay;
-    float* ref_ring;       int ref_ring_size, ref_ring_write, ref_ring_filled;
-    int    current_delay;
-    int    pending_delay;  int has_pending; int pending_delay_ttl;
-    int    delay_shift_judgment_active;
-    int    delay_shift_judgment_pre_delay;
-    float  delay_shift_judgment_pre_erle;
-    int    delay_shift_judgment_hops_left;
-    Complex* delay_shift_judgment_pre_W;
-    Complex* delay_shift_judgment_pre_shadow_W;
-    float*   delay_shift_judgment_pre_H_error;   /* main filter H_error_per_bin [n_freqs] */
-    int    delay_reject_values[AEC_DELAY_REJECT_CAP];
-    int    delay_reject_count;
-    unsigned int delay_generation;
-    unsigned int delay_gen_hop_start;
-    int    far_hop_aligned;
-    AecDutyGate duty;
-    unsigned long long duty_hops_total;
-
-    PBFDKF main_filter;
-    PBFDAF shadow_filter;  int has_shadow;
-    PBFDAF observer_filter;  int has_observer;
-
-    RenderActivity    render_activity;
-    float*            ra_pairwise_scratch;
-    FilterConvergence convergence;
-    DoubleTalk        dt_analyzer;
-    EpcDetector       epc;
-    ShadowCopy        regime;
-    RenderSignalAnalyzer rsa;   int64_t* rsa_counters;
-
-    FftHandle*  post_fft;
-    AecPost    post;
-    AecState              a3_state;   AecStateStorage a3_state_st;
-    ResidualEchoEstimator a3_ree;
-    SuppressionGain       a3_sg;
-    StationarityEstimator a3_stat;
-    LinearFilterSelect    a3_lfs;
-    AecPostRunScratch    a3_sc;
-    int    pending_gain_change;   /* bool */
-    int    pending_delay_change;
-    int    stationarity_active_hops;
-    int    stationarity_converge_hops;
-    int    non_zero_render_seen;
-    float  render_peak_floor;
-    int    block_stationary_next;
-
-    float  saturation_level;
-    float  erl_estimate;
-    float  main_err_smooth, shadow_err_smooth;
-    long   shadow_frame_count;     /* saturates at LONG_MAX */
-    int    epc_render_forced_remaining;
-    float  erle_window_near, erle_window_err;
-    float  erle_factor_prev;
-    float  inst_erle_smooth;
-    float  erle_slope_buf[64];
-    int    erle_slope_cap, erle_slope_len, erle_slope_head;
-    float  wn_err_baseline;
-    int    stat_dt_hangover;
-    int    warmup_frames_remaining;
-    int    warmup_far_active;
-    float  simple_mu_ratio;
-    int    simple_mu_holdoff;
-    float* per_bin_mu_scale;   int has_per_bin_mu;
-    float  near_power, raw_error_power;
-    float  alpha_pow;
-    long   frame_count;            /* saturates at LONG_MAX */
-
-    int    ne_above;
-    int    ne_recent_frames;
-
-    int    poor_coarse_counter;
-    int    coarse_reset_hangover;
-    int    leakage_div_sustained_counter;
-    int    poor_coarse_threshold_hops;
-    int    coarse_reset_hangover_hops;
-    int    leakage_div_sustain_hops;
-    int    stat_dt_hangover_hops;
-
-    float  misadj_e2_acum, misadj_y2_acum;
-    int    misadj_n_acum;
-    float  misadj_inv;
-    int    misadj_overhang;
-    int    misadj_stable_count;
-    int    misadj_hangover_remaining;
-
-    float  last_erle_windowed;
-
-    float  last_far_power, last_shadow_dt, last_dt_indicator;
-    float  alpha_erl_tracking, alpha_erl_converged;
-    int    last_is_stationary_dt;
-
-    float* near_hop;
-    float* far_hop;
-    float* raw_output;
-    float* shadow_out;
-    float* final_out;
-    float* observer_far_hop;
-    int    observer_far_hop_valid;
-    int    observer_shift_hops;
-    float* filter_taps_full;
-
-    float* scr_sq;
-    float* scr_e2_echo;
-    float* scr_e2_near;
-    float* scr_rsa_mask;
-    float* scr_mu_buf_pre;
-    float* scr_mu_buf;
-    float* scr_e2ref_arr;
-
-    unsigned char is_static;    /* the caller owns the memory */
-    unsigned char ready;        /* set by a successful create / init, cleared by aec_destroy(); a handle that is not ready is refused */
-
-    /* Two-stage hop bookkeeping (aec_process_linear / aec_process_residual): 0 idle, 1 = stage 1 done and the residual
-     * stage pending. hop_carry holds the stage-1 locals the residual stage needs. Internal. */
-    int hop_phase;
-    struct AecHopCarry {
-        float far_hop_mean_sq;
-        float erle_inst;            /* inst-ERLE of this hop (misadjustment estimator) */
-        float erle_windowed;
-        int   render_active;
-        int   stationarity_block_for_post;
-        uint32_t t_stage;           /* clock stamp that closed the steering window */
-    } hop_carry;
-    int residual_valid;             /* a residual stage has completed since construction or aec_reset() */
-
-    /* Array instance (AecConfig.n_mics == AEC_ARRAY_MICS): the flow state in src/aec_array.c; NULL for a single-channel
-     * instance. On an array instance every field above is unused except cfg and the dimensions. */
-    struct AecArray* array;
-
-    void*  heap_arena;
-
-    struct AecStageTiming {
-        uint32_t delay_us;
-        uint32_t frontend_us;
-        uint32_t linear_us;
-        uint32_t res_us;
-        uint32_t steering_us;
-    } last_timing;
-} Aec;
-
 /* Per-hop wall-clock cost (microseconds) of the five largest stages in
  * aec_process*(). Diagnostic only. delay_us: delay estimation, ring write and
  * compensated read (0 under EXTERNAL_ALIGNED). frontend_us: entry to main
@@ -406,21 +173,29 @@ typedef struct Aec {
 #define AEC_STAGE_TIMING 0
 #endif
 
-typedef struct AecStageTiming AecStageTiming;
+typedef struct AecStageTiming {
+    uint32_t delay_us;
+    uint32_t frontend_us;
+    uint32_t linear_us;
+    uint32_t res_us;
+    uint32_t steering_us;
+} AecStageTiming;
 
 /* Copies the last hop's stage timings into out. A NULL instance zeroes out;
  * out must not be NULL. */
 void aec_get_last_timing(const Aec* a, AecStageTiming* out);
 
-/* Heap construction: returns 0 on success, -1 on a NULL argument, an invalid
- * cfg or allocation failure. aec_destroy releases the instance (NULL-safe, repeatable); aec_reset restores the initial state
- * (NULL-safe; a handle that is not ready is left as it is).
- * A handle that is not ready: NULL, zero-filled or never built, left by a failed aec_create(), or destroyed. Every entry point
- * refuses it (AEC_ERR_ARG, -1, 0, NULL or a zeroed record, as each function states) until aec_create() / aec_init() builds it;
- * aec_hop_size() reads 0. A destroyed handle is refused for the Aec an aec_create() filled and for an aec_init() instance whose
- * pool has not been freed or overwritten. Using a handle whose Aec storage or pool has been freed or reused is undefined, as for
- * any C object; so is the pointer of a view obtained before the destroy. */
-int  aec_create(Aec* a, const AecConfig* cfg);
+/* Heap construction: one allocation of aec_get_mem_size(cfg) bytes, 16-byte aligned, holding the instance and everything it
+ * carves, built as aec_init() builds one in a pool of that size. Returns NULL for a NULL or invalid cfg or a failed allocation.
+ * aec_destroy() releases it (NULL-safe); the pointer is dead afterwards, as after free(), and the caller never frees it. A
+ * pool instance from aec_init() is not freed by aec_destroy(): it stays refused (not ready) until it is built again, and a
+ * repeated aec_destroy() on it is harmless as long as its pool has not been freed or overwritten. aec_reset restores the
+ * initial state (NULL-safe; a handle that is not ready is left as it is).
+ * A handle that is not ready: NULL, zero-filled or never built, or a destroyed pool instance. Every entry point refuses it
+ * (AEC_ERR_ARG, -1, 0, NULL or a zeroed record, as each function states) until aec_init() builds it; aec_hop_size() reads 0.
+ * Using a handle whose memory has been freed or reused is undefined, as for any C object; so is the pointer of a view obtained
+ * before the destroy. */
+Aec* aec_create(const AecConfig* cfg);
 void aec_destroy(Aec* a);
 void aec_reset(Aec* a);
 
@@ -435,12 +210,10 @@ void aec_reset(Aec* a);
  * delay mode. */
 int aec_apply_external_realign(Aec* a, int delta_samples);
 
-/* Retargets the residual-echo strength of a running instance; filter, delay
- * state and histories carry on. Updates min_gain_floor_far_active_db and, for
- * aggressive, min_gain_floor_dt_db; NO_FLOOR clears
- * min_gain_split_floor_enabled. The far-active floor walks to its new value
+/* Retargets the residual-echo strength of a running instance and stores it as the instance's level; filter, delay
+ * state and histories carry on. The far-active floor walks to its new value
  * linearly in dB over a fixed 100 ms (a change during a ramp restarts from
- * the live value); the DT floor and the split-floor flag step immediately.
+ * the live value); the DT floor (aggressive differs) and the split-floor flag (NO_FLOOR clears it) step immediately.
  * Inert on an instance whose residual is below AEC_RESIDUAL_FULL. Call between
  * hops, serialised with aec_process(). Returns 0, or -1 (nothing written) on
  * NULL or an out-of-enum level. */
@@ -466,8 +239,8 @@ typedef struct AecBeam {
  *   aec_process           linear + residual and, with AEC_RESIDUAL_FULL, the gain, the comfort noise and the library's
  *                         own synthesis: `out` is the finished hop. Below FULL, `out` is the linear residual.
  *   aec_process_linear    stage 1: front end, delay, shadow and main filter. With AEC_RESIDUAL_OFF it also ends the hop.
- *   aec_process_residual  stage 2, directly after aec_process_linear of the same hop: FORM, AecState, r2, comfort noise
- *                         and G_res, as far as AecConfig.residual reaches. It applies nothing and synthesizes nothing:
+ *   aec_process_residual  stage 2, directly after aec_process_linear of the same hop: FORM, the echo-state classifier, r2,
+ *                         comfort noise and G_res, as far as AecConfig.residual reaches. It applies nothing and synthesizes nothing:
  *                         read aec_get_residual() and finish with aec_apply_gain() / aec_apply_cng() and the caller's
  *                         own inverse transform. `beam` is for an array instance and must be NULL on a single-channel one.
  *
@@ -487,7 +260,7 @@ long aec_far_fft_real_compute_count(const Aec* a);
 
 /* 1 if the linear filter is demonstrably cancelling: last hop's windowed ERLE
  * above 2.5 dB, or the recent inst-ERLE peak above
- * cfg.delay_acquire_inst_erle_db. 0 means no evidence, not a fault (also 0
+ * the internal inst-ERLE threshold (4 dB). 0 means no evidence, not a fault (also 0
  * before the ERLE machinery has run). */
 int aec_linear_is_cancelling(const Aec* a);
 
@@ -604,14 +377,15 @@ uint32_t aec_post_reset_serial(const Aec* a);
  *     ac_stft_config_default(&sc, n);
  *     sc.window = w;                                  // borrowed table; AcIstft carves none
  *     size_t sz = ac_istft_get_mem_size(&sc);         // then ac_istft_init(mem, sz, &sc) as usual
- * The AcIstft is configured with fft_size = the returned length. The pointer is read-only, owned by the
- * library, and valid for the lifetime of the instance (it does not change across processing or reset calls);
- * the AcIstft borrows it, so it must not outlive the Aec. *window and *length are set only on success.
+ * The AcIstft is configured with fft_size = the returned length. The pointer is read-only and lives in the
+ * instance's own pool (built by aec_init() / aec_create()): it is valid until aec_destroy() and does not change
+ * across processing or reset calls. The AcIstft borrows it, so it must not outlive the Aec (after aec_destroy() of
+ * an aec_create() instance the memory is freed). *window and *length are set only on success.
  * Returns 0, or -1 for a NULL instance, window or length (outputs untouched). */
 int aec_synthesis_window(const Aec* a, const float** window, int* length);
 
 /* Linear-AEC / NN post-filter seam: read-only view for an external post-filter.
- *   - aligned_far_hop aliases a->far_hop, valid until the next process/reset call.
+ *   - aligned_far_hop aliases the instance's aligned far hop, valid until the next process/reset call.
  *   - UNLOCKED: aligned_far_hop is the raw far (not delay-compensated).
  *   - generation increments (saturating) on every ring-offset change (first
  *     acquisition, confirmed shift, reset); poll it to invalidate cross-hop caches.
@@ -639,7 +413,7 @@ typedef struct AecLinearView {
     size_t       struct_size;
     int          hop_size;
     int          n_freqs;
-    const float* linear_hop;         /* refined PBFDKF hop, before FORM selection */
+    const float* linear_hop;         /* refined linear-filter hop, before FORM selection */
     const Complex* echo_spec;        /* main filter echo / near / far spectra (pre-FORM; the far one is rectangular-block) */
     const Complex* near_spec;
     const Complex* far_spec;
@@ -706,11 +480,9 @@ int aec_get_linear(const Aec* a, AecLinearView* out);
  * Shared alignment. The delay estimator (MATCHED) is fed by ONE microphone, capture_proxy_channel; the other three are never
  * seen by it, so a dead or blocked proxy microphone leaves the array without an acquired delay (all lanes run on the raw
  * far end). FIXED and EXTERNAL_ALIGNED use no estimator.
- * Fields with no effect on an array: delay_est_init_s (the duty-cycle hold is a fixed 0.3 s), delay_buffer_ms (the shared
- * ring is max_delay_ms + 2 hops + 1 samples), dt_aware_res_floor_enabled and ne_recent_* for the fused gain (its DT floor
- * applies whenever the worst lane double-talk indicator is above 0.2; the lanes still use ne_recent_* for their own
- * echo-path-change recovery). Limits that differ from a single channel: 8 kHz is refused and max_delay_ms is capped at 4096
- * (a single channel allows 60000).
+ * Differences from a single channel: the fused gain's DT floor applies whenever the worst lane double-talk indicator is above 0.2
+ * (the lanes still use their own near-end-recent gate for echo-path-change recovery), the duty-cycle hold is a fixed 0.3 s,
+ * the shared ring holds the library's 1024 ms reach plus 2 hops + 1 samples, and 8 kHz is refused.
  * Fused gain. With AEC_RESIDUAL_FULL the gain comes from a stand-alone gain stage fed with the fused spectra: near power is
  * |near|^2, limited by |E|^2 once every contributing lane has converged; the fused r2 serves as both the bounded and the
  * unbounded residual-echo estimate; the comfort-noise PSD is the weighted power sum; the far level is the aligned far hop's.
@@ -755,7 +527,7 @@ int aec_get_array(const Aec* a, AecArrayView* out);
  * bytes. aec_init(mem, size, cfg) is aec_init_ex(..., NULL). Query a fresh descriptor for every build; never persist or
  * synthesize one. */
 #define AEC_DESCRIPTOR_VERSION 1u
-#define AEC_LAYOUT_VERSION     1u
+#define AEC_LAYOUT_VERSION     2u
 #define AEC_BACKEND_NE10       2u   /* backend_id 1 is never returned */
 typedef struct AecMemReq {
     uint32_t descriptor_version;
@@ -795,6 +567,10 @@ typedef struct AecDebugStatus {
      * MATCHED. */
     unsigned long long duty_hops_total;
     unsigned long long duty_hops_run;
+
+    /* Geometry and retiming resolved at construction (constant for the instance's life). */
+    int    n_partitions;       /* partitions of the main filter (an array: lane 0's) */
+    int    delay_period_hops;  /* hops per matched-filter analysis once the duty cycle settles; 1 = every hop */
 } AecDebugStatus;
 
 void aec_debug_status(const Aec* a, AecDebugStatus* out);

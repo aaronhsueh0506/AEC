@@ -21,9 +21,11 @@
 #include <stddef.h>
 
 #include "aec.h"
+#include "aec_impl.h"
 #include "aec_internal.h"
 #include "aec_array_internal.h"
-#include "aec_config_build.h"          /* aec_resolve_valid_config */
+#include "aec_config_build.h"           /* aec_synth_window_build */
+#include "aec_tuning.h"                /* AecResolved, aec_resolve_tuned, aec_apply_level */
 #include "aec_res_internal.h"
 #include "delay_aec.h"
 #include "utility/mem_align.h"
@@ -94,6 +96,7 @@ struct AecArray {
 
     ArraySnapshot snapshots[AEC_ARRAY_MICS];
 
+    float* synth_window;       /* fft_size floats, rebuilt at init; the one a borrower gets */
     float* mic_lane;
     float* aligned_ref;
 
@@ -164,7 +167,7 @@ static void* pool_carve(PoolCursor* cursor, size_t count, size_t element_size) {
 
 /* Resolved geometry and pool sizes of an array cfg. */
 typedef struct ArrayDims {
-    AecConfig lane;
+    AecResolved lane;
     int hop, fft, n, ring;
     int post, full, matched;
     size_t ctl_bytes, buf_bytes, delay_bytes, res_bytes, fft_bytes, lane_each_bytes, total;   /* total: beyond the Aec header */
@@ -173,20 +176,21 @@ typedef struct ArrayDims {
 /* The flow's contract stamped on a lane config: this grid, the shared aligned far (EXTERNAL_ALIGNED), the lane's residual
  * stage at ESTIMATE (STATE when the array is STATE), the flow's estimator duty cycle. Every other field (level values, filter
  * length, ...) is the array config's. */
-static void array_derive_lane(const AecConfig* cfg, AecConfig* lane) {
-    *lane = *cfg;
-    lane->n_mics = 1;
-    lane->capture_proxy_channel = 0;
-    lane->delay_backward_quarantine_enabled = 0;
-    lane->delay_mode = AEC_DELAY_EXTERNAL_ALIGNED;
-    lane->delay_num_filters = DA_NUM_FILTERS;
-    lane->fixed_delay_samples = -1;
-    lane->residual = (cfg->residual == AEC_RESIDUAL_STATE) ? AEC_RESIDUAL_STATE : AEC_RESIDUAL_ESTIMATE;
-    /* The lanes never estimate delay; the period is the flow's estimator duty cycle (already in *cfg). */
+static void array_derive_lane(const AecResolved* in, AecResolved* lane) {
+    *lane = *in;
+    lane->cfg.n_mics = 1;
+    lane->cfg.capture_proxy_channel = 0;
+    lane->cfg.delay_backward_quarantine_enabled = 0;
+    lane->cfg.delay_mode = AEC_DELAY_EXTERNAL_ALIGNED;
+    lane->cfg.delay_num_filters = AEC_DELAY_NUM_FILTERS_MAX;
+    lane->cfg.fixed_delay_samples = -1;
+    lane->cfg.residual = (in->cfg.residual == AEC_RESIDUAL_STATE) ? AEC_RESIDUAL_STATE : AEC_RESIDUAL_ESTIMATE;
+    /* The lanes never estimate delay; the period is the flow's estimator duty cycle (already in the tuning, which every lane
+     * shares with the array). */
 }
 
-static size_t flow_buffer_size(int hop, int n, int ring, int post) {
-    size_t total = 0;
+static size_t flow_buffer_size(int hop, int fft, int n, int ring, int post) {
+    size_t total = ck_field_size(0, (size_t)fft, sizeof(float));   /* synth_window */
     int i;
     for (i = 0; i < 2; ++i) total = ck_field_size(total, (size_t)hop, sizeof(float));
     if (post) {
@@ -198,7 +202,9 @@ static size_t flow_buffer_size(int hop, int n, int ring, int post) {
 }
 
 /* Fills *d for a validated array cfg; 0 when a size cannot be formed. */
-static int array_dims(const AecConfig* cfg, ArrayDims* d) {
+static int array_dims(const AecResolved* rs, ArrayDims* d) {
+    const AecConfig* cfg = &rs->cfg;
+    const AecTuning* tn = &rs->tun;
     AecSignalGrid g;
     size_t total;
     memset(d, 0, sizeof(*d));
@@ -207,10 +213,10 @@ static int array_dims(const AecConfig* cfg, ArrayDims* d) {
     d->post = cfg->residual != AEC_RESIDUAL_STATE;
     d->full = cfg->residual == AEC_RESIDUAL_FULL;
     d->matched = cfg->delay_mode == AEC_DELAY_MATCHED;
-    array_derive_lane(cfg, &d->lane);
+    array_derive_lane(rs, &d->lane);
 
     if (d->matched) {
-        int max_delay_samples = (int)ceilf(cfg->max_delay_ms * (float)cfg->sample_rate / 1000.0f);
+        int max_delay_samples = (int)ceilf(tn->max_delay_ms * (float)cfg->sample_rate / 1000.0f);
         d->ring = max_delay_samples + 2 * d->hop + 1;
         d->delay_bytes = delay_aec_get_mem_size(cfg->sample_rate, d->hop, cfg->delay_num_filters);
         /* An estimator that cannot be sized makes the config invalid. */
@@ -220,10 +226,10 @@ static int array_dims(const AecConfig* cfg, ArrayDims* d) {
         if (d->ring <= 0) return 0;
     }
     d->ctl_bytes = ck_align16_size(sizeof(struct AecArray));
-    d->buf_bytes = flow_buffer_size(d->hop, d->n, d->ring, d->post);
+    d->buf_bytes = flow_buffer_size(d->hop, d->fft, d->n, d->ring, d->post);
     if (d->buf_bytes == 0) return 0;
     if (d->full) {
-        d->res_bytes = aec_res_get_mem_size(&d->lane);
+        d->res_bytes = aec_res_get_mem_size_resolved(&d->lane);
         if (d->res_bytes == 0) return 0;
     }
     d->fft_bytes = fft_get_mem_size(d->fft);
@@ -242,7 +248,9 @@ static int array_dims(const AecConfig* cfg, ArrayDims* d) {
     return 1;
 }
 
-int aec_array_impl_config_ok(const AecConfig* cfg) {
+int aec_array_impl_config_ok(const AecResolved* rs) {
+    const AecConfig* cfg = &rs->cfg;
+    const AecTuning* tn = &rs->tun;
     int n = cfg->n_mics;
     if (n != 1 && n != AEC_ARRAY_MICS) return 0;
     if (n == 1) {
@@ -250,33 +258,33 @@ int aec_array_impl_config_ok(const AecConfig* cfg) {
     }
     {
         ArrayDims d;
-        AecConfig lane_resolved;
+        AecResolved lane_resolved;
         if (cfg->residual == AEC_RESIDUAL_OFF) return 0;
         if (cfg->capture_proxy_channel < 0 || cfg->capture_proxy_channel >= AEC_ARRAY_MICS) return 0;
         /* The flow's three product grids only. */
         if (!((cfg->sample_rate == 16000 && (cfg->fft_size == 256 || cfg->fft_size == 512)) ||
               (cfg->sample_rate == 48000 && cfg->fft_size == 1024))) return 0;
-        if (!isfinite(cfg->max_delay_ms) || cfg->max_delay_ms < 0.0f || cfg->max_delay_ms > 4096.0f) return 0;
-        if (!array_dims(cfg, &d)) return 0;
-        return aec_resolve_valid_config(&d.lane, &lane_resolved);
+        if (!isfinite(tn->max_delay_ms) || tn->max_delay_ms < 0.0f || tn->max_delay_ms > 4096.0f) return 0;
+        if (!array_dims(rs, &d)) return 0;
+        return aec_resolve_tuned(&d.lane.cfg, &d.lane.tun, &lane_resolved);
     }
 }
 
-size_t aec_array_impl_get_mem_size(const AecConfig* cfg) {
+size_t aec_array_impl_get_mem_size(const AecResolved* rs) {
     ArrayDims d;
     size_t total;
-    if (!array_dims(cfg, &d)) return 0;
+    if (!array_dims(rs, &d)) return 0;
     total = ck_add_size(ck_align16_size(sizeof(Aec)), d.total);
     return MEM_SIZE_INVALID(total) ? 0 : total;
 }
 
-int aec_array_impl_get_mem_breakdown(const AecConfig* cfg, AecMemBreakdown* out) {
+int aec_array_impl_get_mem_breakdown(const AecResolved* rs, AecMemBreakdown* out) {
     ArrayDims d;
     size_t total, lanes, ring, est;
     if (!out) return AEC_ERR_ARG;
     memset(out, 0, sizeof(*out));
-    if (!array_dims(cfg, &d)) return AEC_ERR_ARG;
-    total = aec_array_impl_get_mem_size(cfg);
+    if (!array_dims(rs, &d)) return AEC_ERR_ARG;
+    total = aec_array_impl_get_mem_size(rs);
     if (total == 0) return AEC_ERR_ARG;
     lanes = ck_mul_size((size_t)AEC_ARRAY_MICS, ck_align16_size(d.lane_each_bytes));
     ring = d.ring > 0 ? ck_field_size(0, (size_t)d.ring, sizeof(float)) : 0;
@@ -296,15 +304,16 @@ int aec_array_impl_get_mem_breakdown(const AecConfig* cfg, AecMemBreakdown* out)
 static void array_clear_state(AecArray* p);
 
 /* Builds the array in `base` (>= d.total bytes, 16-byte aligned), with the Aec handle `a` already zeroed. 0, or -1. */
-static int array_setup(Aec* a, uint8_t* base, size_t avail, const AecConfig* cfg, int is_static) {
+static int array_setup(Aec* a, uint8_t* base, size_t avail, const AecResolved* rs) {
+    const AecConfig* cfg = &rs->cfg;
+    const AecTuning* tn = &rs->tun;
     ArrayDims d;
     AecArray* p;
     PoolCursor cursor;
-    float q_hop_s;
-    int ch, q_hops, hold, period;
+    int ch, q_hops;
     void* region;
 
-    if (!array_dims(cfg, &d) || avail < d.total) return -1;
+    if (!array_dims(rs, &d) || avail < d.total) return -1;
     memset(base, 0, d.ctl_bytes + d.buf_bytes);           /* control block and the flow buffers; lane pools are built by aec_init */
     p = (AecArray*)base;
     cursor.ptr = base + d.ctl_bytes;
@@ -318,6 +327,9 @@ static int array_setup(Aec* a, uint8_t* base, size_t avail, const AecConfig* cfg
     p->post = d.post; p->full = d.full;
     p->delay_ring_size = d.ring;
 
+    p->synth_window = (float*)pool_carve(&cursor, (size_t)d.fft, sizeof(float));
+    if (!p->synth_window) return -1;
+    aec_synth_window_build(p->synth_window, d.fft);
     p->mic_lane = (float*)pool_carve(&cursor, (size_t)d.hop, sizeof(float));
     p->aligned_ref = (float*)pool_carve(&cursor, (size_t)d.hop, sizeof(float));
     if (!p->mic_lane || !p->aligned_ref) return -1;
@@ -343,7 +355,7 @@ static int array_setup(Aec* a, uint8_t* base, size_t avail, const AecConfig* cfg
     }
     if (d.full) {
         region = pool_carve(&cursor, d.res_bytes, 1);
-        p->gain_stage = region ? aec_res_init(region, d.res_bytes, &d.lane) : NULL;
+        p->gain_stage = region ? aec_res_init_resolved(region, d.res_bytes, &d.lane) : NULL;
         if (!p->gain_stage) return -1;
     }
     region = pool_carve(&cursor, d.fft_bytes, 1);
@@ -361,32 +373,28 @@ static int array_setup(Aec* a, uint8_t* base, size_t avail, const AecConfig* cfg
 
     /* Seconds -> hops once against the resolved grid, with the single-channel floor of 1. The duty floor is 1, not 2: 2 would
      * cap delay_est_period_s = 0.0 at 50 % engagement. */
-    q_hop_s = (float)d.hop / (float)cfg->sample_rate;
-    q_hops = (int)lrintf(cfg->delay_backward_quarantine_s / q_hop_s);
-    hold = (int)lrintf(DUTY_HOLD_S / q_hop_s);
-    period = (int)lrintf(cfg->delay_est_period_s / q_hop_s) / AEC_DUTY_PERIOD_DIVISOR;
+    q_hops = (int)lrintf(cfg->delay_backward_quarantine_s / ((float)d.hop / (float)cfg->sample_rate));
     p->delay_quarantine_hops = q_hops < 1 ? 1 : q_hops;
-    p->duty.hold_hops = hold < 1 ? 1 : hold;
-    p->duty.period_hops = period < 1 ? 1 : period;
-    p->duty.erle_leak_db = aec_duty_leak_db(d.hop, cfg->sample_rate);
+    aec_duty_configure(&p->duty, DUTY_HOLD_S, tn->delay_est_period_s, d.hop, cfg->sample_rate);
     array_clear_state(p);
 
     a->cfg = *cfg;
+    a->tun = *tn;
     a->hop_size = d.hop; a->block_size = d.fft; a->fft_size = d.fft; a->n_freqs = d.n;
     a->n_partitions = p->lanes[0]->n_partitions;
-    a->is_static = is_static;
+    a->is_static = 1;
     a->array = p;
     return 0;
 }
 
-Aec* aec_array_impl_init(void* mem, size_t mem_size, const AecConfig* cfg) {
+Aec* aec_array_impl_init(void* mem, size_t mem_size, const AecResolved* rs) {
     Aec* a;
-    size_t need = aec_array_impl_get_mem_size(cfg);
+    size_t need = aec_array_impl_get_mem_size(rs);
     size_t header = ALIGN16(sizeof(Aec));
     if (!mem || need == 0 || mem_size < need) return NULL;
     a = (Aec*)mem;
     memset(a, 0, sizeof(Aec));
-    if (array_setup(a, (uint8_t*)mem + header, mem_size - header, cfg, 1) != 0) {
+    if (array_setup(a, (uint8_t*)mem + header, mem_size - header, rs) != 0) {
         memset(a, 0, sizeof(Aec));
         return NULL;
     }
@@ -394,36 +402,15 @@ Aec* aec_array_impl_init(void* mem, size_t mem_size, const AecConfig* cfg) {
     return a;
 }
 
-int aec_array_impl_create(Aec* a, const AecConfig* cfg) {
-    void* arena = NULL;
-    size_t need = aec_array_impl_get_mem_size(cfg);
-    size_t header = ALIGN16(sizeof(Aec));
-    if (!a || need == 0) return -1;
-    if (posix_memalign(&arena, 16u, need - header) != 0 || !arena) return -1;
-    memset(a, 0, sizeof(*a));
-    if (array_setup(a, (uint8_t*)arena, need - header, cfg, 0) != 0) {
-        free(arena);
-        memset(a, 0, sizeof(*a));
-        return -1;
-    }
-    a->heap_arena = arena;
-    a->ready = 1;
-    return 0;
-}
-
 void aec_array_impl_destroy(Aec* a) {
-    AecArray* p;
-    int ch;
+    AecArray* p = a->array;
     void* heap;
-    p = a->array;
+    int ch;
     for (ch = 0; ch < AEC_ARRAY_MICS; ++ch) aec_destroy(p->lanes[ch]);
     fft_destroy(p->fft);
-    heap = a->heap_arena;
-    if (heap) {                   /* aec_create(): the control block lived in the arena */
-        free(heap);
-        memset(a, 0, sizeof(*a));
-    }
+    heap = a->is_static ? NULL : a->heap_arena;
     a->ready = 0;
+    if (heap) free(heap);       /* aec_create(): the block that holds *a, the control block and the lanes */
 }
 
 /* ---- shared alignment ----------------------------------------------------------------------------------------------- */
@@ -984,21 +971,16 @@ uint32_t aec_array_impl_post_reset_serial(const Aec* a) {
 
 int aec_array_impl_synthesis_window(const Aec* a, const float** window, int* length) {
     const AecArray* p = a->array;
-    return aec_synthesis_window(p->lanes[0], window, length);
+    *window = p->synth_window;
+    *length = a->block_size;
+    return 0;
 }
 
 int aec_array_impl_set_level(Aec* a, AecLevel level) {
     AecArray* p = a->array;
-    float db, dt_db;
-    int en;
-    if (aec_level_floor_db(level, &db) != 0 || aec_level_dt_floor_db(level, &dt_db) != 0 ||
-        aec_level_split_floor_enabled(level, &en) != 0) return -1;
-    /* Lookups are validated before any write; the gain stage applies first and refuses without writing. */
+    /* Each store validates the level before writing; the gain stage goes first and refuses without writing. */
     if (p->gain_stage && aec_res_set_level(p->gain_stage, level) != 0) return -1;
-    a->cfg.min_gain_floor_far_active_db = db;
-    a->cfg.min_gain_floor_dt_db = dt_db;
-    a->cfg.min_gain_split_floor_enabled = en;
-    return 0;
+    return aec_apply_level(&a->cfg, &a->tun, level);
 }
 
 void aec_array_impl_debug_status(const Aec* a, AecDebugStatus* out) {
@@ -1012,6 +994,8 @@ void aec_array_impl_debug_status(const Aec* a, AecDebugStatus* out) {
     out->erle_windowed_db = max_lane_erle_windowed(p);
     out->duty_hops_total = p->delay_mode == (int)AEC_DELAY_MATCHED ? p->delay_calls : 0ull;
     out->duty_hops_run = p->duty.hops_run;
+    out->n_partitions = a->n_partitions;
+    out->delay_period_hops = p->duty.period_hops;
 }
 
 long aec_array_impl_far_fft_count(const Aec* a) {
@@ -1129,10 +1113,7 @@ long aec_array_realign_soft_lane_count(const Aec* a) {
 }
 
 int aec_array_matched_filter_count(const Aec* a) {
-    const AecArray* p = live_array(a);
-    if (aec_unusable(a)) return 0;
-    if (p) return p->delay_mode == (int)AEC_DELAY_MATCHED ? 1 : 0;
-    return a->cfg.delay_mode == AEC_DELAY_MATCHED ? 1 : 0;
+    return !aec_unusable(a) && a->cfg.delay_mode == AEC_DELAY_MATCHED ? 1 : 0;
 }
 
 int aec_array_linear_aec_count(const Aec* a) {

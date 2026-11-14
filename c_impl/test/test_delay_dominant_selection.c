@@ -3,8 +3,7 @@
  * A reference delay estimator that wants the earliest echo-path onset can report the pre-echo candidate. Here the reported
  * sample delay aligns a short PBFDKF directly, so an onset further ahead of the dominant echo than that filter spans puts the
  * echo it must cancel outside the filter, while confidence still reads 1.0 (it describes the dominant histogram, not a
- * substituted delay). The onset estimate therefore has no consumer: the accumulated-error search that produced it is not
- * computed and the pre-echo histogram is never fed; test_pre_echo_path_is_inert() pins that.
+ * substituted delay). The C estimator therefore has no onset search and no pre-echo state.
  *
  * The signal is dual-path on purpose: a weak early reflection plus a stronger dominant one, separated by more than the PBFDKF
  * span. "The dominant one was reported" only means something if this estimator could have reported the early one, so every
@@ -153,38 +152,6 @@ static void test_reported_delay_is_the_dominant_peak(int sample_rate, int hop) {
     free(pool);
 }
 
-/* The other half of the contract: the onset estimate is not merely unreported, it is not computed.
- * After a long dual-path run, which would have driven every pre-echo update a per-tap-prefix path
- * makes, the buffers it fed and the histogram it fed into must still hold their initialised values.
- * A change that re-introduced the per-tap-prefix error would trip over this. */
-static void test_pre_echo_path_is_inert(void) {
-    DelayAec d;
-    const char *why = NULL;
-    void *pool = delay_pool_init(&d, 16000, 256, DA_NUM_FILTERS, &why);
-    const DaMatchedFilter *mf;
-    const DaPreEcho *pe;
-    int i, hist_sum = 0, inst_nonzero = 0, acc_moved = 0;
-    if (!pool) { printf("FAIL: pool (%s)\n", why ? why : "?"); g_fail++; return; }
-    feed_dual_path(&d, 11u, 900, 256, EARLY_16K, DOMINANT_16K);
-    mf = &d.est.matched_filter;
-    pe = &d.est.aggregator.pre_echo;
-    for (i = 0; i < pe->hist_size; ++i) hist_sum += pe->histogram[i];
-    for (i = 0; i < DA_ACC_ERR_SIZE; ++i)
-        if (mf->instantaneous_error[i] != 0.0f) inst_nonzero++;
-    for (i = 0; i < mf->num_filters * DA_ACC_ERR_SIZE; ++i)
-        if (mf->accumulated_error[i] != 1.0f) acc_moved++;
-    CHECK(hist_sum == 0 && pe->number_updates == 0 && pe->pre_echo_candidate == 0,
-          "the pre-echo histogram is never fed");
-    CHECK(inst_nonzero == 0,
-          "the per-tap-prefix (instantaneous) error stays at its zero init");
-    CHECK(acc_moved == 0,
-          "the accumulated error stays at its 1.0 init");
-    /* the run really was long enough to have driven a per-tap-prefix path */
-    CHECK(mf->number_pre_echo_updates == DA_PRE_ECHO_UPDATES_TO_REPORT,
-          "the fixture is long enough that the old update gate would have opened");
-    free(pool);
-}
-
 static void test_reset_reacquires_the_dominant_candidate(void) {
     DelayAec d;
     const char *why = NULL;
@@ -213,7 +180,6 @@ int main(void) {
     test_reported_delay_is_the_dominant_peak(16000, 128);
     test_reported_delay_is_the_dominant_peak(16000, 256);
     test_reported_delay_is_the_dominant_peak(48000, 512);
-    test_pre_echo_path_is_inert();
     test_reset_reacquires_the_dominant_candidate();
     if (g_fail) { printf("\n%d check(s) FAILED\n", g_fail); return 1; }
     printf("\ntest_delay_dominant_selection: ALL PASS\n");

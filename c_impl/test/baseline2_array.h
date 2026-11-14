@@ -248,7 +248,6 @@ static const char* const G2AG_NAME[G2AG_COUNT] = { "front", "frame", "gain", "ap
 static void g2a_apply_cfg(AecConfig* cfg, const G2ACase* c) {
     aec_config_from_level(cfg, AEC_LEVEL_BALANCED, c->sr);
     cfg->fft_size = c->fft;
-    if (c->noshadow) cfg->enable_shadow = 0;
 }
 
 static const char* g2a_grid(const G2ACase* c, char* buf, size_t cap) { snprintf(buf, cap, "%d/%d", c->sr, c->fft); return buf; }

@@ -73,8 +73,8 @@ build() {   # $1 label, rest = make variables; prints the directory holding pyc_
     make -s -C "$C_IMPL" OBJ_ROOT="$o" BIN_ROOT="$b" "$@" print-bin-dir
 }
 echo "== building (scratch: $WORK)"
-STD_DIR=$(build std SIMD=0 EXTRA_CFLAGS=-DUSE_STANDARD_MATH) || exit 2
-SHIP_DIR=$(build ship SIMD=1 EXTRA_CFLAGS=) || exit 2
+STD_DIR=$(build std AEC_TESTING=1 SIMD=0 EXTRA_CFLAGS=-DUSE_STANDARD_MATH) || exit 2
+SHIP_DIR=$(build ship AEC_TESTING=1 SIMD=1 EXTRA_CFLAGS=) || exit 2
 STD_BIN=$STD_DIR/pyc_aec_run; SHIP_BIN=$SHIP_DIR/pyc_aec_run
 [ -x "$STD_BIN" ] && [ -x "$SHIP_BIN" ] || { echo "FAIL(setup): driver binaries missing" >&2; exit 2; }
 echo "   std-math build: SIMD=0 EXTRA_CFLAGS=-DUSE_STANDARD_MATH"

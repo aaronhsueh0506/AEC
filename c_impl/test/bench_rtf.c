@@ -43,6 +43,10 @@
 #include <string.h>
 #include <time.h>
 
+#ifdef AEC_TESTING
+#include "aec_test_tuning.h"
+#endif
+
 /* ── deterministic synthetic input ─────────────────────────────────────── */
 
 /* Classic Numerical-Recipes LCG. Top 16 bits are far better distributed than
@@ -158,17 +162,8 @@ static void print_usage(const char* prog) {
         "  --stage {full|linear|both}            stages to run (default: both)\n"
         "  --scene {noise|bursts}                synthetic input: white noise (default) or the speech-like scene\n"
         "  --wav <mic.wav> <ref.wav>             use a recording instead of synthetic input\n"
-        "  --live-observer                       A21 Stage 2 observer on (default off)\n",
+        "  --live-observer                       A21 Stage 2 observer on (default off; needs make bench AEC_TESTING=1)\n",
         prog);
-}
-
-static const char* level_name(AecLevel p) {
-    switch (p) {
-        case AEC_LEVEL_MILD:       return "mild";
-        case AEC_LEVEL_AGGRESSIVE: return "aggressive";
-        case AEC_LEVEL_NO_FLOOR:   return "no_floor";
-        default:                    return "balanced";
-    }
 }
 
 /* ── timing ─────────────────────────────────────────────────────────────── */
@@ -184,6 +179,19 @@ static int cmp_double(const void* a, const void* b) {
     return (x > y) - (x < y);
 }
 
+/* One instance for cfg. The live observer is an internal tuning switch, so it is available only in a build with the test
+ * hooks (make bench AEC_TESTING=1); the product build of this tool refuses the option. */
+static Aec* bench_create(const AecConfig* cfg, int live_observer) {
+#ifdef AEC_TESTING
+    AecTuning tun;
+    aec_testing_tuning_defaults(&tun, cfg);
+    tun.live_observer_enabled = live_observer;
+    return aec_testing_create(cfg, &tun);
+#else
+    return live_observer ? NULL : aec_create(cfg);
+#endif
+}
+
 /* Runs `repeat` full passes of aec_process() over [mic,ref) x n_hops hops
  * under `cfg`, prints the stage line, and returns the minimum total_s
  * observed (least-noise estimate); the line also carries the median over the
@@ -191,11 +199,11 @@ static int cmp_double(const void* a, const void* b) {
  * buckets of the fastest pass. One aec_create/aec_destroy per stage;
  * aec_reset() between repeats restores a cold-start state (no realloc) so
  * every repeat measures the same condition rather than a warmed-up tail. */
-static double run_stage(const char* name, const AecConfig* cfg,
+static double run_stage(const char* name, const AecConfig* cfg, int live_observer,
                          const float* mic_buf, const float* ref_buf,
                          int hop, int n_hops, int repeat, double audio_seconds) {
-    Aec aec;
-    if (aec_create(&aec, cfg) != 0) {
+    Aec *aec = NULL;
+    if ((aec = bench_create(cfg, live_observer)) == NULL) {
         fprintf(stderr, "ERROR: aec_create failed for stage '%s'\n", name);
         exit(4);
     }
@@ -211,7 +219,7 @@ static double run_stage(const char* name, const AecConfig* cfg,
     double sum[5] = {0}, best_sum[5] = {0};
 #endif
     for (int r = 0; r < repeat; ++r) {
-        aec_reset(&aec);
+        aec_reset(aec);
         const float* mp = mic_buf;
         const float* rp = ref_buf;
 #if AEC_STAGE_TIMING
@@ -220,11 +228,11 @@ static double run_stage(const char* name, const AecConfig* cfg,
 
         double t0 = now_s();
         for (int h = 0; h < n_hops; ++h) {
-            aec_process(&aec, mp, rp, out);
+            aec_process(aec, mp, rp, out);
 #if AEC_STAGE_TIMING
             {
                 AecStageTiming t;
-                aec_get_last_timing(&aec, &t);
+                aec_get_last_timing(aec, &t);
                 sum[0] += t.delay_us;  sum[1] += t.frontend_us; sum[2] += t.linear_us;
                 sum[3] += t.res_us;    sum[4] += t.steering_us;
             }
@@ -248,7 +256,7 @@ static double run_stage(const char* name, const AecConfig* cfg,
 
     free(out);
     free(times);
-    aec_destroy(&aec);
+    aec_destroy(aec);
 
     double us_per_hop = n_hops > 0 ? (best * 1e6) / (double)n_hops : 0.0;
     double median_us_per_hop = n_hops > 0 ? (median * 1e6) / (double)n_hops : 0.0;
@@ -313,7 +321,12 @@ int main(int argc, char** argv) {
             ref_path = argv[++i];
             use_wav = 1;
         } else if (!strcmp(arg, "--live-observer")) {
+#ifdef AEC_TESTING
             live_observer = 1;
+#else
+            fprintf(stderr, "ERROR: --live-observer needs a build with the test hooks: make bench AEC_TESTING=1\n");
+            return 2;
+#endif
         } else if (!strcmp(arg, "-h") || !strcmp(arg, "--help")) {
             print_usage(argv[0]);
             return 0;
@@ -362,34 +375,33 @@ int main(int argc, char** argv) {
     aec_config_from_level(&full_cfg, level, sample_rate);
     full_cfg.enable_cng = 1;   /* mirrors aec_wav's --cng path */
     if (fft_override > 0) full_cfg.fft_size = fft_override;
-    full_cfg.live_observer_enabled = live_observer;
 
     /* Probe hop size once (hop is a pure function of sample_rate/level,
      * identical for the full and linear configs below); this instance is
      * not part of either timed stage. */
-    Aec probe;
-    if (aec_create(&probe, &full_cfg) != 0) {
+    Aec *probe = NULL;
+    if ((probe = bench_create(&full_cfg, live_observer)) == NULL) {
         fprintf(stderr, "ERROR: aec_create (probe) failed\n");
         return 4;
     }
-    int hop = aec_hop_size(&probe);
-    aec_destroy(&probe);
+    int hop = aec_hop_size(probe);
+    aec_destroy(probe);
 
     int n_hops = hop > 0 ? n_samples / hop : 0;
     double audio_seconds = (double)n_hops * hop / (double)sample_rate;
 
     printf("# level=%s input=%s sample_rate=%d hop=%d audio_s=%.3f\n",
-           level_name(level), use_wav ? "wav" : "synthetic", sample_rate, hop, audio_seconds);
+           aec_level_name(level), use_wav ? "wav" : "synthetic", sample_rate, hop, audio_seconds);
     printf("runs=%d\n", repeat);
 
     double full_s = 0.0, linear_s = 0.0;
     if (stage_sel != 2)
-        full_s = run_stage("full", &full_cfg, mic_buf, ref_buf, hop, n_hops, repeat, audio_seconds);
+        full_s = run_stage("full", &full_cfg, live_observer, mic_buf, ref_buf, hop, n_hops, repeat, audio_seconds);
 
     AecConfig linear_cfg = full_cfg;
     linear_cfg.residual = AEC_RESIDUAL_OFF;
     if (stage_sel != 1)
-        linear_s = run_stage("linear", &linear_cfg, mic_buf, ref_buf, hop, n_hops, repeat, audio_seconds);
+        linear_s = run_stage("linear", &linear_cfg, live_observer, mic_buf, ref_buf, hop, n_hops, repeat, audio_seconds);
 
     /* Derived: post-filter cost ≈ full - linear. Not an independently timed
      * stage (see file header); can be noisy/negative on a loaded machine. */

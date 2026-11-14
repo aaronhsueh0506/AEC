@@ -23,13 +23,13 @@ static void pbfdaf_compute_sizes(int hop_size, int* out_hop, int* out_blk,
     if (out_K)   *out_K   = fft / 2 + 1;
 }
 
-/* td_window is 1 on [0, hop) and 0 on [hop, fft_size); sqrt_hann is the periodic sqrt-Hann. */
+/* td_window is 1 on [0, hop) and 0 on [hop, fft_size); sqrt_hann is the periodic sqrt-Hann (NULL on a follower). */
 static void pbfdaf_fill_windows(PBFDAF* p) {
     memset(p->td_window, 0, (size_t)p->fft_size * sizeof(float));
     /* Constrain: keep the causal half of each partition and clear the rest, so no wrap-around
      * energy leaks into the next valid hop. */
     for (int i = 0; i < p->hop_size; ++i) p->td_window[i] = 1.0f;
-    ac_window_build(p->sqrt_hann, p->block_size);
+    if (p->sqrt_hann) ac_window_build(p->sqrt_hann, p->block_size);
 }
 
 static void pbfdaf_init_scalars(PBFDAF* p, int n_partitions, float mu,
@@ -50,7 +50,6 @@ static void pbfdaf_init_scalars(PBFDAF* p, int n_partitions, float mu,
     p->initial_state_threshold_hops =
         aec_ms_to_hops(2500.0f, p->hop_size, sample_rate);
     p->initial_state_far_energy_floor = 1e-4f;
-    p->last_initial_state_active = 1;
     p->last_s_max_abs = 0.0f;
     p->lightweight = 0;
     p->precomputed_far_spec = NULL;
@@ -78,8 +77,8 @@ static void pbfdaf_zero_state(PBFDAF* p) {
     if (p->spec_scratch) memset(p->spec_scratch, 0, (size_t)p->n_freqs * sizeof(Complex));
 }
 
-/* follower = 1: a lightweight shadow of a main filter at the same geometry. It has no near_spec / error_spec_windowed /
- * spec_scratch (the frontend skips them when lightweight) and shares the main filter's X_buf and x2_cache. */
+/* follower = 1: a lightweight shadow of a main filter at the same geometry. It has no sqrt_hann / near_spec /
+ * error_spec_windowed / spec_scratch (the frontend skips them when lightweight) and shares the main filter's X_buf and x2_cache. */
 static size_t pbfdaf_mem_size_impl(int block_size, int n_partitions, int hop_size,
                                    int with_process_scratch, int follower) {
     int hop = (hop_size > 0) ? hop_size : block_size / 2;
@@ -92,7 +91,7 @@ static size_t pbfdaf_mem_size_impl(int block_size, int n_partitions, int hop_siz
      * match this one. */
     size_t total = 0;
     total = ck_field_size(total, (size_t)fft, sizeof(float));
-    total = ck_field_size(total, (size_t)blk, sizeof(float));
+    if (!follower) total = ck_field_size(total, (size_t)blk, sizeof(float));   /* sqrt_hann */
     total = ck_field_size(total, Wsz, sizeof(Complex));                  /* W */
     if (!follower) total = ck_field_size(total, Wsz, sizeof(Complex));   /* X_buf */
     total = ck_field_size(total, (size_t)blk, sizeof(float));
@@ -156,7 +155,7 @@ static int pbfdaf_init_impl(PBFDAF* p, void* mem, size_t mem_size,
     int Wsz = n_partitions * K;
 
     p->td_window  = (float*)ptr;   ptr += ALIGN16((size_t)fft * sizeof(float));
-    p->sqrt_hann  = (float*)ptr;   ptr += ALIGN16((size_t)blk * sizeof(float));
+    if (!follower) { p->sqrt_hann = (float*)ptr; ptr += ALIGN16((size_t)blk * sizeof(float)); }
     p->W          = (Complex*)ptr; ptr += ALIGN16((size_t)Wsz * sizeof(Complex));
     if (follower) {
         p->X_buf = far_owner->X_buf;
@@ -357,7 +356,6 @@ void pbfdaf_process_with_far_cmag2(PBFDAF* p,
         if (p->initial_state_active_render_hops >= p->initial_state_threshold_hops)
             p->initial_state_active = 0;
     }
-    p->last_initial_state_active = p->initial_state_active;
 
     if (far_hop_energy > 1e-4f) {
         /* The counter increments first, unconditionally, and saturates at LONG_MAX: its raw value
@@ -438,6 +436,10 @@ void pbfdaf_copy_weights_from(PBFDAF* dst, const PBFDAF* src) {
     dst->w_dirty = 1;
 }
 
+static void pbfdaf_get_time_domain_filter(PBFDAF* p, float* out) {
+    pbfdaf_get_time_domain_filter_range(p, 0, p->n_partitions, out);
+}
+
 /* Warm tap transfer: shifts the learned IR by shift_samples (positive = left, toward tap 0;
  * negative = right), zero-filling the freed end, so the cold-start cancellation survives a delay
  * realign. Raw irfft per partition -> concatenate -> shift -> rfft each hop block back into W (no
@@ -476,10 +478,6 @@ int pbfdaf_warm_shift_ir(PBFDAF* p, int shift_samples) {
 static void pbfdkf_init_scalars(PBFDKF* p) {
     int K = p->base.n_freqs;
     for (int k = 0; k < K; ++k) {
-        p->Q_high[k] = 1e-4f;
-        p->Q_low[k]  = 1e-5f;
-        p->Q[k]      = 1e-4f;
-        p->R[k]      = 1e-2f;
         p->error_psd[k] = 1e-2f;
         p->H_error_per_bin[k] = (float)AEC_H_ERROR_INIT_FLOAT;
         p->erl_per_bin[k] = 0.1f;
@@ -516,9 +514,9 @@ size_t pbfdkf_get_mem_size(int block_size, int n_partitions, int hop_size) {
     if (n_partitions <= 0 || K <= 0) return 0;
     size_t total = pbfdaf_get_mem_size(block_size, n_partitions, hop_size, 0);
     if (total == 0) return 0;
-    /* Checked size arithmetic: 12 equally sized K-length float fields, each ALIGN16'd by
+    /* Checked size arithmetic: 8 equally sized K-length float fields, each ALIGN16'd by
      * pbfdkf_init_static. */
-    total = ck_field_size_reps(total, (size_t)K, sizeof(float), 12);
+    total = ck_field_size_reps(total, (size_t)K, sizeof(float), 8);
 
     if (MEM_SIZE_INVALID(total)) return 0;
     return total;
@@ -545,10 +543,6 @@ int pbfdkf_init_static(PBFDKF* p, void* mem, size_t mem_size,
         return -1;
     uint8_t* ptr = (uint8_t*)mem + base_sz;
     int K = p->base.n_freqs;
-    p->Q_high    = (float*)ptr; ptr += ALIGN16((size_t)K * sizeof(float));
-    p->Q_low     = (float*)ptr; ptr += ALIGN16((size_t)K * sizeof(float));
-    p->Q         = (float*)ptr; ptr += ALIGN16((size_t)K * sizeof(float));
-    p->R         = (float*)ptr; ptr += ALIGN16((size_t)K * sizeof(float));
     p->error_psd = (float*)ptr; ptr += ALIGN16((size_t)K * sizeof(float));
     p->H_error_per_bin = (float*)ptr; ptr += ALIGN16((size_t)K * sizeof(float));
     p->erl_per_bin = (float*)ptr; ptr += ALIGN16((size_t)K * sizeof(float));
@@ -570,9 +564,7 @@ void pbfdkf_free(PBFDKF* p) {
 static void pbfdkf_rearm_kalman(PBFDKF* p) {
     int K = p->base.n_freqs;
     for (int k = 0; k < K; ++k) {
-        p->R[k] = 1e-2f;
         p->error_psd[k] = 1e-2f;
-        p->Q[k] = p->Q_high[k];
     }
 }
 
@@ -597,7 +589,6 @@ void pbfdaf_reset_carried_state(PBFDAF* p) {
     p->block_stationary = 0;
     p->initial_state_active = 1;
     p->initial_state_active_render_hops = 0;
-    p->last_initial_state_active = 1;
 }
 
 void pbfdkf_reset_carried_state(PBFDKF* p) {
@@ -647,11 +638,7 @@ void pbfdaf_get_time_domain_filter_range(PBFDAF* p, int first_partition,
     }
 }
 
-void pbfdaf_get_time_domain_filter(PBFDAF* p, float* out) {
-    pbfdaf_get_time_domain_filter_range(p, 0, p->n_partitions, out);
-}
-
-void pbfdaf_scale_filter(PBFDAF* p, float scale) {
+static void pbfdaf_scale_filter(PBFDAF* p, float scale) {
     int Wsz = p->n_partitions * p->n_freqs;
     for (int i = 0; i < Wsz; ++i) {
         p->W[i].r = p->W[i].r * scale;
@@ -785,7 +772,6 @@ int pbfdkf_process_with_far_cmag2(PBFDKF* p,
         if (b->initial_state_active_render_hops >= b->initial_state_threshold_hops)
             b->initial_state_active = 0;
     }
-    b->last_initial_state_active = b->initial_state_active;
 
     if (far_hop_energy > 1e-4f) {
         /* PBFDKF update. */
@@ -817,12 +803,11 @@ int pbfdkf_process_with_far_cmag2(PBFDKF* p,
             return error_cmag2_valid;
         }
 
-        /* error_psd EMA and R = max(error_psd, delta), float32. alpha_r is retimed at init. */
+        /* error_psd EMA, float32. alpha_r is retimed at init. */
         const float ar = p->alpha_r;
         const float oar = 1.0f - p->alpha_r;
         for (int k = 0; k < K; ++k) {
             p->error_psd[k] = ar * p->error_psd[k] + oar * e2_ref[k];
-            p->R[k] = (p->error_psd[k] > b->delta) ? p->error_psd[k] : (float)b->delta;
         }
 
         pbfdkf_update_weights(p, curr_p, mu_arr, e2_ref);

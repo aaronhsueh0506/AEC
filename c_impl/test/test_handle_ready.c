@@ -1,14 +1,18 @@
 /* test_handle_ready.c -- a handle that is not ready is refused by every public entry point that takes an Aec (aec.h).
  *
- * "Not ready" = a zero-filled Aec that was never built (static storage, calloc, a zeroed pool cast to Aec*), the handle a failed
- * aec_create() left behind, and a destroyed handle; single-channel and array, heap (aec_create) and caller pool (aec_init). A
- * live handle of each kind is the positive control: the same calls must not all be refused. The list of entries is the block
+ * "Not ready" = a zero-filled Aec that was never built (static storage, stack, calloc, a zeroed pool cast to Aec*), the NULL a
+ * failed aec_create() returns, and a destroyed pool instance (an aec_create() instance is freed by aec_destroy(), so its pointer
+ * is dead); single-channel and array, heap (aec_create) and caller pool (aec_init). A live handle of each kind is the positive
+ * control: the same calls must not all be refused. The list of entries is the block
  * between the BEGIN / END markers in check_refused(); check_handle_entries.py compares it with the prototypes in aec.h.
  *
  * Run from c_impl/:  make test-handle-ready */
 #include "aec.h"
+#include "aec_white_box.h"
+#include "aec_test_tuning.h"
 #include "aec_internal.h"
 #include "aec_pool_test_util.h"
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -110,7 +114,7 @@ static void invalid_cfg(AecConfig* cfg, int array) {
         cfg->n_mics = ARRAY_CH;
         cfg->residual = AEC_RESIDUAL_OFF;       /* an array needs a residual mode */
     } else {
-        cfg->filter_length = 0;
+        cfg->delay_num_filters = 0;             /* the matched-filter bank needs 1..5 filters */
     }
 }
 
@@ -138,28 +142,54 @@ static void test_never_built(void) {
 
 static void test_failed_create(int array) {
     AecConfig bad, good;
-    Aec a;
+    Aec *a = NULL;
     const char* kind = array ? "array" : "single-channel";
     char what[96];
     invalid_cfg(&bad, array);
     valid_cfg(&good, array);
-    memset(&a, 0, sizeof a);
-    CHECK(aec_create(&a, &bad) == -1, "%s: aec_create(invalid cfg) fails", kind);
-    snprintf(what, sizeof what, "%s: handle left by a failed aec_create", kind);
-    check_refused(&a, what);
-    /* a failed re-create over a destroyed handle leaves it refused, and a good create then builds it */
-    CHECK(aec_create(&a, &good) == 0, "%s: aec_create(valid cfg)", kind);
+    CHECK((a = aec_create(&bad)) == NULL, "%s: aec_create(invalid cfg) fails", kind);
+    snprintf(what, sizeof what, "%s: the NULL a failed aec_create returns", kind);
+    check_refused(a, what);
+    CHECK(aec_create(NULL) == NULL, "%s: aec_create(NULL) fails", kind);
+    /* the pointer of a destroyed heap instance is dead; a new create builds a live instance */
+    CHECK((a = aec_create(&good)) != NULL, "%s: aec_create(valid cfg)", kind);
     snprintf(what, sizeof what, "%s: created", kind);
-    check_live(&a, what);
-    aec_destroy(&a);
-    CHECK(aec_create(&a, &bad) == -1, "%s: aec_create(invalid cfg) over a destroyed handle fails", kind);
-    snprintf(what, sizeof what, "%s: failed re-create over a destroyed handle", kind);
-    check_refused(&a, what);
-    CHECK(aec_create(&a, &good) == 0, "%s: a refused handle can be created again", kind);
-    check_live(&a, "re-created");
-    aec_destroy(&a);
-    snprintf(what, sizeof what, "%s: destroyed heap handle", kind);
-    check_refused(&a, what);
+    check_live(a, what);
+    aec_destroy(a);
+    CHECK((a = aec_create(&good)) != NULL, "%s: aec_create again after a destroy", kind);
+    check_live(a, "re-created");
+    aec_destroy(a);
+}
+
+/* AecDebugStatus.n_partitions / delay_period_hops: the values the construction resolved, read back through the public status.
+ * The expectations are computed here from the config and the grid, not from the instance. */
+static void test_debug_status_geometry(int array) {
+    const char* kind = array ? "array" : "single-channel";
+    const int explicit_np[2] = { 0, 5 };
+    int k;
+    for (k = 0; k < 2; ++k) {
+        AecTestCfg tc;
+        AecDebugStatus ds;
+        Aec* a;
+        int hop, want_np, want_period;
+        valid_cfg(&tc.c, array);
+        aec_tcfg_refresh(&tc);
+        tc.t.delay_est_period_s = 0.5f;
+        tc.t.n_partitions = explicit_np[k];
+        a = aec_tcfg_create(&tc);
+        CHECK(a != NULL, "%s: status geometry instance", kind);
+        if (!a) continue;
+        memset(&ds, 0x5A, sizeof ds);
+        aec_debug_status(a, &ds);
+        hop = aec_hop_size(a);
+        want_np = explicit_np[k] > 0 ? explicit_np[k] : (tc.t.filter_length + hop - 1) / hop;
+        want_period = (int)lrintf(tc.t.delay_est_period_s / ((float)hop / (float)tc.c.sample_rate)) / 5;
+        CHECK(want_np > 1 && ds.n_partitions == want_np, "%s: n_partitions %d (want %d)", kind, ds.n_partitions, want_np);
+        CHECK(want_period > 1 && ds.delay_period_hops == want_period, "%s: delay_period_hops %d (want %d)", kind,
+              ds.delay_period_hops, want_period);
+        CHECK(ds.n_partitions == a->n_partitions, "%s: n_partitions equals the instance's", kind);
+        aec_destroy(a);
+    }
 }
 
 static void test_destroyed_pool(int array) {
@@ -192,9 +222,11 @@ static void test_destroyed_pool(int array) {
 int main(void) {
     test_never_built();
     test_failed_create(0);
+    test_debug_status_geometry(0);
     test_destroyed_pool(0);
 #ifndef AEC_NO_ARRAY
     test_failed_create(1);
+    test_debug_status_geometry(1);
     test_destroyed_pool(1);
 #endif
     printf("%ld checks, %d failed\n%s\n", g_checks, g_fail, g_fail ? "FAIL" : "PASS");

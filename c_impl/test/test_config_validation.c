@@ -1,9 +1,11 @@
-/* test_config_validation.c -- negative-input tests: aec_resolve_valid_config() (aec.c) is the single source of truth for
- * AecConfig bounds-checking, wired into all three public entry points that derive sizes/state from a config. This test
- * proves each entry point rejects a bad config through its own failure convention (no release-path asserts):
+/* test_config_validation.c -- negative-input tests: aec_resolve() / aec_resolve_tuned() (aec.c) is the single source of truth
+ * for AecConfig and AecTuning bounds-checking, wired into all three public entry points that derive sizes/state from a
+ * config. This test proves each entry point rejects a bad config through its own failure convention (no release-path
+ * asserts):
  *   - aec_get_mem_size(cfg)        -> 0
  *   - aec_init(mem, mem_size, cfg) -> NULL
- *   - aec_create(&a, cfg)          -> nonzero
+ *   - aec_create(cfg)              -> NULL
+ * A bad INTERNAL tuning value reaches the same three paths through the aec_testing_* hooks (check_rejected_tuned).
  * plus the misaligned-pool-base guard in aec_init(), and a smoke test that the otherwise-valid 16 kHz balanced config
  * still works end to end.
  *
@@ -19,6 +21,8 @@
  *   ./bin/test_config_validation
  */
 #include "aec.h"
+#include "aec_white_box.h"
+#include "aec_test_tuning.h"
 #include "aec_pool_test_util.h"
 #include "res_gain_of.h"
 /* AECB_RATE_TABLE / aecb_rate_cfg(): the tuning table carries its
@@ -26,6 +30,7 @@
  * constants. test_signal_grid_resolver() pins it against the shared
  * resolver so the instance can never be split across two grids. */
 #include "aec_balanced_config.h"
+#include "aec_ref_tables.h"   /* the twin's full tables: the oracle for what aec_init decodes into the pool */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -62,9 +67,27 @@ static void check_rejected(const char* what, const AecConfig* bad_cfg,
 
     snprintf(label, sizeof(label), "%s: aec_create() != 0", what);
     {
-        Aec a;
-        CHECK(aec_create(&a, bad_cfg) != 0, label);
+        Aec *a = NULL;
+        CHECK((a = aec_create(bad_cfg)) == NULL, label);
     }
+}
+
+/* The same three paths for a bad tuning value (the hooks take a caller-built AecTuning). */
+static void check_rejected_tuned(const char* what, const AecConfig* bad_cfg, const AecTuning* bad_tun,
+                                 void* aligned_mem, size_t aligned_mem_sz) {
+    char label[192];
+
+    snprintf(label, sizeof(label), "%s: aec_testing_get_mem_size() == 0", what);
+    CHECK(aec_testing_get_mem_size(bad_cfg, bad_tun) == 0, label);
+
+    snprintf(label, sizeof(label), "%s: aec_testing_init() == NULL", what);
+    CHECK(aec_testing_init(aligned_mem, aligned_mem_sz, bad_cfg, bad_tun) == NULL, label);
+
+    snprintf(label, sizeof(label), "%s: aec_testing_create() == NULL", what);
+    CHECK(aec_testing_create(bad_cfg, bad_tun) == NULL, label);
+
+    snprintf(label, sizeof(label), "%s: aec_testing_tuning_valid() == 0 or the config is the fault", what);
+    CHECK(aec_testing_tuning_valid(bad_tun, bad_cfg) == 0 || aec_get_mem_size(bad_cfg) == 0, label);
 }
 
 static void test_sample_rate(void) {
@@ -96,17 +119,17 @@ static void test_filter_length(void) {
 
     int bad_lengths[] = { 0, -1, INT_MAX };
     for (size_t i = 0; i < sizeof(bad_lengths) / sizeof(bad_lengths[0]); ++i) {
-        AecConfig cfg; base_cfg(&cfg);
-        cfg.filter_length = bad_lengths[i];
+        AecTestCfg cfg; base_cfg(&cfg.c); aec_tcfg_refresh(&cfg);
+        cfg.t.filter_length = bad_lengths[i];
         char what[64];
         snprintf(what, sizeof(what), "filter_length=%d", bad_lengths[i]);
-        check_rejected(what, &cfg, mem, sz);
+        check_rejected_tuned(what, &cfg.c, &cfg.t, mem, sz);
     }
     free(mem);
 }
 
 /* The config factories take the rate as a plain int. An unsupported rate must come back as an unusable config (fft_size 0,
- * filter_length 0) that all three entry points reject, never as a value computed from an overflowing int product: before
+ * and a derived tuning with filter_length 0) that all three entry points reject, never as a value computed from an overflowing int product: before
  * the guard, sr * 64 overflowed int for sr >= 2^25 (undefined; the resulting filter_length depended on the optimisation
  * level) and a rate such as 44100 kept a plausible filter_length next to fft_size 0. A supported rate must keep its factory values exactly. */
 static void test_config_factories_unsupported_rate(void) {
@@ -120,15 +143,18 @@ static void test_config_factories_unsupported_rate(void) {
     for (size_t i = 0; i < sizeof(bad_rates) / sizeof(bad_rates[0]); ++i) {
         char what[96];
         AecConfig cfg;
+        AecTuning tn;
         aec_config_defaults(&cfg, bad_rates[i]);
+        aec_tuning_defaults(&tn, &cfg);
         snprintf(what, sizeof(what), "aec_config_defaults(sr=%d): fft_size 0, filter_length 0", bad_rates[i]);
-        CHECK(cfg.fft_size == 0 && cfg.filter_length == 0, what);
+        CHECK(cfg.fft_size == 0 && tn.filter_length == 0, what);
         snprintf(what, sizeof(what), "aec_config_defaults(sr=%d)", bad_rates[i]);
         check_rejected(what, &cfg, mem, sz);
 
         aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, bad_rates[i]);
+        aec_tuning_defaults(&tn, &cfg);
         snprintf(what, sizeof(what), "aec_config_from_level(sr=%d): fft_size 0, filter_length 0", bad_rates[i]);
-        CHECK(cfg.fft_size == 0 && cfg.filter_length == 0, what);
+        CHECK(cfg.fft_size == 0 && tn.filter_length == 0, what);
         snprintf(what, sizeof(what), "aec_config_from_level(sr=%d)", bad_rates[i]);
         check_rejected(what, &cfg, mem, sz);
     }
@@ -141,10 +167,12 @@ static void test_config_factories_unsupported_rate(void) {
     for (size_t i = 0; i < sizeof(good) / sizeof(good[0]); ++i) {
         char what[96];
         AecConfig cfg;
+        AecTuning tn;
         aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, good[i].sr);
-        snprintf(what, sizeof(what), "aec_config_from_level(sr=%d): fft_size %d, filter_length %d unchanged",
+        aec_tuning_defaults(&tn, &cfg);
+        snprintf(what, sizeof(what), "aec_config_from_level(sr=%d): fft_size %d, derived filter_length %d unchanged",
                  good[i].sr, good[i].fft, good[i].filter_length);
-        CHECK(cfg.fft_size == good[i].fft && cfg.filter_length == good[i].filter_length, what);
+        CHECK(cfg.fft_size == good[i].fft && tn.filter_length == good[i].filter_length, what);
         snprintf(what, sizeof(what), "aec_config_from_level(sr=%d) sizes > 0", good[i].sr);
         CHECK(aec_get_mem_size(&cfg) > 0, what);
     }
@@ -192,7 +220,7 @@ static void test_misaligned_base(void) {
  * Hz range: hpf_init() (audiolib hpf.c, called from aec_carve whenever enable_highpass is set)
  * rejects any cutoff_hz that is not finite, not > 0, or not < 0.45*sample_rate, silently returning
  * NULL and leaving the instance without a mic-path HPF. E.g. {sample_rate=8000,
- * highpass_cutoff_hz=4000} would pass a flat range. aec_resolve_valid_config mirrors hpf_params_valid
+ * highpass_cutoff_hz=4000} would pass a flat range. aec_tuning_valid mirrors hpf_params_valid
  * when enable_highpass=1, so every combination hpf_init rejects is rejected here too (all three
  * entry points) and every combination it accepts still works end to end. */
 static void test_highpass_cutoff(void) {
@@ -217,14 +245,14 @@ static void test_highpass_cutoff(void) {
         { 48000, -80.0f },               /* negative */
     };
     for (size_t i = 0; i < sizeof(bad_hp) / sizeof(bad_hp[0]); ++i) {
-        AecConfig cfg;
-        aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, bad_hp[i].sr);
-        cfg.enable_highpass = 1;
-        cfg.highpass_cutoff_hz = bad_hp[i].cutoff;
+        AecTestCfg cfg;
+        aec_tcfg_from_level(&cfg, AEC_LEVEL_BALANCED, bad_hp[i].sr);
+        cfg.t.enable_highpass = 1;
+        cfg.t.highpass_cutoff_hz = bad_hp[i].cutoff;
         char what[80];
         snprintf(what, sizeof(what), "highpass sr=%d cutoff=%g (enabled)",
                  bad_hp[i].sr, (double)bad_hp[i].cutoff);
-        check_rejected(what, &cfg, mem, sz);
+        check_rejected_tuned(what, &cfg.c, &cfg.t, mem, sz);
     }
 
     /* The same bad cutoff values must NOT be rejected when enable_highpass=0: the field is inert
@@ -239,12 +267,12 @@ static void test_highpass_cutoff(void) {
             { 16000, 7200.0f },
         };
         for (size_t i = 0; i < sizeof(inert_ok) / sizeof(inert_ok[0]); ++i) {
-            AecConfig cfg;
-            aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, inert_ok[i].sr);
-            cfg.enable_highpass = 0;
-            cfg.highpass_cutoff_hz = inert_ok[i].cutoff;
+            AecTestCfg cfg;
+            aec_tcfg_from_level(&cfg, AEC_LEVEL_BALANCED, inert_ok[i].sr);
+            cfg.t.enable_highpass = 0;
+            cfg.t.highpass_cutoff_hz = inert_ok[i].cutoff;
             char what[96];
-            size_t bsz = aec_get_mem_size(&cfg);
+            size_t bsz = aec_tcfg_mem_size(&cfg);
             snprintf(what, sizeof(what),
                      "highpass sr=%d cutoff=%g (disabled): aec_get_mem_size() > 0",
                      inert_ok[i].sr, (double)inert_ok[i].cutoff);
@@ -264,13 +292,13 @@ static void test_highpass_cutoff(void) {
         { 48000, 21599.0f },
     };
     for (size_t i = 0; i < sizeof(good_hp) / sizeof(good_hp[0]); ++i) {
-        AecConfig cfg;
-        aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, good_hp[i].sr);
-        cfg.enable_highpass = 1;
-        cfg.highpass_cutoff_hz = good_hp[i].cutoff;
+        AecTestCfg cfg;
+        aec_tcfg_from_level(&cfg, AEC_LEVEL_BALANCED, good_hp[i].sr);
+        cfg.t.enable_highpass = 1;
+        cfg.t.highpass_cutoff_hz = good_hp[i].cutoff;
         char what[96];
 
-        size_t gsz = aec_get_mem_size(&cfg);
+        size_t gsz = aec_tcfg_mem_size(&cfg);
         snprintf(what, sizeof(what), "highpass sr=%d cutoff=%g: aec_get_mem_size() > 0",
                  good_hp[i].sr, (double)good_hp[i].cutoff);
         CHECK(gsz > 0, what);
@@ -282,7 +310,7 @@ static void test_highpass_cutoff(void) {
         CHECK(gmem != NULL, what);
         if (!gmem) continue;
 
-        Aec* a = aec_init(gmem, gsz, &cfg);
+        Aec* a = aec_tcfg_init(gmem, gsz, &cfg);
         snprintf(what, sizeof(what), "highpass sr=%d cutoff=%g: aec_init() succeeds",
                  good_hp[i].sr, (double)good_hp[i].cutoff);
         CHECK(a != NULL, what);
@@ -301,12 +329,12 @@ static void test_highpass_cutoff(void) {
         }
         free(gmem);
 
-        Aec dyn;
-        int rc = aec_create(&dyn, &cfg);
+        Aec *dyn = NULL;
+        int rc = ((dyn = aec_tcfg_create(&cfg)) ? 0 : -1);
         snprintf(what, sizeof(what), "highpass sr=%d cutoff=%g: aec_create() == 0",
                  good_hp[i].sr, (double)good_hp[i].cutoff);
         CHECK(rc == 0, what);
-        if (rc == 0) aec_destroy(&dyn);
+        if (rc == 0) aec_destroy(dyn);
     }
 }
 
@@ -345,24 +373,24 @@ static void test_residual_mode_range_and_exposure(void) {
         for (m = 0; m < 4; ++m) {
             AecConfig cfg; base_cfg(&cfg);
             cfg.residual = modes[m];
-            Aec a;
+            Aec *a = NULL;
             char what[160];
-            int rc = aec_create(&a, &cfg);
+            int rc = ((a = aec_create(&cfg)) ? 0 : -1);
             snprintf(what, sizeof(what), "residual=%s: aec_create() succeeds", names[m]);
             CHECK(rc == 0, what);
             if (rc != 0) continue;
-            int hop = aec_hop_size(&a);
+            int hop = aec_hop_size(a);
             float* mic = (float*)calloc((size_t)hop, sizeof(float));
             float* ref = (float*)calloc((size_t)hop, sizeof(float));
             AecResidualView rv;
             memset(&rv, 0, sizeof rv); rv.struct_size = sizeof rv;
-            CHECK(aec_process_linear(&a, mic, ref) == AEC_OK, "residual mode: aec_process_linear() runs");
+            CHECK(aec_process_linear(a, mic, ref) == AEC_OK, "residual mode: aec_process_linear() runs");
             if (modes[m] == AEC_RESIDUAL_OFF) {
                 snprintf(what, sizeof(what), "residual=OFF: aec_process_residual() and aec_get_residual() are AEC_ERR_MODE");
-                CHECK(aec_process_residual(&a, NULL) == AEC_ERR_MODE && aec_get_residual(&a, &rv) == AEC_ERR_MODE, what);
+                CHECK(aec_process_residual(a, NULL) == AEC_ERR_MODE && aec_get_residual(a, &rv) == AEC_ERR_MODE, what);
             } else {
-                CHECK(aec_process_residual(&a, NULL) == AEC_OK, "residual mode: aec_process_residual() runs");
-                CHECK(aec_get_residual(&a, &rv) == AEC_OK, "residual mode: aec_get_residual() succeeds");
+                CHECK(aec_process_residual(a, NULL) == AEC_OK, "residual mode: aec_process_residual() runs");
+                CHECK(aec_get_residual(a, &rv) == AEC_OK, "residual mode: aec_get_residual() succeeds");
                 snprintf(what, sizeof(what), "residual=%s: the linear half and the rendering base are exposed", names[m]);
                 CHECK(rv.formed_hop != NULL && rv.error_spec != NULL && rv.echo_spec != NULL && rv.near_spec != NULL &&
                       rv.far_spec != NULL && rv.base_spec != NULL, what);
@@ -373,9 +401,9 @@ static void test_residual_mode_range_and_exposure(void) {
                 snprintf(what, sizeof(what), "residual=%s: res_gain is %s", names[m],
                          modes[m] == AEC_RESIDUAL_FULL ? "exposed" : "NULL");
                 CHECK((rv.res_gain != NULL) == (modes[m] == AEC_RESIDUAL_FULL) &&
-                      (res_gain_of(&a) != NULL) == (modes[m] == AEC_RESIDUAL_FULL), what);
+                      (res_gain_of(a) != NULL) == (modes[m] == AEC_RESIDUAL_FULL), what);
             }
-            aec_destroy(&a);
+            aec_destroy(a);
             free(mic); free(ref);
         }
     }
@@ -450,19 +478,19 @@ static void test_multi_rate_valid_smoke(void) {
         /* Same rate through the dynamic (aec_create) constructor too --
          * heap and pool share aec_carve (arena-fication), but this proves
          * the aec_create entry point independently accepts the rate. */
-        Aec dyn;
-        int rc = aec_create(&dyn, &cfg);
+        Aec *dyn = NULL;
+        int rc = ((dyn = aec_create(&cfg)) ? 0 : -1);
         snprintf(what, sizeof(what), "sr=%d (dynamic): aec_create() == 0", sr);
         CHECK(rc == 0, what);
         if (rc == 0) {
-            int hop = aec_hop_size(&dyn);
+            int hop = aec_hop_size(dyn);
             float* mic = (float*)calloc((size_t)hop, sizeof(float));
             float* ref = (float*)calloc((size_t)hop, sizeof(float));
             float* out = (float*)malloc((size_t)hop * sizeof(float));
-            aec_process(&dyn, mic, ref, out);
+            aec_process(dyn, mic, ref, out);
             snprintf(what, sizeof(what), "sr=%d (dynamic): one hop of aec_process() runs", sr);
             CHECK(1, what);
-            aec_destroy(&dyn);
+            aec_destroy(dyn);
             free(mic); free(ref); free(out);
         }
     }
@@ -574,7 +602,7 @@ static void test_direct_init_rejects_bad_rate(void) {
 }
 
 /* ── shared signal-grid resolver: lockstep across every entry point ───────
- * (sample_rate, fft_size) admissibility (aec_resolve_valid_config()), the `hop = fft/2` / `K = fft/2+1` derivation
+ * (sample_rate, fft_size) admissibility (aec_resolve_tuned()), the `hop = fft/2` / `K = fft/2+1` derivation
  * (aec_derive_dims()) and AECB_RATE_TABLE's geometry columns all read one resolver. On all four supported grids:
  *   1. the resolver's frame/hop/n_freqs are what the grid table says, hard-coded rather than recomputed from `fft/2`;
  *   2. the grid aec_get_mem_size() sized against == the grid aec_init()/aec_create() initialised against == the hop
@@ -582,7 +610,7 @@ static void test_direct_init_rejects_bad_rate(void) {
  *   3. fft_size == 0 ("auto") and every mismatched pair (16k/1024, 48k/256, 8k/512, ...) are rejected by all three entry
  *      points: 16 kHz has two production grids, so a library that guessed would silently pick one.
  * Mutations that must fail: editing one AEC_GRID_TABLE row's hop; making aec_derive_dims re-derive `hop = fft/2` itself.
- * Not caught here: removing the aec_resolve_signal_grid() call from aec_resolve_valid_config() alone, since aecb_rate_cfg()
+ * Not caught here: removing the aec_resolve_signal_grid() call from aec_resolve_tuned() alone, since aecb_rate_cfg()
  * returns NULL for an unsupported pair and aec_get_mem_size() then returns 0. */
 static void test_signal_grid_resolver(void) {
     struct { int sr, fft, frame, hop, K, legacy; const char* tag; } grids[] = {
@@ -637,6 +665,26 @@ static void test_signal_grid_resolver(void) {
             snprintf(label, sizeof(label),
                      "%s: aec_hop_size() == the resolved hop", grids[i].tag);
             CHECK(aec_hop_size(pa) == g.hop_size, label);
+            /* The pool holds the decoded ENR/SU tables and the rebuilt window: equal to the reference tables. */
+            {
+                const AecRefTables* ref = NULL;
+                const float* w = NULL;
+                int wn = 0, j;
+                for (j = 0; j < AECREF_N_GRIDS; ++j)
+                    if (AECREF_GRIDS[j].sample_rate == grids[i].sr && AECREF_GRIDS[j].fft_size == grids[i].fft)
+                        ref = &AECREF_GRIDS[j];
+                const SuppressionGainTuning* tn = &pa->a3_sg.tun;
+                size_t nb = ref ? (size_t)ref->n_bins * sizeof(float) : 0;
+                snprintf(label, sizeof(label), "%s: pool ENR/SU tables equal the reference tables", grids[i].tag);
+                CHECK(ref && tn->table_len == ref->n_bins &&
+                      memcmp(tn->nearend_enr_tr, ref->nearend_enr_tr, nb) == 0 &&
+                      memcmp(tn->nearend_enr_su, ref->nearend_enr_su, nb) == 0 &&
+                      memcmp(tn->normal_enr_tr, ref->normal_enr_tr, nb) == 0 &&
+                      memcmp(tn->normal_enr_su, ref->normal_enr_su, nb) == 0, label);
+                snprintf(label, sizeof(label), "%s: pool window equals the reference window", grids[i].tag);
+                CHECK(ref && aec_synthesis_window(pa, &w, &wn) == 0 && wn == grids[i].fft &&
+                      memcmp(w, ref->window, (size_t)wn * sizeof(float)) == 0, label);
+            }
             /* And the hop aec_process() actually consumes: hand it exactly
              * hop samples of a ramp and require the output hop to be
              * written end to end (a wrong hop would leave the tail at the
@@ -662,17 +710,17 @@ static void test_signal_grid_resolver(void) {
         free(pool);
 
         /* Same grid, other construction path -- and the SAME byte total. */
-        Aec dyn;
+        Aec *dyn = NULL;
         snprintf(label, sizeof(label), "%s: aec_create() == 0", grids[i].tag);
-        CHECK(aec_create(&dyn, &cfg) == 0, label);
+        CHECK((dyn = aec_create(&cfg)) != NULL, label);
         snprintf(label, sizeof(label),
                  "%s: create sees the same grid as get_mem_size/init",
                  grids[i].tag);
-        CHECK(dyn.fft_size == g.fft_size && dyn.block_size == g.frame_size &&
-              dyn.hop_size == g.hop_size && dyn.n_freqs == g.n_freqs, label);
-        CHECK(aec_get_mem_size(&dyn.cfg) == need,
+        CHECK(dyn->fft_size == g.fft_size && dyn->block_size == g.frame_size &&
+              dyn->hop_size == g.hop_size && dyn->n_freqs == g.n_freqs, label);
+        CHECK(aec_get_mem_size(&dyn->cfg) == need,
               "grid lockstep: the instance's own config re-sizes identically");
-        aec_destroy(&dyn);
+        aec_destroy(dyn);
     }
 
     /* NO GUESSING: fft_size == 0 never resolves and is rejected everywhere. */
@@ -748,6 +796,42 @@ static void test_signal_grid_resolver(void) {
         AecConfig c; aec_config_defaults(&c, 44100);
         CHECK(c.fft_size == 0 && aec_default_fft_size(44100) == 0,
               "aec_config_defaults(sr=44100) leaves fft_size=0 (rejected later)");
+    }
+}
+
+/* The library's default tuning per (rate, level), pinned as FNV-1a-32 over the AecTuning bytes (every field is 4 bytes, the
+ * struct is zeroed first, so the bytes are the values). A one-unit change of any default or of a level's floors fails the
+ * row of its rate; the baseline streams (AEC_TEST_BASELINE) are the second guard, this one needs no external directory.
+ * Mutations that must fail: warmup_frames 100 -> 101; min_gain_floor_far_active_db of one level. Re-pin a row only together
+ * with a deliberate default change. */
+static uint32_t fnv32_bytes(const void* p, size_t n) {
+    const unsigned char* b = (const unsigned char*)p;
+    uint32_t h = 2166136261u;
+    size_t i;
+    for (i = 0; i < n; ++i) { h ^= b[i]; h *= 16777619u; }
+    return h;
+}
+
+static void test_tuning_defaults_pin(void) {
+    static const struct { int sr; uint32_t h[4]; } rows[] = {
+        { 8000, { 0x39f16995u, 0x2a6346d5u, 0x64f50ffcu, 0x8fd8e0ccu } },
+        { 16000, { 0xcebe373fu, 0xa6ab907fu, 0x89ea8192u, 0x72001496u } },
+        { 48000, { 0xac519652u, 0x6a6f3a92u, 0xf4e4ae1fu, 0x41e4509bu } },
+    };
+    size_t i;
+    int lv;
+    CHECK(sizeof(AecTuning) % 4 == 0, "tuning pin: AecTuning has only 4-byte fields (no padding)");
+    for (i = 0; i < sizeof(rows) / sizeof(rows[0]); ++i) {
+        for (lv = 0; lv < 4; ++lv) {
+            AecTestCfg x;
+            uint32_t got;
+            char label[96];
+            aec_tcfg_from_level(&x, (AecLevel)lv, rows[i].sr);
+            got = fnv32_bytes(&x.t, sizeof(x.t));
+            snprintf(label, sizeof(label), "tuning pin: sr=%d level=%d defaults hash 0x%08x (pinned 0x%08x)", rows[i].sr, lv,
+                     (unsigned)got, (unsigned)rows[i].h[lv]);
+            CHECK(got == rows[i].h[lv], label);
+        }
     }
 }
 
@@ -833,8 +917,18 @@ static void test_delay_mode_illegal_combinations(void) {
         c.delay_mode = (AecDelayMode)7;
         check_rejected("delay_mode=7 (out of enum)", &c, mem, sz);
         base_cfg(&c);
-        c.min_gain_split_floor_enabled = 2;
-        check_rejected("min_gain_split_floor_enabled=2 (non-boolean)", &c, mem, sz);
+        c.enable_cng = 2;
+        check_rejected("enable_cng=2 (non-boolean)", &c, mem, sz);
+        base_cfg(&c);
+        c.level = (AecLevel)4;
+        check_rejected("level=4 (out of enum)", &c, mem, sz);
+        c.level = (AecLevel)-1;
+        check_rejected("level=-1 (out of enum)", &c, mem, sz);
+        {
+            AecTestCfg t; base_cfg(&t.c); aec_tcfg_refresh(&t);
+            t.t.min_gain_split_floor_enabled = 2;
+            check_rejected_tuned("min_gain_split_floor_enabled=2 (non-boolean)", &t.c, &t.t, mem, sz);
+        }
     }
 
     /* The guard is not blanket: every LEGAL combination still constructs,
@@ -859,33 +953,33 @@ static void test_delay_mode_illegal_combinations(void) {
             size_t need = aec_get_mem_size(&c);
             snprintf(label, sizeof(label), "%s: aec_get_mem_size() > 0", ok[i].tag);
             CHECK(need > 0, label);
-            Aec a;
+            Aec *a = NULL;
             snprintf(label, sizeof(label), "%s: aec_create() == 0", ok[i].tag);
-            CHECK(aec_create(&a, &c) == 0, label);
+            CHECK((a = aec_create(&c)) != NULL, label);
             snprintf(label, sizeof(label), "%s: instance keeps the mode",
                      ok[i].tag);
-            CHECK(a.cfg.delay_mode == ok[i].m, label);
+            CHECK(a->cfg.delay_mode == ok[i].m, label);
             snprintf(label, sizeof(label), "%s: estimator built iff MATCHED",
                      ok[i].tag);
-            CHECK(a.has_delay == (ok[i].m == AEC_DELAY_MATCHED), label);
+            CHECK(a->has_delay == (ok[i].m == AEC_DELAY_MATCHED), label);
             snprintf(label, sizeof(label), "%s: ring carved iff not EXTERNAL",
                      ok[i].tag);
-            CHECK((a.ref_ring != NULL) ==
+            CHECK((a->ref_ring != NULL) ==
                   (ok[i].m != AEC_DELAY_EXTERNAL_ALIGNED), label);
             if (ok[i].m == AEC_DELAY_FIXED) {
                 snprintf(label, sizeof(label),
                          "%s: current_delay seeded from the config", ok[i].tag);
-                CHECK(a.current_delay == ok[i].fixed, label);
+                CHECK(a->current_delay == ok[i].fixed, label);
                 /* The FIXED ring is sized for THIS delay (the tight `fixed + hop` bound), not from
                  * the MATCHED search budget. The sizing rule and the exact-fit ring's alignment
                  * behaviour live in test_linear_context.c / test_delay_num_filters.c; this row only
                  * pins that a validated config lands on it. */
                 snprintf(label, sizeof(label),
                          "%s: ring == fixed + hop (%d)", ok[i].tag,
-                         ok[i].fixed + a.hop_size);
-                CHECK(a.ref_ring_size == ok[i].fixed + a.hop_size, label);
+                         ok[i].fixed + a->hop_size);
+                CHECK(a->ref_ring_size == ok[i].fixed + a->hop_size, label);
             }
-            aec_destroy(&a);
+            aec_destroy(a);
             /* Same config through the caller-pool path. */
             void* pool = aec_test_pool_alloc(need);
             snprintf(label, sizeof(label), "%s: aec_init() != NULL", ok[i].tag);
@@ -915,6 +1009,7 @@ int main(void) {
     test_misaligned_base();
     test_residual_mode_range_and_exposure();
     test_signal_grid_resolver();
+    test_tuning_defaults_pin();
     test_delay_mode_defaults();
     test_delay_mode_illegal_combinations();
     test_valid_config_smoke();

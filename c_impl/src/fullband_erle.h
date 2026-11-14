@@ -36,7 +36,6 @@ typedef struct {
     float  x2_band_energy_threshold; /* per-bin X^2 gate (already hop-scaled,
                                        * result of the float32 threshold helper) */
     float  min_erle_log2;
-    float  max_erle_lf_log2;
     float  td_alpha;
     float  quality_alpha;
     int    blocks_to_hold_erle;
@@ -50,8 +49,7 @@ typedef struct {
 /* hop_size scales x2_band_energy_threshold; hop_size/sample_rate set blocks_to_hold_erle,
  * quality_alpha and td_alpha. */
 void fb_erle_init(FullBandErleEstimator *s, int n_freqs,
-                        float min_erle, float max_erle_l, int hop_size,
-                        int sample_rate);
+                        float min_erle, int hop_size, int sample_rate);
 
 void fb_erle_reset(FullBandErleEstimator *s);
 

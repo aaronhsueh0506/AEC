@@ -5,8 +5,10 @@
 ## 1. 三個 delay 預算必須分開配置
 
 `delay_num_filters`、PBFDKF `filter_length` 與 AIAEC TA `D`應是三個
-彼此獨立的 init/export 參數，不得由其中一個自動推導另一個，也不得
-用單一「總 delay range」把三者相加：
+彼此獨立的預算，不得由其中一個自動推導另一個，也不得
+用單一「總 delay range」把三者相加。在 C 函式庫裡 `delay_num_filters` 是 `AecConfig` 欄位；
+`filter_length` 是內部值，由取樣率決定（8k：416、16k：832、48k：3072 sample），呼叫端不能設定，這一列只用來估算涵蓋時間；
+`D` 屬於 AIAEC 的 init/export：
 
 | 參數 | 負責的問題 | 不能取代的能力 |
 |---|---|---|
@@ -31,7 +33,7 @@ matched filter/external align 必須先將 bulk delay 收進可用 residual
   RES+NR 不得依賴 TA 補救已失鎖的 linear AEC。
 
 因此縮小 `n` 前要分別量測：產品 bulk-delay 分佈選 `n/mode`；
-對齊後 residual + RIR tail 選 PBFDKF `filter_length`；NN 實際輸入的
+對齊後 residual + RIR tail 要跟 PBFDKF 涵蓋的 `filter_length`（由取樣率決定）比對，不夠時在上游縮短路徑或補償 bulk delay；NN 實際輸入的
 residual-frame lag 分佈選 `D`。若有 external coarse delay，可將大幅固定
 delay 移除後再配小 `n` + 小 `D`，但不能宣稱總覆蓋範圍等於
 `MF reach + filter_length + TA reach`。

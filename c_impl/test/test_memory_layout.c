@@ -1,5 +1,7 @@
 /* Pool size, final carve position, and tail guard across optional allocations. */
 #include "aec.h"
+#include "aec_white_box.h"
+#include "aec_test_tuning.h"
 #include "aec_internal.h"
 #include "hpf.h"
 #include "res_gain_of.h"
@@ -12,10 +14,10 @@ static size_t align16(size_t n) { return (n + 15u) & ~(size_t)15u; }
 
 /* Absolute pins, LP64 only: sizeof(Aec) and the single-channel pool sizes at the balanced level, default delay mode, with and
  * without the shadow filter. They are literals, not recomputed from the build under test. */
-#define AEC_SIZEOF_PIN 6368u
+#define AEC_SIZEOF_PIN 6208u
 static int check_pinned_sizes(void) {
     static const struct { int sr, fft; size_t with_shadow, without_shadow; } pin[3] = {
-        {16000, 256, 343760u, 314848u}, {16000, 512, 456640u, 414480u}, {48000, 1024, 1078560u, 973904u} };
+        {16000, 256, 239920u, 212032u}, {16000, 512, 352288u, 312176u}, {48000, 1024, 776224u, 675664u} };
     int i, bad = 0;
     if (sizeof(void*) != 8 || sizeof(size_t) != 8) {
         printf("test_memory_layout: absolute size pins are LP64 values; skipped on this %zu-byte-pointer ABI\n",
@@ -27,13 +29,13 @@ static int check_pinned_sizes(void) {
         bad = 1;
     }
     for (i = 0; i < 3; ++i) {
-        AecConfig cfg;
+        AecTestCfg cfg;
         size_t now_s, now_n;
-        aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, pin[i].sr);
-        cfg.fft_size = pin[i].fft;
-        now_s = aec_get_mem_size(&cfg);
-        cfg.enable_shadow = 0;
-        now_n = aec_get_mem_size(&cfg);
+        aec_tcfg_from_level(&cfg, AEC_LEVEL_BALANCED, pin[i].sr);
+        cfg.c.fft_size = pin[i].fft;
+        now_s = aec_get_mem_size(&cfg.c);
+        cfg.t.enable_shadow = 0;
+        now_n = aec_tcfg_mem_size(&cfg);
         if (now_s != pin[i].with_shadow || now_n != pin[i].without_shadow) {
             fprintf(stderr, "%d/%d pool %zu / %zu (shadow on / off), pinned %zu / %zu\n", pin[i].sr, pin[i].fft,
                     now_s, now_n, pin[i].with_shadow, pin[i].without_shadow);
@@ -46,15 +48,40 @@ static int check_pinned_sizes(void) {
     return bad;
 }
 
+/* The pool descriptor: layout_version is a literal (bump it, and the pin, when a carved layout changes size or order) and, on LP64
+ * (where the ABI hash is the identity), so is the FNV-1a-32 of the carve text, which every edit of that text moves. */
+#define AEC_LAYOUT_VERSION_PIN 2u
+#define AEC_CARVE_HASH_PIN_LP64 3368782680u
+static int check_descriptor_pin(void) {
+    AecConfig cfg;
+    AecMemReq req;
+    int bad = 0;
+    aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, 16000);
+    if (aec_get_mem_requirements(&cfg, &req) != 0) { fprintf(stderr, "descriptor query refused\n"); return 1; }
+    if (AEC_LAYOUT_VERSION != AEC_LAYOUT_VERSION_PIN || req.layout_version != AEC_LAYOUT_VERSION_PIN) {
+        fprintf(stderr, "layout_version %u (macro %u), pinned %u\n", (unsigned)req.layout_version, (unsigned)AEC_LAYOUT_VERSION,
+                AEC_LAYOUT_VERSION_PIN);
+        bad = 1;
+    }
+    if (sizeof(void*) == 8 && sizeof(size_t) == 8 && req.build_flags_hash != AEC_CARVE_HASH_PIN_LP64) {
+        fprintf(stderr, "build_flags_hash %u, pinned %u\n", (unsigned)req.build_flags_hash, (unsigned)AEC_CARVE_HASH_PIN_LP64);
+        bad = 1;
+    }
+    if (!bad) printf("test_memory_layout: layout_version %u, build_flags_hash %u\n", (unsigned)req.layout_version, (unsigned)req.build_flags_hash);
+    return bad;
+}
+
 #ifndef AEC_NO_ARRAY
 /* Absolute pins of the four-microphone array pool (n_mics 4, balanced level, default delay mode, shadow filter on), LP64:
- * the flow buffers, the alignment ring and estimator, one shared FFT handle, and four lanes. A lane (aec_lane_get_mem_size)
- * is the EXTERNAL_ALIGNED single-channel pool minus what that contract never runs: the delay-shift snapshots, the synthesis
- * and gain-stage buffers and the FFT handle; a STATE lane also omits the residual-echo estimator and comfort-noise arrays. */
+ * the flow buffers (with the array's one synthesis window), the alignment ring and estimator, the gain stage (with its decoded
+ * ENR/SU tables), one shared FFT handle, and four lanes. A lane (aec_lane_get_mem_size) is the EXTERNAL_ALIGNED
+ * single-channel pool minus what that contract never runs: the delay-shift snapshots, the synthesis window and output
+ * buffers, the gain buffers and decoded tables, and the FFT handle; a STATE lane also omits the residual-echo estimator and
+ * comfort-noise arrays. */
 static int check_array_pins(void) {
     static const struct { int sr, fft; size_t state, estimate, full; } pin[3] = {
-        {16000, 256, 616912u, 712448u, 720352u}, {16000, 512, 920464u, 1110208u, 1124256u},
-        {48000, 1024, 2062960u, 2441120u, 2470528u} };
+        {16000, 256, 595744u, 691280u, 701280u}, {16000, 512, 883936u, 1073680u, 1091872u},
+        {48000, 1024, 1995712u, 2373872u, 2411520u} };
     int i, bad = 0;
     if (sizeof(void*) != 8 || sizeof(size_t) != 8) {
         printf("test_memory_layout: array pool pins are LP64 values; skipped on this %zu-byte-pointer ABI\n", sizeof(void*));
@@ -125,36 +152,36 @@ static int check_array_toggles(void) {
     for (shadow = 0; shadow < 2; ++shadow)
     for (observer = 0; observer < 2; ++observer)
     for (highpass = 0; highpass < 2; ++highpass) {
-        AecConfig cfg;
+        AecTestCfg cfg;
         size_t need, i;
         unsigned char* pool = NULL;
         Aec* a;
         Complex* weights;
         uint32_t rng = 12345u + (uint32_t)checked;
         int hop, n, k, bad = 0;
-        aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, grid[g][0]);
-        cfg.fft_size = grid[g][1];
-        cfg.n_mics = AEC_ARRAY_MICS;
-        cfg.residual = modes[m];
-        cfg.enable_shadow = shadow;
-        cfg.live_observer_enabled = observer;
-        cfg.enable_highpass = highpass;
+        aec_tcfg_from_level(&cfg, AEC_LEVEL_BALANCED, grid[g][0]);
+        cfg.c.fft_size = grid[g][1];
+        cfg.c.n_mics = AEC_ARRAY_MICS;
+        cfg.c.residual = modes[m];
+        cfg.t.enable_shadow = shadow;
+        cfg.t.live_observer_enabled = observer;
+        cfg.t.enable_highpass = highpass;
         if (d == 0) {
-            cfg.delay_mode = AEC_DELAY_MATCHED;
+            cfg.c.delay_mode = AEC_DELAY_MATCHED;
         } else if (d == 1) {
-            cfg.delay_mode = AEC_DELAY_FIXED;
-            cfg.fixed_delay_samples = 100;
+            cfg.c.delay_mode = AEC_DELAY_FIXED;
+            cfg.c.fixed_delay_samples = 100;
         } else {
-            cfg.delay_mode = AEC_DELAY_EXTERNAL_ALIGNED;
-            cfg.fixed_delay_samples = -1;
+            cfg.c.delay_mode = AEC_DELAY_EXTERNAL_ALIGNED;
+            cfg.c.fixed_delay_samples = -1;
         }
-        need = aec_get_mem_size(&cfg);
+        need = aec_tcfg_mem_size(&cfg);
         if (!need) { fprintf(stderr, "array pool size refused: grid=%d residual=%d delay=%d shadow=%d observer=%d highpass=%d\n", g, m, d, shadow, observer, highpass); return 1; }
         if (posix_memalign((void**)&pool, 16, need + 64u) != 0) return 1;
         memset(pool, 0xA5, need + 64u);
-        if (aec_init(pool, need - 1u, &cfg) != NULL) bad = 1;
+        if (aec_tcfg_init(pool, need - 1u, &cfg) != NULL) bad = 1;
         for (i = 0; i < need + 64u; ++i) if (pool[i] != 0xA5) bad = 1;
-        a = aec_init(pool, need, &cfg);
+        a = aec_tcfg_init(pool, need, &cfg);
         if (!a) { fprintf(stderr, "array init refused: grid=%d residual=%d delay=%d shadow=%d observer=%d highpass=%d\n", g, m, d, shadow, observer, highpass); free(pool); return 1; }
         hop = aec_hop_size(a);
         n = hop + 1;
@@ -201,6 +228,7 @@ static int check_destroyed_single(Aec* a) {
 
 int main(void) {
     if (check_pinned_sizes()) return 1;
+    if (check_descriptor_pin()) return 1;
 #ifndef AEC_NO_ARRAY
     if (check_array_pins()) return 1;
     if (check_array_toggles()) return 1;
@@ -221,26 +249,26 @@ int main(void) {
     for (int observer = 0; observer < 2; ++observer)
     for (int highpass = 0; highpass < 2; ++highpass)
     for (int delay = 0; delay < 3; ++delay) {
-        AecConfig cfg;
-        aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, rates[g]);
-        cfg.fft_size = ffts[g];
-        cfg.enable_shadow = shadow;
-        cfg.live_observer_enabled = observer;
-        cfg.enable_highpass = highpass;
+        AecTestCfg cfg;
+        aec_tcfg_from_level(&cfg, AEC_LEVEL_BALANCED, rates[g]);
+        cfg.c.fft_size = ffts[g];
+        cfg.t.enable_shadow = shadow;
+        cfg.t.live_observer_enabled = observer;
+        cfg.t.enable_highpass = highpass;
         if (delay == 0) {
-            cfg.delay_mode = AEC_DELAY_MATCHED;
+            cfg.c.delay_mode = AEC_DELAY_MATCHED;
         } else if (delay == 1) {
-            cfg.delay_mode = AEC_DELAY_FIXED;
-            cfg.fixed_delay_samples = 123;
+            cfg.c.delay_mode = AEC_DELAY_FIXED;
+            cfg.c.fixed_delay_samples = 123;
         } else {
-            cfg.delay_mode = AEC_DELAY_EXTERNAL_ALIGNED;
+            cfg.c.delay_mode = AEC_DELAY_EXTERNAL_ALIGNED;
         }
-        size_t need = aec_get_mem_size(&cfg);
+        size_t need = aec_tcfg_mem_size(&cfg);
         unsigned char* pool = NULL;
         if (!need || posix_memalign((void**)&pool, 16, need + 64u) != 0)
             return 1;
         memset(pool, 0xA5, need + 64u);
-        if (aec_init(pool, need - 1u, &cfg) != NULL) {
+        if (aec_tcfg_init(pool, need - 1u, &cfg) != NULL) {
             fprintf(stderr, "undersized pool accepted\n");
             free(pool);
             return 1;
@@ -252,7 +280,7 @@ int main(void) {
                 return 1;
             }
         }
-        Aec* a = aec_init(pool, need, &cfg);
+        Aec* a = aec_tcfg_init(pool, need, &cfg);
         if (!a) { free(pool); return 1; }
         /* HPF is the optional final block; scr_e2ref_arr precedes it. */
         const unsigned char* end = a->hp_mic

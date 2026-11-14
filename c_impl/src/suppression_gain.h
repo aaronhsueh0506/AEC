@@ -18,8 +18,6 @@ typedef struct {
     int    sr;
     int    hop_size;
 
-    int    last_lf_band;
-    int    first_hf_band;
     int    last_lf_smoothing_band;
     int    last_permanent_lf_smoothing_band;
     int    lf_smoothing_during_initial_phase;
