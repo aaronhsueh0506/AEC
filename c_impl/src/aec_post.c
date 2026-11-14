@@ -417,7 +417,6 @@ void aec_post_run(AecPost *p,
             const FilterDelayEstimate *ext_p = NULL;
             if (in->delay_active && in->current_delay >= 0) {
                 ext.reported = 1;
-                ext.delay = in->current_delay;
                 ext_p = &ext;
             }
 

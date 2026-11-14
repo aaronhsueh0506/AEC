@@ -53,8 +53,8 @@
 | `py_total` | 575 | Python 符號總數（規則 4） |
 | `py_mapped` | 322 | 被 §1／§2 至少一列引用的 Python 符號 |
 | `py_only_struct` | 58 | §3 Python-only：C 以資料結構、列舉或常數承載 |
-| `py_only_field` | 60 | §3 Python-only：C 以結構欄位或回傳值直接取得 |
-| `py_only_none` | 135 | §3 Python-only：C 無此機制 |
+| `py_only_field` | 58 | §3 Python-only：C 以結構欄位或回傳值直接取得 |
+| `py_only_none` | 137 | §3 Python-only：C 無此機制 |
 | `py_unknown` | 0 | §3 未能判斷 |
 <!-- stats:end -->
 
@@ -555,7 +555,7 @@
 
 ### 1.16 `filter_delay.c`　filter_delay.c（濾波器延遲彙整）
 
-依據：C 的 `filter_delay.c` 對應 `python/modules/state/filter_delay.py`。Python 的 `external_delay_samples`、`direct_path_filter_delays` 為 getter，C 以結構欄位存取（見 §3）。
+依據：C 的 `filter_delay.c` 對應 `python/modules/state/filter_delay.py`。Python 的 `direct_path_filter_delays` 為 getter，C 以結構欄位存取（見 §3）；C 的 external_delay 只保留 `reported` 旗標，沒有 samples 值。
 
 | C 檔:函式 | Python 檔:符號 | 關係 | 已知落差 | 對拍工具／測試 |
 |---|---|---|---| --- |
@@ -895,14 +895,15 @@ PBF/Kalman H-error refresh、subband ERLE accumulation/release、render peak cou
 | — | `modules/residual/suppression_gain.py:_DominantNearendDetector`、`modules/residual/suppression_gain.py:_DominantNearendDetector.__init__`、`modules/residual/suppression_gain.py:_DominantNearendDetector._derive_trigger_threshold`、`modules/residual/suppression_gain.py:_DominantNearendDetector.set_config` | Python-only（C 以結構欄位或回傳值直接取得；C 在 `suppression_gain_init` 內展開設定，狀態在 `SuppressionGain` 欄位） | — | — |
 | — | `modules/residual/suppression_gain.py:_DominantNearendDetector.is_nearend_state` | Python-only（C 以結構欄位或回傳值直接取得；`SuppressionGain` 欄位（見 `suppression_gain_is_dominant_nearend`）） | — | — |
 | `struct:AecState` | `modules/state/aec_state.py:AecState` | Python-only（C 以資料結構、列舉或常數承載；方法已對照到 `aec_state_*`） | — | — |
-| — | `modules/state/aec_state.py:AecState.external_delay_samples` | Python-only（C 以結構欄位或回傳值直接取得；`FilterDelay` 欄位） | — | — |
+| — | `modules/state/aec_state.py:AecState.external_delay_samples` | Python-only（C 無此值：`FilterDelayEstimate` 只有 `reported` 旗標） | — | — |
 | `struct:ErlEstimator` | `modules/state/erl_estimator.py:ErlEstimator` | Python-only（C 以資料結構、列舉或常數承載；方法已對照到 `erl_estimator_*`） | — | — |
 | `struct:ErleEstimator` | `modules/state/erle_estimator.py:ErleEstimator` | Python-only（C 以資料結構、列舉或常數承載；方法已對照到 `erle_estimator_*`） | — | — |
 | `struct:FaConsistentDetector` | `modules/state/filter_analyzer.py:_ConsistentFilterDetector` | Python-only（C 以資料結構、列舉或常數承載；方法已對照到 `cd_*`） | — | — |
 | `struct:FilterAnalyzer` | `modules/state/filter_analyzer.py:FilterAnalyzer` | Python-only（C 以資料結構、列舉或常數承載；方法已對照到 `fa_*`） | — | — |
 | — | `modules/state/filter_analyzer.py:FilterAnalyzer.filter_delays_blocks` | Python-only（C 以結構欄位或回傳值直接取得；同名結構欄位） | — | — |
 | `struct:FilterDelay` | `modules/state/filter_delay.py:FilterDelay` | Python-only（C 以資料結構、列舉或常數承載；方法已對照到 `filter_delay_*`） | — | — |
-| — | `modules/state/filter_delay.py:FilterDelay.external_delay_samples`、`modules/state/filter_delay.py:FilterDelay.direct_path_filter_delays` | Python-only（C 以結構欄位或回傳值直接取得；同名結構欄位） | — | — |
+| — | `modules/state/filter_delay.py:FilterDelay.external_delay_samples` | Python-only（C 無此值：`FilterDelayEstimate` 只有 `reported` 旗標） | — | — |
+| — | `modules/state/filter_delay.py:FilterDelay.direct_path_filter_delays` | Python-only（C 以結構欄位或回傳值直接取得；同名結構欄位） | — | — |
 | `struct:FilteringQualityAnalyzer` | `modules/state/filter_quality.py:FilteringQualityAnalyzer` | Python-only（C 以資料結構、列舉或常數承載；方法已對照到 `fq_*`） | — | — |
 | `struct:ErleInstantaneous` | `modules/state/fullband_erle.py:_ErleInstantaneous` | Python-only（C 以資料結構、列舉或常數承載；方法已對照到 `inst_*`） | — | — |
 | — | `modules/state/fullband_erle.py:_ErleInstantaneous.get_inst_erle_log2` | Python-only（C 以結構欄位或回傳值直接取得；同名結構欄位） | — | — |

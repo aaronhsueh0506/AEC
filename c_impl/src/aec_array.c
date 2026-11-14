@@ -357,7 +357,7 @@ static int array_setup(Aec* a, uint8_t* base, size_t avail, const AecResolved* r
 
     a->cfg = *cfg;
     a->tun = *tn;
-    a->hop_size = d.hop; a->block_size = d.fft; a->fft_size = d.fft; a->n_freqs = d.n;
+    a->hop_size = d.hop; a->block_size = d.fft; a->n_freqs = d.n;
     a->n_partitions = p->lanes[0]->n_partitions;
     a->is_static = 1;
     a->array = p;
@@ -1027,9 +1027,7 @@ int aec_get_array(const Aec* a, AecArrayView* out) {
     if (a->array) {
         const AecArray* p = a->array;
         if (!p->front_valid) return AEC_ERR_SEQUENCE;
-        out->n_channels = AEC_ARRAY_MICS;
         out->n_freqs = p->n_freqs;
-        out->hop_size = p->hop_size;
         for (ch = 0; ch < AEC_ARRAY_MICS; ++ch) {
             out->lane_error_spec[ch] = p->snapshots[ch].error_spec;
             out->lane_base_spec[ch] = p->snapshots[ch].base_spec;
@@ -1053,9 +1051,7 @@ int aec_get_array(const Aec* a, AecArrayView* out) {
         if (rc != AEC_OK) return rc;
         if (aec_get_linear(a, &lv) != AEC_OK) return AEC_ERR_ARG;
         aec_debug_status(a, &ds);
-        out->n_channels = 1;
         out->n_freqs = rv.n_freqs;
-        out->hop_size = rv.hop_size;
         out->lane_error_spec[0] = rv.error_spec;
         out->lane_base_spec[0] = rv.base_spec;
         out->lane_formed_hop[0] = rv.formed_hop;

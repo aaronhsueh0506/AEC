@@ -97,7 +97,7 @@ it builds that archive, scans it and a minimal linked consumer for stdio symbols
 `make lib AEC_NO_ARRAY=1` builds a `libaec.a` without the four-microphone array instance: `src/aec_array.c` and `src/aec_res.c` are not compiled
 (`-DAEC_NO_ARRAY`), `AecConfig.n_mics` other than 1 is refused (`aec_get_mem_size()` 0, `aec_init()` NULL, `aec_create()` NULL), and
 `aec_get_array()` and the `aec_array_*()` diagnostics are not defined. Everything single-channel behaves byte for byte as in the full library. On the host
-the archive's `__TEXT` drops by about 22 kB at `SIMD=1` (164,227 -> 142,015 B) and 19 kB at `SIMD=0` (145,667 -> 126,643 B); measured as `size "$(make -s print-lib-path [SIMD=0] [AEC_NO_ARRAY=1])" | awk 'NR>1{t+=$1} END{print t}'` after `make lib` with the same flags (Apple clang, arm64). The flag is part of the config hash, so the
+the archive's `__TEXT` drops by about 21 kB at `SIMD=1` (160,122 -> 139,234 B) and 18 kB at `SIMD=0` (140,678 -> 122,914 B); measured as `size "$(make -s print-lib-path [SIMD=0] [AEC_NO_ARRAY=1])" | awk 'NR>1{t+=$1} END{print t}'` after `make lib` with the same flags (Apple clang, arm64). The flag is part of the config hash, so the
 two builds keep separate `obj/` and `bin/` directories; the array-only test targets print "SKIPPED" under it. Consumers pass it through to this build
 (`make AEC_NO_ARRAY=1` in Audio_ALG/pipelines).
 
@@ -249,7 +249,7 @@ The beamformer and the synthesis stay with the caller. Per hop: `aec_process_lin
 `aec_apply_gain()` / `aec_apply_cng()`. Query the pool with `aec_get_mem_requirements()` and build with
 `aec_init_ex()`; the pool size depends on `residual` (see `STATIC_MEMORY.md`). Not done yet: the far-side state is
 still per lane (only the delay estimator, the aligned far and the far FFT result are shared). A lane omits what its
-contract never runs: at 16 kHz / 256 a lane pool is 142,880 B against 177,568 B for a stand-alone
+contract never runs: at 16 kHz / 256 a lane pool is 142,720 B against 177,408 B for a stand-alone
 `EXTERNAL_ALIGNED` instance. Contract and example:
 [../docs/reference/integration.md](../docs/reference/integration.md) §8.8.
 

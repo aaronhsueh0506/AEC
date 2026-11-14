@@ -87,16 +87,16 @@ host (the same for every `AecConfig.residual`, for `SIMD=0/1` and for `AEC_NO_AR
 
 | Sample rate / FFT / hop | Pool size | `EXTERNAL_ALIGNED` |
 |---|---:|---:|
-| 16 kHz / 256 / 128 | 239,920 B | 177,568 B |
-| 16 kHz / 512 / 256 | 352,288 B | 289,424 B |
-| 48 kHz / 1024 / 512 | 776,224 B | 645,776 B |
-| 8 kHz / 256 / 128 (legacy) | 211,552 B | 149,200 B |
+| 16 kHz / 256 / 128 | 239,760 B | 177,408 B |
+| 16 kHz / 512 / 256 | 352,128 B | 289,264 B |
+| 48 kHz / 1024 / 512 | 776,064 B | 645,616 B |
+| 8 kHz / 256 / 128 (legacy) | 211,392 B | 149,040 B |
 
 These figures depend on the struct sizes of the library's internals; re-run
 `aec_get_mem_size()` (or `aec_wav --print-mem-size`) rather than carrying
 them forward. The pool holds the instance and everything it carves, including the synthesis window and the decoded
-gain-threshold tables (see "Ownership model"); the code and flash side is separate: `libaec.a` `__TEXT` is 164,227 B at `SIMD=1`
-and 145,667 B at `SIMD=0`, and 142,015 B / 126,643 B built with `AEC_NO_ARRAY=1` (host Apple clang, arm64, `size` summed over the
+gain-threshold tables (see "Ownership model"); the code and flash side is separate: `libaec.a` `__TEXT` is 160,122 B at `SIMD=1`
+and 140,678 B at `SIMD=0`, and 139,234 B / 122,914 B built with `AEC_NO_ARRAY=1` (host Apple clang, arm64, `size` summed over the
 members as in `README.md`; the target toolchain's numbers differ).
 
 The delay configuration moves these numbers, because the matched-filter bank,
@@ -134,27 +134,27 @@ if (!aec) { /* pool too small / unaligned, or descriptor from a different build 
 ```
 
 Unlike a single-channel instance, the array pool **depends on `AecConfig.residual`** (`OFF` is refused). Measured with
-`aec_get_mem_requirements()` on the 64-bit host (balanced, `MATCHED`, `delay_num_filters = 5`, NE10, `Aec` header 6,208 B):
+`aec_get_mem_requirements()` on the 64-bit host (balanced, `MATCHED`, `delay_num_filters = 5`, NE10, `Aec` header 6,048 B):
 
 | Grid | `STATE` | `ESTIMATE` | `FULL` (default) |
 |---|---:|---:|---:|
-| 16 kHz / 256 | 595,744 B | 691,280 B | 701,280 B |
-| 16 kHz / 512 | 883,936 B | 1,073,680 B | 1,091,872 B |
-| 48 kHz / 1024 | 1,995,712 B | 2,373,872 B | 2,411,520 B |
+| 16 kHz / 256 | 594,944 B | 690,480 B | 700,480 B |
+| 16 kHz / 512 | 883,136 B | 1,072,880 B | 1,091,072 B |
+| 48 kHz / 1024 | 1,994,912 B | 2,373,072 B | 2,410,720 B |
 
-`aec_get_mem_breakdown()` splits the `FULL` pool as follows. The `Aec` header (6,208 B here, a multiple of 16) belongs
+`aec_get_mem_breakdown()` splits the `FULL` pool as follows. The `Aec` header (6,048 B here, a multiple of 16) belongs
 to none of the four sub-fields, so they sum to `total_bytes` minus the header:
 
 | Grid | `total_bytes` | `estimator_bytes` | `ring_bytes` | `lane_bytes` | `fusion_bytes` |
 |---|---:|---:|---:|---:|---:|
-| 16 kHz / 256 | 701,280 | 29,248 | 66,576 | 571,520 | 27,728 |
-| 16 kHz / 512 | 1,091,872 | 29,248 | 67,600 | 938,304 | 50,512 |
-| 48 kHz / 1024 | 2,411,520 | 30,624 | 200,720 | 2,074,816 | 99,152 |
+| 16 kHz / 256 | 700,480 | 29,248 | 66,576 | 570,880 | 27,728 |
+| 16 kHz / 512 | 1,091,072 | 29,248 | 67,600 | 937,664 | 50,512 |
+| 48 kHz / 1024 | 2,410,720 | 30,624 | 200,720 | 2,074,176 | 99,152 |
 
 - **Lane contract.** The flow stamps the same config on each lane: the array's grid and tunables, `delay_mode = EXTERNAL_ALIGNED`
   (the lanes take the shared aligned far), `residual = ESTIMATE` (`STATE` for a `STATE` array), `n_mics = 1`. Each lane pool is
-  142,880 / 234,576 / 518,704 B (`ESTIMATE` and `FULL`; a `STATE` lane omits the residual-echo estimator and comfort-noise arrays its early exit never reads: 120,560 / 190,240 / 430,336 B) and `lane_bytes` is four of them. A lane is built by the internal
-  `aec_lane_init()`; against a stand-alone single-channel `EXTERNAL_ALIGNED` instance (177,568 / 289,424 / 645,776 B)
+  142,720 / 234,416 / 518,544 B (`ESTIMATE` and `FULL`; a `STATE` lane omits the residual-echo estimator and comfort-noise arrays its early exit never reads: 120,400 / 190,080 / 430,176 B) and `lane_bytes` is four of them. A lane is built by the internal
+  `aec_lane_init()`; against a stand-alone single-channel `EXTERNAL_ALIGNED` instance (177,408 / 289,264 / 645,616 B)
   it borrows the array's one FFT handle and omits what its contract never runs: the delay-shift snapshots (only the `MATCHED`
   estimator takes them), the synthesis and gain buffers (synthesis window, OLA, `eout`, the SuppressionGain arrays and the decoded ENR/SU threshold tables; only `FULL` applies a gain) and
   the FFT handle; a `STATE` lane also omits the residual-echo estimator and comfort-noise arrays (its early exit never reads them).

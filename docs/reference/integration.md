@@ -71,7 +71,7 @@ while (app_read_hop(mic, ref, hop)) {
 > 會一直觸發，不只在開頭幾秒。
 >
 > 既有 SDK 應用若還在渲染 `error_spec`，編譯與執行都不會報錯，但會失去守衛；遷移步驟、前後程式碼與驗收測試見
-> [`sdk_migration_output_guard.md`](../sdk_migration_output_guard.md)，並以 `AEC_OUTPUT_GUARD_API_VERSION`（`aec.h`）在建置期檢查。
+> [`sdk_migration_output_guard.md`](../sdk_migration_output_guard.md)，並以 `AEC_CNG_NR_GAIN_FLOOR`（`aec.h`）是否存在在建置期檢查。
 
 > **兩種形式可以逐 hop 混用。**
 >

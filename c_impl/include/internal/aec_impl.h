@@ -42,7 +42,7 @@ struct Aec {
     AecConfig cfg;
     AecTuning tun;            /* the tuning as built, with the fields authored on the 10 ms grid retimed to this one */
 
-    int hop_size, block_size, fft_size, n_freqs, n_partitions;
+    int hop_size, block_size, n_freqs, n_partitions;
 
     Hpf  *hp_mic;             /* NULL when highpass disabled */
     Saturation sat_ref, sat_mic;  int has_sat;

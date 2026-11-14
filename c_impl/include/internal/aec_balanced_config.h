@@ -341,13 +341,8 @@ static const float AECB_R48K_SG_RUN_VAL[36] = { 1.09000003f, 0.966250002f, 0.842
  * ------------------------------------------------------------------ */
 typedef struct {
     int sample_rate;
-    int n_bins;
     int fft_size;
-    int block_size;
     int hop_size;
-    int n_partitions;
-    int filter_taps_size;
-    int filter_length;
     int synth_window_len;
     const uint16_t* sg_run_end;
     const float* sg_run_val;
@@ -393,8 +388,7 @@ typedef struct {
 static const AecBalancedRateDims AECB_RATE_TABLE[] __attribute__((unused)) = {
     { /* 16000 Hz -- the unsuffixed block above. */
       16000,
-      AECB_N_BINS, AECB_FFT_SIZE, AECB_BLOCK_SIZE, AECB_HOP_SIZE,
-      AECB_N_PARTITIONS, AECB_FILTER_TAPS_SIZE, 832,
+      AECB_FFT_SIZE, AECB_HOP_SIZE,
       AECB_BLOCK_SIZE,
       AECB_SG_RUN_END, AECB_SG_RUN_VAL, AECB_SG_RUNS,
       AECB_SG_NEAREND_EMR_TR, AECB_SG_NORMAL_EMR_TR,
@@ -416,8 +410,7 @@ static const AecBalancedRateDims AECB_RATE_TABLE[] __attribute__((unused)) = {
       AECB_SG_NEAREND_SMOOTHER_N },
     { /* 8000 Hz */
       8000,
-      AECB_R8K_N_BINS, AECB_R8K_FFT_SIZE, AECB_R8K_BLOCK_SIZE, AECB_R8K_HOP_SIZE,
-      AECB_R8K_N_PARTITIONS, AECB_R8K_FILTER_TAPS_SIZE, AECB_R8K_FILTER_LENGTH,
+      AECB_R8K_FFT_SIZE, AECB_R8K_HOP_SIZE,
       AECB_R8K_SYNTH_WINDOW_LEN,
       AECB_R8K_SG_RUN_END, AECB_R8K_SG_RUN_VAL, AECB_R8K_SG_RUNS,
       AECB_R8K_SG_NEAREND_EMR_TR, AECB_R8K_SG_NORMAL_EMR_TR,
@@ -439,8 +432,7 @@ static const AecBalancedRateDims AECB_RATE_TABLE[] __attribute__((unused)) = {
       AECB_R8K_SG_NEAREND_SMOOTHER_N },
     { /* 16000 Hz */
       16000,
-      AECB_R16K256_N_BINS, AECB_R16K256_FFT_SIZE, AECB_R16K256_BLOCK_SIZE, AECB_R16K256_HOP_SIZE,
-      AECB_R16K256_N_PARTITIONS, AECB_R16K256_FILTER_TAPS_SIZE, AECB_R16K256_FILTER_LENGTH,
+      AECB_R16K256_FFT_SIZE, AECB_R16K256_HOP_SIZE,
       AECB_R16K256_SYNTH_WINDOW_LEN,
       AECB_R16K256_SG_RUN_END, AECB_R16K256_SG_RUN_VAL, AECB_R16K256_SG_RUNS,
       AECB_R16K256_SG_NEAREND_EMR_TR, AECB_R16K256_SG_NORMAL_EMR_TR,
@@ -462,8 +454,7 @@ static const AecBalancedRateDims AECB_RATE_TABLE[] __attribute__((unused)) = {
       AECB_R16K256_SG_NEAREND_SMOOTHER_N },
     { /* 48000 Hz */
       48000,
-      AECB_R48K_N_BINS, AECB_R48K_FFT_SIZE, AECB_R48K_BLOCK_SIZE, AECB_R48K_HOP_SIZE,
-      AECB_R48K_N_PARTITIONS, AECB_R48K_FILTER_TAPS_SIZE, AECB_R48K_FILTER_LENGTH,
+      AECB_R48K_FFT_SIZE, AECB_R48K_HOP_SIZE,
       AECB_R48K_SYNTH_WINDOW_LEN,
       AECB_R48K_SG_RUN_END, AECB_R48K_SG_RUN_VAL, AECB_R48K_SG_RUNS,
       AECB_R48K_SG_NEAREND_EMR_TR, AECB_R48K_SG_NORMAL_EMR_TR,

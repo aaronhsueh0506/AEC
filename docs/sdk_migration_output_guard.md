@@ -13,7 +13,7 @@ context API 的應用。只呼叫 `aec_process()`（`AecConfig.residual` 維持�
 
 相關文件：`reference/integration.md` §8.1（進入點與分析 seam／渲染底座）、§8.3
 （`aec_get_residual()`／`aec_apply_gain()`／`aec_post_reset_serial()` 的完整語意）、§8.7（單聲道整鏈）；
-公開宣告在 `c_impl/include/aec.h`（`AEC_OUTPUT_GUARD_API_VERSION`、`aec_get_residual`、`aec_apply_gain`、
+公開宣告在 `c_impl/include/aec.h`（`aec_get_residual`、`aec_apply_gain`、
 `aec_apply_cng`、`aec_apply_cng_spec`、`aec_post_reset_serial`、`aec_synthesis_window`）。
 
 ## 1. 先講結論：舊程式不會報錯，只會悄悄失去守衛
@@ -29,32 +29,32 @@ context API 的應用。只呼叫 `aec_process()`（`AecConfig.residual` 維持�
 - 另外你的合成視窗、舒適噪音種子、delay 硬重置時的 OLA／CNG 處理也可能和函式庫內部不同。
 
 新增的 getter 無法偵測「呼叫端還在用 `error_spec` 渲染」，所以這件事只能靠**你主動遷移**。
-`AEC_OUTPUT_GUARD_API_VERSION` 是給你放進自己建置的編譯期標記（見 §2），它不會強迫沒加檢查的舊程式中斷。
+編譯期檢查見 §2（它不會強迫沒加檢查的舊程式中斷）。
 `AecResidualView.error_spec` 的名稱與語意沿用舊版（它仍是分析用的真實線性殘差），所以只改渲染的程式不會因改名而編譯失敗；
 但使用舊 context 型別與函式的程式會因這些名稱已移除而編譯失敗（這一項是明確的，照 §3 改寫即可）。
 
 不在守衛範圍內：時域 seam（`AecResidualView.formed_hop`、`AecLinearView.linear_hop`）永遠是分析殘差，
 沒有時域渲染底座。直接播放或重新合成這兩個串流的應用拿不到輸出守衛，需要守衛就必須改走頻域路徑。
 
-## 2. 版本旗標
+## 2. 編譯期檢查
 
-`aec.h` 定義 `#define AEC_OUTPUT_GUARD_API_VERSION 2`，代表下列同時存在：
+`aec.h` 不再定義 `AEC_OUTPUT_GUARD_API_VERSION`（原值 2）。下列各項在同一版 `aec.h` 一起提供：
 `aec_get_residual().base_spec`（舊版是 `aec_get_output_base()`）、`aec_apply_gain()`／`aec_apply_cng()`、
-`aec_post_reset_serial()`、`aec_synthesis_window()`、`aec_apply_cng_spec()` 與 `AEC_CNG_SEED`
-（都在 `aec.h`）。版本 1 是舊的 `aec_get_output_base()` 形式。
+`aec_post_reset_serial()`、`aec_synthesis_window()`、`aec_apply_cng_spec()` 與 `AEC_CNG_NR_GAIN_FLOOR`。
+`AEC_CNG_NR_GAIN_FLOOR` 是 `aec_apply_gain()`／`aec_apply_cng()` 同一輪加入的前置處理器巨集，舊的 `aec_get_output_base()` 形式的標頭沒有它。
 把下面幾行放進你渲染後級頻譜的那個檔案；SDK 比這一版舊時會在編譯期停下來，而不是靜默通過：
 
 ```c
 #include "aec.h"
 #include "audio_stft.h"   /* AcIstft */
 
-#if !defined(AEC_OUTPUT_GUARD_API_VERSION) || AEC_OUTPUT_GUARD_API_VERSION < 2
-#error "aec.h is older than the output-guard API 2: update the SDK before rendering residual spectra"
+#if !defined(AEC_CNG_NR_GAIN_FLOOR)
+#error "aec.h is older than the output-guard API: update the SDK before rendering residual spectra"
 #endif
 ```
 
-之後輸出守衛相關 API 若再有不相容的變動，這個數字會加一；你的檢查寫成 `== 目前驗過的版本`
-還是 `>=`，由你決定要不要在版本升級時被迫重新驗證。
+原先照 `#if !defined(AEC_OUTPUT_GUARD_API_VERSION) || AEC_OUTPUT_GUARD_API_VERSION < 2` 寫的檢查，在新標頭上會因巨集已不存在而
+一律走 `#error`：請改成上面的 `AEC_CNG_NR_GAIN_FLOOR` 檢查。
 
 ## 3. 遷移步驟總表
 
@@ -94,7 +94,8 @@ context API 的應用。只呼叫 `aec_process()`（`AecConfig.residual` 維持�
 | 由 `include/` 取用內部標頭（`aec_post.h`、`pbfdkf.h` 等）裡的常數與型別 | `AEC_CNG_SEED`、`AEC_PSD_SCALE_F`／`AEC_PSD_SCALE_INV_F`、`AecStageTiming`、`aec_level_name()` 在 `aec.h`；`include/` 只剩 `aec.h`，其餘全部（`aec_internal.h`、`aec_balanced_config.h`、內部標頭）在 `include/internal/`；編譯 `src/*.c` 的 SDK Makefile 要加 `-I include/internal` |
 | `aec_debug_set_level()`、`aec_debug_set_log()`、`aec_wav` 的 `--debug-level`、`--debug-log`、`--no-shadow`、`--no-hpf`、`--delay-est-period` | 已刪除（前兩者只儲存、從不讀取；後三個對應的欄位已是內部值）。`aec_debug.h`（`aec_debug_set_trace()`、`aec_debug_set_frame()`、`AecDebugTraceRow`）與 `aec_wav --debug-trace` 一併刪除，改用 `aec_debug_status()` 與 `--debug` |
 | 合成視窗 `aec_synthesis_window()` 指向靜態表 | 指向實例自己的 pool（init／create 時建好）：借用它的 `AcIstft` 不得比 `Aec` 活得久（§6） |
-| 存檔的 `AecMemReq` 描述子（`AEC_LAYOUT_VERSION` 1） | `AEC_LAYOUT_VERSION` 2：舊描述子被 `aec_init_ex()` 拒絕；每次建置重新查詢（`aec_init()`／`aec_create()` 不比對描述子） |
+| 存檔的 `AecMemReq` 描述子（`AEC_LAYOUT_VERSION` 1 或 2） | `AEC_LAYOUT_VERSION` 3：舊描述子被 `aec_init_ex()` 拒絕；每次建置重新查詢（`aec_init()`／`aec_create()` 不比對描述子） |
+| `AecArrayView.n_channels`、`AecArrayView.hop_size` | 已刪除：通道數用 `aec_array_linear_aec_count()`、hop 長度用 `aec_hop_size()`。`AecArrayView` 變小，沒有版本巨集保護，用舊標頭編譯的呼叫端必須重新編譯（以較大的 `struct_size` 呼叫會被接受並讀到位移後的欄位） |
 
 位元結果：同一份輸入、同樣的組態，新舊對應的模式輸出逐位元相同（函式庫端曾以 `make test-split-entry` 與 `make test-split-entry-2`（第三組場景當時是獨立的 `test-split-entry-3`，現已併入後者）對舊 API 產生的
 雜湊逐行驗證；這些一次性的對照檔已於 2026-11-13 確認一致後除役，之後的改動由新版本取基準，見 `c_impl/README.md` 的 “Line-stream baselines”）。
@@ -103,7 +104,7 @@ context API 的應用。只呼叫 `aec_process()`（`AecConfig.residual` 維持�
 
 | # | 要做的事 | 舊寫法 | 新寫法 |
 |---|---|---|---|
-| 1 | 編譯期檢查 | 無（或版本 1） | §2 的 `#if`／`#error` |
+| 1 | 編譯期檢查 | 無（或 `AEC_OUTPUT_GUARD_API_VERSION`，已移除） | §2 的 `#if`／`#error` |
 | 2 | 渲染底座 | `ctx.error_spec[k] × g[k]` | `aec_apply_gain(aec, extra_gain, out_spec)`，或自己乘：`rv.base_spec[k] × g[k]`，`rv` 來自 `aec_get_residual()` |
 | 3 | reset serial | 無，或自己從 delay 變動推測 | 每 hop 比對 `aec_post_reset_serial()`，變了就清 OLA 尾巴（§5） |
 | 4 | 合成視窗 | `AcIstft` 預設 sqrt-Hann | 向 `aec_synthesis_window()` 借表（§6） |

@@ -57,17 +57,9 @@ void suppression_gain_init(SuppressionGain *sg,
         }
     }
     sg->low_render_avg_power = 32768.0f * 32768.0f;
-    /* The power IIR (0.9 / 0.1) is per 4 ms block; the wall-clock-rescaled form is optional and
-     * off by default (cfg->use_wallclock_ema_alpha = 0). */
-    if (cfg->use_wallclock_ema_alpha) {
-        float alpha = aec_per_block_ema_alpha_to_per_hop(
-            0.1f, cfg->hop_size, cfg->sr);
-        sg->low_render_iir_decay = 1.0f - alpha;
-        sg->low_render_iir_weight = alpha;
-    } else {
-        sg->low_render_iir_decay = 0.9f;
-        sg->low_render_iir_weight = 0.1f;
-    }
+    /* The power IIR is the literal 0.9 / 0.1 at every grid. */
+    sg->low_render_iir_decay = 0.9f;
+    sg->low_render_iir_weight = 0.1f;
     sg->far_active_latched = 0;
     sg->dt_protect_active = 0;
     sg->initial_state = 1;

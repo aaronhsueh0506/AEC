@@ -28,7 +28,6 @@ void filter_delay_init(FilterDelay *fd, int *delays_storage,
     fd->min_filter_delay = blocks;
 
     fd->external_delay.reported = 0;
-    fd->external_delay.delay = 0;
 }
 
 void filter_delay_update(FilterDelay *fd, const int *analyzer, int analyzer_len,

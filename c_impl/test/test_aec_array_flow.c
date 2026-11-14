@@ -223,8 +223,8 @@ static int af_process_front(Af* p, const float* mics, const float* ref, AfFront*
     rc = aec_get_array(p, &av);
     if (rc != AEC_OK) return rc;
     out->delay = av.delay;
-    out->hop_size = av.hop_size;
-    out->n_channels = av.n_channels;
+    out->hop_size = aec_hop_size(p);
+    out->n_channels = AF_CHANNELS;
     out->n_freqs = av.n_freqs;
     for (ch = 0; ch < AF_CHANNELS; ++ch) {
         out->linear_spectra[ch] = av.lane_error_spec[ch];

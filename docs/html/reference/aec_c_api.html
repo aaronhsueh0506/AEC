@@ -56,7 +56,7 @@ pre code{background:none;padding:0}
 <tr><td>延遲</td><td>8 ms/hop,<b>較低</b></td><td>16 ms/hop</td></tr>
 <tr><td>頻率解析度</td><td>129 bins</td><td>257 bins,<b>較高</b>——長混響與 tonal echo 分得更開</td></tr>
 <tr><td>每秒運算次數</td><td>加倍 → CPU 較高</td><td>減半 → CPU 較低</td></tr>
-<tr><td>記憶體(balanced/MATCHED n=5)</td><td>239,920 B</td><td>352,288 B</td></tr>
+<tr><td>記憶體(balanced/MATCHED n=5)</td><td>239,760 B</td><td>352,128 B</td></tr>
 <tr><td>partition 數</td><td>濾波器長度 832 / 128 → 7</td><td>832 / 256 → 4</td></tr>
 </table></div>
 <p class="small">所有以「10 ms 為單位」撰寫的時間常數,都會在 <code>aec_carve()</code> 依實際 hop 自動 retime,換 grid 不需要手動換算 tuning。</p>
@@ -103,12 +103,12 @@ pre code{background:none;padding:0}
 <h3>四個 grid 的 pool 實測(balanced、MATCHED n=5)</h3>
 <div class="tblwrap"><table>
 <tr><th>sr / fft</th><th><code>aec_get_mem_size()</code></th><th>其中 estimator</th><th>其中 ring</th></tr>
-<tr><td>16000 / 256</td><td>239,920</td><td>29,248</td><td>33,104</td></tr>
-<tr><td>16000 / 512</td><td>352,288</td><td>29,248</td><td>33,616</td></tr>
-<tr><td>48000 / 1024</td><td>776,224</td><td>30,624</td><td>99,824</td></tr>
-<tr><td>8000 / 256(legacy)</td><td>211,552</td><td>29,248</td><td>33,104</td></tr>
+<tr><td>16000 / 256</td><td>239,760</td><td>29,248</td><td>33,104</td></tr>
+<tr><td>16000 / 512</td><td>352,128</td><td>29,248</td><td>33,616</td></tr>
+<tr><td>48000 / 1024</td><td>776,064</td><td>30,624</td><td>99,824</td></tr>
+<tr><td>8000 / 256(legacy)</td><td>211,392</td><td>29,248</td><td>33,104</td></tr>
 </table></div>
-<p class="small">此表為 <code>aec_get_mem_size()</code>／<code>aec_get_mem_breakdown()</code> 的實測輸出(池內 <code>Aec</code> 標頭 6,208 B、<code>sizeof(AecConfig)</code> = 48)。<b>這些絕對值會隨 <code>Aec</code>／<code>AecConfig</code> 結構大小整批移動</b>——必須重新查 <code>aec_get_mem_size()</code>,不可沿用記下的常數。相對地,每 filter 的 11,264 B(48 kHz 23,552 B)delta 不隨結構改變。</p>
+<p class="small">此表為 <code>aec_get_mem_size()</code>／<code>aec_get_mem_breakdown()</code> 的實測輸出(池內 <code>Aec</code> 標頭 6,048 B、<code>sizeof(AecConfig)</code> = 48)。<b>這些絕對值會隨 <code>Aec</code>／<code>AecConfig</code> 結構大小整批移動</b>——必須重新查 <code>aec_get_mem_size()</code>,不可沿用記下的常數。相對地,每 filter 的 11,264 B(48 kHz 23,552 B)delta 不隨結構改變。</p>
 
 <h2>5. 每-hop 處理入口 — 選哪一個</h2>
 <p><b>所有入口的所有 buffer 一律是 <code>hop_size</code> 個 <code>float</code></b>;函式<b>沒有長度參數</b>,傳錯長度不會替你報錯。</p>
@@ -140,11 +140,11 @@ pre code{background:none;padding:0}
 <h3>陣列記憶池實測(balanced、MATCHED n=5、<code>n_mics = 4</code>)</h3>
 <div class="tblwrap"><table>
 <tr><th>sr / fft</th><th><code>STATE</code></th><th><code>ESTIMATE</code></th><th><code>FULL</code></th><th>estimator</th><th>ring</th><th><code>lane_bytes</code></th><th><code>fusion_bytes</code></th></tr>
-<tr><td>16000 / 256</td><td>595,744</td><td>691,280</td><td>701,280</td><td>29,248</td><td>66,576</td><td>571,520</td><td>27,728</td></tr>
-<tr><td>16000 / 512</td><td>883,936</td><td>1,073,680</td><td>1,091,872</td><td>29,248</td><td>67,600</td><td>938,304</td><td>50,512</td></tr>
-<tr><td>48000 / 1024</td><td>1,995,712</td><td>2,373,872</td><td>2,411,520</td><td>30,624</td><td>200,720</td><td>2,074,816</td><td>99,152</td></tr>
+<tr><td>16000 / 256</td><td>594,944</td><td>690,480</td><td>700,480</td><td>29,248</td><td>66,576</td><td>570,880</td><td>27,728</td></tr>
+<tr><td>16000 / 512</td><td>883,136</td><td>1,072,880</td><td>1,091,072</td><td>29,248</td><td>67,600</td><td>937,664</td><td>50,512</td></tr>
+<tr><td>48000 / 1024</td><td>1,994,912</td><td>2,373,072</td><td>2,410,720</td><td>30,624</td><td>200,720</td><td>2,074,176</td><td>99,152</td></tr>
 </table></div>
-<p class="small">估計器、ring、lane、fusion 四欄是 <code>FULL</code> 的 <code>aec_get_mem_breakdown()</code>;<code>total_bytes</code> 還含不在任何欄位內的 <code>Aec</code> 標頭(對齊 16 B = 6,208 B)。每條 lane 池 142,880／234,576／518,704 B(比同格點單聲道 <code>EXTERNAL_ALIGNED</code> 的 177,568／289,424／645,776 B 少:借用陣列的同一個 FFT 控制代碼,並省去 lane 契約不跑的配置),與陣列的 <code>residual</code> 無關;<code>fusion_bytes</code> 含這個共用的 FFT 控制代碼(7,152／13,552／26,352 B)。主機實測,<code>sizeof(AecConfig)</code> = 48;以 <code>aec_get_mem_requirements()</code> 為準。</p>
+<p class="small">估計器、ring、lane、fusion 四欄是 <code>FULL</code> 的 <code>aec_get_mem_breakdown()</code>;<code>total_bytes</code> 還含不在任何欄位內的 <code>Aec</code> 標頭(對齊 16 B = 6,048 B)。每條 lane 池 142,720／234,416／518,544 B(比同格點單聲道 <code>EXTERNAL_ALIGNED</code> 的 177,408／289,264／645,616 B 少:借用陣列的同一個 FFT 控制代碼,並省去 lane 契約不跑的配置),與陣列的 <code>residual</code> 無關;<code>fusion_bytes</code> 含這個共用的 FFT 控制代碼(7,152／13,552／26,352 B)。主機實測,<code>sizeof(AecConfig)</code> = 48;以 <code>aec_get_mem_requirements()</code> 為準。</p>
 <div class="warn"><b>目前尚未做到</b>:遠端側狀態仍是每條 lane 各一份——共用的是 delay 估計器、對齊後 far、FFT 控制代碼,以及 hop 內由 lane 0 借給 lane 1–3 的遠端 FFT 結果(lane 約占 <code>FULL</code> 陣列池的 81%／86%／86%)。</div>
 
 <h2>6. 搭配 NN model:不需要 DSP 後級時怎麼用</h2>
@@ -243,7 +243,7 @@ aec_get_linear(aec, &amp;lin);              /* 時域 seam:線性殘差 + 已對
 <tr><td><code>SIMD=0|1</code></td><td><code>1</code></td><td><code>0</code> → <code>-DSIMD_KERNELS_FORCE_SCALAR</code></td><td>數值可能微差;ABI 不變</td></tr>
 <tr><td><code>PROFILE=0|1</code></td><td><code>0</code></td><td><code>1</code> → <code>-DAEC_STAGE_TIMING=1</code></td><td>每 hop 每 instance 7 次 clock 讀取。<b>struct layout 不變,ABI 相容</b></td></tr>
 <tr><td><code>NO_STDIO=0|1</code></td><td><code>0</code></td><td><code>1</code> → 只換一個獨立的 obj/bin 目錄(函式庫本來就沒有 stdio,<code>0</code> 與 <code>1</code> 的 archive 內容相同)</td><td><b>只用於 <code>lib</code> target</b>(CLI 用 <code>FILE*</code>)。回歸閘門:<code>make audit-no-stdio</code>(archive 與連結出的執行檔都沒有 <code>fprintf</code>/<code>stderr</code> 引用)</td></tr>
-<tr><td><code>AEC_NO_ARRAY=0|1</code></td><td><code>0</code></td><td><code>1</code> → <code>-DAEC_NO_ARRAY</code>:不編陣列實例(<code>aec_array.c</code>、<code>aec_res.c</code>);<code>n_mics</code> 不是 1 時 <code>aec_get_mem_size()</code> 回 0、<code>aec_init()</code>／<code>aec_create()</code> 回 NULL,<code>aec_get_array()</code> 與 <code>aec_array_*()</code> 診斷函式不存在(呼叫即連結錯誤)</td><td>單聲道行為與完整函式庫逐位元相同,池大小相同;<code>libaec.a</code> 的 <code>__TEXT</code> 少約 22 kB(<code>SIMD=1</code> 164,227 → 142,015 B;<code>SIMD=0</code> 145,667 → 126,643 B;主機 Apple clang arm64,目標工具鏈的數字不同)</td></tr>
+<tr><td><code>AEC_NO_ARRAY=0|1</code></td><td><code>0</code></td><td><code>1</code> → <code>-DAEC_NO_ARRAY</code>:不編陣列實例(<code>aec_array.c</code>、<code>aec_res.c</code>);<code>n_mics</code> 不是 1 時 <code>aec_get_mem_size()</code> 回 0、<code>aec_init()</code>／<code>aec_create()</code> 回 NULL,<code>aec_get_array()</code> 與 <code>aec_array_*()</code> 診斷函式不存在(呼叫即連結錯誤)</td><td>單聲道行為與完整函式庫逐位元相同,池大小相同;<code>libaec.a</code> 的 <code>__TEXT</code> 少約 21 kB(<code>SIMD=1</code> 160,122 → 139,234 B;<code>SIMD=0</code> 140,678 → 122,914 B;主機 Apple clang arm64,目標工具鏈的數字不同)</td></tr>
 <tr><td><code>AEC_TESTING</code></td><td><code>0</code></td><td>編入內部測試 hook</td><td class="dead"><b>絕不可出貨</b></td></tr>
 </table></div>
 <p><code>-ffp-contract=off</code> 是<b>強制</b>的,在所有 caller 旗標<b>之後</b>才 append,無法被覆蓋。Makefile 在 parse 時就<b>拒絕</b> <code>EXTRA_CFLAGS</code> 內出現 <code>-Ofast</code>／<code>-ffast-math</code>／<code>-ffp-contract=</code>,也拒絕覆寫 <code>CFLAGS</code> 等變數;唯二 hook 是 <code>EXTRA_CFLAGS</code>／<code>EXTRA_LDFLAGS</code>。</p>

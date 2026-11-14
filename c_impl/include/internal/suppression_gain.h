@@ -69,10 +69,6 @@ typedef struct {
 
     int    stat_aware_ne_proxy_enabled;
     float  stat_aware_ne_proxy_threshold;
-
-    /* LowNoiseRenderDetector power IIR rate conversion. Keep at 0 (literal 0.9f/0.1f IIR); the
-     * wall-clock form is not validated. */
-    int    use_wallclock_ema_alpha;
 } SuppressionGainConfig;
 
 /* Per-bin tuning tables (n_bins each), supplied by the caller. */

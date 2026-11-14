@@ -43,7 +43,6 @@ void aec_state_init(AecState *s, const AecStateConfig *cfg,
     int erle_hops, erl_hops;
 
     s->cfg = *cfg;
-    s->st  = *st;
 
     initial_state_init(&s->initial_state,
                        cfg->conservative_initial_phase,

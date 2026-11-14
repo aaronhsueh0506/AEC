@@ -429,7 +429,7 @@ static void aec_state_bind(Aec* a, int K, int hop, int sample_rate, int np) {
     acfg.erle_min = AECB_ST_ERLE_MIN;
     acfg.erle_max_l = AECB_ST_ERLE_MAX_L;
     acfg.erle_max_h = AECB_ST_ERLE_MAX_H;
-    /* Runtime np*hop, not AECB_FILTER_TAPS_SIZE (equal only at 16 kHz). */
+    /* Runtime np*hop: the filter length differs between grids. */
     acfg.filter_taps_size = np * hop;
     acfg.fa_scratch_size = np * hop;
     aec_state_init(&a->a3_state, &acfg, &a->a3_state_st);
@@ -781,12 +781,12 @@ static void aec_recompute_wallclock_thresholds(Aec* a, int hop, int sample_rate)
 }
 
 static void aec_init_config_state(Aec* a, const AecResolved* rs, int hop, int blk,
-                                  int fft, int K, int np) {
+                                  int K, int np) {
     const AecConfig* cfg = &rs->cfg;
     const AecTuning* tn = &rs->tun;
     a->cfg = *cfg;
     a->tun = *tn;
-    a->hop_size = hop; a->block_size = blk; a->fft_size = fft;
+    a->hop_size = hop; a->block_size = blk;
     a->n_freqs = K; a->n_partitions = np;
 
     /* Retimes wall-clock-authored constants to the resolved grid (only
@@ -1284,7 +1284,7 @@ static int aec_carve(Aec* a, uint8_t* ptr, const AecResolved* rs,
     if (aec_build_sg_config(rs, &scfg, &stun) != 0) return -1;
 
     uint8_t* const start = ptr;
-    aec_init_config_state(a, rs, hop, blk, fft, K, np);
+    aec_init_config_state(a, rs, hop, blk, K, np);
     ptr = aec_carve_delay_ring(a, ptr, rs, hop, K, buf_samp);
     if (!ptr) return -1;
     ptr = aec_carve_filters(a, ptr, rs, hop, blk, fft, K, np, opt);

@@ -42,6 +42,36 @@ when verdict requires it.
 ---
 
 
+## [Unreleased] — 2026-11-14 — Dead fields removed, `AEC_LAYOUT_VERSION` 3, `AEC_OUTPUT_GUARD_API_VERSION` and two `AecArrayView` fields removed
+
+**`aec_process()` output unchanged.** The four baseline streams (`split_entry`, `split_entry2`, `aec_array`, `aec_array2`) written from this tree compare with 0 mismatches against streams captured from the previous commit (`6482974`) at 16k/256, 16k/512 and 48k/1024, `SIMD=1` and `SIMD=0`. `split_entry` differs in exactly the `META sizeof_Aec` and `META mem_size_*` lines (6 per grid and build, 18 per stream file); `split_entry2`, `aec_array` and `aec_array2` are byte-identical.
+
+**Pool layout (integrators read this).** `AEC_LAYOUT_VERSION` 2 to 3: a pool descriptor stored from a build with layout 2 is refused by `aec_init_ex()`, and `aec_init()` / `aec_create()` size the pool from the current header. Re-query `aec_get_mem_size()`; do not carry byte counts forward. LP64 sizes, before to after:
+
+| | before | after |
+|---|---:|---:|
+| `sizeof(Aec)` (the pool header, 16 B aligned) | 6200 (6208) | 6048 (6048) |
+| single channel 8k/256 | 211,552 B | 211,392 B |
+| single channel 16k/256 | 239,920 B | 239,760 B |
+| single channel 16k/512 | 352,288 B | 352,128 B |
+| single channel 48k/1024 | 776,224 B | 776,064 B |
+| array 16k/256 `STATE` / `ESTIMATE` / `FULL` | 595,744 / 691,280 / 701,280 B | 594,944 / 690,480 / 700,480 B |
+| array 16k/512 | 883,936 / 1,073,680 / 1,091,872 B | 883,136 / 1,072,880 / 1,091,072 B |
+| array 48k/1024 | 1,995,712 / 2,373,872 / 2,411,520 B | 1,994,912 / 2,373,072 / 2,410,720 B |
+| array lane pool 16k/256 (`ESTIMATE`, `FULL`) | 142,880 B | 142,720 B |
+
+Every pool shrinks by 160 B per `Aec` header (a single-channel instance has one, an array has one plus four lanes: 800 B); all deltas between configurations are unchanged. `aec_res_get_mem_size()` is unchanged. `libaec.a` `__TEXT` (host, summed `size`): `SIMD=1` 160,230 to 160,122 B, `SIMD=0` 140,774 to 140,678 B, `AEC_NO_ARRAY=1` 139,318 to 139,234 B and 122,990 to 122,914 B. `test/test_memory_layout.c` pins and the byte counts in `c_impl/STATIC_MEMORY.md`, `c_impl/README.md`, `docs/reference/lifecycle.md`, `docs/reference/wav_cli.md` and the HTML references are re-measured.
+
+**Removed from `aec.h`.**
+- `AEC_OUTPUT_GUARD_API_VERSION`. A build that guards on it (`#if !defined(AEC_OUTPUT_GUARD_API_VERSION) || ... < 2` / `#error`) now stops at the `#error`: use `#if !defined(AEC_CNG_NR_GAIN_FLOOR)` (see `docs/sdk_migration_output_guard.md` section 2). The output-guard API itself (`base_spec`, `aec_apply_gain()`, `aec_apply_cng()`, `aec_post_reset_serial()`, `aec_synthesis_window()`) is unchanged.
+- `AecArrayView.n_channels` and `AecArrayView.hop_size` (176 B instead of 184 B on LP64; `aec_array_linear_aec_count()` and `aec_hop_size()` return the same values). `AecArrayView` has no version constant: a caller built against the old header and run against the new library is accepted and reads shifted fields, so rebuild every consumer (board samples included) against this `aec.h`.
+- Kept after review, because an integration document names them as outputs (no code outside this repository reads them): `AecResidualView.delay_changed` / `delay_locked` (`reference/integration.md`, Audio_ALG `pipelines/reference/call-flow.md`), `AecLinearView.echo_spec` / `near_spec` / `far_spec` / `epc_active` / `filter_once_converged` / `is_stationary_dt` / `shadow_dt` (`reference/integration.md`, `sdk_migration_output_guard.md`).
+
+**Removed from internal structures** (all written, none read): `Aec.fft_size` (the `fft` parameter of `aec_init_config_state()` goes with it; tests read `main_filter.base.fft_size`), `AecState.st`, `FilterDelayEstimate.delay`, `ResidualEchoEstimator.hop_size` / `reverb_decay` / `reverb_mild_decay_scale` / `sample_rate` (the `ree_init()` parameters stay: they feed the per-hop decay and the noise-floor growth), `SuppressionGainConfig.use_wallclock_ema_alpha` (the C power IIR was always the literal 0.9 / 0.1; the Python `use_wallclock_ema_alpha` keyword stays) and five members of `AecBalancedRateDims` (`block_size`, `filter_length`, `filter_taps_size`, `n_bins`, `n_partitions`; `python/diag/gen_aec_balanced_config_h.py` emits the table, `include/internal/aec_balanced_config.h` is regenerated, `test/aec_ref_tables.h` is byte-identical; the 4-row table is 96 B smaller). 17 `AECB_*` macros are now definition-only in the generated header.
+
+**Docs.** `docs/c_python_function_map.md` rewords the `external_delay_samples` rows (C keeps only the `reported` flag; the shared `FilterDelay` row is split in two, so the Python-only statistics read `py_only_field` 58 and `py_only_none` 137; the C-function counts are unchanged), `docs/timing_constant_inventory.*` drops the pointer to the removed C field, `docs/sdk_migration_output_guard.md` gains the layout 3 and `AecArrayView` rows.
+
+
 ## [Unreleased] — 2026-11-14 — `aec.c` split into three files, test and generator clean-up, `aec_wav --no-delay-est` removed
 
 **`aec_process()` output unchanged.** The four baseline streams (`split_entry`, `split_entry2`, `aec_array`, `aec_array2`) compare with 0 mismatches against streams captured from the previous commit, at 16k/256, 16k/512 and 48k/1024, `SIMD=1` and `SIMD=0` (and `AEC_NO_ARRAY=1` for the single-channel two). `aec_wav` writes the same samples and the same stderr as before on the 17 accepted runs (and refuses the 18th, `--fft-size 512` at 48 kHz, as before). `sizeof(Aec)` and every pool size are unchanged.

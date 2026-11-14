@@ -80,8 +80,6 @@ typedef struct {
     int blocks_with_active_render;
     int capture_signal_saturation;
     int active_render_blocks;
-
-    AecStateStorage st;
 } AecState;
 
 void aec_state_config_defaults(AecStateConfig *cfg);

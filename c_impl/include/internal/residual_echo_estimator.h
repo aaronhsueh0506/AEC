@@ -30,13 +30,7 @@ typedef struct {
     float  tm_gain_early;
     float  tm_gain_late;
     int    erle_onset_comp_in_dominant;
-    /* Authoring inputs to the per-hop decay; ree_init() folds them into
-     * reverb_decay_per_hop{,_mild}, so writing them on a live instance changes nothing. */
-    float  reverb_decay;
-    float  reverb_mild_decay_scale;
     int    reverb_enabled;
-    int    hop_size;
-    int    sample_rate;             /* live rate; drives noise_floor_growth_per_hop and the reverb-decay rescale */
     float  noise_floor_growth_per_hop; /* computed in ree_init() */
     /* Per-hop reverb decay for both dominant_nearend branches, resolved once in ree_init()
      * (0 when reverb is disabled). The mild value scales in double before the exponentiation, so it

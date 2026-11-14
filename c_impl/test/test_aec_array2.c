@@ -95,10 +95,10 @@ static int g2a_front(void* p, const float* mics, const float* ref, G2AFront* o) 
     if (aec_process_linear(h->a, mics, ref) != AEC_OK) return -1;
     memset(&av, 0, sizeof av); av.struct_size = sizeof av;
     if (aec_get_array(h->a, &av) != AEC_OK) return -1;
-    CHECK(av.n_channels == ARR_CH && av.n_freqs == h->n && av.hop_size == h->hop, "array view geometry");
+    CHECK(av.n_freqs == h->n, "array view geometry");
     CHECK(av.post_reset_serial == aec_post_reset_serial(h->a), "view serial != aec_post_reset_serial");
     memset(o, 0, sizeof *o);
-    o->n_freqs = av.n_freqs; o->hop_size = av.hop_size;
+    o->n_freqs = av.n_freqs; o->hop_size = h->hop;
     for (int ch = 0; ch < ARR_CH; ++ch) {
         o->lane_error[ch] = av.lane_error_spec[ch]; o->lane_base[ch] = av.lane_base_spec[ch];
         o->lane_formed[ch] = av.lane_formed_hop[ch]; o->lane_guard[ch] = av.lane_guard_active[ch];

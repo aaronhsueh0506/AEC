@@ -7,10 +7,9 @@
 #ifndef FILTER_DELAY_H
 #define FILTER_DELAY_H
 
-/* DelayEstimate POD. `delay` is in samples; `reported` == 0 means no estimate. */
+/* DelayEstimate POD. `reported` == 0 means no estimate. */
 typedef struct {
     int reported;
-    int delay;
 } FilterDelayEstimate;
 
 typedef struct {

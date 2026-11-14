@@ -335,14 +335,11 @@ int aec_apply_cng(Aec* a, const float* extra_gain, Complex* spec);
 void aec_apply_gain_spec(Complex* out, const Complex* base, const float* g_res, const float* g_extra, int n);
 void aec_apply_cng_spec(uint32_t* rng, Complex* spec, const float* cn, const float* g_res, const float* g_extra, int n);
 
-/* Output-guard API version (2: aec_get_residual().base_spec is the rendering base; aec_apply_gain() /
- * aec_apply_cng() render it for you). An application that renders the AecResidualView spectra itself must make this
- * macro part of its build, e.g. #if !defined(AEC_OUTPUT_GUARD_API_VERSION) || AEC_OUTPUT_GUARD_API_VERSION < 2 / #error /
- * #endif, and must render base_spec instead of error_spec, handle aec_post_reset_serial() for its own overlap-add tail,
- * borrow aec_synthesis_window() and, if it draws comfort noise itself, start from AEC_CNG_SEED. Nothing else in the API
- * reveals that an old renderer of error_spec has lost the guard; the migration steps are in
- * docs/sdk_migration_output_guard.md. */
-#define AEC_OUTPUT_GUARD_API_VERSION 2
+/* Output guard: aec_get_residual().base_spec is the rendering base; aec_apply_gain() / aec_apply_cng() render it for you. An
+ * application that renders the AecResidualView spectra itself must render base_spec instead of error_spec, handle
+ * aec_post_reset_serial() for its own overlap-add tail, borrow aec_synthesis_window() and, if it draws comfort noise itself,
+ * start from AEC_CNG_SEED. Nothing in the API reveals that an old renderer of error_spec has lost the guard; the migration
+ * steps are in docs/sdk_migration_output_guard.md. */
 
 /* Counter of hard post-chain resets (wrapping uint32_t, 0 on a freshly created instance), read without
  * consuming it. It advances by one on each of:
@@ -506,9 +503,7 @@ typedef struct AecDelayState {
  * RENDERING base (error_spec, or the lane's capture spectrum where its output guard fired, lane_guard_active). */
 typedef struct AecArrayView {
     size_t         struct_size;
-    int            n_channels;
     int            n_freqs;
-    int            hop_size;
     const Complex* lane_error_spec[AEC_ARRAY_MICS];
     const Complex* lane_base_spec[AEC_ARRAY_MICS];
     const float*   lane_formed_hop[AEC_ARRAY_MICS];
@@ -527,7 +522,7 @@ int aec_get_array(const Aec* a, AecArrayView* out);
  * bytes. aec_init(mem, size, cfg) is aec_init_ex(..., NULL). Query a fresh descriptor for every build; never persist or
  * synthesize one. */
 #define AEC_DESCRIPTOR_VERSION 1u
-#define AEC_LAYOUT_VERSION     2u
+#define AEC_LAYOUT_VERSION     3u
 #define AEC_BACKEND_NE10       2u   /* backend_id 1 is never returned */
 typedef struct AecMemReq {
     uint32_t descriptor_version;

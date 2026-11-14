@@ -54,8 +54,6 @@ void ree_init(ResidualEchoEstimator *r,
               float *scratch_store) {
     int k;
     r->n_bins = n_bins;
-    r->hop_size = hop_size;
-    r->sample_rate = sample_rate;
     /* Render-noise-power per-block growth (x2_noise_floor *= 1.1) rescaled to the live grid; 1.1 is
      * a double literal so the exponentiation keeps full precision. */
     r->noise_floor_growth_per_hop =
@@ -66,8 +64,6 @@ void ree_init(ResidualEchoEstimator *r,
     r->tm_gain_early = tm_gain;
     r->tm_gain_late = tm_gain;
     r->erle_onset_comp_in_dominant = erle_onset_comp_in_dominant ? 1 : 0;
-    r->reverb_decay = reverb_decay;
-    r->reverb_mild_decay_scale = reverb_mild_decay_scale;
     r->reverb_enabled = reverb_enabled ? 1 : 0;
     /* Both dominant_nearend decay branches are resolved here, once. The mild branch multiplies in
      * double before the exponentiation. */

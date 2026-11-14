@@ -124,7 +124,7 @@ static int run_case(const ArrCase* c, int id, AecResidualMode residual) {
         if (rc != AEC_OK) { free(W); free(rmem); free(mem); return -1; }
         memset(&av, 0, sizeof av); av.struct_size = sizeof av;
         CHECK(aec_get_array(a, &av) == AEC_OK, "aec_get_array");
-        CHECK(av.n_channels == ARR_CH && av.n_freqs == n && av.hop_size == hop, "array view geometry");
+        CHECK(av.n_freqs == n, "array view geometry");
         changed_hop = av.delay.changed;
         /* a scene's heavy lines are also hashed on every hop whose alignment changed */
         const int skip = light && !changed_hop;
@@ -453,7 +453,7 @@ static void test_status_and_sequence(void) {
             CHECK(aec_process_linear(s, m1, r1) == AEC_OK, "single-channel linear");
             CHECK(aec_get_array(s, &av) == AEC_ERR_SEQUENCE, "single-channel array view before the residual stage");
             CHECK(aec_process_residual(s, NULL) == AEC_OK, "single-channel hop");
-            CHECK(aec_get_array(s, &av) == AEC_OK && av.n_channels == 1 && av.lane_error_spec[0] && av.lane_base_spec[0] &&
+            CHECK(aec_get_array(s, &av) == AEC_OK && av.lane_error_spec[0] && av.lane_base_spec[0] &&
                   av.lane_formed_hop[0] && av.aligned_ref, "single-channel array view");
             CHECK(aec_array_linear_aec_count(s) == 1 && aec_testing_array_pending_delay_candidate(s) == -1 &&
                   aec_array_realign_warm_lane_count(s) == 0 && aec_array_realign_soft_lane_count(s) == 0,

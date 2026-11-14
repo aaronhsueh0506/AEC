@@ -26,7 +26,7 @@
 #include "aec_pool_test_util.h"
 #include "res_gain_of.h"
 /* AECB_RATE_TABLE / aecb_rate_cfg(): the tuning table carries its
- * own {n_bins, fft_size, block_size, hop_size} alongside ~40 tuning
+ * own {fft_size, hop_size} alongside ~40 tuning
  * constants. test_signal_grid_resolver() pins it against the shared
  * resolver so the instance can never be split across two grids. */
 #include "aec_balanced_config.h"
@@ -639,14 +639,12 @@ static void test_signal_grid_resolver(void) {
 
         /* The tuning table must describe the SAME geometry. It is not
          * a second resolver -- nothing consults it for admissibility -- but
-         * it does hand the post chain its own n_bins/fft/block/hop, so a
-         * divergence would split the instance across two grids. */
+         * it does hand the post chain its own fft/hop, so a divergence
+         * would split the instance across two grids. */
         const AecBalancedRateDims* rd = aecb_rate_cfg(grids[i].sr, grids[i].fft);
         snprintf(label, sizeof(label), "%s: AECB_RATE_TABLE agrees with the resolver",
                  grids[i].tag);
-        CHECK(rd != NULL && rd->fft_size == g.fft_size &&
-              rd->block_size == g.frame_size && rd->hop_size == g.hop_size &&
-              rd->n_bins == g.n_freqs, label);
+        CHECK(rd != NULL && rd->fft_size == g.fft_size && rd->hop_size == g.hop_size, label);
 
         /* LOCKSTEP: size, init, and process must all see this same grid. */
         AecConfig cfg;
@@ -663,7 +661,7 @@ static void test_signal_grid_resolver(void) {
         if (pa) {
             snprintf(label, sizeof(label),
                      "%s: init sees the resolver's grid", grids[i].tag);
-            CHECK(pa->fft_size == g.fft_size && pa->block_size == g.frame_size &&
+            CHECK(pa->main_filter.base.fft_size == g.fft_size && pa->block_size == g.frame_size &&
                   pa->hop_size == g.hop_size && pa->n_freqs == g.n_freqs, label);
             snprintf(label, sizeof(label),
                      "%s: aec_hop_size() == the resolved hop", grids[i].tag);
@@ -719,7 +717,7 @@ static void test_signal_grid_resolver(void) {
         snprintf(label, sizeof(label),
                  "%s: create sees the same grid as get_mem_size/init",
                  grids[i].tag);
-        CHECK(dyn->fft_size == g.fft_size && dyn->block_size == g.frame_size &&
+        CHECK(dyn->main_filter.base.fft_size == g.fft_size && dyn->block_size == g.frame_size &&
               dyn->hop_size == g.hop_size && dyn->n_freqs == g.n_freqs, label);
         CHECK(aec_get_mem_size(&dyn->cfg) == need,
               "grid lockstep: the instance's own config re-sizes identically");
