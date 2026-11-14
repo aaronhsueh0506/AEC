@@ -1,7 +1,15 @@
 #!/usr/bin/env python3
-"""Build the fixed, checked-in 90-case AEC eval manifest.
+"""Select a balanced, deterministic 90-case subset of the local blind corpus.
 
-Selects a balanced, deterministic subset of wav/aec_challenge_blind/:
+This does NOT reproduce the checked-in eval/manifest_90case.json. That set was
+frozen from an earlier state of the git-ignored corpus (29 near-end clips have
+since moved to nearend_singletalk/_quarantine_non_official/), and running this
+today picks a different set. Do not regenerate the checked-in files: A/B runs
+compare on the frozen set, which eval/manifest_pin.py resolves and pins by
+sha256. --out and --stems-out are required so that a run cannot overwrite them
+by default.
+
+The selection rule, applied to wav/aec_challenge_blind/:
   - farend_singletalk : 30 cases (all 5 static + 25 movement, sorted)
   - doubletalk        : 30 cases (all 4 static + 26 movement, sorted)
   - nearend_singletalk: 30 cases (all static; this corpus has no near-end
@@ -10,14 +18,11 @@ Selects a balanced, deterministic subset of wav/aec_challenge_blind/:
 Static cases are scarce, so every one is included; movement cases fill the
 remainder up to 30 in sorted-stem order.
 
-The checked-in eval/manifest_90case.json is the frozen set that baseline and
-candidate runs compare on; regenerating it changes which cases are compared.
-
 Usage:
     python3 eval/build_manifest_90case.py \\
         --dataset-dir wav/aec_challenge_blind \\
-        --out eval/manifest_90case.json \\
-        --stems-out eval/manifest_90case_stems.txt
+        --out /scratch/new_manifest.json \\
+        --stems-out /scratch/new_stems.txt
 """
 import argparse
 import glob
@@ -49,8 +54,8 @@ def select(dataset_dir, scenario, target=30):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--dataset-dir', default='wav/aec_challenge_blind')
-    ap.add_argument('--out', default='eval/manifest_90case.json')
-    ap.add_argument('--stems-out', default='eval/manifest_90case_stems.txt')
+    ap.add_argument('--out', required=True)
+    ap.add_argument('--stems-out', required=True)
     ap.add_argument('--per-category', type=int, default=30)
     args = ap.parse_args()
 

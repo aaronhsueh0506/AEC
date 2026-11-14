@@ -74,9 +74,18 @@ comparable.
 
 `eval/run_py_ab.sh` (Python path, `NO_PREALIGN=1`) and `eval/run_c_ab.sh` (C path, `aec_wav`) render and score the stems in
 `eval/manifest_90case_stems.txt`; `eval/ab_report.py` summarises. A change that lands in both ports needs both runners: neither
-sees the other's regressions. `eval/manifest_90case_stems.txt` currently lists 29 stems that are absent from their scenario
-directory (they sit under `nearend_singletalk/_quarantine_non_official`), so both runners stop at their completeness gate until
-the manifest is repointed.
+sees the other's regressions.
+
+The corpus under `wav/aec_challenge_blind/` is git-ignored local data, and 29 of the 90 near-end clips now sit in
+`nearend_singletalk/_quarantine_non_official/`. `eval/manifest_pin.py prepare` resolves each stem to its scenario directory, else
+to that directory's `_quarantine_non_official/`, so the frozen set is compared unchanged (do not regenerate it:
+`build_manifest_90case.py` run today selects a different set). It stops naming every stem it cannot find, and verifies
+`eval/manifest_90case.sha256` (sha256 of the 180 clips by scenario-relative name, of the stems list and of the manifest JSON), so
+drift of the corpus or the manifest aborts the run with the list of files. The resolved clips are linked into `$OUT/dataset_view`,
+which the renderer and `bench_aecmos.py --dataset` read; `python/eval_manifest90.py` applies the same resolution and check. After
+an intended corpus change, re-pin with `python3 eval/manifest_pin.py write --dataset wav/aec_challenge_blind`. `SELF_CHECK=1
+eval/run_c_ab.sh` accepts two byte-identical builds: a null run in which every delta must be exactly 0 (all 90 byte-equal at 16k/256
+and 16k/512). Run the scripts from a scratch copy of the tree, not from inside the repository.
 
 ### Byte-equal regression check (behaviour-neutral changes)
 

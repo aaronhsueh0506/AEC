@@ -13,7 +13,12 @@
 # pre-align crutch, which invalidates any timing-related verdict.
 #
 # The dataset and the manifest come from THIS checkout, not the worktrees, so
-# both sides see byte-identical input. PYBIN selects the interpreter; WORKERS
+# both sides see byte-identical input. A stem resolves to
+# <scenario>/<stem>_{mic,lpb}.wav, else to the same name under
+# <scenario>/_quarantine_non_official/ (eval/manifest_pin.py); the run stops
+# naming every unresolved stem, and when a clip or the manifest no longer
+# matches eval/manifest_90case.sha256. The resolved clips are linked into
+# $OUT/dataset_view, which the renderer and the scorer read. PYBIN selects the interpreter; WORKERS
 # (default 6) the number of parallel renders. OUT_DIR receives out_*/, res_*/,
 # render_*.log, score_*.log and wav_comparison_g<fft>.json.
 #
@@ -21,7 +26,7 @@
 #   eval/run_py_ab.sh BASE_WORKTREE CAND_WORKTREE OUT_DIR ["256 512"]
 set -euo pipefail
 
-if [ "$#" -lt 3 ]; then sed -n '2,21p' "$0" >&2; exit 2; fi
+if [ "$#" -lt 3 ]; then sed -n '2,27p' "$0" >&2; exit 2; fi
 
 BASE_WT="$1"; CAND_WT="$2"; OUT="$3"; GRIDS="${4:-256 512}"
 
@@ -38,6 +43,9 @@ WORKERS="${WORKERS:-6}"
 WANT=$(grep -cve '^[[:space:]]*$' -e '^#' "$STEMS")
 
 mkdir -p "$OUT"
+VIEW="$OUT/dataset_view"
+rm -rf "$VIEW"
+"$PYBIN" "$AEC/eval/manifest_pin.py" prepare --dataset "$DATASET" --view "$VIEW" || exit 1
 echo "harness:  $AEC/eval/run_py_ab.sh"
 echo "manifest: $STEMS ($WANT cases)"
 
@@ -46,7 +54,7 @@ render () {  # render <worktree> <label> <frame_size>
   local dir="$OUT/out_$label"
   rm -rf "$dir"; mkdir -p "$dir"
   ( cd "$wt" && NO_PREALIGN=1 AEC_CFG_OVERRIDE="frame_size=$fft" \
-      "$PYBIN" python/eval_aec_challenge.py "$DATASET" \
+      "$PYBIN" python/eval_aec_challenge.py "$VIEW" \
         --preset balanced --filter 832 --cng \
         --cases-list "$STEMS" --workers "$WORKERS" -o "$dir" ) \
     > "$OUT/render_$label.log" 2>&1
@@ -65,7 +73,7 @@ score () {  # score <label> [baseline-scores.json]
   [ -n "$base" ] && args+=(--baseline "$base")
   mkdir -p "$OUT/res_$label"
   ( cd "$AEC" && "$PYBIN" python/bench_aecmos.py "$OUT/out_$label" \
-      "$OUT/res_$label" "${args[@]}" ) > "$OUT/score_$label.log" 2>&1
+      "$OUT/res_$label" --dataset "$VIEW" "${args[@]}" ) > "$OUT/score_$label.log" 2>&1
   echo "  scored $label"
 }
 

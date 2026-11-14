@@ -286,8 +286,8 @@ mic, ref (hop 個 float)
   ▼  aec_get_linear(a, &lin)                   aligned_far_hop、delay_state
   │      （以上指標都借自 AEC 的 per-hop 緩衝，下一次 AEC 處理呼叫前有效）
   ▼  anr_process_gain_with_residual_psd(nr,  NR 增益 g_nr：r2 / 32768² 併入噪音底
-  │         rv.error_spec, r2 / 32768²)       （僅在 rv.usable_linear 為真時；否則 anr_process_gain(nr, rv.error_spec) 純降噪）
-  │                                            ；回傳的內部陣列就是 g_nr
+  │         rv.base_spec, r2 / 32768²)        （僅在 rv.usable_linear 為真時；否則 anr_process_gain(nr, rv.base_spec) 純降噪）
+  │                                            ；回傳的內部陣列就是 g_nr；單聲道出貨鏈估計在 base_spec（見下方要點）
   ▼  aec_apply_gain(a, g_nr, spec)             spec[k] = rv.base_spec[k] · min(g_nr[k], res_gain[k])；不是 error_spec
   ▼  aec_apply_cng(a, g_nr, spec)              只填被 RES 切掉的 bin，量依 g_nr 縮放（下限 AEC_CNG_NR_GAIN_FLOOR）；
   │                                            產生器在實例內，起點 AEC_CNG_SEED
@@ -301,8 +301,11 @@ mic, ref (hop 個 float)
 - **增益取最小值，不是相乘**：`g_total = min(G_nr, G_res)`（`aec_apply_gain()` 的 `extra_gain` 就是 `G_nr`）。`G_res`（取 min 之前的值）
   同時決定舒適噪音的量，所以填補只反映 AEC 的抑制，NR 增益再以 `-10 dB`
   （`AEC_CNG_NR_GAIN_FLOOR`，`0.31622777f`）為下限縮放填補量。
-- **渲染 `rv.base_spec`，不是 `rv.error_spec`**：底座已套用輸出守衛（§8.1），`aec_apply_gain()` 已經替你這麼做。`anr_process_gain*()` 的頻譜輸入
-  用哪一個由整合者明確選擇並在自己的程式裡寫清楚；分析用的 `error_spec` 與渲染用的底座在守衛 hop 上不同。
+- **渲染 `rv.base_spec`，不是 `rv.error_spec`**：底座已套用輸出守衛（§8.1），`aec_apply_gain()` 已經替你這麼做。
+- **NR 的輸入頻譜**：函式庫不替你選；分析用的 `error_spec` 與渲染用的 `base_spec` 只在守衛 hop 上不同（其餘 hop 逐位元相同）。
+  出貨的單聲道鏈（Audio_ALG `pipelines/mono/aec_nr_res`）把 `base_spec` 交給 `anr_process_gain*()`：NR 估計的就是增益要乘上去的那張頻譜。
+  出貨的 4ch 鏈（`array_sample_anr_gain()`）交 `error_spec`，即 beamformer 輸出 E。`error_spec`／`formed_hop` 是 AI 模型與 ERLE 類統計
+  用的分析 seam。Audio_ALG 之外的板端 sample 目前把 `error_spec` 交給 NR，這是已知差異，不是建議；新的整合以出貨單聲道鏈為準。
 - **舒適噪音產生器在 `Aec` 裡**（`aec_apply_cng()`），起點是 `AEC_CNG_SEED`（42，`aec.h`），與 `aec_process()`
   內部相同，硬 post 鏈 reset 時函式庫自己重設。每個 hop 在 `ac_istft_push` 之前先比對 `aec_post_reset_serial()`：值變了就
   `ac_istft_reset()`、存下新值（§8.3）；**不要**為此呼叫 `aec_reset()`。自己持有產生器狀態、改走 `aec_apply_cng_spec()` 的整合者

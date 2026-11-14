@@ -12,9 +12,12 @@ category also reports AECMOS:
 Every category is reported with its static and movement subsets SEPARATE
 (never pooled): movement cases track delay differently and pooling hides that.
 
-Cases come from eval/manifest_90case.json (built by
-eval/build_manifest_90case.py), so every run reads the identical list: 30
-far-end / 30 doubletalk / 30 near-end (near-end is all static).
+Cases come from eval/manifest_90case.json, so every run reads the identical
+list: 30 far-end / 30 doubletalk / 30 near-end (near-end is all static). A clip
+is read from its scenario directory, else from that directory's
+_quarantine_non_official/; the run stops naming unresolved stems and, for the
+checked-in manifest, when a clip no longer matches eval/manifest_90case.sha256
+(see eval/manifest_pin.py).
 
 Rendering reuses eval_aec_challenge.py's `run_ours` (same AEC invocation,
 offline pre-align and online delay-est policy as the 800-case bench), so
@@ -48,10 +51,12 @@ _REPO = os.path.dirname(_HERE)
 _MODEL_DIR = os.path.join(_REPO, 'model')
 sys.path.insert(0, _HERE)
 sys.path.insert(0, _MODEL_DIR)
+sys.path.insert(0, os.path.join(_REPO, 'eval'))
 
 import eval_aec_challenge as eac  # run_ours, compute_erle, compute_sdr
 from bench_aecmos import FastAECMOS
 from preset_arg import PRESET_METAVAR, PRESET_NAMES, parse_preset_arg
+import manifest_pin  # stem -> clip resolution (scenario dir, then quarantine) and the sha256 pin
 
 # ---------------------------------------------------------------------------
 # Run provenance: a run's scores.json records what produced the numbers (signal
@@ -172,9 +177,8 @@ def _run_one_case(case_args):
 
     eac._ENABLE_CNG = enable_cng
 
-    sc_dir = os.path.join(dataset_dir, scenario)
-    mic_path = os.path.join(sc_dir, stem + '_mic.wav')
-    lpb_path = os.path.join(sc_dir, stem + '_lpb.wav')
+    mic_path = manifest_pin.locate(dataset_dir, '%s/%s_mic.wav' % (scenario, stem))
+    lpb_path = manifest_pin.locate(dataset_dir, '%s/%s_lpb.wav' % (scenario, stem))
 
     mic, sr = sf.read(mic_path)
     ref, _ = sf.read(lpb_path)
@@ -245,6 +249,14 @@ def main():
 
     cases = load_manifest(args.manifest)
     print(f"Loaded {len(cases)} cases from {args.manifest}", file=sys.stderr)
+    try:
+        found = manifest_pin.resolve_all(
+            args.dataset_dir, [stem for stem, _, _ in cases])
+        if os.path.samefile(args.manifest, manifest_pin.MANIFEST):
+            manifest_pin.check_manifest_consistent(manifest_pin.read_stems())
+            manifest_pin.verify(found)
+    except manifest_pin.PinError as exc:
+        sys.exit(f"ERROR: {exc}")
 
     case_args = [
         (stem, scenario, split, args.dataset_dir, args.output_dir, args.filter,

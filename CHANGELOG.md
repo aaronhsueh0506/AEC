@@ -43,11 +43,16 @@ when verdict requires it.
 ---
 
 
+## [Unreleased] — 2026-11-14 — Docs only: which spectrum the denoiser reads
+
+Documentation only; no source, header or output changes. `docs/reference/integration.md`, `docs/html/reference/aec_usage.html` and `docs/sdk_migration_output_guard.md` now say the same as `aec.h`: the shipped mono chain hands `base_spec` to the denoiser (it estimates on the spectrum its gain is multiplied on), the shipped 4ch chain hands `error_spec`, the two differ only on output-guard hops, and `error_spec` / `formed_hop` stay the analysis seam. The usage example shows `base_spec`.
+
 ## [Unreleased] — 2026-11-14 — Finish round: default-tuning pin, header comments, figures corrected
 
 **Library output and pool unchanged** (the five baseline streams written from this tree compare with 0 mismatches at `SIMD=1` and `SIMD=0`; against the streams of f6e846f only the 21 `META` pool lines of `split_entry` differ).
 
 - `test_config_validation.c` pins the default tuning: FNV-1a-32 over the bytes of the `AecTuning` that `aec_testing_tuning_defaults()` builds, for 8 / 16 / 48 kHz at the four levels (12 hashes; 504 checks, was 492). A one-unit change of a default or of a level's floors fails the rows it touches without the external baseline directory. Mutations tried: `warmup_frames` 100 -> 101 (12 rows fail), aggressive far-active floor -38 -> -37 dB (3 rows fail). Re-pin a row only together with a deliberate default change, and re-capture the baseline streams with it.
+- Eval harness (no library change): the 90-case A/B runners and `python/eval_manifest90.py` resolve a stem to its scenario directory, else to `_quarantine_non_official/` (the same 90 clips as before), and verify `eval/manifest_90case.sha256` before rendering; `SELF_CHECK=1` allows a null run; `build_manifest_90case.py` no longer claims to reproduce the checked-in set and requires `--out`/`--stems-out`.
 - `aec.h`: three comments no longer name internals (`AecState`, `a->far_hop`, `PBFDKF`); the preprocessed header is unchanged.
 - Entry corrections below: AecTuning has 42 fields after the dead-state entry (it said 45 -> 43); the FULL array pool of the dead-state entry is -22,224 / -38,608 / -71,376 B (STATE and ESTIMATE -22,208 / -38,592 / -71,360); the `aec_testing_*` count is 23 at the head of 2026-11-14.
 

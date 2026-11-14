@@ -21,7 +21,14 @@
 #     per-sample statistics, never inferred from equal AECMOS deltas.
 #
 # Both sides are built after `make clean` with SIMD=1 WERROR=1; the run aborts
-# if the two binaries are byte-identical. PYBIN selects the interpreter.
+# if the two binaries are byte-identical (SELF_CHECK=1 allows it: a null run
+# whose every delta must be exactly zero). PYBIN selects the interpreter.
+#
+# Input: a stem resolves to <scenario>/<stem>_{mic,lpb}.wav, else to the same
+# name under <scenario>/_quarantine_non_official/ (eval/manifest_pin.py). The
+# run stops naming every unresolved stem, and when a clip or the manifest no
+# longer matches eval/manifest_90case.sha256. The resolved clips are linked into
+# $OUT/dataset_view, which the renderer and the scorer read.
 # OUT_DIR receives out_*/, res_*/, score_*.log, build_*.log and
 # wav_comparison_g<fft>.json per grid.
 #
@@ -33,7 +40,7 @@
 set -euo pipefail
 
 if [ "$#" -lt 3 ]; then
-  sed -n '2,32p' "$0" >&2; exit 2
+  sed -n '2,40p' "$0" >&2; exit 2
 fi
 
 BASE_WT="$1"; shift
@@ -61,6 +68,9 @@ done
 WANT=$(grep -cve '^[[:space:]]*$' -e '^#' "$STEMS")
 
 mkdir -p "$OUT"
+VIEW="$OUT/dataset_view"
+rm -rf "$VIEW"
+"$PYBIN" "$AEC/eval/manifest_pin.py" prepare --dataset "$DATASET" --view "$VIEW" || exit 1
 echo "harness:  $AEC/eval/run_c_ab.sh"
 echo "manifest: $STEMS ($WANT cases)"
 echo "extra:    ${EXTRA[*]:-<none>}"
@@ -87,12 +97,14 @@ render () {  # render <aec_wav> <label> <fft>
   local n=0
   while read -r stem; do
     case "$stem" in ""|\#*) continue;; esac
-    # Manifest stems already carry the scenario suffix; the scenario DIRECTORY
-    # is the stem's scenario with any _with_movement suffix stripped.
-    local sc="${stem#*_}"
-    sc="${sc%_with_movement}"
-    local mic="$DATASET/$sc/${stem}_mic.wav"
-    local lpb="$DATASET/$sc/${stem}_lpb.wav"
+    local sc
+    case "$stem" in
+      *_farend_singletalk*)  sc=farend_singletalk;;
+      *_nearend_singletalk*) sc=nearend_singletalk;;
+      *)                     sc=doubletalk;;
+    esac
+    local mic="$VIEW/$sc/${stem}_mic.wav"
+    local lpb="$VIEW/$sc/${stem}_lpb.wav"
     [ -f "$mic" ] && [ -f "$lpb" ] || { echo "  missing source: $stem" >&2; continue; }
     if "$exe" "$mic" "$lpb" "$dir/${stem}_ours.wav" --level 1 --cng \
            --fft-size "$fft" ${EXTRA[@]+"${EXTRA[@]}"} >/dev/null 2>&1; then
@@ -113,7 +125,7 @@ score () {  # score <label> [baseline-scores.json]
   [ -n "$base" ] && args+=(--baseline "$base")
   mkdir -p "$OUT/res_$label"
   ( cd "$AEC" && "$PYBIN" python/bench_aecmos.py "$OUT/out_$label" \
-      "$OUT/res_$label" "${args[@]}" ) > "$OUT/score_$label.log" 2>&1
+      "$OUT/res_$label" --dataset "$VIEW" "${args[@]}" ) > "$OUT/score_$label.log" 2>&1
   echo "  scored $label"
 }
 
@@ -121,7 +133,9 @@ echo "building baseline..."; BASE_EXE=$(build "$BASE_WT")
 echo "building candidate..."; CAND_EXE=$(build "$CAND_WT")
 echo "  base: $BASE_EXE"
 echo "  cand: $CAND_EXE"
-if cmp -s "$BASE_EXE" "$CAND_EXE"; then
+if cmp -s "$BASE_EXE" "$CAND_EXE" && [ "${SELF_CHECK:-0}" = 1 ]; then
+  echo "SELF_CHECK=1: identical binaries accepted; every delta must be exactly 0"
+elif cmp -s "$BASE_EXE" "$CAND_EXE"; then
   echo "ABORT: the two builds produced byte-identical binaries -- the worktrees" \
        "do not differ, so this run would compare a commit against itself" >&2
   exit 1
