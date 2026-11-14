@@ -186,7 +186,7 @@ noise scaled by `sqrt(1 - G²)` to mask the suppressed spectrum. State:
 per-bin noise PSD EMA + smoothed cn gain (init in `AEC.__init__`).
 
 The numeric core is one function in each language: C `aec_cng_fill()`
-(`aec.c`, declared in `aec_internal.h`, called by the post chain's own output stage; external
+(`aec_post.c`, declared in `aec_internal.h`, called by the post chain's own output stage; external
 synthesizers use the public `aec_apply_cng_spec()`, which fixes `nr_floor` at `AEC_CNG_NR_GAIN_FLOOR`) and Python `modules/cng.py` (`cng_fill`, which
 `_post_add_comfort_noise` shares through `cng_draw_indices` /
 `cng_noise_terms`). For bins `1 .. n-2` (DC and Nyquist get no noise and draw

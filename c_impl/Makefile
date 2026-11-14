@@ -114,7 +114,7 @@ endif
 # library: naming one of them as a goal sets AEC_TESTING=1 (a command-line AEC_TESTING wins), so the dispatch and the
 # aggregators need no per-goal recursion. test-rate-structural and the three test-aec-array* goals re-invoke make themselves.
 AEC_HOOK_GOALS := \
-  test-split-entry-2 test-split-entry-3 test-config-validation test-process-context test-duty-census \
+  test-split-entry-2 test-config-validation test-process-context test-duty-census \
   test-external-realign test-guard-unify test-handle-ready test-linear-context test-memory-layout test-shared-far-spec \
   test-shared-fft-handle test-spectral-reuse test-synthesis-window test-parity-e2e pyc-parity-driver
 AEC_TESTING ?= 0
@@ -223,7 +223,7 @@ COMMON_FWD = BACKEND=$(BACKEND) SIMD=$(SIMD) WERROR=$(WERROR) CC='$(CC)' CXX='$(
 # Goals dispatched through the two-phase audiolib resolution below; the phase-2 .PHONY list names the same goals.
 AEC_COMMON_GOALS := \
   all bench test test-full test-counter-saturation test-rate-structural test-config-validation test-process-context \
-  test-split-entry test-split-entry-2 test-split-entry-3 test-aec-array test-aec-array-2 test-aec-array-flow \
+  test-split-entry test-split-entry-2 test-aec-array test-aec-array-2 test-aec-array-flow \
   test-avg-reverb-slots test-linear-context test-guard-unify test-res-nearend-gate test-runtime-preset \
   test-delay-num-filters test-duty-census test-external-realign test-cli-delay-flags test-shared-far-spec \
   test-spectral-reuse test-heap-alignment test-lifecycle test-shared-fft-handle test-synthesis-window test-static-aec \
@@ -370,17 +370,12 @@ TEST_SE_OBJS   = $(patsubst $(TEST_DIR)/%.c,$(OBJ_DIR)/%.o,$(TEST_SE_SRCS))
 TEST_SE_TARGET = $(BIN_DIR)/test_split_entry
 
 # The second single-channel scene set (saturation, double talk, delay shifts and the bad-relock revert, drift, reset, FIXED and
-# EXTERNAL_ALIGNED with realign, levels in flight, switched-off blocks, live observer, duty cycle, 8 kHz) and the carve-end /
-# alternation checks. Cases and runner: test/baseline2_mono.h.
+# EXTERNAL_ALIGNED with realign, levels in flight, switched-off blocks, live observer, duty cycle, 8 kHz), the third scene set
+# (18 bad-relock judgments, revert / no revert either side of the 1 dB margin, that free-running two-path scenes produce by
+# themselves; its table is in the test) and the carve-end / alternation checks. Cases and runner: test/baseline2_mono.h.
 TEST_SE2_SRCS   = $(TEST_DIR)/test_split_entry2.c
 TEST_SE2_OBJS   = $(patsubst $(TEST_DIR)/%.c,$(OBJ_DIR)/%.o,$(TEST_SE2_SRCS))
 TEST_SE2_TARGET = $(BIN_DIR)/test_split_entry2
-
-# The third single-channel scene set: bad-relock judgments (revert / no revert, either side of the 1 dB margin) that free-running
-# two-path scenes produce by themselves. Case table: in test/test_split_entry3.c.
-TEST_SE3_SRCS   = $(TEST_DIR)/test_split_entry3.c
-TEST_SE3_OBJS   = $(patsubst $(TEST_DIR)/%.c,$(OBJ_DIR)/%.o,$(TEST_SE3_SRCS))
-TEST_SE3_TARGET = $(BIN_DIR)/test_split_entry3
 
 # The four-microphone array instance (n_mics = 4) driven through its residual modes, with its contract checks; and the
 # shared-alignment / quarantine / duty-cycle /
@@ -499,7 +494,7 @@ test-pyc-parity:
 test-python:
 	cd .. && PYTHONDONTWRITEBYTECODE=1 OMP_NUM_THREADS=1 "$(PYTHON)" -m pytest -q -p no:cacheprovider python/tests
 
-# Header-only AEC kernel correctness/microbench harness (utility/simd_aec.h).
+# Header-only AEC kernel correctness harness (utility/simd_aec.h).
 # Links with libm, without the audiolib archive or two-phase dispatch.
 SELFTEST_SRC    = $(TEST_DIR)/simd_selftest_aec.c
 SELFTEST_TARGET = $(BIN_DIR)/simd_selftest_aec
@@ -741,10 +736,6 @@ test-split-entry: $(TEST_SE_TARGET)
 test-split-entry-2: $(TEST_SE2_TARGET)
 	"$(abspath $(TEST_SE2_TARGET))"
 
-# Builds AND runs.
-test-split-entry-3: $(TEST_SE3_TARGET)
-	"$(abspath $(TEST_SE3_TARGET))"
-
 test-avg-reverb-slots: $(TEST_ARS_TARGET)
 	"$(abspath $(TEST_ARS_TARGET))"
 
@@ -901,7 +892,7 @@ test-zero-heap: $(TEST_ZH_TARGET)
 #   `make test-full` adds what is slow or changes rarely: the SIMD-independent targets under SIMD=0 as well, the end-to-end
 #   gate, the full pyc matrix instead of the lean one, the UBSan --use-standard-math variants, the Makefile flag-policy
 #   script and the signal-handling script that tests the UBSan wrappers' traps.
-TEST_SIMD_DEP   = selftest test-process-context test-split-entry test-split-entry-2 test-split-entry-3 test-aec-array test-aec-array-2 test-aec-array-flow test-linear-context test-guard-unify test-aec-res test-res-nearend-gate test-runtime-preset \
+TEST_SIMD_DEP   = selftest test-process-context test-split-entry test-split-entry-2 test-aec-array test-aec-array-2 test-aec-array-flow test-linear-context test-guard-unify test-aec-res test-res-nearend-gate test-runtime-preset \
                   test-delay-num-filters test-duty-census test-external-realign test-reset-parity test-delay-reset \
                   test-delay-dominant-selection test-delay-kernels test-delay-matched-neon test-neon-twins \
                   test-rate-structural test-counter-saturation
@@ -980,10 +971,6 @@ $(TEST_AA_TARGET): $(OBJS) $(TEST_AA_OBJS) $(COMMON_LIB) | _cfg_guard
 $(TEST_SE2_TARGET): $(OBJS) $(TEST_RES_OBJ) $(TEST_SE2_OBJS) $(COMMON_LIB) | _cfg_guard
 	$(LINK) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 	@echo "test_split_entry2 [$(BACKEND)] -> $@"
-
-$(TEST_SE3_TARGET): $(OBJS) $(TEST_RES_OBJ) $(TEST_SE3_OBJS) $(COMMON_LIB) | _cfg_guard
-	$(LINK) $(CFLAGS) -o $@ $^ $(LDFLAGS)
-	@echo "test_split_entry3 [$(BACKEND)] -> $@"
 
 $(TEST_AA2_TARGET): $(OBJS) $(TEST_AA2_OBJS) $(COMMON_LIB) | _cfg_guard
 	$(LINK) $(CFLAGS) -o $@ $^ $(LDFLAGS)
@@ -1473,16 +1460,14 @@ help:
 	@echo "                  (test_process_context: aec_process vs the split pair) -- run from c_impl/"
 	@echo "  test-split-entry  Build + run the three-entry-point test (test_split_entry)"
 	@echo "  test-split-entry-2  Build + run the second single-channel scene set (saturation, double talk, delay shifts,"
-	@echo "                  drift, reset, realign, levels, toggles, 8 kHz), the alternation and carve-end checks"
-	@echo "                  (test_split_entry2)"
-	@echo "  test-split-entry-3  Build + run the third single-channel scene set (bad-relock judgments that two-path scenes"
-	@echo "                  produce by themselves: natural reverts and non-reverts either side of the margin)"
-	@echo "                  (test_split_entry3)"
+	@echo "                  drift, reset, realign, levels, toggles, 8 kHz), the third scene set (bad-relock judgments that"
+	@echo "                  two-path scenes produce by themselves: natural reverts and non-reverts either side of the"
+	@echo "                  margin), the alternation and carve-end checks (test_split_entry2)"
 	@echo "  test-aec-array  Build + run the array-instance test and its contract checks (test_aec_array)"
 	@echo "  test-aec-array-2  Build + run the second array scene set (clipped / silent microphone, proxy channel,"
 	@echo "                  caller beamformed error, drift, levels, quarantine) (test_aec_array2)"
 	@echo "                  AEC_TEST_BASELINE_WRITE=<dir> / AEC_TEST_BASELINE=<dir> capture / compare the line stream of"
-	@echo "                  the five test-split-entry* / test-aec-array* tests (none shipped; run each from c_impl/)"
+	@echo "                  the four test-split-entry* / test-aec-array* tests (none shipped; run each from c_impl/)"
 	@echo "  test-aec-array-flow  Build + run the array shared-alignment / quarantine / duty-cycle /"
 	@echo "                  lane-contract state-machine tests (test_aec_array_flow, AEC_TESTING build)"
 	@echo "  test-delay-num-filters  Build + run the permanent matched-filter-bank-size"

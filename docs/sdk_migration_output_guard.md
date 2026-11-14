@@ -96,7 +96,7 @@ context API 的應用。只呼叫 `aec_process()`（`AecConfig.residual` 維持�
 | 合成視窗 `aec_synthesis_window()` 指向靜態表 | 指向實例自己的 pool（init／create 時建好）：借用它的 `AcIstft` 不得比 `Aec` 活得久（§6） |
 | 存檔的 `AecMemReq` 描述子（`AEC_LAYOUT_VERSION` 1） | `AEC_LAYOUT_VERSION` 2：舊描述子被 `aec_init_ex()` 拒絕；每次建置重新查詢（`aec_init()`／`aec_create()` 不比對描述子） |
 
-位元結果：同一份輸入、同樣的組態，新舊對應的模式輸出逐位元相同（函式庫端曾以 `make test-split-entry`、`make test-split-entry-2` 與 `make test-split-entry-3` 對舊 API 產生的
+位元結果：同一份輸入、同樣的組態，新舊對應的模式輸出逐位元相同（函式庫端曾以 `make test-split-entry` 與 `make test-split-entry-2`（第三組場景當時是獨立的 `test-split-entry-3`，現已併入後者）對舊 API 產生的
 雜湊逐行驗證；這些一次性的對照檔已於 2026-11-13 確認一致後除役，之後的改動由新版本取基準，見 `c_impl/README.md` 的 “Line-stream baselines”）。
 
 ### 3.2 自己渲染的應用要做的事

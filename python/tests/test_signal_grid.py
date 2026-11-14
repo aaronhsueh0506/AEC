@@ -7,7 +7,7 @@ row. Asserted:
   - frame/hop/n_freqs on all four supported grids (three product grids plus
     8 kHz), hard-coded rather than recomputed from the source's own ``// 2``;
     ``is_legacy`` is set for 8 kHz only;
-  - the table matches ``AEC_GRID_TABLE`` in c_impl/src/aec.c row for row, read
+  - the table matches ``AEC_GRID_TABLE`` in c_impl/src/aec_tuning.c row for row, read
     out of the C source;
   - an unspecified / zero / negative fft_size RAISES instead of being filled in
     (16 kHz has two production grids), and every mismatched pair raises;
@@ -36,9 +36,9 @@ from modules.config import (
 )
 
 
-_C_AEC_SRC = os.path.join(
+_C_TUNING_SRC = os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-    'c_impl', 'src', 'aec.c')
+    'c_impl', 'src', 'aec_tuning.c')
 
 # The four supported grids, spelled out rather than recomputed from the
 # formula the source uses — a recomputed expectation would move together
@@ -67,16 +67,16 @@ class SignalGridResolverTests(unittest.TestCase):
         self.assertEqual(legacy, {(8000, 256)})
 
     def test_table_matches_the_c_grid_table_row_for_row(self) -> None:
-        """AEC_GRID_TABLE in c_impl/src/aec.c must be the same four rows.
+        """AEC_GRID_TABLE in c_impl/src/aec_tuning.c must be the same four rows.
 
         Read out of the C source instead of restated here, so an edit to
         either side that is not mirrored on the other fails this test.
         """
-        src = open(_C_AEC_SRC, encoding='utf-8').read()
+        src = open(_C_TUNING_SRC, encoding='utf-8').read()
         m = re.search(
             r'static const AecSignalGrid AEC_GRID_TABLE\[\]\s*=\s*\{(.*?)\n\};',
             src, re.S)
-        self.assertIsNotNone(m, "AEC_GRID_TABLE not found in c_impl/src/aec.c")
+        self.assertIsNotNone(m, "AEC_GRID_TABLE not found in c_impl/src/aec_tuning.c")
         rows = re.findall(
             r'\{\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,'
             r'\s*(\d+)\s*\}', m.group(1))

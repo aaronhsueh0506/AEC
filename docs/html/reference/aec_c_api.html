@@ -40,7 +40,7 @@ pre code{background:none;padding:0}
 <div class="note"><code>include/</code> 只有一個 header:<code>aec.h</code>(對外 API)。其餘全部在 <code>include/internal/</code>(不屬於公開介面,只用公開 API 的整合者不需要把它加進 include 路徑):<code>aec_internal.h</code>(pipeline 用的庫內部介面)、<code>aec_balanced_config.h</code>(產生的表)等。<code>Aec</code> 是<b>不透明型別</b>(<code>aec.h</code> 只有 <code>typedef struct Aec Aec;</code>):用 <code>aec_create()</code> 取得指標,或用 <code>aec_init()</code> 放進自己的 pool;不能以值持有、取 <code>sizeof</code> 或讀欄位。<code>pbfdkf.h</code>／<code>delay_aec.h</code>／<code>aec_post.h</code>／<code>suppression_gain.h</code> 等內部實作標頭也在 <code>include/internal/</code>。<br>殘留回音抑制增益階段不是獨立的公開介面(見 <a href="aec_res.html">RES 增益階段與舒適噪音</a>);舒適噪音填補 <code>aec_apply_cng_spec()</code> 宣告在 <code>aec.h</code>(底層 <code>aec_cng_fill()</code> 在內部標頭 <code>aec_internal.h</code>)。<code>Aec</code> 本身也有四麥克風的陣列實例(<code>n_mics = 4</code>,融合與一次 <code>G_res</code> 都在實例內),見 <a href="#array">§5a</a>。</div>
 
 <h2>2. 這個 lib 可以設定的 grid</h2>
-<p>訊號格點由 <code>(sample_rate, fft_size)</code> <b>成對</b>決定,必須命中下表其中一列(<code>aec.c</code> 的 <code>AEC_GRID_TABLE</code>);<code>hop = fft_size/2</code>、<code>n_freqs = fft_size/2+1</code>。</p>
+<p>訊號格點由 <code>(sample_rate, fft_size)</code> <b>成對</b>決定,必須命中下表其中一列(<code>aec_tuning.c</code> 的 <code>AEC_GRID_TABLE</code>);<code>hop = fft_size/2</code>、<code>n_freqs = fft_size/2+1</code>。</p>
 <div class="tblwrap"><table>
 <tr><th>sample_rate</th><th>fft_size = frame</th><th>hop</th><th>hop 時長</th><th>n_freqs</th><th>狀態</th></tr>
 <tr><td><b>16000</b></td><td><b>256</b></td><td><b>128</b></td><td>8 ms</td><td>129</td><td><b>產品預設(低延遲、低運算)</b></td></tr>

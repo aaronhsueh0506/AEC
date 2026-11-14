@@ -7,6 +7,7 @@
 #include "utility/fast_math.h"
 #include "utility/simd_aec.h"
 #include "aec_scale.h"
+#include "aec_balanced_config.h"   /* AECB_SQRT2_SIN_LUT */
 #include "aec.h"
 #include "aec_internal.h"
 
@@ -637,4 +638,65 @@ void aec_post_run(AecPost *p,
 post_done:
     if (out_pending_gain_change) *out_pending_gain_change = pgc;
     if (out_pending_delay_change) *out_pending_delay_change = pdc;
+}
+
+/* Bins per chunk of the shared comfort-noise core: the N^2 -> amplitude conversion is vectorised per chunk, the random phase
+ * draws stay strictly sequential in bin order. */
+#define AEC_CNG_CHUNK 64
+
+void aec_apply_gain_spec(Complex* out, const Complex* base, const float* g_res, const float* g_extra, int n) {
+    if (!out || !base || !g_res || n <= 0) return;
+    if (!g_extra) {
+        sk_capply_gain_f32(out, base, g_res, (size_t)n);
+        return;
+    }
+    {
+        /* min then multiply, block by block with the same kernels the samples used (non-finite gains stay visible). */
+        float total[AEC_CNG_CHUNK];
+        int k = 0;
+        while (k < n) {
+            int m = (n - k < AEC_CNG_CHUNK) ? (n - k) : AEC_CNG_CHUNK;
+            sk_min_f32(total, g_extra + k, g_res + k, (size_t)m);
+            sk_capply_gain_f32(out + k, base + k, total, (size_t)m);
+            k += m;
+        }
+    }
+}
+
+void aec_cng_fill(uint32_t* rng, Complex* spec, const float* cn,
+                  const float* g_res, const float* g_nr, float nr_floor, int n) {
+    static const float inv_psd_scale = (float)AEC_PSD_SCALE_INV;     /* comfort_noise is on the int16^2 scale */
+    float pw[AEC_CNG_CHUNK], amp[AEC_CNG_CHUNK];
+    uint32_t seed;
+    int k0;
+    if (!rng || !spec || !cn || !g_res || n < 3) return;
+    seed = *rng;
+    for (k0 = 1; k0 < n - 1; k0 += AEC_CNG_CHUNK) {
+        int m = n - 1 - k0, j;
+        if (m > AEC_CNG_CHUNK) m = AEC_CNG_CHUNK;
+        /* amp[j] = sqrt(max(cn / 32768^2, 0)); the square root reads pw and writes amp (no in-place call) */
+        sk_scale_f32(pw, cn + k0, inv_psd_scale, m);
+        sk_clip_f32(pw, 0.0f, (float)INFINITY, m);
+        sk_fast_sqrt_f32(pw, amp, m);
+        for (j = 0; j < m; ++j) {
+            int bin = k0 + j;
+            uint32_t ix;
+            float ng, cn_re, cn_im, t;
+            seed = (seed * 69069u + 1u) & 0x7FFFFFFFu;
+            ix = seed >> 26;
+            cn_re = amp[j] * AECB_SQRT2_SIN_LUT[ix];
+            cn_im = amp[j] * AECB_SQRT2_SIN_LUT[(ix + 8u) & 31u];
+            t = 1.0f - g_res[bin] * g_res[bin];
+            if (t < 0.0f) t = 0.0f;
+            ng = fast_sqrt(t);
+            if (g_nr) ng = ng * fmaxf(g_nr[bin], nr_floor);
+            spec[bin].r += ng * cn_re;
+            spec[bin].i += ng * cn_im;
+        }
+    }
+    *rng = seed;
+}
+
+void aec_apply_cng_spec(uint32_t* rng, Complex* spec, const float* cn, const float* g_res, const float* g_extra, int n) {
+    aec_cng_fill(rng, spec, cn, g_res, g_extra, AEC_CNG_NR_GAIN_FLOOR, n);
 }

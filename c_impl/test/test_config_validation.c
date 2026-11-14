@@ -1,4 +1,4 @@
-/* test_config_validation.c -- negative-input tests: aec_resolve() / aec_resolve_tuned() (aec.c) is the single source of truth
+/* test_config_validation.c -- negative-input tests: aec_resolve() / aec_resolve_tuned() (aec_tuning.c, validity in aec.c) is the single source of truth
  * for AecConfig and AecTuning bounds-checking, wired into all three public entry points that derive sizes/state from a
  * config. This test proves each entry point rejects a bad config through its own failure convention (no release-path
  * asserts):

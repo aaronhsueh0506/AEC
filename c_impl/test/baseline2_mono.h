@@ -1,5 +1,5 @@
 /* baseline2_mono.h -- the second single-channel scene set: case table and runner of the test of the entry points
- * (test/test_split_entry2.c; test/test_split_entry3.c adds its own case table on top).
+ * (test/test_split_entry2.c, which adds its own bad-relock case table on top).
  *
  * The includer provides, before including this header: <aec.h> and the header of the stand-alone residual gain stage
  * (AecRes: include/internal/aec_res_internal.h), <utility/simd_kernels.h>, and (the cases switch internal tuning, so it is built with AEC_TESTING=1)
@@ -74,7 +74,7 @@ typedef struct G2MonoCase {
     G2Stim stim;
     int   n_ev; G2Ev ev[8];
     int   judge;               /* 1: log every bad-relock judgment (EV_judge line, G2JudgeRec census); 0 for the second set */
-    int   n_exp; G2JudgeExp exp[4];     /* judge: the expected judgments in order (checked by g3m_judge_check, not part of the line stream) */
+    int   n_exp; G2JudgeExp exp[4];     /* judge: the expected judgments in order (checked by g3m_judge_check in test_split_entry2.c, not part of the line stream) */
 } G2MonoCase;
 
 #define G2M_MAX_CASES 64

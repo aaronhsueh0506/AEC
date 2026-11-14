@@ -60,109 +60,6 @@ static float aec_legacy10ms_rate(float legacy_per_hop, int hop,
         : legacy_per_hop;
 }
 
-/* Level strength table in AecLevel order; NO_FLOOR repeats balanced's
- * (unused) values. */
-typedef struct { float far_active_db, dt_db; int split_floor_enabled; } AecLevelFloors;
-static const AecLevelFloors AEC_LEVEL_FLOORS[] = {
-    [AEC_LEVEL_MILD]       = { -20.0f, -20.0f, 1 },
-    [AEC_LEVEL_BALANCED]   = { -28.0f, -20.0f, 1 },
-    [AEC_LEVEL_AGGRESSIVE] = { -38.0f, -30.0f, 1 },
-    [AEC_LEVEL_NO_FLOOR]   = { -28.0f, -20.0f, 0 },
-};
-
-/* Row for an in-enum level, NULL otherwise (every lookup below then fails). */
-static const AecLevelFloors* aec_level_row(AecLevel p) {
-    return ((unsigned)p < sizeof(AEC_LEVEL_FLOORS) / sizeof(AEC_LEVEL_FLOORS[0]))
-               ? &AEC_LEVEL_FLOORS[p] : NULL;
-}
-
-const char* aec_level_name(AecLevel p) {
-    static const char* const names[] = {
-        [AEC_LEVEL_MILD]       = "mild",
-        [AEC_LEVEL_BALANCED]   = "balanced",
-        [AEC_LEVEL_AGGRESSIVE] = "aggressive",
-        [AEC_LEVEL_NO_FLOOR]   = "no_floor",
-    };
-    return aec_level_row(p) ? names[p] : "balanced";
-}
-
-int aec_level_floor_db(AecLevel p, float* db_out) {
-    const AecLevelFloors* r = aec_level_row(p);
-    if (db_out == NULL || r == NULL) return -1;
-    *db_out = r->far_active_db;
-    return 0;
-}
-
-int aec_level_dt_floor_db(AecLevel p, float* db_out) {
-    const AecLevelFloors* r = aec_level_row(p);
-    if (db_out == NULL || r == NULL) return -1;
-    *db_out = r->dt_db;
-    return 0;
-}
-
-int aec_level_split_floor_enabled(AecLevel p, int* enabled_out) {
-    const AecLevelFloors* r = aec_level_row(p);
-    if (enabled_out == NULL || r == NULL) return -1;
-    *enabled_out = r->split_floor_enabled;
-    return 0;
-}
-
-void aec_config_from_level(AecConfig* cfg, AecLevel p, int sr) {
-    if (!cfg) return;
-    memset(cfg, 0, sizeof(*cfg));
-    cfg->sample_rate = sr;
-    /* The only place a default fft_size is applied (0 for an unsupported rate, which the validator rejects). */
-    cfg->fft_size = aec_default_fft_size(sr);
-    cfg->n_mics = 1;
-    cfg->level = aec_level_row(p) ? p : AEC_LEVEL_BALANCED;
-    cfg->residual = AEC_RESIDUAL_FULL;
-    /* MATCHED with 5 filters is the default; fixed_delay_samples must be -1 (0 is a legal FIXED delay). */
-    cfg->delay_mode = AEC_DELAY_MATCHED;
-    cfg->fixed_delay_samples = -1;
-    cfg->delay_num_filters = AEC_DELAY_NUM_FILTERS_MAX;
-    cfg->enable_cng = 1;
-    cfg->capture_proxy_channel = 0;
-    cfg->delay_backward_quarantine_enabled = 0;
-    cfg->delay_backward_quarantine_s = 1.0f;
-}
-
-/* Signal-grid table: admissible (sample_rate, fft_size) pairs and their
- * geometry. */
-static const AecSignalGrid AEC_GRID_TABLE[] = {
-    { 16000,  256,   256,  128,     129, 0 },
-    { 16000,  512,   512,  256,     257, 0 },
-    { 48000, 1024,  1024,  512,     513, 0 },
-    {  8000,  256,   256,  128,     129, 1 },
-};
-
-/* First table row for sample_rate whose fft_size matches (fft_size <= 0: any), or NULL. */
-static const AecSignalGrid* aec_find_grid(int sample_rate, int fft_size) {
-    for (size_t i = 0; i < sizeof(AEC_GRID_TABLE) / sizeof(AEC_GRID_TABLE[0]); ++i) {
-        if (AEC_GRID_TABLE[i].sample_rate == sample_rate &&
-            (fft_size <= 0 || AEC_GRID_TABLE[i].fft_size == fft_size))
-            return &AEC_GRID_TABLE[i];
-    }
-    return NULL;
-}
-
-int aec_resolve_signal_grid(int sample_rate, int fft_size, AecSignalGrid* out) {
-    const AecSignalGrid* g;
-    if (fft_size <= 0) return AEC_ERR_ARG;
-    g = aec_find_grid(sample_rate, fft_size);
-    if (!g) return AEC_ERR_ARG;
-    if (out) *out = *g;
-    return AEC_OK;
-}
-
-int aec_is_valid_sample_rate(int sample_rate) {
-    return aec_find_grid(sample_rate, 0) != NULL;
-}
-
-int aec_default_fft_size(int sample_rate) {
-    const AecSignalGrid* g = aec_find_grid(sample_rate, 0);
-    return g ? g->fft_size : 0;
-}
-
 /* True when a reference ring exists (MATCHED, FIXED); Aec::has_delay is the
  * MATCHED-only estimator. */
 static inline int aec_ring_active(const AecConfig* cfg) {
@@ -170,7 +67,7 @@ static inline int aec_ring_active(const AecConfig* cfg) {
 }
 
 /* The caller's fields, the tuning, and the delay-mode / array rules. 1 = acceptable. */
-static int aec_resolved_valid(const AecResolved* r) {
+int aec_resolved_valid(const AecResolved* r) {
     const AecConfig* cfg = &r->cfg;
     if (aec_resolve_signal_grid(cfg->sample_rate, cfg->fft_size, NULL) != AEC_OK) return 0;
     if (cfg->enable_cng != 0 && cfg->enable_cng != 1) return 0;
@@ -212,20 +109,6 @@ static int aec_resolved_valid(const AecResolved* r) {
 #endif
 }
 
-int aec_resolve_tuned(const AecConfig* in, const AecTuning* tun, AecResolved* out) {
-    AecResolved r;
-    if (!in || !out) return 0;
-    r.cfg = *in;
-    if (tun) r.tun = *tun; else aec_tuning_defaults(&r.tun, in);
-    if (!aec_resolved_valid(&r)) return 0;
-    *out = r;
-    return 1;
-}
-
-int aec_resolve(const AecConfig* in, AecResolved* out) {
-    return aec_resolve_tuned(in, NULL, out);
-}
-
 /* ───────────────────────── helpers ─────────────────────────────────────── */
 
 /* Mean of x^2 in float32. scratch holds >= n floats. */
@@ -234,7 +117,6 @@ static float mean_sq(const float* x, int n, float* scratch) {
     float s = sk_pairwise_sum_f32(scratch, (size_t)n);
     return s / (float)n;
 }
-
 
 /* Counters saturate at LONG_MAX (32-bit long on some targets). */
 static inline void aec_counter_bump(long* c) {
@@ -510,7 +392,6 @@ float aec_testing_legacy10ms_rate(float legacy_per_hop, int hop,
 
 /* ───────────────────────── construction ────────────────────────────────── */
 
-
 /* FilterAnalyzer tap materializer: inverse-transforms only the partitions
  * covering tap span [first, last] into a->filter_taps_full. */
 static void aec_fill_filter_taps(void* ctx, int first, int last) {
@@ -592,7 +473,7 @@ static void aec_post_chain_reset(Aec* a) {
     aec_post_reset(&a->post);
     linear_filter_select_reset(&a->a3_lfs);
     /* Sample rate and fft size are fixed at construction, so the lookup always hits. */
-    const AecBalancedRateDims* rd = aecb_rate_cfg(
+    const AecBalancedRateDims* rd = aec_balanced_rate_dims(
         a->cfg.sample_rate, a->cfg.fft_size);
     aec_state_bind(a, a->n_freqs, a->hop_size, a->cfg.sample_rate,
                    a->n_partitions);
@@ -739,7 +620,7 @@ static size_t aec_mem_size_impl(const AecResolved* rs, int lane) {
     const int ncc  = AECB_ST_NUM_CAPTURE_CHANNELS;
     const int state_lane = aec_state_lane(cfg, lane);
     const int rh   = (AECB_REE_USE_AEC_ECHO_GEN_WINDOW ? 1 : 0) + 2;
-    const AecBalancedRateDims* rd = aecb_rate_cfg(
+    const AecBalancedRateDims* rd = aec_balanced_rate_dims(
         cfg->sample_rate, cfg->fft_size);
     if (!rd) return 0;
     const int sg_n = rd->sg_nearend_smoother_n;
@@ -897,116 +778,6 @@ static void aec_recompute_wallclock_thresholds(Aec* a, int hop, int sample_rate)
     a->coarse_reset_hangover_hops = aec_blocks_to_hops(25, hop, sample_rate);
     a->leakage_div_sustain_hops = aec_ms_to_hops(50.0f, hop, sample_rate);
     a->stat_dt_hangover_hops = aec_ms_to_hops(800.0f, hop, sample_rate);
-}
-
-/* Synthesis window of length n (a power of two that divides AECB_SYNTH_HALF_N), rebuilt bit for bit from the half table. */
-void aec_synth_window_build(float* w, int n) {
-    const int stride = AECB_SYNTH_HALF_N / n;
-    int i;
-    assert(n >= 2 && AECB_SYNTH_HALF_N % n == 0);
-    for (i = 0; i < n; ++i) w[i] = AECB_SYNTH_WINDOW_HALF[(i <= n / 2 ? i : n - i) * stride];
-}
-
-size_t aec_sg_tables_bytes(int n_bins) {
-    return ck_mul_size(4, ck_align16_size((size_t)n_bins * sizeof(float)));
-}
-
-/* Expands the row's run-length ENR/SU tables into `mem`: four tables, each padded to 16 bytes and zero in the padding. */
-static void aec_sg_tables_expand(const AecBalancedRateDims* rd, void* mem, SuppressionGainTuning* tun) {
-    const int n = rd->sg_table_len;
-    const size_t stride = ALIGN16((size_t)n * sizeof(float)) / sizeof(float);
-    float* const dst = (float*)mem;
-    int t, r = 0, k;
-    assert(rd->sg_runs >= 1 && rd->sg_run_end[rd->sg_runs - 1] >= n);
-    for (k = 0; k < n; ++k) {
-        while (k >= rd->sg_run_end[r]) ++r;
-        for (t = 0; t < 4; ++t) dst[(size_t)t * stride + (size_t)k] = rd->sg_run_val[(size_t)t * (size_t)rd->sg_runs + (size_t)r];
-    }
-    for (t = 0; t < 4; ++t)
-        for (k = n; (size_t)k < stride; ++k) dst[(size_t)t * stride + (size_t)k] = 0.0f;
-    tun->nearend_enr_tr = dst;                tun->nearend_enr_su = dst + stride;
-    tun->normal_enr_tr  = dst + 2 * stride;   tun->normal_enr_su  = dst + 3 * stride;
-}
-
-int aec_sg_tables_decode(const AecResolved* rs, void* mem, SuppressionGainTuning* tun) {
-    const AecBalancedRateDims* rd;
-    if (!rs || !mem || !tun) return -1;
-    rd = aecb_rate_cfg(rs->cfg.sample_rate, rs->cfg.fft_size);
-    if (!rd) return -1;
-    aec_sg_tables_expand(rd, mem, tun);
-    return 0;
-}
-
-/* Suppression-gain config and tuning for a resolved configuration; shared by
- * Aec and standalone RES instances. The ENR/SU tables of the tuning stay NULL (aec_sg_tables_decode() fills them) and the
- * EMR tables point at static data. Returns 0, or -1 without a signal grid or rate row. */
-int aec_build_sg_config(const AecResolved* rs, SuppressionGainConfig* out_cfg,
-                        SuppressionGainTuning* out_tun) {
-    const AecConfig* cfg;
-    const AecTuning* tn;
-    AecSignalGrid grid;
-    const AecBalancedRateDims* rd;
-    SuppressionGainConfig scfg;
-    SuppressionGainTuning stun;
-    int hop, K;
-    if (!rs || !out_cfg || !out_tun) return -1;
-    cfg = &rs->cfg;
-    tn = &rs->tun;
-    if (aec_resolve_signal_grid(cfg->sample_rate, cfg->fft_size, &grid) != AEC_OK) return -1;
-    rd = aecb_rate_cfg(cfg->sample_rate, cfg->fft_size);
-    if (!rd) return -1;
-    hop = grid.hop_size;
-    K = grid.n_freqs;
-    memset(&scfg, 0, sizeof(scfg));
-    scfg.n_bins = K; scfg.sr = cfg->sample_rate; scfg.hop_size = hop;
-    scfg.last_lf_smoothing_band = rd->sg_last_lf_smoothing_band;
-    scfg.last_permanent_lf_smoothing_band = AECB_SG_LAST_PERMANENT;
-    scfg.lf_smoothing_during_initial_phase = AECB_SG_LF_SMOOTHING_INITIAL;
-    scfg.lf_clamp_bin = rd->sg_lf_clamp_bin;
-    scfg.dne_lf_end = rd->sg_dne_lf_end;
-    scfg.nearend_smoother_n = rd->sg_nearend_smoother_n;
-    scfg.aud_lf_end_bin = rd->sg_aud_lf_end_bin; scfg.aud_mf_end_bin = rd->sg_aud_mf_end_bin;
-    scfg.floor_power = rd->sg_floor_power;
-    scfg.aud_thr_lf = AECB_SG_AUD_THR_LF; scfg.aud_thr_mf = AECB_SG_AUD_THR_MF;
-    scfg.aud_thr_hf = AECB_SG_AUD_THR_HF;
-    scfg.low_render_limit = rd->sg_low_render_limit;
-    scfg.normal_render_limit = rd->sg_normal_render_limit;
-    scfg.hf_lgb = rd->sg_hf_lgb; scfg.hf_biq = AECB_SG_HF_BIQ;
-    scfg.conservative_hf = AECB_SG_CONSERVATIVE_HF;
-    scfg.max_inc_normal = rd->sg_max_inc;
-    scfg.max_inc_nearend = rd->sg_max_inc;
-    scfg.max_dec_lf_normal = rd->sg_max_dec_lf;
-    scfg.max_dec_lf_nearend = rd->sg_max_dec_lf;
-    scfg.floor_first_increase = 0.00001f;
-    scfg.low_render_threshold = rd->sg_low_render_threshold;
-    /* From the level, so NO_FLOOR reaches the suppressor at construction. */
-    scfg.split_floor_enabled = tn->min_gain_split_floor_enabled;
-    scfg.split_floor_far_active =
-        powf(10.0f, tn->min_gain_floor_far_active_db / 10.0f);
-    scfg.split_floor_far_silent = AECB_SG_SPLIT_FLOOR_FAR_SILENT;
-    scfg.split_floor_dt =
-        powf(10.0f, tn->min_gain_floor_dt_db / 10.0f);
-    scfg.split_floor_latch_power = AECB_SG_SPLIT_FLOOR_LATCH_POWER;
-    scfg.soft_blend_enabled = AECB_SG_SOFT_BLEND_ENABLED;
-    scfg.soft_blend_per_bin = AECB_SG_SOFT_BLEND_PER_BIN;
-    scfg.soft_blend_enr_thr = (float)AECB_SG_SOFT_BLEND_ENR_THR;
-    scfg.soft_blend_softness = (float)AECB_SG_SOFT_BLEND_SOFTNESS;
-    scfg.dne_enr_threshold = AECB_SG_DNE_ENR_THRESHOLD;
-    scfg.dne_enr_exit_threshold = AECB_SG_DNE_ENR_EXIT_THRESHOLD;
-    scfg.dne_snr_threshold = AECB_SG_DNE_SNR_THRESHOLD;
-    scfg.dne_use_during_initial_phase = AECB_SG_DNE_USE_DURING_INITIAL_PHASE;
-    scfg.dne_use_unbounded_echo = AECB_SG_DNE_USE_UNBOUNDED_ECHO;
-    scfg.dne_lf_endpoint_bin = rd->sg_dne_lf_endpoint_bin;
-    scfg.dne_trigger_threshold_hops = rd->sg_trigger_threshold_hops;
-    scfg.dne_hold_duration_hops = rd->sg_hold_duration_hops;
-    scfg.stat_aware_ne_proxy_enabled = 0; scfg.stat_aware_ne_proxy_threshold = 0.10f;
-    /* The ENR/SU tables are decoded into the pool (aec_sg_tables_decode()); only the EMR tables are static. */
-    stun.nearend_emr_tr = rd->sg_nearend_emr_tr;
-    stun.normal_emr_tr  = rd->sg_normal_emr_tr;
-    stun.table_len      = rd->sg_table_len;
-    *out_cfg = scfg;
-    *out_tun = stun;
-    return 0;
 }
 
 static void aec_init_config_state(Aec* a, const AecResolved* rs, int hop, int blk,
@@ -1505,7 +1276,7 @@ static int aec_carve(Aec* a, uint8_t* ptr, const AecResolved* rs,
                       int buf_samp, const AecCarveOpt* opt) {
     const AecConfig* cfg = &rs->cfg;
     /* Per-rate row (a hit is guaranteed by aec_resolve). */
-    const AecBalancedRateDims* rd = aecb_rate_cfg(
+    const AecBalancedRateDims* rd = aec_balanced_rate_dims(
         cfg->sample_rate, cfg->fft_size);
     if (!rd) return -1;
     SuppressionGainConfig scfg;
@@ -1658,7 +1429,6 @@ int aec_hop_size(const Aec* a) {
     return a->hop_size;
 }
 
-
 /* Saturating bump of the AecLinearView alignment generation. */
 static void aec_bump_delay_generation(Aec* a) {
     if (a->delay_generation != 0xFFFFFFFFu) { a->delay_generation++; }
@@ -1680,18 +1450,6 @@ long aec_far_fft_real_compute_count(const Aec* a) {
         total += extra;
     }
     return total;
-}
-
-int aec_sg_apply_level(SuppressionGain* sg, AecLevel level) {
-    float db, dt_db;
-    int en;
-    if (aec_level_floor_db(level, &db) != 0 || aec_level_dt_floor_db(level, &dt_db) != 0 ||
-        aec_level_split_floor_enabled(level, &en) != 0) return -1;
-    /* The suppressor validates and applies first and writes nothing on refusal. The ramp governs the far-active floor only; the
-     * DT floor and the split-floor gate step immediately. */
-    if (suppression_gain_set_split_floor_far_active_db(sg, db, AEC_LEVEL_RAMP_MS) != 0) return -1;
-    if (suppression_gain_set_split_floor_dt_db(sg, dt_db) != 0) return -1;
-    return suppression_gain_set_split_floor_enabled(sg, en) != 0 ? -1 : 0;
 }
 
 int aec_set_level(Aec* a, AecLevel level) {
@@ -3013,67 +2771,6 @@ static int aec_gain_ready(const Aec* a) {
     if (a->cfg.residual != AEC_RESIDUAL_FULL) return AEC_ERR_MODE;
     if (a->hop_phase != 0 || !a->residual_valid) return AEC_ERR_SEQUENCE;
     return AEC_OK;
-}
-
-/* Bins per chunk of the shared comfort-noise core: the N^2 -> amplitude conversion is vectorised per chunk, the random phase
- * draws stay strictly sequential in bin order. */
-#define AEC_CNG_CHUNK 64
-
-void aec_apply_gain_spec(Complex* out, const Complex* base, const float* g_res, const float* g_extra, int n) {
-    if (!out || !base || !g_res || n <= 0) return;
-    if (!g_extra) {
-        sk_capply_gain_f32(out, base, g_res, (size_t)n);
-        return;
-    }
-    {
-        /* min then multiply, block by block with the same kernels the samples used (non-finite gains stay visible). */
-        float total[AEC_CNG_CHUNK];
-        int k = 0;
-        while (k < n) {
-            int m = (n - k < AEC_CNG_CHUNK) ? (n - k) : AEC_CNG_CHUNK;
-            sk_min_f32(total, g_extra + k, g_res + k, (size_t)m);
-            sk_capply_gain_f32(out + k, base + k, total, (size_t)m);
-            k += m;
-        }
-    }
-}
-
-void aec_cng_fill(uint32_t* rng, Complex* spec, const float* cn,
-                  const float* g_res, const float* g_nr, float nr_floor, int n) {
-    static const float inv_psd_scale = (float)AEC_PSD_SCALE_INV;     /* comfort_noise is on the int16^2 scale */
-    float pw[AEC_CNG_CHUNK], amp[AEC_CNG_CHUNK];
-    uint32_t seed;
-    int k0;
-    if (!rng || !spec || !cn || !g_res || n < 3) return;
-    seed = *rng;
-    for (k0 = 1; k0 < n - 1; k0 += AEC_CNG_CHUNK) {
-        int m = n - 1 - k0, j;
-        if (m > AEC_CNG_CHUNK) m = AEC_CNG_CHUNK;
-        /* amp[j] = sqrt(max(cn / 32768^2, 0)); the square root reads pw and writes amp (no in-place call) */
-        sk_scale_f32(pw, cn + k0, inv_psd_scale, m);
-        sk_clip_f32(pw, 0.0f, (float)INFINITY, m);
-        sk_fast_sqrt_f32(pw, amp, m);
-        for (j = 0; j < m; ++j) {
-            int bin = k0 + j;
-            uint32_t ix;
-            float ng, cn_re, cn_im, t;
-            seed = (seed * 69069u + 1u) & 0x7FFFFFFFu;
-            ix = seed >> 26;
-            cn_re = amp[j] * AECB_SQRT2_SIN_LUT[ix];
-            cn_im = amp[j] * AECB_SQRT2_SIN_LUT[(ix + 8u) & 31u];
-            t = 1.0f - g_res[bin] * g_res[bin];
-            if (t < 0.0f) t = 0.0f;
-            ng = fast_sqrt(t);
-            if (g_nr) ng = ng * fmaxf(g_nr[bin], nr_floor);
-            spec[bin].r += ng * cn_re;
-            spec[bin].i += ng * cn_im;
-        }
-    }
-    *rng = seed;
-}
-
-void aec_apply_cng_spec(uint32_t* rng, Complex* spec, const float* cn, const float* g_res, const float* g_extra, int n) {
-    aec_cng_fill(rng, spec, cn, g_res, g_extra, AEC_CNG_NR_GAIN_FLOOR, n);
 }
 
 int aec_apply_gain(const Aec* a, const float* extra_gain, Complex* out_spec) {

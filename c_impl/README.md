@@ -167,13 +167,11 @@ caller-pool path (`aec_get_mem_size`/`aec_init`), and differs from numpy's fp64
   veto, clock drift, resets, `FIXED` and `EXTERNAL_ALIGNED` with `aec_apply_external_realign`, `aec_set_level` ramps in flight on all four
   levels, shadow / high-pass / comfort noise / saturation off, live observer, windowed noise tracker, duty cycle and the 8 kHz grid,
   chained per-group hashes. Also `aec_process` alternating with the split calls hop by hop, and the carve of every instance kind
-  ending exactly at `aec_get_mem_size()`.
-- `test/test_split_entry3.c` (`make test-split-entry-3`) — the third single-channel scene set
-  (its case table is in the file): free-running two-path scenes
-  in which the bad-relock judgment (windowed ERLE after a confirmed delay shift against the value before it, 1 dB margin) comes
-  out by itself, with the ERLE improving (kept), clearly worse (reverted), 0.5 dB either side of the margin, worse without an
-  estimate (kept) and on the soft path, on the three product grids; the test prints every judgment (hop, ERLE before / after,
-  outcome) and checks it against the case table.
+  ending exactly at `aec_get_mem_size()`. The same test runs a third single-channel scene set (its case table is in the file):
+  free-running two-path scenes in which the bad-relock judgment (windowed ERLE after a confirmed delay shift against the value
+  before it, 1 dB margin) comes out by itself, with the ERLE improving (kept), clearly worse (reverted), 0.5 dB either side of
+  the margin, worse without an estimate (kept) and on the soft path, on the three product grids; it prints every judgment (hop,
+  ERLE before / after, outcome), checks each against the case table and requires all four outcomes to occur.
 - `test/test_aec_array.c` (`make test-aec-array`) — the four-microphone array instance
   (`AecConfig.n_mics = 4`) driven hop by hop in `STATE`, `ESTIMATE` and `FULL` (hashed into a line stream), plus
   the contract checks (pool vs heap, pool fills and offsets, reset equals fresh, descriptor).
@@ -185,10 +183,10 @@ caller-pool path (`aec_get_mem_size`/`aec_init`), and differs from numpy's fp64
   double talk, a clipping far end, `capture_proxy_channel` 1-3, a caller-supplied `beamformed_error`, clock drift, `aec_set_level`
   in flight, lanes without the shadow filter, the 32/36-sample admission band, the backward and forward moves under the quarantine
   and the duty cycle, a reset inside double talk; `STATE`, `ESTIMATE` and `FULL` runs, plus per-hop view invariants.
-- **Line-stream baselines.** The five tests above (`test-split-entry`, `-2`, `-3`, `test-aec-array`, `-2`) each print or hash
+- **Line-stream baselines.** The four tests above (`test-split-entry`, `-2`, `test-aec-array`, `-2`) each print or hash
   their fields into a line stream. No baseline is shipped: the one-off files written by the pre-split API were compared
   bit for bit with this version (all three single-channel sets and both array sets, `SIMD=0` and `SIMD=1`) and retired on
-  2026-11-13. `AEC_TEST_BASELINE_WRITE=<dir> make test-split-entry` (likewise the other four, each run from `c_impl/`)
+  2026-11-13. `AEC_TEST_BASELINE_WRITE=<dir> make test-split-entry` (likewise the other three, each run from `c_impl/`)
   writes `<dir>/split_entry_simd{0,1}.txt` from the build at hand (`simd0` = `SIMD=0`, `simd1` = NEON; nothing on other
   hosts); `AEC_TEST_BASELINE=<dir>` compares every line with it. Capture the baseline from the finished version before the
   next change, compare after it; the files are valid for the host, compiler and FFT backend that wrote them.

@@ -1,4 +1,5 @@
-/* aec_tuning.c -- the internal tuning (defaults, level, range checks); see aec_tuning.h. */
+/* aec_tuning.c -- the internal tuning (defaults, level, range checks), the level and signal-grid tables, aec_config_from_level() and
+ * aec_resolve(); see aec_tuning.h. */
 #include "aec_tuning.h"
 #include "aec_internal.h"
 
@@ -136,4 +137,121 @@ int aec_tuning_valid(const AecTuning* tun, const AecConfig* cfg) {
 #undef AEC_CK_RANGE_F
 #undef AEC_CK_RANGE_I
     return 1;
+}
+
+/* Level strength table in AecLevel order; NO_FLOOR repeats balanced's
+ * (unused) values. */
+typedef struct { float far_active_db, dt_db; int split_floor_enabled; } AecLevelFloors;
+static const AecLevelFloors AEC_LEVEL_FLOORS[] = {
+    [AEC_LEVEL_MILD]       = { -20.0f, -20.0f, 1 },
+    [AEC_LEVEL_BALANCED]   = { -28.0f, -20.0f, 1 },
+    [AEC_LEVEL_AGGRESSIVE] = { -38.0f, -30.0f, 1 },
+    [AEC_LEVEL_NO_FLOOR]   = { -28.0f, -20.0f, 0 },
+};
+
+/* Row for an in-enum level, NULL otherwise (every lookup below then fails). */
+static const AecLevelFloors* aec_level_row(AecLevel p) {
+    return ((unsigned)p < sizeof(AEC_LEVEL_FLOORS) / sizeof(AEC_LEVEL_FLOORS[0]))
+               ? &AEC_LEVEL_FLOORS[p] : NULL;
+}
+
+const char* aec_level_name(AecLevel p) {
+    static const char* const names[] = {
+        [AEC_LEVEL_MILD]       = "mild",
+        [AEC_LEVEL_BALANCED]   = "balanced",
+        [AEC_LEVEL_AGGRESSIVE] = "aggressive",
+        [AEC_LEVEL_NO_FLOOR]   = "no_floor",
+    };
+    return aec_level_row(p) ? names[p] : "balanced";
+}
+
+int aec_level_floor_db(AecLevel p, float* db_out) {
+    const AecLevelFloors* r = aec_level_row(p);
+    if (db_out == NULL || r == NULL) return -1;
+    *db_out = r->far_active_db;
+    return 0;
+}
+
+int aec_level_dt_floor_db(AecLevel p, float* db_out) {
+    const AecLevelFloors* r = aec_level_row(p);
+    if (db_out == NULL || r == NULL) return -1;
+    *db_out = r->dt_db;
+    return 0;
+}
+
+int aec_level_split_floor_enabled(AecLevel p, int* enabled_out) {
+    const AecLevelFloors* r = aec_level_row(p);
+    if (enabled_out == NULL || r == NULL) return -1;
+    *enabled_out = r->split_floor_enabled;
+    return 0;
+}
+
+void aec_config_from_level(AecConfig* cfg, AecLevel p, int sr) {
+    if (!cfg) return;
+    memset(cfg, 0, sizeof(*cfg));
+    cfg->sample_rate = sr;
+    /* The only place a default fft_size is applied (0 for an unsupported rate, which the validator rejects). */
+    cfg->fft_size = aec_default_fft_size(sr);
+    cfg->n_mics = 1;
+    cfg->level = aec_level_row(p) ? p : AEC_LEVEL_BALANCED;
+    cfg->residual = AEC_RESIDUAL_FULL;
+    /* MATCHED with 5 filters is the default; fixed_delay_samples must be -1 (0 is a legal FIXED delay). */
+    cfg->delay_mode = AEC_DELAY_MATCHED;
+    cfg->fixed_delay_samples = -1;
+    cfg->delay_num_filters = AEC_DELAY_NUM_FILTERS_MAX;
+    cfg->enable_cng = 1;
+    cfg->capture_proxy_channel = 0;
+    cfg->delay_backward_quarantine_enabled = 0;
+    cfg->delay_backward_quarantine_s = 1.0f;
+}
+
+/* Signal-grid table: admissible (sample_rate, fft_size) pairs and their
+ * geometry. */
+static const AecSignalGrid AEC_GRID_TABLE[] = {
+    { 16000,  256,   256,  128,     129, 0 },
+    { 16000,  512,   512,  256,     257, 0 },
+    { 48000, 1024,  1024,  512,     513, 0 },
+    {  8000,  256,   256,  128,     129, 1 },
+};
+
+/* First table row for sample_rate whose fft_size matches (fft_size <= 0: any), or NULL. */
+static const AecSignalGrid* aec_find_grid(int sample_rate, int fft_size) {
+    for (size_t i = 0; i < sizeof(AEC_GRID_TABLE) / sizeof(AEC_GRID_TABLE[0]); ++i) {
+        if (AEC_GRID_TABLE[i].sample_rate == sample_rate &&
+            (fft_size <= 0 || AEC_GRID_TABLE[i].fft_size == fft_size))
+            return &AEC_GRID_TABLE[i];
+    }
+    return NULL;
+}
+
+int aec_resolve_signal_grid(int sample_rate, int fft_size, AecSignalGrid* out) {
+    const AecSignalGrid* g;
+    if (fft_size <= 0) return AEC_ERR_ARG;
+    g = aec_find_grid(sample_rate, fft_size);
+    if (!g) return AEC_ERR_ARG;
+    if (out) *out = *g;
+    return AEC_OK;
+}
+
+int aec_is_valid_sample_rate(int sample_rate) {
+    return aec_find_grid(sample_rate, 0) != NULL;
+}
+
+int aec_default_fft_size(int sample_rate) {
+    const AecSignalGrid* g = aec_find_grid(sample_rate, 0);
+    return g ? g->fft_size : 0;
+}
+
+int aec_resolve_tuned(const AecConfig* in, const AecTuning* tun, AecResolved* out) {
+    AecResolved r;
+    if (!in || !out) return 0;
+    r.cfg = *in;
+    if (tun) r.tun = *tun; else aec_tuning_defaults(&r.tun, in);
+    if (!aec_resolved_valid(&r)) return 0;
+    *out = r;
+    return 1;
+}
+
+int aec_resolve(const AecConfig* in, AecResolved* out) {
+    return aec_resolve_tuned(in, NULL, out);
 }

@@ -51,9 +51,9 @@ FL = 832
 # Additional rates. filter_length is left to AecConfig.__post_init__ auto-policy
 # (52 ms <44.1kHz / 64 ms >=44.1kHz), unlike the 16 kHz FL=832.
 EXTRA_GRIDS = (
-    (8000, 256, 'R8K', 'AECB_ENABLE_8K'),
-    (16000, 256, 'R16K256', 'AECB_ENABLE_16K_256'),
-    (48000, 1024, 'R48K', 'AECB_ENABLE_48K'),
+    (8000, 256, 'R8K'),
+    (16000, 256, 'R16K256'),
+    (48000, 1024, 'R48K'),
 )
 
 
@@ -104,9 +104,9 @@ def _plan_shared_tables(cap16, extra_caps):
     """Tables emitted once and referenced by name from several grids.
 
     emr: every *_EMR_TR table of every grid is a prefix of the longest one (they are the
-    constant 0.3); emitted unconditionally so the 16 kHz block never depends on a rate flag.
+    constant 0.3); emitted once, ahead of every rate block.
     """
-    all_caps = [cap16] + [extra_caps[(sr, fs)] for sr, fs, _t, _f in EXTRA_GRIDS]
+    all_caps = [cap16] + [extra_caps[(sr, fs)] for sr, fs, _t in EXTRA_GRIDS]
     emr = [c['arrays'][n] for c in all_caps for n in ('SG_NEAREND_EMR_TR', 'SG_NORMAL_EMR_TR')]
     emr_base = _f32(max(emr, key=len))
     shared_emr = emr_base if all(_is_prefix(a, emr_base) for a in emr) else None
@@ -597,14 +597,13 @@ def emit_legacy_block(w, cap, shared, rle):
     emit_rle(w, 'AECB_', rle)
 
 
-def emit_rate_block(w, tag, enable_flag, cap, emr_bases, base_rle, own_rle):
+def emit_rate_block(w, tag, cap, emr_bases, base_rle, own_rle):
     """Emits the AECB_<tag>_* block for one extra rate (8k/48k): only the
-    rate-varying subset, guarded by `enable_flag` so firmware can strip it.
+    rate-varying subset.
     """
     v = cap['values']
     sr = cap['sr']
 
-    w('#if %s\n' % enable_flag)
     w('/* ---- %d Hz rate block (AUTO-GENERATED) ----\n'
       % sr)
     w(' * Same live-capture mechanism as the 16 kHz block above, at\n')
@@ -670,7 +669,7 @@ def emit_rate_block(w, tag, enable_flag, cap, emr_bases, base_rle, own_rle):
         for part in ('RUN_END', 'RUN_VAL', 'RUNS'):
             w('#define AECB_%s_SG_%s AECB_SG_%s\n' % (tag, part, part))
     w('#define AECB_%s_SG_TABLE_LEN %d\n' % (tag, v['N_BINS']))
-    w('#endif /* %s */\n\n' % enable_flag)
+    w('\n')
 
 
 def window_sets(caps):
@@ -684,20 +683,14 @@ def window_sets(caps):
 
 
 def emit_window_half(w, by_n):
-    """The half table of the longest window (48 kHz grid, when enabled) and of the longest window without it."""
+    """The half table of the longest window (the 48 kHz grid's)."""
     full_half = window_half(by_n)
-    short_n = max(n for n in by_n if n != max(by_n))
-    short_half = window_half({n: v for n, v in by_n.items() if n <= short_n})
-    w('/* Synthesis window: the first n/2 + 1 floats of the longest enabled grid\'s window. aec_synth_window_build() rebuilds\n')
+    w('/* Synthesis window: the first n/2 + 1 floats of the longest grid\'s window. aec_synth_window_build() rebuilds\n')
     w(' * the window of any grid length n (a power of two dividing AECB_SYNTH_HALF_N) bit for bit: w[i] = half[i * (HALF_N / n)]\n')
     w(' * for i <= n/2, w[n - i] = w[i] above. This generator checks every captured window against that rule. */\n')
-    w('#if AECB_ENABLE_48K\n')
     w('#define AECB_SYNTH_HALF_N %d\n' % max(by_n))
     w(emit_array('AECB_SYNTH_WINDOW_HALF', full_half))
-    w('#else\n')
-    w('#define AECB_SYNTH_HALF_N %d\n' % short_n)
-    w(emit_array('AECB_SYNTH_WINDOW_HALF', short_half))
-    w('#endif\n\n')
+    w('\n')
 
 
 def ref_header_lines(grids):
@@ -818,8 +811,7 @@ def emit_rate_table(w):
     w('      AECB_SG_TRIGGER_THRESHOLD_HOPS, AECB_SG_HOLD_DURATION_HOPS,\n')
     w('      AECB_SG_NEAREND_SMOOTHER_N },\n')
 
-    for sr, fft_size, tag, flag in EXTRA_GRIDS:
-        w('#if %s\n' % flag)
+    for sr, fft_size, tag in EXTRA_GRIDS:
         w('    { /* %d Hz */\n' % sr)
         w('      %d,\n' % sr)
         w('      AECB_%s_N_BINS, AECB_%s_FFT_SIZE, AECB_%s_BLOCK_SIZE, AECB_%s_HOP_SIZE,\n'
@@ -848,7 +840,6 @@ def emit_rate_table(w):
         w('      AECB_%s_SG_MAX_INC, AECB_%s_SG_MAX_DEC_LF,\n' % (tag, tag))
         w('      AECB_%s_SG_TRIGGER_THRESHOLD_HOPS, AECB_%s_SG_HOLD_DURATION_HOPS,\n' % (tag, tag))
         w('      AECB_%s_SG_NEAREND_SMOOTHER_N },\n' % tag)
-        w('#endif /* %s */\n' % flag)
 
     w('};\n\n')
 
@@ -869,7 +860,7 @@ def main():
     cap16 = _capture_all(SR, DEFAULT_FRAME, filter_length=FL)
     extra_caps = {
         (sr, fft_size): _capture_all(sr, fft_size, filter_length=None)
-        for sr, fft_size, _tag, _flag in EXTRA_GRIDS
+        for sr, fft_size, _tag in EXTRA_GRIDS
     }
 
     all_caps = dict(extra_caps)
@@ -896,16 +887,13 @@ def main():
     emit_legacy_block(w, cap16, shared, rle16)
     w('\n')
 
-    for _sr, _fs, _tag, flag in EXTRA_GRIDS:
-        w('#ifndef %s\n#define %s 1\n#endif\n' % (flag, flag))
-    w('\n')
     emit_window_half(w, window_sets(list(all_caps.values())))
 
     emr_bases = _emr_bases(shared)
-    for sr, fft_size, tag, flag in EXTRA_GRIDS:
+    for sr, fft_size, tag in EXTRA_GRIDS:
         cap = extra_caps[(sr, fft_size)]
         own = None if rle_is_alias(rle16, cap) else rle_checked(cap)
-        emit_rate_block(w, tag, flag, cap, emr_bases, rle16, own)
+        emit_rate_block(w, tag, cap, emr_bases, rle16, own)
 
     emit_rate_table(w)
 
@@ -916,7 +904,7 @@ def main():
     os.makedirs(os.path.dirname(OUT_REF), exist_ok=True)
     with open(OUT_REF, 'w') as fh:
         fh.writelines(ref_header_lines([('R16K512', cap16)] + [(tag, extra_caps[(sr, fs)])
-                                                               for sr, fs, tag, _f in EXTRA_GRIDS]))
+                                                               for sr, fs, tag in EXTRA_GRIDS]))
     print('wrote %s (%d lines, n_bins=%d filter_taps=%d; +8k=%d +16k/256=%d +48k=%d)'
           % (OUT, sum(chunk.count('\n') for chunk in lines), cap16['values']['N_BINS'], cap16['filter_taps_size'],
              extra_caps[(8000, 256)]['values']['N_BINS'],

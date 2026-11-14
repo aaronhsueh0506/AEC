@@ -98,6 +98,10 @@ int aec_tuning_valid(const AecTuning* tun, const AecConfig* cfg);
 int aec_resolve_tuned(const AecConfig* in, const AecTuning* tun, AecResolved* out);
 int aec_resolve(const AecConfig* in, AecResolved* out);
 
+/* The configuration checks behind aec_resolve_tuned(): the caller's fields, the tuning, the delay-mode and the array rules.
+ * 1 = acceptable. Defined in aec.c (the array rules live with the array instance). */
+int aec_resolved_valid(const AecResolved* r);
+
 #ifdef __cplusplus
 }
 #endif

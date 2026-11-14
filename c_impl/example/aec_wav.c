@@ -17,8 +17,6 @@ static void print_usage(const char* prog) {
         "                                 (--preset is accepted as an alias)\n"
         "  --cng                          Enable comfort noise\n"
         "  --no-cng                       Explicitly disable CNG\n"
-        "  --no-delay-est                 EXTERNAL_ALIGNED mode: no online delay\n"
-        "                                 estimation (inputs assumed pre-aligned)\n"
         "  --no-res                       Disable residual echo suppressor\n"
         "  --fft-size <n>                 256/512 @16kHz; 1024 @48kHz\n"
         "  --delay-mode {matched|fixed|external}\n"
@@ -77,7 +75,7 @@ int main(int argc, char* argv[]) {
 
     AecLevel level = AEC_LEVEL_BALANCED;
     int explicit_cng = -1;
-    int no_delay_est = 0, no_res = 0;
+    int no_res = 0;
     int debug_status = 0;
     int fft_size = 0;
     /* Delay-mode overrides use a separate "given" flag, and are handed to aec_create() unvalidated
@@ -97,7 +95,6 @@ int main(int argc, char* argv[]) {
             }
         } else if (!strcmp(arg, "--cng"))           explicit_cng = 1;
         else if (!strcmp(arg, "--no-cng"))          explicit_cng = 0;
-        else if (!strcmp(arg, "--no-delay-est"))    no_delay_est = 1;
         else if (!strcmp(arg, "--no-res"))          no_res = 1;
         else if (!strcmp(arg, "--fft-size") && i + 1 < argc) {
             if (aec_cli_parse_int(argv[++i], &fft_size) != 0) return bad_int(arg, argv[i]);
@@ -173,8 +170,6 @@ int main(int argc, char* argv[]) {
     if (have_delay_mode)         cfg.delay_mode = delay_mode;
     if (have_delay_num_filters)  cfg.delay_num_filters = delay_num_filters;
     if (have_fixed_delay)        cfg.fixed_delay_samples = fixed_delay_samples;
-    if (no_delay_est && cfg.delay_mode == AEC_DELAY_MATCHED)
-        cfg.delay_mode = cfg.fixed_delay_samples >= 0 ? AEC_DELAY_FIXED : AEC_DELAY_EXTERNAL_ALIGNED;
 
     /* --print-mem-size: report the static-pool size and exit before any audio is touched. */
     if (print_mem_size) {

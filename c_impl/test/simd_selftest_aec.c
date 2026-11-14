@@ -1,4 +1,4 @@
-/* Shared AEC kernel correctness and microbenchmark harness (utility/simd_aec.h).
+/* Shared AEC kernel correctness harness (utility/simd_aec.h).
  * Finite scalar/SIMD results and mutated state must match byte-for-byte.
  * The NaN corpus also checks classification; payload differences are allowed
  * only where check_bits_classify documents that contract. All hard mismatches
@@ -13,7 +13,6 @@
 #include <math.h>
 #include <stdint.h>
 #include <float.h>
-#include <time.h>
 
 #include "test/simd_test_harness.h"
 
@@ -30,8 +29,6 @@ static const int N_LIST[] = {
 #define N_LIST_COUNT ((int)(sizeof(N_LIST) / sizeof(N_LIST[0])))
 #define TRIALS 8
 
-#define BENCH_N 257
-#define BENCH_REPS 200000
 
 /* ═══════════════════════ input generation ═══════════════════════
  * Deterministic LCG over raw uint32 bit patterns mapped to floats, mixed with a curated
@@ -81,25 +78,6 @@ static int32_t gen_int32(void) {
 static void fill_ints(int *a, int n) {
     int i;
     for (i = 0; i < n; ++i) a[i] = (int)gen_int32();
-}
-
-/* Separate, moderate-range generator for the microbenchmarks only -- keeps
- * the timing loops away from Inf/NaN-producing accumulation artifacts so
- * the reported numbers reflect typical-case throughput. Not used by any
- * correctness check. */
-static float gen_bench_float(void) {
-    uint32_t r = lcg_next();
-    return ((float)(r % 2000001u) / 1000000.0f) - 1.0f; /* ~[-1, 1] */
-}
-
-static void fill_bench_floats(float *a, int n) {
-    int i;
-    for (i = 0; i < n; ++i) a[i] = gen_bench_float();
-}
-
-static void fill_bench_complex(Complex *a, int n) {
-    int i;
-    for (i = 0; i < n; ++i) { a[i].r = gen_bench_float(); a[i].i = gen_bench_float(); }
 }
 
 /* ═══════════════════════ NaN corpus ═══════════════════════
@@ -1576,212 +1554,15 @@ static void test_no_audible_echo_gain_edge(void) {
            SG_CFG_COUNT);
 }
 
-/* ═══════════════════════════════ microbench ═══════════════════════════════
- * n=257, ~200k reps, CLOCK_MONOTONIC. `g_bench_sink` (volatile) forces the
- * compiler to keep each call's result live, so the timing loop can't be
- * hoisted/eliminated as dead/invariant code. */
-
-static volatile double g_bench_sink = 0.0;
-
-static void bench_cabs_np(void) {
-    Complex z[BENCH_N]; float out[BENCH_N];
-    fill_bench_complex(z, BENCH_N);
-    {
-        double t0, t1; int r;
-        t0 = now_ns();
-        for (r = 0; r < BENCH_REPS; ++r) { sk_cabs_np_f32_scalar(z, out, BENCH_N); g_bench_sink += out[0]; }
-        t1 = now_ns();
-        {
-            double ns_scalar = (t1 - t0) / BENCH_REPS;
-            double t2 = now_ns();
-            for (r = 0; r < BENCH_REPS; ++r) { sk_cabs_np_f32(z, out, BENCH_N); g_bench_sink += out[0]; }
-            {
-                double t3 = now_ns();
-                report_bench("cabs_np_f32", ns_scalar, (t3 - t2) / BENCH_REPS);
-            }
-        }
-    }
-}
-
-
-static void bench_cmag2_np(void) {
-    Complex z[BENCH_N]; float out[BENCH_N];
-    fill_bench_complex(z, BENCH_N);
-    {
-        double t0, t1; int r;
-        t0 = now_ns();
-        for (r = 0; r < BENCH_REPS; ++r) { sk_cmag2_np_f32_scalar(z, out, BENCH_N); g_bench_sink += out[0]; }
-        t1 = now_ns();
-        {
-            double ns_scalar = (t1 - t0) / BENCH_REPS;
-            double t2 = now_ns();
-            for (r = 0; r < BENCH_REPS; ++r) { sk_cmag2_np_f32(z, out, BENCH_N); g_bench_sink += out[0]; }
-            {
-                double t3 = now_ns();
-                report_bench("cmag2_np_f32", ns_scalar, (t3 - t2) / BENCH_REPS);
-            }
-        }
-    }
-}
-
-
-static void bench_cmag2_np_acc(void) {
-    Complex z[BENCH_N]; float acc[BENCH_N];
-    fill_bench_complex(z, BENCH_N);
-    fill_bench_floats(acc, BENCH_N);
-    {
-        double t0, t1; int r;
-        t0 = now_ns();
-        for (r = 0; r < BENCH_REPS; ++r) { sk_cmag2_np_acc_f32_scalar(z, acc, BENCH_N); g_bench_sink += acc[0]; }
-        t1 = now_ns();
-        {
-            double ns_scalar = (t1 - t0) / BENCH_REPS;
-            double t2 = now_ns();
-            for (r = 0; r < BENCH_REPS; ++r) { sk_cmag2_np_acc_f32(z, acc, BENCH_N); g_bench_sink += acc[0]; }
-            {
-                double t3 = now_ns();
-                report_bench("cmag2_np_acc_f32", ns_scalar, (t3 - t2) / BENCH_REPS);
-            }
-        }
-    }
-}
 
 
 
 
-static void bench_wupdate_nlms(void) {
-    Complex X[BENCH_N], err[BENCH_N], W[BENCH_N];
-    float mu_eff[BENCH_N];
-    fill_bench_complex(X, BENCH_N);
-    fill_bench_complex(err, BENCH_N);
-    fill_bench_complex(W, BENCH_N);
-    fill_bench_floats(mu_eff, BENCH_N);
-    {
-        double t0, t1; int r;
-        t0 = now_ns();
-        for (r = 0; r < BENCH_REPS; ++r) { sk_wupdate_nlms_f32_scalar(W, X, err, mu_eff, BENCH_N); g_bench_sink += W[0].r; }
-        t1 = now_ns();
-        {
-            double ns_scalar = (t1 - t0) / BENCH_REPS;
-            double t2 = now_ns();
-            for (r = 0; r < BENCH_REPS; ++r) { sk_wupdate_nlms_f32(W, X, err, mu_eff, BENCH_N); g_bench_sink += W[0].r; }
-            {
-                double t3 = now_ns();
-                report_bench("wupdate_nlms_f32", ns_scalar, (t3 - t2) / BENCH_REPS);
-            }
-        }
-    }
-}
 
 
-static void bench_wupdate_kf(void) {
-    Complex X[BENCH_N], err[BENCH_N], W[BENCH_N];
-    float mu[BENCH_N], mu_scale[BENCH_N];
-    fill_bench_complex(X, BENCH_N);
-    fill_bench_complex(err, BENCH_N);
-    fill_bench_complex(W, BENCH_N);
-    fill_bench_floats(mu, BENCH_N);
-    fill_bench_floats(mu_scale, BENCH_N);
-    {
-        double t0, t1; int r;
-        t0 = now_ns();
-        for (r = 0; r < BENCH_REPS; ++r) { sk_wupdate_kf_f32_scalar(W, X, err, mu, mu_scale, BENCH_N); g_bench_sink += W[0].r; }
-        t1 = now_ns();
-        {
-            double ns_scalar = (t1 - t0) / BENCH_REPS;
-            double t2 = now_ns();
-            for (r = 0; r < BENCH_REPS; ++r) { sk_wupdate_kf_f32(W, X, err, mu, mu_scale, BENCH_N); g_bench_sink += W[0].r; }
-            {
-                double t3 = now_ns();
-                report_bench("wupdate_kf_f32", ns_scalar, (t3 - t2) / BENCH_REPS);
-            }
-        }
-    }
-}
 
 
-static void bench_pairwise_sum(void) {
-    float a[BENCH_N];
-    fill_bench_floats(a, BENCH_N);
-    {
-        double t0, t1; int r;
-        t0 = now_ns();
-        for (r = 0; r < BENCH_REPS; ++r) g_bench_sink += sk_pairwise_sum_f32_scalar(a, (size_t)BENCH_N);
-        t1 = now_ns();
-        {
-            double ns_scalar = (t1 - t0) / BENCH_REPS;
-            double t2 = now_ns();
-            for (r = 0; r < BENCH_REPS; ++r) g_bench_sink += sk_pairwise_sum_f32(a, (size_t)BENCH_N);
-            {
-                double t3 = now_ns();
-                report_bench("pairwise_sum_f32", ns_scalar, (t3 - t2) / BENCH_REPS);
-            }
-        }
-    }
-}
 
-
-static void bench_sum_sq_pairwise(void) {
-    float a[BENCH_N];
-    fill_bench_floats(a, BENCH_N);
-    {
-        double t0, t1; int r;
-        t0 = now_ns();
-        for (r = 0; r < BENCH_REPS; ++r) g_bench_sink += sk_sum_sq_pairwise_f32_scalar(a, (size_t)BENCH_N);
-        t1 = now_ns();
-        {
-            double ns_scalar = (t1 - t0) / BENCH_REPS;
-            double t2 = now_ns();
-            for (r = 0; r < BENCH_REPS; ++r) g_bench_sink += sk_sum_sq_pairwise_f32(a, (size_t)BENCH_N);
-            {
-                double t3 = now_ns();
-                report_bench("sum_sq_pairwise_f32", ns_scalar, (t3 - t2) / BENCH_REPS);
-            }
-        }
-    }
-}
-
-
-static void bench_pairwise_sum_tailfold(void) {
-    float a[BENCH_N];
-    fill_bench_floats(a, BENCH_N);
-    {
-        double t0, t1; int r;
-        t0 = now_ns();
-        for (r = 0; r < BENCH_REPS; ++r) g_bench_sink += sk_pairwise_sum_tailfold_f32_scalar(a, (size_t)BENCH_N);
-        t1 = now_ns();
-        {
-            double ns_scalar = (t1 - t0) / BENCH_REPS;
-            double t2 = now_ns();
-            for (r = 0; r < BENCH_REPS; ++r) g_bench_sink += sk_pairwise_sum_tailfold_f32(a, (size_t)BENCH_N);
-            {
-                double t3 = now_ns();
-                report_bench("pairwise_sum_tailfold_f32", ns_scalar, (t3 - t2) / BENCH_REPS);
-            }
-        }
-    }
-}
-
-
-static void bench_pairwise_sum_tailfold_b(void) {
-    float a[BENCH_N];
-    fill_bench_floats(a, BENCH_N);
-    {
-        double t0, t1; int r;
-        t0 = now_ns();
-        for (r = 0; r < BENCH_REPS; ++r) g_bench_sink += sk_pairwise_sum_tailfold_b_f32_scalar(a, (size_t)BENCH_N);
-        t1 = now_ns();
-        {
-            double ns_scalar = (t1 - t0) / BENCH_REPS;
-            double t2 = now_ns();
-            for (r = 0; r < BENCH_REPS; ++r) g_bench_sink += sk_pairwise_sum_tailfold_b_f32(a, (size_t)BENCH_N);
-            {
-                double t3 = now_ns();
-                report_bench("pairwise_sum_tailfold_b_f32", ns_scalar, (t3 - t2) / BENCH_REPS);
-            }
-        }
-    }
-}
 
 /* ═══════════════════════════ correctness: kernel 16 ══════════════════════ */
 
@@ -2493,272 +2274,12 @@ static void test_no_audible_echo_gain_nan(void) {
            g_nan_soft_mismatch_count);
 }
 
-static void bench_coherence_ema_gate(void) {
-    Complex echo[BENCH_N], near_spec[BENCH_N];
-    float abs_echo[BENCH_N], abs_near[BENCH_N];
-    float sye_re[BENCH_N], sye_im[BENCH_N], syy[BENCH_N], see[BENCH_N];
-    unsigned char mask[BENCH_N];
-    fill_bench_complex(echo, BENCH_N);
-    fill_bench_complex(near_spec, BENCH_N);
-    fill_bench_floats(abs_echo, BENCH_N);
-    fill_bench_floats(abs_near, BENCH_N);
-    fill_bench_floats(sye_re, BENCH_N);
-    fill_bench_floats(sye_im, BENCH_N);
-    fill_bench_floats(syy, BENCH_N);
-    fill_bench_floats(see, BENCH_N);
-    {
-        double t0, t1; int r;
-        t0 = now_ns();
-        for (r = 0; r < BENCH_REPS; ++r) {
-            sk_coherence_ema_gate_f32_scalar(sye_re, sye_im, syy, see, echo, near_spec,
-                                              abs_echo, abs_near, 0.05f, 0.5f, mask, BENCH_N);
-            g_bench_sink += sye_re[0];
-        }
-        t1 = now_ns();
-        {
-            double ns_scalar = (t1 - t0) / BENCH_REPS;
-            double t2 = now_ns();
-            for (r = 0; r < BENCH_REPS; ++r) {
-                sk_coherence_ema_gate_f32(sye_re, sye_im, syy, see, echo, near_spec,
-                                           abs_echo, abs_near, 0.05f, 0.5f, mask, BENCH_N);
-                g_bench_sink += sye_re[0];
-            }
-            {
-                double t3 = now_ns();
-                report_bench("coherence_ema_gate_f32", ns_scalar, (t3 - t2) / BENCH_REPS);
-            }
-        }
-    }
-}
-
-static void bench_ema_delta(void) {
-    float state[BENCH_N], x[BENCH_N];
-    fill_bench_floats(state, BENCH_N);
-    fill_bench_floats(x, BENCH_N);
-    {
-        double t0, t1; int r;
-        t0 = now_ns();
-        for (r = 0; r < BENCH_REPS; ++r) { sk_ema_delta_f32_scalar(state, x, 0.23f, BENCH_N); g_bench_sink += state[0]; }
-        t1 = now_ns();
-        {
-            double ns_scalar = (t1 - t0) / BENCH_REPS;
-            double t2 = now_ns();
-            for (r = 0; r < BENCH_REPS; ++r) { sk_ema_delta_f32(state, x, 0.23f, BENCH_N); g_bench_sink += state[0]; }
-            {
-                double t3 = now_ns();
-                report_bench("ema_delta_f32", ns_scalar, (t3 - t2) / BENCH_REPS);
-            }
-        }
-    }
-}
-
-static void bench_n2_track(void) {
-    float n2[BENCH_N], y2s[BENCH_N];
-    fill_bench_floats(n2, BENCH_N);
-    fill_bench_floats(y2s, BENCH_N);
-    {
-        double t0, t1; int r;
-        t0 = now_ns();
-        for (r = 0; r < BENCH_REPS; ++r) { sk_n2_track_f32_scalar(n2, y2s, 0.99f, 0.003f, 1.0005f, BENCH_N); g_bench_sink += n2[0]; }
-        t1 = now_ns();
-        {
-            double ns_scalar = (t1 - t0) / BENCH_REPS;
-            double t2 = now_ns();
-            for (r = 0; r < BENCH_REPS; ++r) { sk_n2_track_f32(n2, y2s, 0.99f, 0.003f, 1.0005f, BENCH_N); g_bench_sink += n2[0]; }
-            {
-                double t3 = now_ns();
-                report_bench("n2_track_f32", ns_scalar, (t3 - t2) / BENCH_REPS);
-            }
-        }
-    }
-}
-
-static void bench_n2_initial_track(void) {
-    float n2i[BENCH_N], n2[BENCH_N];
-    fill_bench_floats(n2i, BENCH_N);
-    fill_bench_floats(n2, BENCH_N);
-    {
-        double t0, t1; int r;
-        t0 = now_ns();
-        for (r = 0; r < BENCH_REPS; ++r) { sk_n2_initial_track_f32_scalar(n2i, n2, 0.0025f, BENCH_N); g_bench_sink += n2i[0]; }
-        t1 = now_ns();
-        {
-            double ns_scalar = (t1 - t0) / BENCH_REPS;
-            double t2 = now_ns();
-            for (r = 0; r < BENCH_REPS; ++r) { sk_n2_initial_track_f32(n2i, n2, 0.0025f, BENCH_N); g_bench_sink += n2i[0]; }
-            {
-                double t3 = now_ns();
-                report_bench("n2_initial_track_f32", ns_scalar, (t3 - t2) / BENCH_REPS);
-            }
-        }
-    }
-}
-
-static void bench_mask_zero(void) {
-    float x[BENCH_N];
-    unsigned char mask[BENCH_N];
-    int i;
-    fill_bench_floats(x, BENCH_N);
-    for (i = 0; i < BENCH_N; ++i) mask[i] = (unsigned char)(i & 1);
-    {
-        double t0, t1; int r;
-        t0 = now_ns();
-        for (r = 0; r < BENCH_REPS; ++r) { sk_mask_zero_f32_scalar(x, mask, BENCH_N); g_bench_sink += x[0]; }
-        t1 = now_ns();
-        {
-            double ns_scalar = (t1 - t0) / BENCH_REPS;
-            double t2 = now_ns();
-            for (r = 0; r < BENCH_REPS; ++r) { sk_mask_zero_f32(x, mask, BENCH_N); g_bench_sink += x[0]; }
-            {
-                double t3 = now_ns();
-                report_bench("mask_zero_f32", ns_scalar, (t3 - t2) / BENCH_REPS);
-            }
-        }
-    }
-}
-
-static void bench_noise_spectrum_update(void) {
-    float noise[BENCH_N], spectrum[BENCH_N];
-    fill_bench_floats(noise, BENCH_N);
-    fill_bench_floats(spectrum, BENCH_N);
-    {
-        double t0, t1; int r;
-        t0 = now_ns();
-        for (r = 0; r < BENCH_REPS; ++r) { sk_noise_spectrum_update_f32_scalar(noise, spectrum, 0.0025f, 1, 1.0e-4f, BENCH_N); g_bench_sink += noise[0]; }
-        t1 = now_ns();
-        {
-            double ns_scalar = (t1 - t0) / BENCH_REPS;
-            double t2 = now_ns();
-            for (r = 0; r < BENCH_REPS; ++r) { sk_noise_spectrum_update_f32(noise, spectrum, 0.0025f, 1, 1.0e-4f, BENCH_N); g_bench_sink += noise[0]; }
-            {
-                double t3 = now_ns();
-                report_bench("noise_spectrum_update_f32", ns_scalar, (t3 - t2) / BENCH_REPS);
-            }
-        }
-    }
-}
-
-static void bench_erl_bin_update(void) {
-    float erl[BENCH_N], x2[BENCH_N], y2[BENCH_N];
-    int hold[BENCH_N];
-    int i;
-    fill_bench_floats(erl, BENCH_N);
-    fill_bench_floats(x2, BENCH_N);
-    fill_bench_floats(y2, BENCH_N);
-    for (i = 0; i < BENCH_N; ++i) hold[i] = 0;
-    {
-        double t0, t1; int r;
-        t0 = now_ns();
-        for (r = 0; r < BENCH_REPS; ++r) { sk_erl_bin_update_f32_scalar(erl, hold, x2, y2, 44015068.0f, 400, 0.01f, BENCH_N); g_bench_sink += erl[0]; }
-        t1 = now_ns();
-        {
-            double ns_scalar = (t1 - t0) / BENCH_REPS;
-            double t2 = now_ns();
-            for (r = 0; r < BENCH_REPS; ++r) { sk_erl_bin_update_f32(erl, hold, x2, y2, 44015068.0f, 400, 0.01f, BENCH_N); g_bench_sink += erl[0]; }
-            {
-                double t3 = now_ns();
-                report_bench("erl_bin_update_f32", ns_scalar, (t3 - t2) / BENCH_REPS);
-            }
-        }
-    }
-}
-
-static void bench_dec1_floorintmin_s32(void) {
-    int x[BENCH_N];
-    int i;
-    for (i = 0; i < BENCH_N; ++i) x[i] = i;
-    {
-        double t0, t1; int r;
-        t0 = now_ns();
-        for (r = 0; r < BENCH_REPS; ++r) { sk_dec1_floorintmin_s32_scalar(x, BENCH_N); g_bench_sink += x[0]; }
-        t1 = now_ns();
-        {
-            double ns_scalar = (t1 - t0) / BENCH_REPS;
-            double t2 = now_ns();
-            for (r = 0; r < BENCH_REPS; ++r) { sk_dec1_floorintmin_s32(x, BENCH_N); g_bench_sink += x[0]; }
-            {
-                double t3 = now_ns();
-                report_bench("dec1_floorintmin_s32", ns_scalar, (t3 - t2) / BENCH_REPS);
-            }
-        }
-    }
-}
-
-static void bench_erl_hold_expire(void) {
-    float erl[BENCH_N];
-    int hold[BENCH_N];
-    int i;
-    fill_bench_floats(erl, BENCH_N);
-    for (i = 0; i < BENCH_N; ++i) hold[i] = (i & 1) ? -1 : 1;
-    {
-        double t0, t1; int r;
-        t0 = now_ns();
-        for (r = 0; r < BENCH_REPS; ++r) { sk_erl_hold_expire_f32_scalar(erl, hold, 1000.0f, BENCH_N); g_bench_sink += erl[0]; }
-        t1 = now_ns();
-        {
-            double ns_scalar = (t1 - t0) / BENCH_REPS;
-            double t2 = now_ns();
-            for (r = 0; r < BENCH_REPS; ++r) { sk_erl_hold_expire_f32(erl, hold, 1000.0f, BENCH_N); g_bench_sink += erl[0]; }
-            {
-                double t3 = now_ns();
-                report_bench("erl_hold_expire_f32", ns_scalar, (t3 - t2) / BENCH_REPS);
-            }
-        }
-    }
-}
-
-static void bench_no_audible_echo_gain(void) {
-    float ne[BENCH_N], ec[BENCH_N], mk[BENCH_N];
-    float ntr[BENCH_N], nsu[BENCH_N], nem[BENCH_N];
-    float otr[BENCH_N], osu[BENCH_N], oem[BENCH_N], out[BENCH_N];
-    fill_bench_floats(ne, BENCH_N); fill_bench_floats(ec, BENCH_N);
-    fill_bench_floats(mk, BENCH_N);
-    fill_bench_floats(ntr, BENCH_N); fill_bench_floats(nsu, BENCH_N);
-    fill_bench_floats(nem, BENCH_N);
-    fill_bench_floats(otr, BENCH_N); fill_bench_floats(osu, BENCH_N);
-    fill_bench_floats(oem, BENCH_N);
-    {
-        double t0, t1; int r;
-        t0 = now_ns();
-        for (r = 0; r < BENCH_REPS; ++r) {
-            sk_no_audible_echo_gain_f32_scalar(ne, ec, mk, ntr, nsu, nem,
-                                                otr, osu, oem, 0.25f, 0.25f, out, BENCH_N);
-            g_bench_sink += out[0];
-        }
-        t1 = now_ns();
-        {
-            double ns_scalar = (t1 - t0) / BENCH_REPS;
-            double t2 = now_ns();
-            for (r = 0; r < BENCH_REPS; ++r) {
-                sk_no_audible_echo_gain_f32(ne, ec, mk, ntr, nsu, nem,
-                                             otr, osu, oem, 0.25f, 0.25f, out, BENCH_N);
-                g_bench_sink += out[0];
-            }
-            {
-                double t3 = now_ns();
-                report_bench("no_audible_echo_gain_f32", ns_scalar, (t3 - t2) / BENCH_REPS);
-            }
-        }
-    }
-}
-
 /* ═══════════════════════ additional kernels ═══════════════════════
  * Each test below runs, per kernel: the finite corpus (random bit patterns and the special-value
  * pool) at every length of N_LIST, the NaN-sprinkle corpus, and the offset + canary matrix (payload
  * at element offsets 1..15 of a canary-filled arena, untouched guard words checked afterwards).
  * Scalar and NEON results must be bit-identical; where a NaN can reach an output the comparison is
  * check_bits_classify, otherwise it is strict. */
-
-#define NEW_BENCH(name, scalar_stmt, simd_stmt) do {                              \
-        double t0_, t1_, t2_, t3_; int r_;                                        \
-        t0_ = now_ns();                                                           \
-        for (r_ = 0; r_ < BENCH_REPS; ++r_) { scalar_stmt; }                      \
-        t1_ = now_ns();                                                           \
-        t2_ = now_ns();                                                           \
-        for (r_ = 0; r_ < BENCH_REPS; ++r_) { simd_stmt; }                        \
-        t3_ = now_ns();                                                           \
-        report_bench(name, (t1_ - t0_) / BENCH_REPS, (t3_ - t2_) / BENCH_REPS);   \
-    } while (0)
 
 /* The loop sk_max_abs_f32 stands for, written out, so the scalar twin has a reference
  * that does not share its code (with SIMD off the kernel is the scalar twin). */
@@ -2897,18 +2418,6 @@ static void test_noise_floor_track(void) {
     printf("PASS noise_floor_track_f32 (5 hold values, finite + NaN sprinkle + offsets 1..15 canary-guarded)\n");
 }
 
-static void bench_noise_floor_track(void) {
-    float fl0[BENCH_N], fl[BENCH_N], psd[BENCH_N];
-    int c0[BENCH_N], c[BENCH_N];
-    int i;
-    fill_bench_floats(fl0, BENCH_N); fill_bench_floats(psd, BENCH_N);
-    for (i = 0; i < BENCH_N; ++i) { fl0[i] = fabsf(fl0[i]) + 1.0f; psd[i] = fabsf(psd[i]) + 1.0f; c0[i] = i % 60; }
-    memcpy(fl, fl0, sizeof fl); memcpy(c, c0, sizeof c);
-    NEW_BENCH("noise_floor_track_f32",
-              (sk_noise_floor_track_f32_scalar(fl, c, psd, 1.0004f, 1.0e-6f, 50, BENCH_N), g_bench_sink += fl[0]),
-              (sk_noise_floor_track_f32(fl, c, psd, 1.0004f, 1.0e-6f, 50, BENCH_N), g_bench_sink += fl[0]));
-}
-
 static void test_raise_to(void) {
     float x_i[SK_TEST_MAX_N], lo[SK_TEST_MAX_N], x_s[SK_TEST_MAX_N], x_v[SK_TEST_MAX_N];
     float *xa_s = (float *)edge_aligned_alloc((size_t)EDGE_ARENA_LEN * sizeof(float));
@@ -2957,15 +2466,6 @@ static void test_raise_to(void) {
     }
     free(xa_s); free(xa_v); free(la);
     printf("PASS raise_to_f32 (finite with ties and zero signs, NaN sprinkle, offsets 1..15 canary-guarded)\n");
-}
-
-static void bench_raise_to(void) {
-    float x0[BENCH_N], x[BENCH_N], lo[BENCH_N];
-    fill_bench_floats(x0, BENCH_N); fill_bench_floats(lo, BENCH_N);
-    memcpy(x, x0, sizeof x);
-    NEW_BENCH("raise_to_f32",
-              (sk_raise_to_f32_scalar(x, lo, BENCH_N), g_bench_sink += x[0]),
-              (sk_raise_to_f32(x, lo, BENCH_N), g_bench_sink += x[0]));
 }
 
 /* Flags carry any byte value (non-zero means set); hangovers are zero about
@@ -3087,23 +2587,6 @@ static void test_stationary_mask_large(void) {
     }
     free(f); free(m_ref); free(m_s); free(m_v); free(h);
     printf("PASS stationary_mask_u8_large (all bins set up to n=65549, byte-fold and lane-sum limits, written-out reference loop)\n");
-}
-
-static void bench_stationary_mask(void) {
-    unsigned char f[BENCH_N], m[BENCH_N];
-    int32_t h[BENCH_N];
-    int32_t *volatile hv = h;   /* opaque to the optimizer: the work cannot be hoisted */
-    fill_stationary_case(f, h, BENCH_N);
-    NEW_BENCH("stationary_mask_u8",
-              (hv[r_ & 7] = (r_ & 1) ? 0 : 5, g_bench_sink += sk_stationary_mask_u8_scalar(f, hv, m, BENCH_N)),
-              (hv[r_ & 7] = (r_ & 1) ? 0 : 5, g_bench_sink += sk_stationary_mask_u8(f, hv, m, BENCH_N)));
-}
-
-static void bench_max_abs(void) {
-    float x[BENCH_N];
-    fill_bench_floats(x, BENCH_N);
-    NEW_BENCH("max_abs_f32", g_bench_sink += sk_max_abs_f32_scalar(x, BENCH_N),
-                             g_bench_sink += sk_max_abs_f32(x, BENCH_N));
 }
 
 /* Inline AEC blocks: every lane boundary, real grid, canonical flag pattern,
@@ -3439,37 +2922,12 @@ int main(void) {
      * cumulative with the first. */
     print_classification_summary();
 
-    printf("\n--- microbenchmarks (n=%d, %d reps) ---\n", BENCH_N, BENCH_REPS);
-    bench_cabs_np();
-    bench_cmag2_np();
-    bench_cmag2_np_acc();
-    bench_wupdate_nlms();
-    bench_wupdate_kf();
-    bench_pairwise_sum();
-    bench_sum_sq_pairwise();
-    bench_pairwise_sum_tailfold();
-    bench_pairwise_sum_tailfold_b();
-    bench_coherence_ema_gate();
-    bench_ema_delta();
-    bench_n2_track();
-    bench_n2_initial_track();
-    bench_mask_zero();
-    bench_noise_spectrum_update();
-    bench_erl_bin_update();
-    bench_dec1_floorintmin_s32();
-    bench_erl_hold_expire();
-    bench_no_audible_echo_gain();
-    bench_max_abs();
-    bench_noise_floor_track();
-    bench_raise_to();
-    bench_stationary_mask();
 
     if (g_hard_fail_count > 0) {
         fprintf(stderr,
             "\nGATE FAILED: %d HARD FAIL(s) -- genuine finite-vs-NaN divergence or "
             "unexplained bit mismatch outside the both-NaN-payload-unspecified "
             "contract (see HARD-FAIL lines above)\n", g_hard_fail_count);
-        (void)g_bench_sink;
         return 1;
     }
 
@@ -3477,6 +2935,5 @@ int main(void) {
            "classified in-contract, 0 hard fails)\n",
            SK_HAVE_NEON, g_nan_soft_mismatch_count - g_hard_fail_count);
     printf("TOTAL CHECKS: %ld\n", g_total_checks);
-    (void)g_bench_sink;
     return 0;
 }

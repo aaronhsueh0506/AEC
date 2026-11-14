@@ -19,7 +19,6 @@ BIN="$(make -s -C c_impl print-bin-dir)"
 | `--level {0\|1\|2\|3}` | 預設 `1`（balanced）；`0` = mild、`1` = balanced、`2` = aggressive、`3` = no_floor（即 `AecLevel` 的數值）。只收整串十進位數字，名稱、空字串、`1x` 一律以結束碼 2 拒絕；`--preset` 仍可作為別名 |
 | `--cng` | 開啟舒適噪音 |
 | `--no-cng` | 關閉舒適噪音 |
-| `--no-delay-est` | 關閉線上延遲估計 |
 | `--no-res` | 關閉殘留回音抑制 |
 | `--fft-size <n>` | 覆寫 FFT 大小：16 kHz 可用 256/512，48 kHz 為 1024 |
 | `--delay-mode {matched\|fixed\|external}` | 覆寫 `cfg.delay_mode`（預設 `matched`）；`external` 對應 C API 的 `AEC_DELAY_EXTERNAL_ALIGNED` |
@@ -74,8 +73,7 @@ duty: matched_filter_ran=250/250 hops (100.00% engagement, 0.00% saved)
 上面是 16 kHz／256、`matched`、2 s 輸入的實測輸出。duty-cycle 降頻的週期是函式庫內部值（預設 0 = 每個 hop 全速分析），
 `aec_wav` 沒有旗標能改它，所以這一行在預設組態下恆為 100%；降頻只在測試用的內部鉤子下出現。
 
-`delay_mode != matched` 時（`fixed`／`external`，或舊式
-`--no-delay-est`）從未建過 matched filter，沒有成本可省，印：
+`delay_mode != matched` 時（`fixed`／`external`）從未建過 matched filter，沒有成本可省，印：
 
 ```text
 duty: matched_filter_ran=0/0 hops (n/a -- no matched-filter estimator in delay_mode=fixed)

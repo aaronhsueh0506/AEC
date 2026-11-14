@@ -183,8 +183,8 @@ their members are listed in `c_impl/README.md`.
 
 ### Behaviour-neutral C changes: the line-stream baseline
 
-No golden directory ships in `c_impl/test/`. The five hash-stream tests (`test-split-entry`, `test-split-entry-2`,
-`test-split-entry-3`, `test-aec-array`, `test-aec-array-2`) capture and compare their own output instead, run from `c_impl/`:
+No golden directory ships in `c_impl/test/`. The four hash-stream tests (`test-split-entry`, `test-split-entry-2`,
+`test-aec-array`, `test-aec-array-2`) capture and compare their own output instead, run from `c_impl/`:
 
 ```bash
 out="$(mktemp -d)"                                    # scratch directory outside the repository; delete it when done
@@ -193,7 +193,7 @@ AEC_TEST_BASELINE_WRITE="$out" make test-split-entry  # BEFORE editing: write <t
 AEC_TEST_BASELINE="$out" make test-split-entry        # AFTER editing: every line must match
 ```
 
-Do this for each of the five tests, at `SIMD=1` and `SIMD=0`. A pool-size change shows up only in the `META` lines; every hop hash must stay
+Do this for each of the four tests, at `SIMD=1` and `SIMD=0`. A pool-size change shows up only in the `META` lines; every hop hash must stay
 identical. The files are valid for the host, compiler and FFT backend that wrote them. The Python-side goldens
 (`make test-detectors-parity`, `make test-parity-e2e`) are regenerated from the Python reference on every run and are not checked in.
 
