@@ -3,9 +3,7 @@
 #include "aec_config_build.h"
 #include "aec_tuning.h"
 #include "aec_internal.h"
-#include "aec_balanced_config.h"
 #include "utility/simd_aec.h"
-#include "utility/fast_math.h"
 #include "utility/mem_align.h"
 #include "suppression_gain.h"
 
@@ -172,20 +170,8 @@ void aec_render_stats(const float* hop, int n, AecRenderStats* out) {
 }
 
 int aec_res_set_level(AecRes* r, AecLevel level) {
-    float db, dt_db;
-    int en;
     if (!r) return -1;
-    if (aec_level_floor_db(level, &db) != 0) return -1;
-    if (aec_level_dt_floor_db(level, &dt_db) != 0) return -1;
-    if (aec_level_split_floor_enabled(level, &en) != 0) return -1;
-    /* The suppressor validates and applies first and writes nothing on refusal. The ramp governs the
-     * far-active floor only; the DT floor and the split-floor gate step immediately. */
-    if (suppression_gain_set_split_floor_far_active_db(&r->sg, db, AEC_LEVEL_RAMP_MS) != 0)
-        return -1;
-    if (suppression_gain_set_split_floor_dt_db(&r->sg, dt_db) != 0)
-        return -1;
-    if (suppression_gain_set_split_floor_enabled(&r->sg, en) != 0)
-        return -1;
+    if (aec_sg_apply_level(&r->sg, level) != 0) return -1;
     r->sg_cfg.split_floor_far_active = r->sg.cfg.split_floor_far_active;
     r->sg_cfg.split_floor_dt = r->sg.cfg.split_floor_dt;
     r->sg_cfg.split_floor_enabled = r->sg.cfg.split_floor_enabled;

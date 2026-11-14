@@ -22,7 +22,6 @@
 
 #include "aec.h"
 #include "aec_impl.h"
-#include "aec_internal.h"
 #include "aec_array_internal.h"
 #include "aec_config_build.h"           /* aec_synth_window_build */
 #include "aec_tuning.h"                /* AecResolved, aec_resolve_tuned, aec_apply_level */
@@ -145,24 +144,6 @@ struct AecArray {
     AecDutyGate duty;
 };
 
-typedef struct PoolCursor {
-    uint8_t* ptr;
-    size_t remaining;
-} PoolCursor;
-
-static void* pool_carve(PoolCursor* cursor, size_t count, size_t element_size) {
-    size_t raw, aligned;
-    void* out;
-    if (!cursor || count == 0 || element_size == 0) return NULL;
-    raw = ck_mul_size(count, element_size);
-    aligned = ck_align16_size(raw);
-    if (MEM_SIZE_INVALID(raw) || MEM_SIZE_INVALID(aligned) || aligned > cursor->remaining) return NULL;
-    out = cursor->ptr;
-    cursor->ptr += aligned;
-    cursor->remaining -= aligned;
-    return out;
-}
-
 /* ---- configuration ------------------------------------------------------------------------------------------------- */
 
 /* Resolved geometry and pool sizes of an array cfg. */
@@ -191,11 +172,10 @@ static void array_derive_lane(const AecResolved* in, AecResolved* lane) {
 
 static size_t flow_buffer_size(int hop, int fft, int n, int ring, int post) {
     size_t total = ck_field_size(0, (size_t)fft, sizeof(float));   /* synth_window */
-    int i;
-    for (i = 0; i < 2; ++i) total = ck_field_size(total, (size_t)hop, sizeof(float));
+    total = ck_field_size_reps(total, (size_t)hop, sizeof(float), 2);
     if (post) {
-        for (i = 0; i < 5; ++i) total = ck_field_size(total, (size_t)n, sizeof(Complex));
-        for (i = 0; i < 2; ++i) total = ck_field_size(total, (size_t)n, sizeof(float));
+        total = ck_field_size_reps(total, (size_t)n, sizeof(Complex), 5);
+        total = ck_field_size_reps(total, (size_t)n, sizeof(float), 2);
     }
     if (ring > 0) total = ck_field_size(total, (size_t)ring, sizeof(float));
     return MEM_SIZE_INVALID(total) ? 0 : total;
@@ -309,7 +289,7 @@ static int array_setup(Aec* a, uint8_t* base, size_t avail, const AecResolved* r
     const AecTuning* tn = &rs->tun;
     ArrayDims d;
     AecArray* p;
-    PoolCursor cursor;
+    AcPoolCursor cursor;
     int ch, q_hops;
     void* region;
 
@@ -327,47 +307,44 @@ static int array_setup(Aec* a, uint8_t* base, size_t avail, const AecResolved* r
     p->post = d.post; p->full = d.full;
     p->delay_ring_size = d.ring;
 
-    p->synth_window = (float*)pool_carve(&cursor, (size_t)d.fft, sizeof(float));
+    p->synth_window = (float*)ac_pool_carve(&cursor, (size_t)d.fft, sizeof(float));
     if (!p->synth_window) return -1;
     aec_synth_window_build(p->synth_window, d.fft);
-    p->mic_lane = (float*)pool_carve(&cursor, (size_t)d.hop, sizeof(float));
-    p->aligned_ref = (float*)pool_carve(&cursor, (size_t)d.hop, sizeof(float));
+    p->mic_lane = (float*)ac_pool_carve(&cursor, (size_t)d.hop, sizeof(float));
+    p->aligned_ref = (float*)ac_pool_carve(&cursor, (size_t)d.hop, sizeof(float));
     if (!p->mic_lane || !p->aligned_ref) return -1;
     if (d.post) {
-        p->fused_error = (Complex*)pool_carve(&cursor, (size_t)d.n, sizeof(Complex));
-        p->fused_near = (Complex*)pool_carve(&cursor, (size_t)d.n, sizeof(Complex));
-        p->residual_work = (Complex*)pool_carve(&cursor, (size_t)d.n, sizeof(Complex));
-        p->residual_proj = (Complex*)pool_carve(&cursor, (size_t)d.n, sizeof(Complex));
-        p->fused_r2 = (float*)pool_carve(&cursor, (size_t)d.n, sizeof(float));
-        p->fused_comfort = (float*)pool_carve(&cursor, (size_t)d.n, sizeof(float));
-        p->render_base = (Complex*)pool_carve(&cursor, (size_t)d.n, sizeof(Complex));
+        p->fused_error = (Complex*)ac_pool_carve(&cursor, (size_t)d.n, sizeof(Complex));
+        p->fused_near = (Complex*)ac_pool_carve(&cursor, (size_t)d.n, sizeof(Complex));
+        p->residual_work = (Complex*)ac_pool_carve(&cursor, (size_t)d.n, sizeof(Complex));
+        p->residual_proj = (Complex*)ac_pool_carve(&cursor, (size_t)d.n, sizeof(Complex));
+        p->fused_r2 = (float*)ac_pool_carve(&cursor, (size_t)d.n, sizeof(float));
+        p->fused_comfort = (float*)ac_pool_carve(&cursor, (size_t)d.n, sizeof(float));
+        p->render_base = (Complex*)ac_pool_carve(&cursor, (size_t)d.n, sizeof(Complex));
         if (!p->fused_error || !p->fused_near || !p->residual_work || !p->residual_proj || !p->fused_r2 ||
             !p->fused_comfort || !p->render_base) return -1;
     }
     if (d.ring > 0) {
-        p->delay_ring = (float*)pool_carve(&cursor, (size_t)d.ring, sizeof(float));
+        p->delay_ring = (float*)ac_pool_carve(&cursor, (size_t)d.ring, sizeof(float));
         if (!p->delay_ring) return -1;
     }
     if (d.matched) {
-        region = pool_carve(&cursor, d.delay_bytes, 1);
+        region = ac_pool_carve(&cursor, d.delay_bytes, 1);
         if (!region || delay_aec_init(&p->delay, region, d.delay_bytes, cfg->sample_rate, d.hop,
                                       cfg->delay_num_filters) != 0) return -1;
     }
     if (d.full) {
-        region = pool_carve(&cursor, d.res_bytes, 1);
+        region = ac_pool_carve(&cursor, d.res_bytes, 1);
         p->gain_stage = region ? aec_res_init_resolved(region, d.res_bytes, &d.lane) : NULL;
         if (!p->gain_stage) return -1;
     }
-    region = pool_carve(&cursor, d.fft_bytes, 1);
+    region = ac_pool_carve(&cursor, d.fft_bytes, 1);
     p->fft = region ? fft_init(region, d.fft_bytes, d.fft) : NULL;
     if (!p->fft) return -1;
     for (ch = 0; ch < AEC_ARRAY_MICS; ++ch) {
-        region = pool_carve(&cursor, d.lane_each_bytes, 1);
+        region = ac_pool_carve(&cursor, d.lane_each_bytes, 1);
         p->lanes[ch] = region ? aec_lane_init(region, d.lane_each_bytes, &d.lane, p->fft) : NULL;
-        if (!p->lanes[ch]) {
-            while (ch-- > 0) aec_destroy(p->lanes[ch]);
-            return -1;
-        }
+        if (!p->lanes[ch]) return -1;      /* every lane lives in the caller's pool: a failed build holds nothing to release */
     }
     if (cursor.remaining != 0) return -1;
 

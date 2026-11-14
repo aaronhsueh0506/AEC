@@ -160,6 +160,9 @@ static void test_config_factories_unsupported_rate(void) {
     }
     free(mem);
 
+    aec_config_from_level(NULL, AEC_LEVEL_BALANCED, 16000);       /* a NULL cfg is ignored (a crash fails the run) */
+    CHECK(1, "aec_config_from_level(NULL) returns");
+
     /* Supported rates: 52 ms below 44.1 kHz, 64 ms at 48 kHz. */
     const struct { int sr, fft, filter_length; } good[] = {
         { 8000, 256, 416 }, { 16000, 256, 832 }, { 48000, 1024, 3072 },

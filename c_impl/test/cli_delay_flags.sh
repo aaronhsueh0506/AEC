@@ -248,6 +248,16 @@ check_mem_case "FIXED 1600, 16k/256"                  --delay-mode fixed --fixed
 check_mem_case "EXTERNAL_ALIGNED, 16k/256"            --delay-mode external -- --delay-mode external
 check_mem_case "MATCHED n=5 (default), 16k/512"       --fft-size 512 -- --fft-size 512
 
+# ============================================================================
+# 11. Integer options are parsed strictly: a typo exits 2 instead of reading as 0
+# ============================================================================
+for bad in "--fft-size abc" "--fft-size 512x" "--delay-num-filters 3x" "--delay-num-filters ''" "--fixed-delay 12.5" "--fixed-delay 99999999999"; do
+    rc=0
+    eval "\"\$AEC_WAV\" \"\$MIC\" \"\$REF\" \"\$TMP/o5.wav\" --cng $bad" >"$TMP/o5.log" 2>&1 || rc=$?
+    if [ "$rc" = 2 ] && grep -q "is not an integer" "$TMP/o5.log"; then ck ok "$bad rejected at CLI parse (exit 2)"
+    else ck no "$bad rejected at CLI parse (exit $rc)"; fi
+done
+
 if [ "$fails" -eq 0 ]; then
     echo "cli_delay_flags: PASS"
     exit 0

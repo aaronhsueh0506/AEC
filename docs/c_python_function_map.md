@@ -279,6 +279,7 @@
 | `src/aec_res.c:aec_res_hop_size` | — | C-only（範圍內無 Python 對應） | — | `ctest:test_aec_res.c` |
 | `src/aec_res.c:aec_res_process` | — | C-only（範圍內無 Python 對應；內部呼叫 `suppression_gain_get_gain`） | — | `ctest:test_aec_res.c` |
 | `src/aec_res.c:aec_res_set_level` | — | C-only（內部函式；只收 level，far-active ramp 固定 `AEC_LEVEL_RAMP_MS` = 100 ms；範圍內無 Python 對應） | S-26；D-04 | `ctest:test_aec_res.c` |
+| `src/aec.c:aec_sg_apply_level` | — | C-only（內部函式；把 level 的 far-active 下限［`AEC_LEVEL_RAMP_MS` ramp］、DT 下限與 split-floor 開關寫進一個 SuppressionGain；`aec_set_level` 與 `aec_res_set_level` 共用；範圍內無 Python 對應） | S-26；D-04 | `ctest:test_aec_res.c`<br>`ctest:test_runtime_preset.c` |
 | `src/aec_res.c:aec_res_split_floor` | — | C-only（範圍內無 Python 對應） | — | `ctest:test_aec_res.c` |
 | `src/aec_res.c:aec_render_stats` | `modules/residual/suppression_gain.py:SuppressionGain.get_gain#render_block` | partial（無實例的 render 統計：× 32768 後的 sum 與 peak 平方；Python 在 `get_gain` 內部算） | D-12 | `ctest:test_aec_res.c` |
 | `src/aec_res.c:aec_testing_res_mem_size` | — | C-only（測試專用鉤子，只在 `AEC_TESTING` 建置存在：單獨一個陣列增益階段的記憶體大小，供 Audio_ALG 的 pyc_parity 4ch replay 在錄製的 frame 上重算 G_res；`test_aec_array_flow.c` 驗證它與陣列自己的 G_res 逐位元相同） | — | `ctest:test_aec_array_flow.c` |
@@ -791,7 +792,6 @@
 | `src/aec_array.c:fuse_contexts` | — | C-only（以 beam 權重融合四條 lane 的誤差、near、R²、舒適噪音（R² 為相干、舒適噪音為功率和）） | — | `ctest:test_aec_array.c`<br>`ctest:test_aec_array_flow.c` |
 | `src/aec_array.c:lane_contributes` | — | C-only（判斷一條 lane 的權重是否有非零項而參與融合） | — | `ctest:test_aec_array.c`<br>`ctest:test_aec_array_flow.c` |
 | `src/aec_array.c:max_lane_erle_windowed` | — | C-only（四條 lane 的 windowed ERLE 最大值，作為 duty 看門狗訊號） | — | `ctest:test_aec_array.c`<br>`ctest:test_aec_array_flow.c` |
-| `src/aec_array.c:pool_carve` | — | C-only（自 pool 游標切出 16 byte 對齊的區塊） | — | `ctest:test_aec_array.c`<br>`ctest:test_aec_array_flow.c` |
 | `src/aec_array.c:project_render_base` | — | C-only（把各 lane 的渲染底座依權重投影成融合底座；沒有任何貢獻 lane 的輸出守衛觸發時直接用 beam 的 E） | — | `ctest:test_aec_array.c`<br>`ctest:test_aec_array_flow.c` |
 | `src/aec_array.c:update_shared_delay` | — | C-only（共用 delay 估計器的逐 hop 更新（EXTERNAL_ALIGNED／FIXED 直接給值；MATCHED 含 duty 降頻、候選值確認與接受）） | — | `ctest:test_aec_array.c`<br>`ctest:test_aec_array_flow.c` |
 

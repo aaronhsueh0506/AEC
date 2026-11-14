@@ -16,6 +16,11 @@ extern "C" {
 int aec_build_sg_config(const AecResolved* rs, SuppressionGainConfig* out_cfg,
                         SuppressionGainTuning* out_tun);
 
+/* Retargets a suppressor to `level`: the far-end-active floor (reached after AEC_LEVEL_RAMP_MS), the DT floor and the split-floor
+ * gate. Returns 0, or -1 for an unknown level or a refused value (the lookups come first and the suppressor writes nothing on a
+ * refusal, so the first refusal leaves it unchanged). */
+int aec_sg_apply_level(SuppressionGain* sg, AecLevel level);
+
 /* Bytes of the four decoded ENR/SU tables of an n_bins grid (each table padded to 16 bytes). */
 size_t aec_sg_tables_bytes(int n_bins);
 

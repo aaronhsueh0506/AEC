@@ -43,6 +43,18 @@ when verdict requires it.
 ---
 
 
+## [Unreleased] — 2026-11-14 — Review round: shared pool and hash helpers, one level-apply helper, strict `aec_wav` integers, fail-closed pin gate
+
+**Output and layout unchanged.** `aec_get_mem_size()`, `aec_get_mem_requirements()` (including `build_flags_hash`, `c8cb8b58` for the default config) and `aec_get_mem_breakdown()` are identical before and after on 1,792 configurations (4 grids x mono/array x 4 residual modes x 3 delay modes x `delay_num_filters` x 4 levels x CNG) at `SIMD=1` and `SIMD=0`; the five `AEC_TEST_BASELINE` streams (`baseline_round2`) compare with 0 mismatches, `META` pool lines included.
+
+- `aec_array.c` carves its pool with audiolib's `AcPoolCursor` / `ac_pool_carve()` (its private `PoolCursor` / `pool_carve()` was a copy) and sizes the flow buffers with `ck_field_size_reps()`; `aec_build_flags_hash()` folds its carve text through `ac_fnv1a_str()`. A lane that fails to build no longer calls `aec_destroy()` on the lanes before it: every lane lives in the caller's pool, so there is nothing to release.
+- `aec_sg_apply_level()` (new, internal) holds the three level lookups, the three suppressor setters and the ramp; `aec_set_level()` and `aec_res_set_level()` call it instead of each carrying a copy. The duplicated pre-checks in `aec_set_level()` are gone (the helper validates before it writes).
+- `aec_config_from_level(NULL, ...)` returns instead of crashing; the `AecStatus` comment says what a refused call does (instance untouched; view getters zero their `out`).
+- `aec_wav`: `--fft-size`, `--delay-num-filters` and `--fixed-delay` parse as whole decimal integers (`aec_cli_parse_int()` in `example/cli_level.h`); a typo exits 2 with "is not an integer" instead of reading as 0. `test/cli_delay_flags.sh` checks six malformed values.
+- `test/pyc_parity/run_parity_e2e.sh` stops with a setup error (exit 2) when the pin file lists no inputs; an emptied pin file used to pass the input check without verifying anything.
+- Unused includes removed (`aec_internal.h` from `aec_array.c`, `aec_balanced_config.h` and `utility/fast_math.h` from `aec_res.c`; object code identical).
+- `docs/c_python_function_map.md`: `pool_carve` row removed, `aec_sg_apply_level` row added.
+
 ## [Unreleased] — 2026-11-14 — Docs only: which spectrum the denoiser reads
 
 Documentation only; no source, header or output changes. `docs/reference/integration.md`, `docs/html/reference/aec_usage.html` and `docs/sdk_migration_output_guard.md` now say the same as `aec.h`: the shipped mono chain hands `base_spec` to the denoiser (it estimates on the spectrum its gain is multiplied on), the shipped 4ch chain hands `error_spec`, the two differ only on output-guard hops, and `error_spec` / `formed_hop` stay the analysis seam. The usage example shows `base_spec`.

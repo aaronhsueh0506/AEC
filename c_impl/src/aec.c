@@ -12,7 +12,7 @@
 #include "utility/simd_kernel_nn.h"  /* skn_all_finite_f32 */
 #include "utility/fast_math.h"
 #include "aec_array_internal.h"      /* array dispatch */
-#include "aec_res_internal.h"        /* AEC_LEVEL_RAMP_MS */
+#include "aec_res_internal.h"
 #include <assert.h>
 #include <stdint.h>
 #include <limits.h>
@@ -113,6 +113,7 @@ int aec_level_split_floor_enabled(AecLevel p, int* enabled_out) {
 }
 
 void aec_config_from_level(AecConfig* cfg, AecLevel p, int sr) {
+    if (!cfg) return;
     memset(cfg, 0, sizeof(*cfg));
     cfg->sample_rate = sr;
     /* The only place a default fft_size is applied (0 for an unsupported rate, which the validator rejects). */
@@ -1548,15 +1549,9 @@ static uint32_t aec_build_flags_hash(void) {
         "|array(aec,ctl,swin,mic,aligned,fuse?(complex5,float2),ring?,delay?,res?(tables),fft,lane4(shared-fft,lean,state-lane-no-ree-cng))",
         "|align16"
     };
-    uint32_t hash = 2166136261u;
+    uint32_t hash = AC_FNV1A_SEED;
     size_t i;
-    for (i = 0; i < sizeof(parts) / sizeof(parts[0]); ++i) {
-        const char* text = parts[i];
-        while (*text) {
-            hash ^= (uint32_t)(unsigned char)*text++;
-            hash *= 16777619u;
-        }
-    }
+    for (i = 0; i < sizeof(parts) / sizeof(parts[0]); ++i) hash = ac_fnv1a_str(hash, parts[i]);
     return ac_memreq_abi_hash(hash);
 }
 
@@ -1692,26 +1687,23 @@ long aec_far_fft_real_compute_count(const Aec* a) {
     return total;
 }
 
-int aec_set_level(Aec* a, AecLevel level) {
+int aec_sg_apply_level(SuppressionGain* sg, AecLevel level) {
     float db, dt_db;
     int en;
+    if (aec_level_floor_db(level, &db) != 0 || aec_level_dt_floor_db(level, &dt_db) != 0 ||
+        aec_level_split_floor_enabled(level, &en) != 0) return -1;
+    /* The suppressor validates and applies first and writes nothing on refusal. The ramp governs the far-active floor only; the
+     * DT floor and the split-floor gate step immediately. */
+    if (suppression_gain_set_split_floor_far_active_db(sg, db, AEC_LEVEL_RAMP_MS) != 0) return -1;
+    if (suppression_gain_set_split_floor_dt_db(sg, dt_db) != 0) return -1;
+    return suppression_gain_set_split_floor_enabled(sg, en) != 0 ? -1 : 0;
+}
+
+int aec_set_level(Aec* a, AecLevel level) {
     if (aec_unusable(a)) return -1;
-    if (aec_level_floor_db(level, &db) != 0) return -1;
-    if (aec_level_dt_floor_db(level, &dt_db) != 0) return -1;
     if (AEC_IS_ARRAY(a)) return aec_array_impl_set_level(a, level);
-    /* Lookups are validated before any write; the suppressor applies first
-     * and refuses without writing, leaving the instance's level unchanged. */
-    if (aec_level_split_floor_enabled(level, &en) != 0) return -1;
-    if (suppression_gain_set_split_floor_far_active_db(&a->a3_sg, db,
-                                                       AEC_LEVEL_RAMP_MS) != 0) {
-        return -1;
-    }
-    if (suppression_gain_set_split_floor_dt_db(&a->a3_sg, dt_db) != 0) {
-        return -1;
-    }
-    if (suppression_gain_set_split_floor_enabled(&a->a3_sg, en) != 0) {
-        return -1;
-    }
+    /* The suppressor applies first and refuses without writing, leaving the instance's level unchanged. */
+    if (aec_sg_apply_level(&a->a3_sg, level) != 0) return -1;
     return aec_apply_level(&a->cfg, &a->tun, level);
 }
 

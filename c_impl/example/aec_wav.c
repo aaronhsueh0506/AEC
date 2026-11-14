@@ -66,6 +66,11 @@ static void print_config_rejected(const char* who, int sr,
             cfg->delay_num_filters, cfg->fixed_delay_samples);
 }
 
+static int bad_int(const char* option, const char* text) {
+    fprintf(stderr, "ERROR: %s '%s' is not an integer\n", option, text);
+    return 2;
+}
+
 int main(int argc, char* argv[]) {
     if (argc < 4) { print_usage(argv[0]); return 1; }
     const char* mic_path = argv[1];
@@ -97,8 +102,9 @@ int main(int argc, char* argv[]) {
         else if (!strcmp(arg, "--no-cng"))          explicit_cng = 0;
         else if (!strcmp(arg, "--no-delay-est"))    no_delay_est = 1;
         else if (!strcmp(arg, "--no-res"))          no_res = 1;
-        else if (!strcmp(arg, "--fft-size") && i + 1 < argc)
-            fft_size = atoi(argv[++i]);
+        else if (!strcmp(arg, "--fft-size") && i + 1 < argc) {
+            if (aec_cli_parse_int(argv[++i], &fft_size) != 0) return bad_int(arg, argv[i]);
+        }
         else if (!strcmp(arg, "--delay-mode") && i + 1 < argc) {
             if (parse_delay_mode(argv[++i], &delay_mode) != 0) {
                 fprintf(stderr, "ERROR: unknown --delay-mode '%s'. "
@@ -107,9 +113,11 @@ int main(int argc, char* argv[]) {
             }
             have_delay_mode = 1;
         } else if (!strcmp(arg, "--delay-num-filters") && i + 1 < argc) {
-            delay_num_filters = atoi(argv[++i]); have_delay_num_filters = 1;
+            if (aec_cli_parse_int(argv[++i], &delay_num_filters) != 0) return bad_int(arg, argv[i]);
+            have_delay_num_filters = 1;
         } else if (!strcmp(arg, "--fixed-delay") && i + 1 < argc) {
-            fixed_delay_samples = atoi(argv[++i]); have_fixed_delay = 1;
+            if (aec_cli_parse_int(argv[++i], &fixed_delay_samples) != 0) return bad_int(arg, argv[i]);
+            have_fixed_delay = 1;
         } else if (!strcmp(arg, "--print-mem-size"))
             print_mem_size = 1;
         else if (!strcmp(arg, "--debug-trace") && i + 1 < argc)

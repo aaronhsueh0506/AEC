@@ -66,8 +66,8 @@ typedef enum AecResidualMode {
 #define AEC_ARRAY_MICS  4
 
 /* Result of every aec_process_* / aec_apply_* call, of the view getters (aec_get_residual / aec_get_linear / aec_get_array) and
- * of aec_resolve_signal_grid() / aec_get_mem_breakdown(): 0, or a negative reason. A refused call writes nothing, except
- * AEC_ERR_DSP below. aec_get_mem_requirements, aec_set_level and aec_synthesis_window
+ * of aec_resolve_signal_grid() / aec_get_mem_breakdown(): 0, or a negative reason. A refused call leaves the instance untouched,
+ * except AEC_ERR_DSP below; a view getter or breakdown call zeroes its `out` record as each function states. aec_get_mem_requirements, aec_set_level and aec_synthesis_window
  * follow the same sign (0 = success, -1 = failure). aec_apply_external_realign() returns an outcome (1 / 0 / -1), and
  * aec_is_valid_sample_rate() is a predicate (1 / 0). */
 typedef enum AecStatus {
@@ -129,7 +129,7 @@ typedef struct AecConfig {
 /* Fills the public configuration for a rate: the rate's product fft_size and level `level` (an out-of-enum level reads as
  * AEC_LEVEL_BALANCED), every other field at its default. For a rate with no grid (anything but 8000/16000/48000, including 0
  * and negative values) fft_size is 0, which aec_get_mem_size / aec_init / aec_create refuse. Everything the instance tunes
- * beyond AecConfig follows from (sample_rate, fft_size, n_mics, level) and is not caller-settable. */
+ * beyond AecConfig follows from (sample_rate, fft_size, n_mics, level) and is not caller-settable. A NULL cfg is ignored. */
 void aec_config_from_level(AecConfig* cfg, AecLevel level, int sample_rate);
 
 /* Signal grid: (sample_rate, fft_size) fixes the geometry; frame_size = fft_size

@@ -44,8 +44,10 @@ mkdir -p "$WORK" || exit 2
 # ---- 1. pinned inputs -------------------------------------------------------------------------
 echo "== inputs (pin: test/parity_e2e_inputs.sha256, wav root: <aec-root>/wav)"
 pin_bad=0
+pin_n=0
 while read -r want rel; do
     case "$want" in ''|'#'*) continue ;; esac
+    pin_n=$((pin_n + 1))
     f=$WAV_ROOT/$rel
     if [ ! -f "$f" ]; then
         echo "  MISSING  $rel"
@@ -65,6 +67,7 @@ while read -r want rel; do
         echo "  ok       $rel  sha256=${got}"
     fi
 done < "$PIN"
+[ "$pin_n" -gt 0 ] || { echo "FAIL(setup): pin file lists no inputs: $PIN" >&2; exit 2; }
 if [ "$pin_bad" -ne 0 ]; then echo "FAIL: pinned input check failed"; exit 1; fi
 
 # ---- 2/3. rows --------------------------------------------------------------------------------
