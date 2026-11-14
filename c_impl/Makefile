@@ -619,7 +619,7 @@ test-header-fresh:
 	  fi; \
 	done
 
-# Compile-only check of the public header with include/ alone on the path (never -I./include/internal): aec.h compiles by
+# Public header check with include/ alone on the path (never -I./include/internal): aec.h compiles by
 # itself as C and as C++11 with the AEC_LEVEL_* enumerators accepted by aec_config_from_level() and aec_set_level(). A public header that starts including an include/internal/
 # header fails here. It needs no audiolib archive, so it sits outside the COMMON_LIB dispatch like test-header-fresh.
 .PHONY: test-header-cpp
@@ -628,7 +628,10 @@ test-header-cpp:
 	  printf '#include "%s"\n' "$$h" | $(CC) -x c -std=gnu99 -fsyntax-only -Wall -Wextra -Werror -I./include -I$(COMMON_DIR)/include -I$(COMMON_DIR) - || exit 1; \
 	done
 	$(CXX) -std=c++11 -fsyntax-only -Wall -Wextra -Werror -I./include -I$(COMMON_DIR)/include -I$(COMMON_DIR) $(TEST_DIR)/test_header_cpp.cpp
-	@echo "test-header-cpp: aec.h compiles alone as C and as C++11, the AEC_LEVEL_* enumerators convert"
+	@mkdir -p $(BIN_ROOT)/test-header-cpp
+	$(CXX) -std=c++11 -Wall -Wextra -Werror -DAEC_HEADER_CPP_RUN -I./include -I$(COMMON_DIR)/include -I$(COMMON_DIR) $(TEST_DIR)/test_header_cpp.cpp -o $(BIN_ROOT)/test-header-cpp/test_header_cpp
+	$(BIN_ROOT)/test-header-cpp/test_header_cpp
+	@echo "test-header-cpp: aec.h compiles alone as C and as C++11, the AEC_LEVEL_* enumerators convert, the public value names hold"
 
 # Compiles and runs the C sample embedded in STATIC_MEMORY.md against the current aec.h. The script builds audiolib itself, so
 # the target sits outside the COMMON_LIB dispatch like test-header-fresh.
@@ -1517,7 +1520,7 @@ help:
 	@echo "                  vs a portable model of the AArch64 NEON dataflow; scalar kernels vs the scalar model otherwise"
 	@echo "  test-aec-res    RES gain stage (include/internal/aec_res_internal.h): lane-equal config, API contract, render scale, initial phase"
 	@echo "  test-header-fresh  Regenerate include/internal/aec_balanced_config.h and diff it against the checked-in copy"
-	@echo "  test-header-cpp  Compile-only check: aec.h alone as C and as C++11 with the AEC_LEVEL_* names"
+	@echo "  test-header-cpp  aec.h alone as C and as C++11 (compile-only), then a run of the C++ value checks (AEC_LEVEL_* digits, public names)"
 	@echo "  test-detectors-parity  Gate detectors.c against the Python reference (regenerates the golden)"
 	@echo "  test-detectors-parity-all  Run detector parity on legacy 8 kHz and all three product grids"
 	@echo "  debug   Build with -g"

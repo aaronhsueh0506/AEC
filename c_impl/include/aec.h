@@ -533,7 +533,6 @@ typedef struct AecMemReq {
     uint32_t reserved;
     uint64_t bytes;
 } AecMemReq;
-_Static_assert(sizeof(AecMemReq) == 32, "AecMemReq must be exactly 32 bytes");
 
 /* Return 0 and fill *out for a valid cfg (single-channel or array); -1 (out zeroed) for a NULL argument or an invalid cfg.
  * out->bytes == aec_get_mem_size(cfg). */

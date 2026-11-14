@@ -48,6 +48,26 @@ static int check_pinned_sizes(void) {
     return bad;
 }
 
+/* ABI facts the headers used to pin at compile time. They fail here at run time, with the fact named. */
+#define LAYOUT_EXPECT(cond, what) do { if (!(cond)) { fprintf(stderr, "test_memory_layout: FAILED: %s\n", (what)); bad = 1; } } while (0)
+
+/* A pool is 16-byte aligned and the Aec header is carved at its start, so struct Aec must not need more. The C99 spelling of
+ * alignment query: the offset of a member of the type behind one char. */
+struct AecAlignProbe { char c; struct Aec a; };
+static int check_header_facts(void) {
+    int bad = 0;
+    LAYOUT_EXPECT(sizeof(AecMemReq) == 32, "sizeof(AecMemReq) must be exactly 32 bytes (public descriptor ABI)");
+    LAYOUT_EXPECT(offsetof(AecMemReq, bytes) == 24, "AecMemReq.bytes must sit at offset 24 with no padding before it");
+    LAYOUT_EXPECT(offsetof(struct AecAlignProbe, a) <= 16, "struct Aec must not need more alignment than the 16-byte pool alignment");
+    LAYOUT_EXPECT(AEC_DELAY_NUM_FILTERS_MAX == DA_NUM_FILTERS, "AEC_DELAY_NUM_FILTERS_MAX (aec.h) must equal DA_NUM_FILTERS, the delay estimator's bank limit");
+    LAYOUT_EXPECT(AEC_DELAY_FILTER_SIZE == DA_FILTER_SIZE, "AEC_DELAY_FILTER_SIZE (aec.h) must equal DA_FILTER_SIZE, the matched filter length");
+    LAYOUT_EXPECT(AEC_DELAY_FILTER_INTRA_SHIFT == DA_FILTER_INTRA_SHIFT, "AEC_DELAY_FILTER_INTRA_SHIFT (aec.h) must equal DA_FILTER_INTRA_SHIFT, the filter spacing");
+    LAYOUT_EXPECT(AEC_DELAY_DOWN_SAMPLING_FACTOR == DA_DOWN_SAMPLING_FACTOR, "AEC_DELAY_DOWN_SAMPLING_FACTOR (aec.h) must equal DA_DOWN_SAMPLING_FACTOR, the estimator decimation");
+    if (!bad)
+        printf("test_memory_layout: sizeof(AecMemReq) %zu; struct Aec alignment <= 16; AEC_DELAY_* equal DA_*\n", sizeof(AecMemReq));
+    return bad;
+}
+
 /* The pool descriptor: layout_version is a literal (bump it, and the pin, when a carved layout changes size or order) and, on LP64
  * (where the ABI hash is the identity), so is the FNV-1a-32 of the carve text, which every edit of that text moves. */
 #define AEC_LAYOUT_VERSION_PIN 3u
@@ -227,6 +247,7 @@ static int check_destroyed_single(Aec* a) {
 }
 
 int main(void) {
+    if (check_header_facts()) return 1;
     if (check_pinned_sizes()) return 1;
     if (check_descriptor_pin()) return 1;
 #ifndef AEC_NO_ARRAY

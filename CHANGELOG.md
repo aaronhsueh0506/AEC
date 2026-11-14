@@ -42,6 +42,15 @@ when verdict requires it.
 ---
 
 
+## [Unreleased] — 2026-11-15 — No `_Static_assert` or `static_assert` remains; the tests pin those facts at run time
+
+**Library output and object code unchanged.** Every `.o` of `libaec.a` and of `aec_wav` (`SIMD=1` and `SIMD=0`) is byte-identical to the previous commit's (a static assert emits no code), and the four baseline streams compare with 0 mismatches against streams captured from the previous commit. `AEC_LAYOUT_VERSION` stays 3.
+
+- Removed: `_Static_assert(sizeof(AecMemReq) == 32)` in `include/aec.h`; four `_Static_assert`s in `include/internal/aec_impl.h` tying `AEC_DELAY_NUM_FILTERS_MAX`, `AEC_DELAY_FILTER_SIZE`, `AEC_DELAY_FILTER_INTRA_SHIFT` and `AEC_DELAY_DOWN_SAMPLING_FACTOR` to `DA_NUM_FILTERS`, `DA_FILTER_SIZE`, `DA_FILTER_INTRA_SHIFT` and `DA_DOWN_SAMPLING_FACTOR`; `_Static_assert(_Alignof(struct Aec) <= 16)` (the only C11-only construct in the headers); the two `static_assert`s of `test/test_header_cpp.cpp`.
+- `test/test_memory_layout.c` has a new `check_header_facts()`: `sizeof(AecMemReq) == 32` and `offsetof(AecMemReq, bytes) == 24`, the four `AEC_DELAY_*` / `DA_*` equalities, and the alignment of `struct Aec` (C99 form: the member offset in a struct with a leading `char`), each failing with a message that names the fact. The `sizeof(Aec)`, pool-size, `AEC_LAYOUT_VERSION` and carve-hash pins that were already there are unchanged.
+- `test/test_header_cpp.cpp` is also built with `-DAEC_HEADER_CPP_RUN` and run by `make test-header-cpp` (no library archive needed): the `AEC_LEVEL_*` digits 0..3, the delay-geometry names, `AEC_CNG_SEED == 42u` and the `AEC_PSD_SCALE_F * AEC_PSD_SCALE_INV_F == 1` identity are checked at run time. The compile-only pass over `aec.h` as C and as C++11 stays.
+- A change to any of these facts no longer stops the compiler; it fails `make test-memory-layout` or `make test-header-cpp` (and so `make test` and `make test-full`). A build that skips the tests does not see it.
+
 ## [Unreleased] — 2026-11-14 — Dead fields removed, `AEC_LAYOUT_VERSION` 3, `AEC_OUTPUT_GUARD_API_VERSION` and two `AecArrayView` fields removed
 
 **`aec_process()` output unchanged.** The four baseline streams (`split_entry`, `split_entry2`, `aec_array`, `aec_array2`) written from this tree compare with 0 mismatches against streams captured from the previous commit (`6482974`) at 16k/256, 16k/512 and 48k/1024, `SIMD=1` and `SIMD=0`. `split_entry` differs in exactly the `META sizeof_Aec` and `META mem_size_*` lines (6 per grid and build, 18 per stream file); `split_entry2`, `aec_array` and `aec_array2` are byte-identical.

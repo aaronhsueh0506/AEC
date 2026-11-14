@@ -184,12 +184,4 @@ struct Aec {
     AecStageTiming last_timing;
 };
 
-/* The public names of internal values agree with them. */
-_Static_assert(AEC_DELAY_NUM_FILTERS_MAX == DA_NUM_FILTERS, "AEC_DELAY_NUM_FILTERS_MAX is the delay estimator's bank limit");
-_Static_assert(AEC_DELAY_FILTER_SIZE == DA_FILTER_SIZE, "AEC_DELAY_FILTER_SIZE is the matched filter length");
-_Static_assert(AEC_DELAY_FILTER_INTRA_SHIFT == DA_FILTER_INTRA_SHIFT, "AEC_DELAY_FILTER_INTRA_SHIFT is the filter spacing");
-_Static_assert(AEC_DELAY_DOWN_SAMPLING_FACTOR == DA_DOWN_SAMPLING_FACTOR, "AEC_DELAY_DOWN_SAMPLING_FACTOR is the estimator decimation");
-/* A pool is 16-byte aligned; the Aec header carved at its start needs no more. */
-_Static_assert(_Alignof(struct Aec) <= 16, "struct Aec must not need more than the pool alignment");
-
 #endif /* AEC_AEC_IMPL_H */
