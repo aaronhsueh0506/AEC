@@ -30,7 +30,7 @@ pre code{background:none;padding:0}
 <h1>AEC RES 增益階段與舒適噪音 — <code>aec_apply_cng_spec()</code></h1>
 
 <h2>1. 概要</h2>
-<p><code>Aec</code> 內部的 post chain 會算出一組逐 bin 的殘留回音抑制增益 G<sub>res</sub>(f)。<b>這個增益階段沒有獨立的公開 API</b>:單聲道的 G<sub>res</sub> 在 <code>Aec</code> 裡(<code>aec_get_residual().res_gain</code>,強度用 <code>aec_set_level()</code>),四麥克風陣列實例(<code>AecConfig.n_mics = 4</code>)則在實例的記憶池內對<b>融合後</b>的頻譜算一次 G<sub>res</sub>(<code>aec_process_residual()</code>,同樣用 <code>aec_get_residual().res_gain</code> 讀、<code>aec_set_level()</code> 設強度,見 <a href="aec_usage.html">aec_usage</a>)。階段本身是庫內部模組 <code>src/aec_res.c</code>(標頭 <code>src/aec_res_internal.h</code>,不安裝)。</p>
+<p><code>Aec</code> 內部的 post chain 會算出一組逐 bin 的殘留回音抑制增益 G<sub>res</sub>(f)。<b>這個增益階段沒有獨立的公開 API</b>:單聲道的 G<sub>res</sub> 在 <code>Aec</code> 裡(<code>aec_get_residual().res_gain</code>,強度用 <code>aec_set_level()</code>),四麥克風陣列實例(<code>AecConfig.n_mics = 4</code>)則在實例的記憶池內對<b>融合後</b>的頻譜算一次 G<sub>res</sub>(<code>aec_process_residual()</code>,同樣用 <code>aec_get_residual().res_gain</code> 讀、<code>aec_set_level()</code> 設強度,見 <a href="aec_usage.html">aec_usage</a>)。階段本身是庫內部模組 <code>src/aec_res.c</code>(標頭 <code>include/internal/aec_res_internal.h</code>,不安裝)。</p>
 <p>公開的只有與它搭配的舒適噪音填補 <code>aec_apply_cng_spec()</code>(宣告在 <code>aec.h</code>):<code>aec_apply_cng()</code> 的明確陣列形式,供自己持有產生器狀態的外部合成使用;底層的 <code>aec_cng_fill()</code>(可自選 <code>nr_floor</code>)在內部標頭 <code>aec_internal.h</code>。</p>
 
 <h2>2. 舒適噪音 API</h2>
@@ -53,7 +53,7 @@ void add_comfort_noise(uint32_t *rng, Complex *spec, const float *cn, const floa
 <div class="tblwrap"><table>
 <tr><th>類別</th><th>內容</th><th>出處</th></tr>
 <tr><td><b>外部(可調)</b></td><td>強度只有 <code>aec_set_level(a, level)</code>(level 四選一;地板固定 100 ms ramp),陣列實例上它重設融合後增益階段的強度</td><td><code>aec.h</code></td></tr>
-<tr><td><b>內部(不開放)</b></td><td><code>SuppressionGainConfig</code> 與 tuning 表(由 <code>aec_build_sg_config</code> 依格點查表)、DominantNearend、ratchet、audibility 門檻;ENR／SU 門檻表在 init 時由 run-length 碼解碼進實例的 pool(陣列的在 <code>AecRes</code> 區塊)</td><td><code>src/suppression_gain.h</code>;<code>src/aec_config_build.h</code></td></tr>
+<tr><td><b>內部(不開放)</b></td><td><code>SuppressionGainConfig</code> 與 tuning 表(由 <code>aec_build_sg_config</code> 依格點查表)、DominantNearend、ratchet、audibility 門檻;ENR／SU 門檻表在 init 時由 run-length 碼解碼進實例的 pool(陣列的在 <code>AecRes</code> 區塊)</td><td><code>include/internal/suppression_gain.h</code>;<code>include/internal/aec_config_build.h</code></td></tr>
 <tr><td>公開函式</td><td><code>aec_apply_cng_spec</code>、<code>aec_apply_cng</code>、<code>aec_apply_gain_spec</code>、<code>aec_apply_gain</code></td><td><code>aec.h</code></td></tr>
 </table></div>
 

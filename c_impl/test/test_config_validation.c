@@ -144,11 +144,11 @@ static void test_config_factories_unsupported_rate(void) {
         char what[96];
         AecConfig cfg;
         AecTuning tn;
-        aec_config_defaults(&cfg, bad_rates[i]);
+        aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, bad_rates[i]);
         aec_tuning_defaults(&tn, &cfg);
-        snprintf(what, sizeof(what), "aec_config_defaults(sr=%d): fft_size 0, filter_length 0", bad_rates[i]);
+        snprintf(what, sizeof(what), "aec_config_from_level(balanced, sr=%d): fft_size 0, filter_length 0", bad_rates[i]);
         CHECK(cfg.fft_size == 0 && tn.filter_length == 0, what);
-        snprintf(what, sizeof(what), "aec_config_defaults(sr=%d)", bad_rates[i]);
+        snprintf(what, sizeof(what), "aec_config_from_level(balanced, sr=%d)", bad_rates[i]);
         check_rejected(what, &cfg, mem, sz);
 
         aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, bad_rates[i]);
@@ -782,23 +782,23 @@ static void test_signal_grid_resolver(void) {
         struct { int sr, fft; } dflt[] = { { 8000, 256 }, { 16000, 256 },
                                            { 48000, 1024 } };
         for (size_t i = 0; i < sizeof(dflt) / sizeof(dflt[0]); ++i) {
-            AecConfig c; aec_config_defaults(&c, dflt[i].sr);
+            AecConfig c; aec_config_from_level(&c, AEC_LEVEL_BALANCED, dflt[i].sr);
             snprintf(label, sizeof(label),
-                     "aec_config_defaults(sr=%d) fills fft_size=%d",
+                     "aec_config_from_level(balanced, sr=%d) fills fft_size=%d",
                      dflt[i].sr, dflt[i].fft);
             CHECK(c.fft_size == dflt[i].fft &&
                   aec_default_fft_size(dflt[i].sr) == dflt[i].fft, label);
             snprintf(label, sizeof(label),
-                     "aec_config_defaults(sr=%d) is immediately resolvable",
+                     "aec_config_from_level(balanced, sr=%d) is immediately resolvable",
                      dflt[i].sr);
             CHECK(aec_resolve_signal_grid(c.sample_rate, c.fft_size, NULL) == AEC_OK,
                   label);
         }
         /* An unsupported rate gets fft_size 0 -- which the core then
          * rejects. */
-        AecConfig c; aec_config_defaults(&c, 44100);
+        AecConfig c; aec_config_from_level(&c, AEC_LEVEL_BALANCED, 44100);
         CHECK(c.fft_size == 0 && aec_default_fft_size(44100) == 0,
-              "aec_config_defaults(sr=44100) leaves fft_size=0 (rejected later)");
+              "aec_config_from_level(balanced, sr=44100) leaves fft_size=0 (rejected later)");
     }
 }
 
@@ -844,11 +844,11 @@ static void test_tuning_defaults_pin(void) {
  * Mutations that must fail: dropping any arm of the validator's mode switch (the matrix fails); dropping the out-of-enum
  * delay_mode check (the delay_mode=7 row fails). */
 static void test_delay_mode_defaults(void) {
-    /* aec_config_defaults must spell fixed_delay_samples out rather than
+    /* aec_config_from_level must spell fixed_delay_samples out rather than
      * leaving it at the memset 0 -- 0 is a LEGAL fixed delay, so a memset
      * default would make the shipped default config an illegal
      * MATCHED+fixed combination. */
-    AecConfig cfg; aec_config_defaults(&cfg, 16000);
+    AecConfig cfg; aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, 16000);
     CHECK(cfg.delay_mode == AEC_DELAY_MATCHED,
           "defaults: delay_mode == MATCHED");
     CHECK(cfg.fixed_delay_samples == -1,

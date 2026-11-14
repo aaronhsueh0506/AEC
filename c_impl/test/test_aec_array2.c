@@ -14,7 +14,7 @@
  *
  * Run from c_impl/:  make test-aec-array-2   (G2_VERBOSE=<file> writes every hop's unchained group hashes) */
 #include "aec.h"
-#include "../src/aec_res_internal.h"
+#include "aec_res_internal.h"
 #include "res_gain_of.h"
 #include "aec_test_tuning.h"   /* AEC_TESTING build: the admission candidate, the tuning overrides */
 #include "utility/simd_kernels.h"

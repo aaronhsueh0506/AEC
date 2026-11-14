@@ -69,17 +69,11 @@ typedef struct {
     double observer_corrob_margin;    /* 10^(live_observer_corrob_margin_db / 10) */
 } AecPostConfig;
 
-/* Per-hop trace stash for the per-frame trace; writing it does not change the output. */
-typedef struct {
-    int    aec_converged;
-    int    far_active;
-    float  gain_mean;
-} AecPostTrace;
-
 typedef struct {
     AecPostConfig cfg;
 
-    AecPostTrace trace;
+    /* This hop's active-render decision; a lane that shares the far-end PSD reads the donor's value. */
+    int far_active;
 
     /* Convergence-flags y2 threshold, scaled to the live hop_size. */
     float y2_thr;
@@ -295,13 +289,13 @@ void aec_post_eval_output_guard(AecPost *p, AecPostRunScratch *sc, int usable);
 /* Process one hop. out[hop] is always written: the synthesized output, or in->raw_output when
  * context_only. *out_pending_gain_change / *out_pending_delay_change receive the post-call state of
  * the pending EPV flags (0 / -1 when an event fired). */
-int aec_post_run(AecPost *p,
-                 const AecPostRunIn *in,
-                 const AecPostRunObj *obj,
-                 AecPostRunScratch *sc,
-                 float *out,
-                 int *out_pending_gain_change,
-                 int *out_pending_delay_change);
+void aec_post_run(AecPost *p,
+                  const AecPostRunIn *in,
+                  const AecPostRunObj *obj,
+                  AecPostRunScratch *sc,
+                  float *out,
+                  int *out_pending_gain_change,
+                  int *out_pending_delay_change);
 
 #ifdef __cplusplus
 }

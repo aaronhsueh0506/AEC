@@ -6,7 +6,7 @@
  * search). 5 is the default for bench/dataset use; a target that compensates the system delay out of band can use fewer.
  *
  * What this test proves (nothing else in the suite can):
- *   1. The default is 5 on aec_config_defaults and on all three levels, and a default Aec builds a 5-filter bank.
+ *   1. The default is 5 on all three levels, and a default Aec builds a 5-filter bank.
  *   2. The knob moves the bank geometry end to end from AecConfig through aec_create. Reliable reach is
  *      (n-1)*DA_FILTER_INTRA_SHIFT + (DA_FILTER_SIZE - 11) downsampled samples at 0.25 ms: 221 ms at n=2, 509 ms at n=5.
  *      A 150 ms echo locks at n=2 (inside reach, so the no-lock case below is about reach, not a broken estimator); a
@@ -114,9 +114,9 @@ static void test_default_is_five(void) {
     Aec *a = NULL;
     int bank;
 
-    aec_config_defaults(&cfg, SR);
+    aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, SR);
     CHECK(cfg.delay_num_filters == DA_NUM_FILTERS,
-          "aec_config_defaults: delay_num_filters == DA_NUM_FILTERS (5)");
+          "balanced level: delay_num_filters == DA_NUM_FILTERS (5)");
     CHECK(DA_NUM_FILTERS == 5, "DA_NUM_FILTERS is still 5 (the default)");
 
     aec_config_from_level(&cfg, AEC_LEVEL_MILD, SR);
@@ -126,7 +126,7 @@ static void test_default_is_five(void) {
     aec_config_from_level(&cfg, AEC_LEVEL_AGGRESSIVE, SR);
     CHECK(cfg.delay_num_filters == 5, "level aggressive: delay_num_filters == 5");
 
-    aec_config_defaults(&cfg, SR);
+    aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, SR);
     CHECK((a = aec_create(&cfg)) != NULL, "default cfg: aec_create");
     bank = a->delay.est.matched_filter.num_filters;
     aec_destroy(a);
@@ -175,21 +175,21 @@ static void test_config_validation(void) {
     int n;
     char msg[96];
 
-    aec_config_defaults(&cfg, SR);
+    aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, SR);
     cfg.delay_num_filters = 0;
     CHECK((a = aec_create(&cfg)) == NULL, "delay_num_filters=0 is rejected");
     CHECK(aec_get_mem_size(&cfg) == 0, "delay_num_filters=0 -> mem_size 0");
 
-    aec_config_defaults(&cfg, SR);
+    aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, SR);
     cfg.delay_num_filters = DA_NUM_FILTERS + 1;
     CHECK((a = aec_create(&cfg)) == NULL, "delay_num_filters=6 is rejected");
 
-    aec_config_defaults(&cfg, SR);
+    aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, SR);
     cfg.delay_num_filters = -1;
     CHECK((a = aec_create(&cfg)) == NULL, "delay_num_filters=-1 is rejected");
 
     for (n = 1; n <= DA_NUM_FILTERS; ++n) {
-        aec_config_defaults(&cfg, SR);
+        aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, SR);
         cfg.delay_num_filters = n;
         snprintf(msg, sizeof msg, "delay_num_filters=%d is accepted and honoured", n);
         if ((a = aec_create(&cfg)) == NULL) { CHECK(0, msg); continue; }

@@ -3,7 +3,7 @@
 Runs the Python RenderActivityDetector / FilterConvergenceAnalyzer /
 DoubleTalkAnalyzer over a deterministic stimulus and writes inputs + expected
 per-frame state to a raw little-endian file that
-``c_impl/test/modules/parity_detectors.c`` replays.
+``c_impl/test/parity_detectors.c`` replays.
 
 The stimulus is engineered to exercise every branch, in particular the ones a
 naive random signal would miss:

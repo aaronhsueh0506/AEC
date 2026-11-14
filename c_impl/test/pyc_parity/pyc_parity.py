@@ -1172,13 +1172,13 @@ def s03_cell(a):
         shutil.rmtree(d)
     ign = shutil.ignore_patterns('__pycache__', '.pytest_cache', 'tests', 'output_*', '*.pyc')
     shutil.copytree(os.path.join(root, 'python'), os.path.join(d, 'python'), ignore=ign)
-    os.makedirs(os.path.join(d, 'c_impl', 'include'))
+    os.makedirs(os.path.join(d, 'c_impl', 'include', 'internal'))
     gen = os.path.join(d, 'python', 'diag', 'gen_aec_balanced_config_h.py')
     p = run([sys.executable, gen], log=os.path.join(d, 'gen.log'), check=False)
-    new_p = os.path.join(d, 'c_impl', 'include', 'aec_balanced_config.h')
-    old_p = os.path.join(root, 'c_impl', 'include', 'aec_balanced_config.h')
+    new_p = os.path.join(d, 'c_impl', 'include', 'internal', 'aec_balanced_config.h')
+    old_p = os.path.join(root, 'c_impl', 'include', 'internal', 'aec_balanced_config.h')
     cell_ = {'id': 'static.s03_balanced_config_regen', 'generator': 'python/diag/gen_aec_balanced_config_h.py',
-             'header': 'c_impl/include/aec_balanced_config.h'}
+             'header': 'c_impl/include/internal/aec_balanced_config.h'}
     if p.returncode != 0 or not os.path.exists(new_p):
         cell_.update({'status': 'FAIL (generator did not run; see work/s03/gen.log)', 'rc': p.returncode})
         return cell_

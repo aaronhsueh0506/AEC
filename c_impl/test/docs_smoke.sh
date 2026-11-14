@@ -107,7 +107,7 @@ i=0
 for src in "${SOURCES[@]}"; do
     obj="$WORK/docs_smoke_obj_$i.o"
     "${CC:-gcc}" -O2 -ffp-contract=off -fno-math-errno -std=gnu99 \
-        -I"$C_IMPL_DIR/include" -I"$C_IMPL_DIR/example" -I"$COMMON_DIR/include" -I"$COMMON_DIR" \
+        -I"$C_IMPL_DIR/include" -I"$C_IMPL_DIR/include/internal" -I"$C_IMPL_DIR/example" -I"$COMMON_DIR/include" -I"$COMMON_DIR" \
         -c "$src" -o "$obj"
     OBJ_LIST+=("$obj")
     i=$((i + 1))

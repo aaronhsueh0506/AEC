@@ -103,7 +103,7 @@ void aec_state_handle_echo_path_change(AecState *s, int gain_change,
 
 /* Per-frame update (order above).
  * bridge_filter_converged: 0/1. external_delay: NULL or .reported == 0 for none.
- * render_psd, capture_psd, error_psd: float32[n_bins]. echo_psd: unused (may be NULL).
+ * render_psd, capture_psd, error_psd: float32[n_bins].
  * render_block: float32[render_block_len] or NULL (skips analyzer and saturation).
  * filter_taps_full: float32[filter_taps_size] or NULL.
  * x2_reverb_for_erle, capture_psd_erle: float32[n_bins] or NULL (render_psd / capture_psd used).
@@ -114,7 +114,6 @@ void aec_state_update(AecState *s,
                       const float *render_psd,
                       const float *capture_psd,
                       const float *error_psd,
-                      const float *echo_psd,
                       int active_render,
                       float subtractor_s_refined_max_abs,
                       float subtractor_s_coarse_max_abs,
@@ -127,7 +126,6 @@ void aec_state_update(AecState *s,
 
 int    aec_state_usable_linear_estimate(const AecState *s);
 int    aec_state_saturated_echo(const AecState *s);
-int    aec_state_transparent_mode_active(const AecState *s);
 int    aec_state_transition_triggered(const AecState *s);
 int    aec_state_min_direct_path_filter_delay(const AecState *s);
 const float *aec_state_erle(AecState *s, int onset_compensated);

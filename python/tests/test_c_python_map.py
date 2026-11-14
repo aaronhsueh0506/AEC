@@ -30,11 +30,11 @@ DOC = os.path.join(REPO, "docs", "c_python_function_map.md")
 
 COLUMNS = ["C 檔:函式", "Python 檔:符號", "關係", "已知落差", "對拍工具／測試"]
 RELATIONS = ("mirror", "partial", "C-only", "Python-only", "未能判斷")
-HEADERS = (("include", "aec_balanced_config.h"), ("src", "pbfdkf.h"), ("include", "aec_debug.h"))
+HEADERS = (("include/internal", "aec_balanced_config.h"), ("include/internal", "pbfdkf.h"))
 
 _PY_TOKEN = re.compile(
     r"^(?P<path>[\w/]+\.py)(?::(?P<sym>[\w.]+))?(?:#(?P<anchor>.+))?$")
-_C_TOKEN = re.compile(r"^(?P<dir>src|include)/(?P<file>[\w]+\.[ch]):(?P<fn>\w+)$")
+_C_TOKEN = re.compile(r"^(?P<dir>src|include/internal|include)/(?P<file>[\w]+\.[ch]):(?P<fn>\w+)$")
 _GAP = re.compile(r"^[SDT]-\d\d$")
 
 
@@ -221,7 +221,7 @@ def test_document_has_the_expected_tables(rows):
 def test_row_shape_and_relation_rules(rows, doc_text):
     headers = " ".join(
         open(os.path.join(C_ROOT, d, h), encoding="utf-8").read()
-        for d in ("include", "src")
+        for d in ("include", "include/internal")
         for h in sorted(os.listdir(os.path.join(C_ROOT, d)))
         if h.endswith(".h"))
     defined_gaps = set(re.findall(r"^\| ([SDT]-\d\d) \|", doc_text, re.M))

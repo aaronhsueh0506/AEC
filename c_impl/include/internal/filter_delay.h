@@ -32,10 +32,10 @@ void filter_delay_init(FilterDelay *fd, int *delays_storage,
  * current delays (analyzer_len is then ignored).
  * external: external delay; NULL or external->reported == 0 means none.
  * blocks_with_proper_filter_adaptation: adaptation counter in hops.
- * Returns 0, or -1 on an analyzer length mismatch (state unmodified). */
-int filter_delay_update(FilterDelay *fd, const int *analyzer, int analyzer_len,
-                        const FilterDelayEstimate *external,
-                        int blocks_with_proper_filter_adaptation);
+ * Leaves state unmodified on an analyzer length mismatch. */
+void filter_delay_update(FilterDelay *fd, const int *analyzer, int analyzer_len,
+                         const FilterDelayEstimate *external,
+                         int blocks_with_proper_filter_adaptation);
 
 int filter_delay_min_direct_path(const FilterDelay *fd);
 

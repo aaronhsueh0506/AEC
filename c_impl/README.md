@@ -24,13 +24,15 @@ print-bin-dir` (same flags as your build) to get the exact path, or `make
 publish` to copy this build's artifacts to a stable `dist/<backend>/current/`
 handoff path.
 
-Headers. `include/` holds the four headers a caller sees: `aec.h` (the API; `Aec` is an opaque `typedef struct Aec Aec;`),
-`aec_internal.h` (library-internal API for pipelines), `aec_balanced_config.h` (generated per-rate tables) and `aec_debug.h`
-(trace). Everything else is in `src/`: the body of `struct Aec` (`src/aec_impl.h`) and the sub-module headers. White-box tests
-reach them through `test/aec_white_box.h` with `-I./src` (`TEST_INC` in the Makefile); the library, the CLI and the
-public-header checks never add it.
+Headers. `include/` holds the one header a caller sees: `aec.h` (the API; `Aec` is an opaque `typedef struct Aec Aec;`).
+Every other header is in `include/internal/`: `aec_internal.h` (library-internal API for pipelines),
+`aec_balanced_config.h` (generated per-rate tables), the body of `struct Aec` (`aec_impl.h`) and the sub-module headers. The
+library, the CLI and the tests compile with `-I include -I include/internal` (the Makefile adds both); an integrator using
+only the public API needs `-I include`, and an SDK Makefile that compiles `src/*.c` needs `-I include/internal` as well.
+White-box tests reach the internal headers through `test/aec_white_box.h`; the public-header checks never add
+`include/internal`.
 
-Compile flags (already in the Makefile): `-O2 -I include -I example`, plus
+Compile flags (already in the Makefile): `-O2 -I include -I include/internal -I example`, plus
 `-ffp-contract=off -fno-math-errno` appended **last** (see "FP-contraction
 policy" below). Both flags are required: no FMA fusion keeps results
 reproducible across builds and compilers, and `-fno-math-errno` lets the
@@ -84,16 +86,11 @@ Kernels with explicit fusion (`vfmaq_f32`/`fmaf`, e.g. `utility/simd_aec.h` and
 
 ### No-stdio library builds (`NO_STDIO=1`)
 
-`make lib NO_STDIO=1` produces a `libaec.a` without the per-hop debug trace:
-`src/aec_debug.c` (the library's only stdio translation unit) is excluded and
-its call site in `aec.c` is compiled out under `AEC_NO_STDIO`, so the archive
-has no `fprintf`/`vfprintf`/`stderr` reference. The gate is compile-time and
-default-off (`NO_STDIO ?= 0`). Only the `lib` goal supports it: the CLI
-(`aec_wav`) uses the `FILE*`-based debug API (`--debug-trace`). Board / MCU
-images that link `libaec.a` without hosted stdio should build with
-`make lib NO_STDIO=1`; `make audit-no-stdio` builds that archive, checks that the
-debug object is absent, scans the archive and a minimal linked consumer for
-stdio symbols, and runs the consumer.
+The library has no stdio: no source under `src/` includes `<stdio.h>`, and the archive carries no
+`fprintf`/`vfprintf`/`stderr` reference. `NO_STDIO` (default `0`) selects no source and no flag; it only keys a separate
+obj/bin directory, as it does in audiolib and NR, so `make lib NO_STDIO=1` is the archive a board / MCU image without hosted
+stdio links. Only the `lib` goal is meant for it (the CLI `aec_wav` uses stdio). `make audit-no-stdio` is the regression gate:
+it builds that archive, scans it and a minimal linked consumer for stdio symbols, and runs the consumer.
 
 ### Single-channel library (`AEC_NO_ARRAY=1`)
 
@@ -114,7 +111,7 @@ post/state modules, `residual_echo_estimator`, HPF). The Python reference
 **implementation**; Python↔C comparison is **tolerance-based**, never 0/0.
 
 The delay-estimator matched filter is float32/fast-math/duty-cycled
-unconditionally (see `src/delay_aec.h`).
+unconditionally (see `include/internal/delay_aec.h`).
 
 The **FFT backend is NE10 (ARM NEON, float32)**; the FFT wrapper and the NE10
 backend live in the shared `audiolib` layer (a sibling repo). It is the only
@@ -172,7 +169,7 @@ caller-pool path (`aec_get_mem_size`/`aec_init`), and differs from numpy's fp64
   chained per-group hashes. Also `aec_process` alternating with the split calls hop by hop, and the carve of every instance kind
   ending exactly at `aec_get_mem_size()`.
 - `test/test_split_entry3.c` (`make test-split-entry-3`) — the third single-channel scene set
-  (`test/baseline3_mono.h`): free-running two-path scenes
+  (its case table is in the file): free-running two-path scenes
   in which the bad-relock judgment (windowed ERLE after a confirmed delay shift against the value before it, 1 dB margin) comes
   out by itself, with the ERLE improving (kept), clearly worse (reverted), 0.5 dB either side of the margin, worse without an
   estimate (kept) and on the soft path, on the three product grids; the test prints every judgment (hop, ERLE before / after,

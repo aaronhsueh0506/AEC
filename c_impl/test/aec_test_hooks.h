@@ -97,7 +97,7 @@ size_t         aec_testing_res_mem_size(const AecConfig* cfg);
 AecTestingRes* aec_testing_res_init(void* mem, size_t bytes, const AecConfig* cfg);
 const float*   aec_testing_res_process(AecTestingRes* r, const AecResidualView* view);
 
-/* Construction with a caller-built tuning (src/aec_tuning.h; a test that uses these includes it).
+/* Construction with a caller-built tuning (include/internal/aec_tuning.h; a test that uses these includes it).
  *
  * Why the public API will not do: AecConfig carries only what a product sets; every other value the instance reads is an
  * internal AecTuning derived from (sample_rate, fft_size, n_mics, level). A test that switches the shadow filter or the
@@ -109,10 +109,8 @@ struct AecTuning;
 void   aec_testing_tuning_defaults(struct AecTuning* tun, const AecConfig* cfg);
 int    aec_testing_tuning_valid(const struct AecTuning* tun, const AecConfig* cfg);
 size_t aec_testing_get_mem_size(const AecConfig* cfg, const struct AecTuning* tun);
-int    aec_testing_get_mem_breakdown(const AecConfig* cfg, const struct AecTuning* tun, AecMemBreakdown* out);
 int    aec_testing_get_mem_requirements(const AecConfig* cfg, const struct AecTuning* tun, AecMemReq* out);
 Aec*   aec_testing_init(void* mem, size_t mem_size, const AecConfig* cfg, const struct AecTuning* tun);
-Aec*   aec_testing_init_ex(void* mem, size_t mem_size, const AecConfig* cfg, const struct AecTuning* tun, const AecMemReq* expected);
 Aec*   aec_testing_create(const AecConfig* cfg, const struct AecTuning* tun);
 
 #ifdef __cplusplus

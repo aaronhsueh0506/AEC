@@ -3,7 +3,6 @@
 #include "aec_impl.h"
 #include "aec_internal.h"
 #include "aec_config_build.h"
-#include "aec_debug.h"
 #include "aec_balanced_config.h"
 #include "aec_scale.h"
 #include "utility/simd_aec.h"
@@ -59,10 +58,6 @@ static float aec_legacy10ms_rate(float legacy_per_hop, int hop,
     return (hop > 0 && sample_rate > 0)
         ? legacy_per_hop * (((float)hop / (float)sample_rate) / ref_s)
         : legacy_per_hop;
-}
-
-void aec_config_defaults(AecConfig* cfg, int sr) {
-    aec_config_from_level(cfg, AEC_LEVEL_BALANCED, sr);
 }
 
 /* Level strength table in AecLevel order; NO_FLOOR repeats balanced's
@@ -2420,7 +2415,7 @@ static void aec_update_shadow_dt(Aec* a, float far_hop_mean_sq, int far_excited)
         /* Shadow-copy warm-up is a 500 ms wall-clock guard, converted per grid. */
         int shadow_warmup_hops =
             aec_ms_to_hops(500.0f, hop, a->cfg.sample_rate);
-        (void)shadow_copy_update(
+        shadow_copy_update(
             &a->regime, aec_count_as_int(a->shadow_frame_count), shadow_warmup_hops,
             far_hop_mean_sq,
             a->main_err_smooth, a->shadow_err_smooth,
@@ -2570,7 +2565,7 @@ static void aec_run_post_chain(Aec* a, int stationarity_block_for_post, int rend
             /* Same far spectrum and far hop as the donor's, so its PSD, scaled block and verdict are this lane's. */
             in.shared_far_psd = share->donor->post.far_psd;
             in.shared_render_block = share->donor->a3_sc.render_block_scaled;
-            in.shared_far_active = share->donor->post.trace.far_active;
+            in.shared_far_active = share->donor->post.far_active;
         }
         in.observer_far_end = (a->has_observer && a->observer_far_hop_valid)
                                ? a->observer_far_hop : NULL;
@@ -2862,37 +2857,6 @@ int aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
     const int apply = (a->cfg.residual == AEC_RESIDUAL_FULL);
     aec_stage_linear(a, mic_in, ref_in, NULL, NULL, NULL, NULL);
     aec_stage_residual(a, apply, a->hop_carry.t_stage, NULL);
-
-    /* Debug trace: runs only when a trace file is armed; compiled out under
-     * AEC_NO_STDIO. */
-#ifndef AEC_NO_STDIO
-    if (apply && aec_debug_trace_active()) {
-        int Kk = a->n_freqs;
-        AecDebugTraceRow tr;
-        float esum = 0.0f, r2sum = 0.0f, cnsum = 0.0f;
-        const float *erle = aec_state_erle(&a->a3_state, /*onset=*/1);
-        int kk;
-        for (kk = 0; kk < Kk; ++kk) {
-            esum  += erle[kk];
-            r2sum += a->a3_sc.r2[kk];
-            cnsum += a->post.comfort_noise[kk];
-        }
-        tr.delay            = aec_state_min_direct_path_filter_delay(&a->a3_state);
-        tr.far_active       = a->post.trace.far_active;
-        tr.saturated_echo   = aec_state_saturated_echo(&a->a3_state);
-        tr.usable_linear    = aec_state_usable_linear_estimate(&a->a3_state);
-        tr.dominant_nearend = suppression_gain_is_dominant_nearend(&a->a3_sg);
-        tr.filter_converged = a->post.trace.aec_converged;
-        tr.fullband_erle    = aec_state_fullband_erle_log2(&a->a3_state);
-        tr.erle_mean        = (Kk > 0) ? esum  / Kk : 0.0f;
-        tr.r2_mean          = (Kk > 0) ? r2sum / Kk : 0.0f;
-        tr.gain_mean        = a->post.trace.gain_mean;
-        tr.comfort_noise_mean = (Kk > 0) ? cnsum / Kk : 0.0f;
-        tr.near_pwr         = a->near_power;
-        tr.raw_err_pwr      = a->raw_error_power;
-        aec_debug_trace_row(&tr);
-    }
-#endif /* AEC_NO_STDIO */
 
     memcpy(out, a->final_out, (size_t)hop * sizeof(float));
     return AEC_OK;
@@ -3250,14 +3214,6 @@ size_t aec_testing_get_mem_size(const AecConfig* cfg, const AecTuning* tun) {
     return aec_resolve_tuned(cfg, tun, &rs) ? aec_mem_size_resolved(&rs) : 0;
 }
 
-int aec_testing_get_mem_breakdown(const AecConfig* cfg, const AecTuning* tun, AecMemBreakdown* out) {
-    AecResolved rs;
-    if (!out) return AEC_ERR_ARG;
-    memset(out, 0, sizeof(*out));
-    if (!cfg || !aec_resolve_tuned(cfg, tun, &rs)) return AEC_ERR_ARG;
-    return aec_mem_breakdown_resolved(&rs, out);
-}
-
 int aec_testing_get_mem_requirements(const AecConfig* cfg, const AecTuning* tun, AecMemReq* out) {
     AecResolved rs;
     if (!out) return -1;
@@ -3269,11 +3225,6 @@ int aec_testing_get_mem_requirements(const AecConfig* cfg, const AecTuning* tun,
 Aec* aec_testing_init(void* mem, size_t mem_size, const AecConfig* cfg, const AecTuning* tun) {
     AecResolved rs;
     return aec_resolve_tuned(cfg, tun, &rs) ? aec_init_resolved(mem, mem_size, &rs) : NULL;
-}
-
-Aec* aec_testing_init_ex(void* mem, size_t mem_size, const AecConfig* cfg, const AecTuning* tun, const AecMemReq* expected) {
-    AecResolved rs;
-    return aec_resolve_tuned(cfg, tun, &rs) ? aec_init_ex_resolved(mem, mem_size, &rs, expected) : NULL;
 }
 
 Aec* aec_testing_create(const AecConfig* cfg, const AecTuning* tun) {

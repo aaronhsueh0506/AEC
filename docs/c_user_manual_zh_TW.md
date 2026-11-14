@@ -12,9 +12,9 @@
 （[§8.5](reference/integration.md#85-舒適噪音填補aec_apply_cng_spec)；自己組合頻域後處理鏈時用）。
 殘留回音抑制增益階段不是獨立的公開介面：單聲道的在 `Aec` 裡，四麥克風融合後的在陣列實例裡。
 
-`c_impl/include/` 只放四個 header：`aec.h`、`aec_internal.h`（給 pipeline 用的函式庫內部介面）、
-`aec_balanced_config.h`（產生的各取樣率表）與 `aec_debug.h`（trace）。`aec_post.h`、`pbfdkf.h`、`delay_aec.h`、
-`suppression_gain.h` 等內部實作 header 在 `c_impl/src/`，不屬於公開介面；`Aec` 是不透明型別
+`c_impl/include/` 只放一個 header：`aec.h`。`c_impl/include/internal/` 放其餘全部：`aec_internal.h`（給 pipeline 用的函式庫內部介面）、
+`aec_balanced_config.h`（產生的各取樣率表）、`aec_post.h`、`pbfdkf.h`、`delay_aec.h`、`suppression_gain.h` 等內部實作 header，
+不屬於公開介面；只用公開 API 的整合者只需要 `-I include`；`Aec` 是不透明型別
 （`typedef struct Aec Aec;`），呼叫端拿不到結構內容，也不能以值持有或取 `sizeof(Aec)`。
 
 `aec.h` 本身會 include 共用 DSP 函式庫（`audiolib`）的 `fft_wrapper.h`，所以編譯時兩個 include 路徑都要給（見 §2）。

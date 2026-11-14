@@ -146,7 +146,7 @@ make                  # debug: `make debug` (adds -g)
 # `make publish` for a stable dist/<backend>/current/ path:
 bin="$(make -s print-bin-dir)"
 "$bin/aec_wav" mic.wav ref.wav out.wav --level 1 --cng
-"$bin/aec_wav" mic.wav ref.wav out.wav --debug-trace aec_trace.csv
+"$bin/aec_wav" mic.wav ref.wav out.wav --debug
 ```
 
 `-ffp-contract=off -fno-math-errno` in `CFLAGS` is mandatory for build

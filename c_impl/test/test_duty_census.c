@@ -43,7 +43,7 @@
 #include "aec.h"
 #include "aec_pool_test_util.h"
 #include "aec_test_tuning.h"
-#include "../src/aec_array_internal.h"
+#include "aec_array_internal.h"
 #include <math.h>
 #include <stdio.h>
 #include <string.h>

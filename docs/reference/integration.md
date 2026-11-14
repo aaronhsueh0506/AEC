@@ -228,7 +228,7 @@ aec_apply_cng_spec(&rng, spec, cn, g_res, g_nr, n_bins);
 （同樣的 sqrt、同樣的乘積順序、同樣的抽樣排程）。`aec_apply_cng()`／`aec_apply_cng_spec()` 的 `nr_floor` 固定為
 `AEC_CNG_NR_GAIN_FLOOR`。Python 孿生是 `modules/cng.py:cng_fill`。
 
-RES 增益階段的實作（`src/aec_res.c`，內部標頭 `src/aec_res_internal.h`，不安裝）供陣列實例使用，由 `make test-aec-res`
+RES 增益階段的實作（`src/aec_res.c`，內部標頭 `include/internal/aec_res_internal.h`，不安裝）供陣列實例使用，由 `make test-aec-res`
 （設定與 lane 逐位元相等、API 契約、render ×32768 縮放、離開初始狀態、飽和後復原限制）、`make test-zero-heap`、
 `make audit-no-stdio` 測試。完整頁面見 [`docs/html/reference/aec_res.html`](../html/reference/aec_res.html)。
 

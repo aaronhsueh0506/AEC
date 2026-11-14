@@ -8,7 +8,7 @@ RANLIB  ?= ranlib
 # CXXFLAGS and CPPFLAGS are consumed by no recipe here (no C++ TU) and DEBUG gates nothing (`make debug` is its own
 # recipe); they stay in the CFG_SIG payload so its shape matches audiolib's and NR's. CXXFLAGS/CPPFLAGS use `+=` so an
 # environment value still flips their origin to "environment override" under `make -e`, which the override check below
-# relies on. NO_STDIO=1 adds -DAEC_NO_STDIO and drops src/aec_debug.c (see the NO_STDIO block).
+# relies on. NO_STDIO selects no source or flag (see the NO_STDIO block).
 CXXFLAGS      +=
 CPPFLAGS      +=
 EXTRA_LDFLAGS ?=
@@ -63,10 +63,9 @@ SIMD_CFLAGS :=
 endif
 
 CFLAGS  = -Wall -Wextra -O2 -std=gnu99
-CFLAGS += -I./include -I./example
-# White-box tests (struct Aec, the library-internal headers) add -I./src through TEST_INC; the library, the CLI and the public-header
-# checks see only include/.
-TEST_INC = -I./src
+CFLAGS += -I./include -I./include/internal -I./example
+# include/ holds the public header (aec.h); include/internal/ holds every other header, for the library, the CLI and the tests. The
+# public-header checks see include/ alone.
 CFLAGS += $(EXTRA_CFLAGS)
 CFLAGS += $(SIMD_CFLAGS)
 CFLAGS += $(PROFILE_CFLAGS)
@@ -126,13 +125,8 @@ ifeq ($(AEC_TESTING),1)
   CFLAGS += -DAEC_TESTING
 endif
 
-# NO_STDIO=1 builds a stdio-free libaec.a: src/aec_debug.c (the only stdio TU) is dropped and the per-frame trace call in
-# src/aec.c is compiled out under AEC_NO_STDIO. Set before CFG_SIG is computed so it keys its own obj/bin directory. Only the
-# library (`make lib`) is built this way: the CLI (example/aec_wav.c) uses the FILE*-based debug API. See aec_debug.h and
-# the `audit-no-stdio` target.
-ifeq ($(NO_STDIO),1)
-  CFLAGS += -DAEC_NO_STDIO
-endif
+# The library has no stdio. NO_STDIO is a CFG_SIG key only (a NO_STDIO=1 build has its own obj/bin directory, as audiolib's and
+# NR's do), and the `audit-no-stdio` target verifies the NO_STDIO=1 archive and a linked executable against the stdio symbols.
 
 # AEC_NO_ARRAY=1 builds the single-channel library: -DAEC_NO_ARRAY, no src/aec_array.c and no src/aec_res.c (the four-microphone
 # array instance and its gain stage), and AecConfig.n_mics other than 1 is rejected by aec_resolve() / aec_init() /
@@ -161,7 +155,7 @@ FP_POLICY := -ffp-contract=off -fno-math-errno
 FP_ALLOWED_CHARS_RE := ^[A-Za-z0-9_./=,+ -]*$$
 
 # A command-line CFLAGS=/CXXFLAGS=/CPPFLAGS=/LDFLAGS=/FP_POLICY=/FP_ALLOWED_CHARS_RE= would silently drop this file's own
-# appends (-ffp-contract=off, -DAEC_NO_STDIO, the -I paths, -lm) or widen the allow-list below, so it is rejected.
+# appends (-ffp-contract=off, the -I paths, -lm) or widen the allow-list below, so it is rejected.
 # EXTRA_CFLAGS / EXTRA_LDFLAGS are the supported hooks.
 $(foreach v,CFLAGS CXXFLAGS CPPFLAGS LDFLAGS FP_POLICY FP_ALLOWED_CHARS_RE,\
   $(if $(findstring command,$(origin $(v)))$(findstring override,$(origin $(v))),\
@@ -189,7 +183,7 @@ $(error FP policy conflict: CFLAGS/CXXFLAGS/CPPFLAGS/LDFLAGS/EXTRA_CFLAGS/EXTRA_
 endif
 
 # Allowed characters: letters, digits and _ . / = , + - plus space (the token separator). That covers every flag this
-# Makefile uses (-O2, -Wall, -std=gnu99, the -I paths, -DAEC_NO_STDIO) with headroom for pass-through flags such as
+# Makefile uses (-O2, -Wall, -std=gnu99, the -I paths) with headroom for pass-through flags such as
 # -Wl,-rpath,dir. Everything else, including every character a deny-list would target, is rejected by construction;
 # test/run_fp_flag_policy_test.sh carries the negative cases. LC_ALL=C pins the bracket ranges to ASCII.
 # FP_ALLOWED_CHARS_RE is defined near the top of this file.
@@ -251,12 +245,6 @@ endif
 # Library sources are auto-detected from src/. Declared before CFG_SIG_PAYLOAD, which folds in the sorted list, so adding or
 # removing a source keys a fresh obj/bin directory. The FFT wrapper sources are in the audiolib archive, not here.
 SRCS = $(wildcard $(SRC_DIR)/*.c)
-
-# NO_STDIO=1: also filter aec_debug.c out of the sources, although it is already empty under -DAEC_NO_STDIO; `audit-no-stdio`
-# checks that the archive does not list aec_debug.o.
-ifeq ($(NO_STDIO),1)
-  SRCS := $(filter-out $(SRC_DIR)/aec_debug.c,$(SRCS))
-endif
 
 # AEC_NO_ARRAY=1: the array instance and its gain stage (aec_res.c is used by nothing else) are not built or archived.
 ifeq ($(AEC_NO_ARRAY),1)
@@ -389,7 +377,7 @@ TEST_SE2_OBJS   = $(patsubst $(TEST_DIR)/%.c,$(OBJ_DIR)/%.o,$(TEST_SE2_SRCS))
 TEST_SE2_TARGET = $(BIN_DIR)/test_split_entry2
 
 # The third single-channel scene set: bad-relock judgments (revert / no revert, either side of the 1 dB margin) that free-running
-# two-path scenes produce by themselves. Case table: test/baseline3_mono.h.
+# two-path scenes produce by themselves. Case table: in test/test_split_entry3.c.
 TEST_SE3_SRCS   = $(TEST_DIR)/test_split_entry3.c
 TEST_SE3_OBJS   = $(patsubst $(TEST_DIR)/%.c,$(OBJ_DIR)/%.o,$(TEST_SE3_SRCS))
 TEST_SE3_TARGET = $(BIN_DIR)/test_split_entry3
@@ -460,7 +448,7 @@ TEST_RPY_TARGET = $(BIN_DIR)/test_reset_parity
 # Python/C parity gate for the three detectors (RenderActivity / FilterConvergence / DoubleTalk). detectors.c needs only
 # detectors.h and <math.h> (plus aec_scale.c for the retiming helpers), so no $(OBJS) or audiolib archive is linked. The
 # golden is generated from the Python reference on demand, not checked in.
-TEST_DET_SRC    = $(TEST_DIR)/modules/parity_detectors.c
+TEST_DET_SRC    = $(TEST_DIR)/parity_detectors.c
 TEST_DET_TARGET = $(BIN_DIR)/parity_detectors
 TEST_DET_HOP   ?= 128
 TEST_DET_SR    ?= 16000
@@ -471,7 +459,7 @@ TEST_ZH_SRCS   = $(TEST_DIR)/test_zero_heap_aec.c
 TEST_ZH_OBJS   = $(patsubst $(TEST_DIR)/%.c,$(OBJ_DIR)/%.o,$(TEST_ZH_SRCS))
 TEST_ZH_TARGET = $(BIN_DIR)/test_zero_heap_aec
 
-# RES gain stage (src/aec_res_internal.h, internal): configuration equality with an Aec lane,
+# RES gain stage (include/internal/aec_res_internal.h, internal): configuration equality with an Aec lane,
 # gain and comfort-noise equality with the multi-lane pipelines' stage, API
 # contract. The test includes src/aec_res.c for the struct, so it links the
 # library objects without aec_res.o.
@@ -497,7 +485,7 @@ PYC_RUN_OBJ    = $(OBJ_DIR)/pyc_aec_run.o
 PYC_RUN_TARGET = $(BIN_DIR)/pyc_aec_run
 
 $(PYC_RUN_OBJ): $(PYC_DIR)/aec_run.c | _cfg_guard
-	$(CC) $(CFLAGS) $(TEST_INC) -MD -MP -c -o $@ $<
+	$(CC) $(CFLAGS) -MD -MP -c -o $@ $<
 
 # Does its own builds (one std-math, one ship) through `make pyc-parity-driver`, so it needs no
 # audiolib dispatch of its own.
@@ -584,13 +572,13 @@ $(OBJ_DIR)/%.o: $(EXAMPLE_DIR)/%.c | _cfg_guard
 	$(CC) $(CFLAGS) -MD -MP -c -o $@ $<
 
 $(OBJ_DIR)/test_aec_res.o: $(TEST_DIR)/test_aec_res.c | _cfg_guard
-	$(CC) $(CFLAGS) $(TEST_INC) -I. -MD -MP -c -o $@ $<
+	$(CC) $(CFLAGS) -I. -MD -MP -c -o $@ $<
 
 $(OBJ_DIR)/test_zero_heap_aec.o: $(TEST_DIR)/test_zero_heap_aec.c | _cfg_guard
-	$(CC) $(CFLAGS) $(TEST_INC) -fno-builtin -I$(COMMON_DIR)/test -MD -MP -c -o $@ $<
+	$(CC) $(CFLAGS) -fno-builtin -I$(COMMON_DIR)/test -MD -MP -c -o $@ $<
 
 $(OBJ_DIR)/%.o: $(TEST_DIR)/%.c | _cfg_guard
-	$(CC) $(CFLAGS) $(TEST_INC) -MD -MP -c -o $@ $<
+	$(CC) $(CFLAGS) -MD -MP -c -o $@ $<
 
 .PHONY: lib
 lib: $(LIB_TARGET)
@@ -614,7 +602,7 @@ $(SELFTEST_TARGET): $(SELFTEST_SRC) | _cfg_guard
 
 -include $(OBJ_DIR)/simd_selftest_aec.d
 
-# Regenerates include/aec_balanced_config.h and test/aec_ref_tables.h (python/diag/gen_aec_balanced_config_h.py) into a throwaway
+# Regenerates include/internal/aec_balanced_config.h and test/aec_ref_tables.h (python/diag/gen_aec_balanced_config_h.py) into a throwaway
 # copy of python/ and diffs them against the checked-in files; a FAIL means the header was hand-edited or is stale. It needs no audiolib archive,
 # so it sits outside the COMMON_LIB dispatch. PYTHON is declared further down; recipe variables expand when the recipe runs.
 .PHONY: test-header-fresh
@@ -622,11 +610,11 @@ test-header-fresh:
 	@set -e; \
 	d="$$(mktemp -d "$${TMPDIR:-/tmp}/aec_header_fresh.XXXXXX")"; \
 	trap 'rm -rf "$$d"' EXIT INT TERM; \
-	mkdir -p "$$d/c_impl/include" "$$d/c_impl/test"; \
+	mkdir -p "$$d/c_impl/include/internal" "$$d/c_impl/test"; \
 	cp -R "$(CURDIR)/../python" "$$d/python"; \
 	find "$$d/python" \( -name __pycache__ -prune -o -name '*.pyc' \) -exec rm -rf {} +; \
 	"$(PYTHON)" "$$d/python/diag/gen_aec_balanced_config_h.py" >/dev/null; \
-	for f in include/aec_balanced_config.h test/aec_ref_tables.h; do \
+	for f in include/internal/aec_balanced_config.h test/aec_ref_tables.h; do \
 	  if cmp -s "$$d/c_impl/$$f" "$(CURDIR)/$$f"; then \
 	    echo "test-header-fresh: $$f is fresh against its generator"; \
 	  else \
@@ -636,17 +624,16 @@ test-header-fresh:
 	  fi; \
 	done
 
-# Compile-only checks of the public headers with include/ alone on the path (never -I./src): each of aec.h, aec_internal.h
-# and aec_debug.h compiles by itself as C, and together they compile as C++11 with the AEC_LEVEL_* enumerators accepted by
-# aec_config_from_level(), aec_set_level() and the level lookups. A public header that starts including a src/ header fails
-# here. It needs no audiolib archive, so it sits outside the COMMON_LIB dispatch like test-header-fresh.
+# Compile-only check of the public header with include/ alone on the path (never -I./include/internal): aec.h compiles by
+# itself as C and as C++11 with the AEC_LEVEL_* enumerators accepted by aec_config_from_level() and aec_set_level(). A public header that starts including an include/internal/
+# header fails here. It needs no audiolib archive, so it sits outside the COMMON_LIB dispatch like test-header-fresh.
 .PHONY: test-header-cpp
 test-header-cpp:
-	@for h in aec.h aec_internal.h aec_debug.h; do \
+	@for h in aec.h; do \
 	  printf '#include "%s"\n' "$$h" | $(CC) -x c -std=gnu99 -fsyntax-only -Wall -Wextra -Werror -I./include -I$(COMMON_DIR)/include -I$(COMMON_DIR) - || exit 1; \
 	done
 	$(CXX) -std=c++11 -fsyntax-only -Wall -Wextra -Werror -I./include -I$(COMMON_DIR)/include -I$(COMMON_DIR) $(TEST_DIR)/test_header_cpp.cpp
-	@echo "test-header-cpp: aec.h, aec_internal.h and aec_debug.h compile alone as C and together as C++11, the AEC_LEVEL_* enumerators convert"
+	@echo "test-header-cpp: aec.h compiles alone as C and as C++11, the AEC_LEVEL_* enumerators convert"
 
 # Compiles and runs the C sample embedded in STATIC_MEMORY.md against the current aec.h. The script builds audiolib itself, so
 # the target sits outside the COMMON_LIB dispatch like test-header-fresh.
@@ -680,7 +667,7 @@ test-delay-kernels: $(TEST_DKN_TARGET)
 	"$(abspath $(TEST_DKN_TARGET))"
 
 $(TEST_DKN_OBJ): $(TEST_DIR)/test_delay_kernels.c | _cfg_guard
-	$(CC) $(CFLAGS) $(TEST_INC) -I. -MD -MP -c -o $@ $<
+	$(CC) $(CFLAGS) -I. -MD -MP -c -o $@ $<
 
 $(TEST_DKN_TARGET): $(TEST_DKN_OBJ) $(OBJ_DIR)/aec_scale.o | _cfg_guard
 	$(CC) $(CFLAGS) -o $@ $(TEST_DKN_OBJ) $(OBJ_DIR)/aec_scale.o -lm
@@ -696,7 +683,7 @@ test-delay-matched-neon: $(TEST_DMN_TARGET)
 	"$(abspath $(TEST_DMN_TARGET))"
 
 $(TEST_DMN_OBJ): $(TEST_DIR)/test_delay_matched_neon.c | _cfg_guard
-	$(CC) $(CFLAGS) $(TEST_INC) -I. -MD -MP -c -o $@ $<
+	$(CC) $(CFLAGS) -I. -MD -MP -c -o $@ $<
 
 $(TEST_DMN_TARGET): $(TEST_DMN_OBJ) $(OBJ_DIR)/aec_scale.o | _cfg_guard
 	$(CC) $(CFLAGS) -o $@ $(TEST_DMN_OBJ) $(OBJ_DIR)/aec_scale.o -lm
@@ -709,7 +696,7 @@ test-neon-twins: $(TEST_NT_TARGET)
 	"$(abspath $(TEST_NT_TARGET))"
 
 $(TEST_NT_OBJ): $(TEST_DIR)/test_neon_twins.c | _cfg_guard
-	$(CC) $(CFLAGS) $(TEST_INC) -I. -MD -MP -c -o $@ $<
+	$(CC) $(CFLAGS) -I. -MD -MP -c -o $@ $<
 
 $(TEST_NT_TARGET): $(TEST_NT_OBJ) $(OBJ_DIR)/aec_scale.o | _cfg_guard
 	$(CC) $(CFLAGS) -o $@ $(TEST_NT_OBJ) $(OBJ_DIR)/aec_scale.o -lm
@@ -861,14 +848,14 @@ test-synthesis-window: $(TEST_SSW_TARGET)
 	"$(abspath $(TEST_SSW_TARGET))"
 
 test-memory-layout: $(OBJS) $(COMMON_LIB) | _cfg_guard
-	$(CC) $(CFLAGS) $(TEST_INC) -c -o "$(OBJ_DIR)/test_memory_layout.o" "$(TEST_DIR)/test_memory_layout.c"
+	$(CC) $(CFLAGS) -c -o "$(OBJ_DIR)/test_memory_layout.o" "$(TEST_DIR)/test_memory_layout.c"
 	$(LINK) $(CFLAGS) -o "$(BIN_DIR)/test_memory_layout" "$(OBJ_DIR)/test_memory_layout.o" $(OBJS) $(COMMON_LIB) $(LDFLAGS)
 	"$(abspath $(BIN_DIR)/test_memory_layout)"
 
-# Builds AND runs. check_handle_entries.py first compares the entries the test calls with the Aec-handle prototypes of aec.h and aec_internal.h.
+# Builds AND runs. check_handle_entries.py first compares the entries the test calls with the Aec-handle prototypes of aec.h and include/internal/aec_internal.h.
 test-handle-ready: $(OBJS) $(COMMON_LIB) | _cfg_guard
-	$(PYTHON) -I "$(TEST_DIR)/check_handle_entries.py" include/aec.h "$(TEST_DIR)/test_handle_ready.c" include/aec_internal.h
-	$(CC) $(CFLAGS) $(TEST_INC) -c -o "$(OBJ_DIR)/test_handle_ready.o" "$(TEST_DIR)/test_handle_ready.c"
+	$(PYTHON) -I "$(TEST_DIR)/check_handle_entries.py" include/aec.h "$(TEST_DIR)/test_handle_ready.c" include/internal/aec_internal.h
+	$(CC) $(CFLAGS) -c -o "$(OBJ_DIR)/test_handle_ready.o" "$(TEST_DIR)/test_handle_ready.c"
 	$(LINK) $(CFLAGS) -o "$(BIN_DIR)/test_handle_ready" "$(OBJ_DIR)/test_handle_ready.o" $(OBJS) $(COMMON_LIB) $(LDFLAGS)
 	"$(abspath $(BIN_DIR)/test_handle_ready)"
 
@@ -1070,12 +1057,12 @@ $(TEST_SSW_TARGET): $(OBJS) $(TEST_SSW_OBJS) $(COMMON_LIB) | _cfg_guard
 	$(LINK) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 	@echo "test_synthesis_window [$(BACKEND)] -> $@"
 
-$(TEST_DET_TARGET): $(TEST_DET_SRC) $(SRC_DIR)/detectors.c $(SRC_DIR)/aec_scale.c $(SRC_DIR)/detectors.h | _cfg_guard
+$(TEST_DET_TARGET): $(TEST_DET_SRC) $(SRC_DIR)/detectors.c $(SRC_DIR)/aec_scale.c include/internal/detectors.h | _cfg_guard
 	@mkdir -p $(BIN_DIR)
 #	$(CC), not $(LINK): LINK is $(CXX) so that NE10's C++ archive links, but
 #	this target pulls in no archive at all -- feeding C sources with
 #	-std=gnu99 to a C++ driver just fails.
-	$(CC) $(CFLAGS) $(TEST_INC) -o $@ $(TEST_DET_SRC) $(SRC_DIR)/detectors.c $(SRC_DIR)/aec_scale.c -lm
+	$(CC) $(CFLAGS) -o $@ $(TEST_DET_SRC) $(SRC_DIR)/detectors.c $(SRC_DIR)/aec_scale.c -lm
 	@echo "parity_detectors [$(BACKEND)] -> $@"
 
 $(TEST_STATIC_TARGET): $(OBJS) $(TEST_STATIC_OBJS) $(COMMON_LIB) | _cfg_guard
@@ -1331,11 +1318,10 @@ endif
 # audit-no-stdio: verifies that a NO_STDIO=1 libaec.a is stdio-free. It builds its own NO_STDIO=1 `lib` with recipe-time
 # sub-makes, whatever NO_STDIO this invocation used. Checks, in order:
 #   1. key isolation: the NO_STDIO=1 print-lib-path differs from the NO_STDIO=0 one.
-#   2. `ar -t`: aec_debug.o is absent from the archive.
-#   3. `nm -A` on the archive: no fprintf/vfprintf/printf/puts/fputs/fputc/fwrite/stderr/__stderrp, defined or undefined.
-#   4. link test/no_stdio_main.c (itself stdio-free) with the archive and audiolib's NO_STDIO=1 archive, and `nm -A` the
+#   2. `nm -A` on the archive: no fprintf/vfprintf/printf/puts/fputs/fputc/fwrite/stderr/__stderrp, defined or undefined.
+#   3. link test/no_stdio_main.c (itself stdio-free) with the archive and audiolib's NO_STDIO=1 archive, and `nm -A` the
 #      executable against the same set (the NE10 backend carries no stdio references).
-#   5. run it; exit code 0 means aec_create, one aec_process hop and aec_destroy needed no stdio.
+#   4. run it; exit code 0 means aec_create, one aec_process hop and aec_destroy needed no stdio.
 AUDIT_STRICT_ALL  = fprintf|vfprintf|printf|puts|fputs|fputc|fwrite|stderr|__stderrp
 AUDIT_STRICT_OWN  = fprintf|vfprintf|printf|puts|fputs
 AUDIT_BIN_DIR     = $(BIN_ROOT)/audit-no-stdio/$(BACKEND)
@@ -1370,7 +1356,7 @@ test-no-testing-symbols:
 # cannot pass vacuously (a build that quietly loses the flag would report a table of zeros, which reads as "free").
 audit-profile:
 	@echo "== audit-profile: BACKEND=$(BACKEND) SIMD=$(SIMD) CC=$(CC) =="
-	@stub='-DAEC_NOW_US=aec_test_stub_now_us -include $(TEST_DIR)/profile_timer_stub.h'; \
+	@stub='-DAEC_NOW_US=aec_test_stub_now_us -include $(TEST_DIR)/profile_timer_fixtures.h'; \
 	 p0="$$($(MAKE) -s --no-print-directory PROFILE=0 print-lib-path)"; \
 	 p1="$$($(MAKE) -s --no-print-directory PROFILE=1 print-lib-path)"; \
 	 ps="$$($(MAKE) -s --no-print-directory PROFILE=1 EXTRA_CFLAGS="$$stub" print-lib-path)"; \
@@ -1396,7 +1382,7 @@ audit-profile:
 	@# linked. A counting stamp turns each window into the number of stamps it
 	@# spans, so a stage whose opening stamp went missing reports a different
 	@# integer instead of the 0 that is indistinguishable from "cost nothing".
-	@cnt='-DAEC_NOW_US=aec_test_count_now_us -include $(TEST_DIR)/profile_timer_count.h'; \
+	@cnt='-DAEC_NOW_US=aec_test_count_now_us -include $(TEST_DIR)/profile_timer_fixtures.h'; \
 	 pc="$$($(MAKE) -s --no-print-directory PROFILE=1 EXTRA_CFLAGS="$$cnt" print-lib-path)"; \
 	 ac="$$($(MAKE) -s --no-print-directory -C $(COMMON_DIR) $(COMMON_FWD) print-lib-path)"; \
 	 test -n "$$ac" || { echo "FATAL: could not resolve audiolib archive path (COMMON_DIR=$(COMMON_DIR))" >&2; exit 1; }; \
@@ -1421,10 +1407,6 @@ audit-no-stdio:
 	 echo "PASS: key-isolation ($$lib_ns1 != $$lib_ns0)"; \
 	 echo "-- ar -t $$lib_ns1 --"; \
 	 ar -t "$$lib_ns1"; \
-	 if ar -t "$$lib_ns1" | grep -qx 'aec_debug.o'; then \
-	   echo "FATAL: aec_debug.o present in NO_STDIO=1 archive" >&2; exit 1; \
-	 fi; \
-	 echo "PASS: aec_debug.o absent from NO_STDIO=1 archive"; \
 	 hits="$$(nm -A "$$lib_ns1" 2>/dev/null | grep -iE '$(AUDIT_STRICT_ALL)' || true)"; \
 	 if [ -n "$$hits" ]; then \
 	   echo "FATAL: stdio symbols found in NO_STDIO=1 archive:" >&2; echo "$$hits" >&2; exit 1; \
@@ -1548,9 +1530,9 @@ help:
 	@echo "                  48 kHz anti-alias pair (the only gate that sees the pair kernel; scalar vs itself with SIMD=0)"
 	@echo "  test-delay-matched-neon  Bit-exact matched-filter kernels (dot, NLMS update, fused update + next dot, core)"
 	@echo "                  vs a portable model of the AArch64 NEON dataflow; scalar kernels vs the scalar model otherwise"
-	@echo "  test-aec-res    RES gain stage (src/aec_res_internal.h): lane-equal config, API contract, render scale, initial phase"
-	@echo "  test-header-fresh  Regenerate include/aec_balanced_config.h and diff it against the checked-in copy"
-	@echo "  test-header-cpp  Compile-only checks: aec.h, aec_internal.h, aec_debug.h each alone as C, together as C++11 with the AEC_LEVEL_* names"
+	@echo "  test-aec-res    RES gain stage (include/internal/aec_res_internal.h): lane-equal config, API contract, render scale, initial phase"
+	@echo "  test-header-fresh  Regenerate include/internal/aec_balanced_config.h and diff it against the checked-in copy"
+	@echo "  test-header-cpp  Compile-only check: aec.h alone as C and as C++11 with the AEC_LEVEL_* names"
 	@echo "  test-detectors-parity  Gate detectors.c against the Python reference (regenerates the golden)"
 	@echo "  test-detectors-parity-all  Run detector parity on legacy 8 kHz and all three product grids"
 	@echo "  debug   Build with -g"

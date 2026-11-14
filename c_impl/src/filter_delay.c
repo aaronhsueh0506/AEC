@@ -31,9 +31,9 @@ void filter_delay_init(FilterDelay *fd, int *delays_storage,
     fd->external_delay.delay = 0;
 }
 
-int filter_delay_update(FilterDelay *fd, const int *analyzer, int analyzer_len,
-                        const FilterDelayEstimate *external,
-                        int blocks_with_proper_filter_adaptation) {
+void filter_delay_update(FilterDelay *fd, const int *analyzer, int analyzer_len,
+                         const FilterDelayEstimate *external,
+                         int blocks_with_proper_filter_adaptation) {
     int delay_estimator_unconverged;
     int c, mn;
 
@@ -53,7 +53,7 @@ int filter_delay_update(FilterDelay *fd, const int *analyzer, int analyzer_len,
     } else if (analyzer != NULL) {
         /* The analyzer length must equal num_channels; state stays unmodified on mismatch. */
         if (analyzer_len != fd->num_channels) {
-            return -1;
+            return;
         }
         for (c = 0; c < fd->num_channels; ++c) {
             fd->filter_delays_blocks[c] = analyzer[c];
@@ -70,8 +70,6 @@ int filter_delay_update(FilterDelay *fd, const int *analyzer, int analyzer_len,
         }
         fd->min_filter_delay = mn;
     }
-
-    return 0;
 }
 
 int filter_delay_min_direct_path(const FilterDelay *fd) {

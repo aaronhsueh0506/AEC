@@ -62,7 +62,7 @@ static int cd_detect(FaConsistentDetector *c, const float *h, int size,
                      const float *render_block, int render_block_len,
                      int peak_index, int delay_blocks,
                      int sample_rate,
-                     float *scratch, float *render_sq_scratch) {
+                     float *scratch) {
     int hi_lower, lo_upper;
 
     if (region_start == 0) {
@@ -105,7 +105,6 @@ static int cd_detect(FaConsistentDetector *c, const float *h, int size,
 
     if (c->significant_peak) {
         int active;
-        (void)render_sq_scratch;
         active = (sk_sum_sq_pairwise_f32(render_block, (size_t)render_block_len)
                   > c->active_render_threshold);
         if (c->delay_ref == delay_blocks) {
@@ -277,7 +276,7 @@ void fa_update(FilterAnalyzer *m, const float *filter_taps,
         &m->consistent, h, size, m->region_start, m->region_end,
         render_block, render_block_len, m->peak_index, m->delay_blocks,
         m->sample_rate,
-        m->abs_scratch, m->render_sq_scratch);
+        m->abs_scratch);
 }
 
 /* Queries */

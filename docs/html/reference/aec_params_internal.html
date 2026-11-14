@@ -32,7 +32,7 @@ pre code{background:none;padding:0}
 <h1>AEC 內部參數 — 可以調,但不建議開放</h1>
 
 <h2>概要</h2>
-<p>本頁列出不屬於 <a href="aec_params.html">外部參數</a> 的內部調校值(原本是 <code>AecConfig</code> 的欄位,現在是庫內部 <code>AecTuning</code> 的欄位,呼叫端不能設定;<code>epc_mu_floor</code> 已刪除),以及編譯期固定的常數。這些值<b>不開放給第三方</b>(測試經 <code>aec_testing_*</code> 鉤子覆寫):共同原因是它們是<b>聯合調出來的</b>(預設值是整體調過的,見手冊 §6.6),單獨改任何一個都沒有保證;validator 的範圍只防崩壞,不防音質崩壞。出處見 <code>src/aec_tuning.h</code>(宣告與預設在 <code>aec_tuning.c</code>)。下表值只有測試能覆寫。</p>
+<p>本頁列出不屬於 <a href="aec_params.html">外部參數</a> 的內部調校值(原本是 <code>AecConfig</code> 的欄位,現在是庫內部 <code>AecTuning</code> 的欄位,呼叫端不能設定;<code>epc_mu_floor</code> 已刪除),以及編譯期固定的常數。這些值<b>不開放給第三方</b>(測試經 <code>aec_testing_*</code> 鉤子覆寫):共同原因是它們是<b>聯合調出來的</b>(預設值是整體調過的,見手冊 §6.6),單獨改任何一個都沒有保證;validator 的範圍只防崩壞,不防音質崩壞。出處見 <code>include/internal/aec_tuning.h</code>(宣告與預設在 <code>aec_tuning.c</code>)。下表值只有測試能覆寫。</p>
 
 <h2>1. 內部調校值(<code>AecTuning</code>,原 <code>AecConfig</code> 內部欄位)</h2>
 <div class="tblwrap"><table>
@@ -48,30 +48,30 @@ pre code{background:none;padding:0}
 <tr><td><b>前端與結構</b>(4)</td><td><code>enable_highpass</code>(1)、<code>highpass_cutoff_hz</code>(80)、<code>enable_shadow</code>(1)、<code>delay_est_period_s</code>(0:每 hop 全速分析)</td><td>mic 高通與 shadow filter 固定開啟;<code>delay_est_period_s</code> 非 0 可能改變選到哪個 lag(不只是變慢),未過驗收。</td></tr>
 <tr><td><b>由 level 帶出</b>(3)</td><td><code>min_gain_floor_far_active_db</code>、<code>min_gain_floor_dt_db</code>、<code>min_gain_split_floor_enabled</code></td><td>唯一入口是 <code>AecConfig.level</code> 與 <code>aec_set_level()</code>,值見<a href="aec_params.html">外部參數</a>的 level 表。</td></tr>
 </table></div>
-<p class="small">加總 6+4+7+5+2+2+7+2+4+3 = 42,等於 <code>src/aec_tuning.h</code> 的 <code>AecTuning</code> 欄位數(<code>delay_buffer_ms</code>、<code>kalman_q_high</code>、<code>kalman_q_low</code> 已刪除,<code>epc_mu_floor</code> 已刪除);公開的 <code>AecConfig</code> 另有 12 個欄位,見<a href="aec_params.html">外部參數</a>。</p>
+<p class="small">加總 6+4+7+5+2+2+7+2+4+3 = 42,等於 <code>include/internal/aec_tuning.h</code> 的 <code>AecTuning</code> 欄位數(<code>delay_buffer_ms</code>、<code>kalman_q_high</code>、<code>kalman_q_low</code> 已刪除,<code>epc_mu_floor</code> 已刪除);公開的 <code>AecConfig</code> 另有 12 個欄位,見<a href="aec_params.html">外部參數</a>。</p>
 
 <h2>2. 不在 <code>AecConfig</code>、編譯期固定的常數(runtime 完全改不了)</h2>
 <p>這些由 <code>aec_carve()</code>／<code>aec_build_sg_config()</code> 依 <code>(sample_rate, fft_size)</code> 查表產生,也不該提供介面。</p>
 <div class="tblwrap"><table>
 <tr><th>項目</th><th>規模(本機以原始碼逐欄計數)</th><th>位置</th></tr>
-<tr><td><code>SuppressionGainConfig</code></td><td>ENR／EMR 門檻、audibility、HF limiter、gain ratchet、soft blend、DominantNearend、split floor…</td><td><code>src/suppression_gain.h</code></td></tr>
-<tr><td><code>AecPostConfig</code></td><td>ERLE coherence gate、CNG 追蹤常數、observer 參數</td><td><code>src/aec_post.h</code></td></tr>
-<tr><td><code>AecStateConfig</code></td><td>ERLE／ERL 啟動、initial state、delay headroom…</td><td><code>src/aec_state.h</code></td></tr>
-<tr><td><code>ReeEchoModelConfig</code></td><td>殘餘回音模型常數</td><td><code>src/residual_echo_estimator.h</code></td></tr>
-<tr><td><code>AECB_*</code> 巨集與表</td><td><code>#define</code>(16k 基準區與 8k／48k 的逐格點覆寫)、半張合成窗 <code>AECB_SYNTH_WINDOW_HALF</code>(<code>AECB_SYNTH_HALF_N</code> 個 float)與 ENR／SU 門檻表的 run-length 碼(<code>AECB_*_SG_RUN_END</code>／<code>_RUN_VAL</code>／<code>_RUNS</code>);檔頭 <code>AUTO-GENERATED … DO NOT EDIT BY HAND</code>(由 <code>python/diag/gen_aec_balanced_config_h.py</code> 產生,<code>make test-header-fresh</code> 比對)</td><td><code>include/aec_balanced_config.h</code></td></tr>
-<tr><td><code>DA_*</code> 延遲估計常數</td><td><code>DA_WINDOW_SIZE_SB</code>(32)、<code>DA_ALIGNMENT_SHIFT_SB</code>(24)、<code>DA_THRESH_INITIAL</code>(5)、<code>DA_THRESH_CONVERGED</code>(20)、<code>DA_HIST_WINDOW</code>(250)…</td><td><code>src/delay_aec.h</code>(對外只有 <code>aec.h</code> 的 <code>AEC_DELAY_NUM_FILTERS_MAX</code>(5)、<code>AEC_DELAY_FILTER_SIZE</code>(512)、<code>AEC_DELAY_FILTER_INTRA_SHIFT</code>(384)、<code>AEC_DELAY_DOWN_SAMPLING_FACTOR</code>(4))</td></tr>
-<tr><td>其他常數</td><td><code>AEC_DELAY_SHIFT_JUDGMENT_HOPS</code>(100)、<code>AEC_DELAY_REJECT_CAP</code>(8)、<code>AEC_POOR_EXC_COUNTER_INITIAL_HOPS</code>(400)</td><td><code>src/aec_impl.h</code>;<code>src/aec_scale.h</code></td></tr>
+<tr><td><code>SuppressionGainConfig</code></td><td>ENR／EMR 門檻、audibility、HF limiter、gain ratchet、soft blend、DominantNearend、split floor…</td><td><code>include/internal/suppression_gain.h</code></td></tr>
+<tr><td><code>AecPostConfig</code></td><td>ERLE coherence gate、CNG 追蹤常數、observer 參數</td><td><code>include/internal/aec_post.h</code></td></tr>
+<tr><td><code>AecStateConfig</code></td><td>ERLE／ERL 啟動、initial state、delay headroom…</td><td><code>include/internal/aec_state.h</code></td></tr>
+<tr><td><code>ReeEchoModelConfig</code></td><td>殘餘回音模型常數</td><td><code>include/internal/residual_echo_estimator.h</code></td></tr>
+<tr><td><code>AECB_*</code> 巨集與表</td><td><code>#define</code>(16k 基準區與 8k／48k 的逐格點覆寫)、半張合成窗 <code>AECB_SYNTH_WINDOW_HALF</code>(<code>AECB_SYNTH_HALF_N</code> 個 float)與 ENR／SU 門檻表的 run-length 碼(<code>AECB_*_SG_RUN_END</code>／<code>_RUN_VAL</code>／<code>_RUNS</code>);檔頭 <code>AUTO-GENERATED … DO NOT EDIT BY HAND</code>(由 <code>python/diag/gen_aec_balanced_config_h.py</code> 產生,<code>make test-header-fresh</code> 比對)</td><td><code>include/internal/aec_balanced_config.h</code></td></tr>
+<tr><td><code>DA_*</code> 延遲估計常數</td><td><code>DA_WINDOW_SIZE_SB</code>(32)、<code>DA_ALIGNMENT_SHIFT_SB</code>(24)、<code>DA_THRESH_INITIAL</code>(5)、<code>DA_THRESH_CONVERGED</code>(20)、<code>DA_HIST_WINDOW</code>(250)…</td><td><code>include/internal/delay_aec.h</code>(對外只有 <code>aec.h</code> 的 <code>AEC_DELAY_NUM_FILTERS_MAX</code>(5)、<code>AEC_DELAY_FILTER_SIZE</code>(512)、<code>AEC_DELAY_FILTER_INTRA_SHIFT</code>(384)、<code>AEC_DELAY_DOWN_SAMPLING_FACTOR</code>(4))</td></tr>
+<tr><td>其他常數</td><td><code>AEC_DELAY_SHIFT_JUDGMENT_HOPS</code>(100)、<code>AEC_DELAY_REJECT_CAP</code>(8)、<code>AEC_POOR_EXC_COUNTER_INITIAL_HOPS</code>(400)</td><td><code>include/internal/aec_impl.h</code>;<code>include/internal/aec_scale.h</code></td></tr>
 <tr><td>時間常數盤點</td><td>80 條候選,其中 25 條仍待 retime 驗證(由 <code>python/diag/gen_timing_inventory.py</code> 產生)</td><td><code>AEC/docs/timing_constant_inventory.md</code></td></tr>
 </table></div>
 
 <h2>3. 內部函式與 header(整合者不得依賴)</h2>
 <div class="tblwrap"><table>
 <tr><th>範圍</th><th>內容</th><th>為什麼不開放</th></tr>
-<tr><td><code>src/aec_tuning.h</code>、<code>src/aec_config_build.h</code></td><td><code>aec_resolve</code>、<code>aec_resolve_tuned</code>、<code>aec_tuning_valid</code>、<code>aec_apply_level</code>、<code>aec_build_sg_config</code>、<code>aec_synth_window_build</code>、<code>aec_sg_tables_decode</code></td><td>庫內部共用的設定建構器(<code>aec.c</code> 與 <code>aec_res.c</code>;後者為內部模組,標頭 <code>src/aec_res_internal.h</code>);回傳的 tuning 表指向靜態 per-rate 資料。</td></tr>
-<tr><td><code>src/aec_scale.h</code></td><td><code>aec_blocks_to_hops</code>、<code>aec_ms_to_hops</code>、<code>aec_growth_rehop</code>、<code>AEC_PSD_SCALE</code>…</td><td>參考常數(int16^2 PSD、4 ms 區塊)換算到本庫尺度的 init-only helper。</td></tr>
-<tr><td>子模組 header(全在 <code>src/</code>,不在 <code>include/</code>)</td><td><code>pbfdkf.h</code>、<code>delay_aec.h</code>、<code>aec_post.h</code>、<code>aec_state.h</code>、<code>suppression_gain.h</code>、<code>residual_echo_estimator.h</code>、<code>epc_shadow.h</code>、<code>detectors.h</code>… 及其 <code>*_get_mem_size</code>／<code>*_init_static</code> 函式</td><td>隨版本改變;應用程式只用頂層 <code>aec_get_mem_size</code>／<code>aec_init</code>(<code>STATIC_MEMORY.md</code>)。</td></tr>
+<tr><td><code>include/internal/aec_tuning.h</code>、<code>include/internal/aec_config_build.h</code></td><td><code>aec_resolve</code>、<code>aec_resolve_tuned</code>、<code>aec_tuning_valid</code>、<code>aec_apply_level</code>、<code>aec_build_sg_config</code>、<code>aec_synth_window_build</code>、<code>aec_sg_tables_decode</code></td><td>庫內部共用的設定建構器(<code>aec.c</code> 與 <code>aec_res.c</code>;後者為內部模組,標頭 <code>include/internal/aec_res_internal.h</code>);回傳的 tuning 表指向靜態 per-rate 資料。</td></tr>
+<tr><td><code>include/internal/aec_scale.h</code></td><td><code>aec_blocks_to_hops</code>、<code>aec_ms_to_hops</code>、<code>aec_growth_rehop</code>、<code>AEC_PSD_SCALE</code>…</td><td>參考常數(int16^2 PSD、4 ms 區塊)換算到本庫尺度的 init-only helper。</td></tr>
+<tr><td>子模組 header(全在 <code>include/internal/</code>,不在 <code>include/</code> 根目錄)</td><td><code>pbfdkf.h</code>、<code>delay_aec.h</code>、<code>aec_post.h</code>、<code>aec_state.h</code>、<code>suppression_gain.h</code>、<code>residual_echo_estimator.h</code>、<code>epc_shadow.h</code>、<code>detectors.h</code>… 及其 <code>*_get_mem_size</code>／<code>*_init_static</code> 函式</td><td>隨版本改變;應用程式只用頂層 <code>aec_get_mem_size</code>／<code>aec_init</code>(<code>STATIC_MEMORY.md</code>)。</td></tr>
 <tr><td><code>suppression_gain_set_split_floor_*</code></td><td><code>_far_active_db</code>、<code>_dt_db</code>、<code>_enabled</code></td><td>是 <code>aec_set_level</code> 的底層 primitive;整合端改用它。</td></tr>
-<tr><td><code>struct Aec</code> 欄位</td><td><code>src/aec_impl.h</code></td><td><code>aec.h</code> 只宣告 <code>typedef struct Aec Aec;</code>,結構內容由編譯器擋在庫外(只有 <code>aec.c</code>、<code>aec_array.c</code> 與白箱測試看得到)。</td></tr>
+<tr><td><code>struct Aec</code> 欄位</td><td><code>include/internal/aec_impl.h</code></td><td><code>aec.h</code> 只宣告 <code>typedef struct Aec Aec;</code>,結構內容由編譯器擋在庫外(只有 <code>aec.c</code>、<code>aec_array.c</code> 與白箱測試看得到)。</td></tr>
 </table></div>
 
 <h2>4. 建置期旗標(內部)</h2>

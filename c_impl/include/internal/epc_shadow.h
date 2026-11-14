@@ -32,7 +32,7 @@ typedef struct EpcDetector {
 void epc_init(EpcDetector* e, int hangover, float total_rise,
                  float delta_threshold, int hop_size, int sample_rate);
 void epc_reset(EpcDetector* e);
-EpcEvent epc_force_delay(EpcDetector* e);
+void epc_force_delay(EpcDetector* e);
 EpcEvent epc_update_epv(EpcDetector* e, float far_pwr_global,
                              int filter_converged, int main_paused);
 EpcEvent epc_update_shadow_rise(EpcDetector* e,
@@ -48,11 +48,6 @@ typedef enum {
     SC_GATE_COH_DELAY,
     SC_GATE_STREAK,
 } ShadowCopyGateMode;
-
-typedef struct ShadowCopyDecision {
-    int pause_main;
-    int reverse_copy;
-} ShadowCopyDecision;
 
 typedef struct ShadowCopy {
     ShadowCopyGateMode gate_mode;
@@ -74,7 +69,7 @@ void shadow_copy_init_for_grid(ShadowCopy* s, ShadowCopyGateMode mode,
                                int epc_hangover, int hop_size,
                                int sample_rate);
 void shadow_copy_reset(ShadowCopy* s);
-ShadowCopyDecision shadow_copy_update(
+void shadow_copy_update(
     ShadowCopy* s,
     int    shadow_frame_count,
     int    warmup_hops,

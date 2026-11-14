@@ -179,9 +179,8 @@ int delay_aec_init(DelayAec *d, void *mem, size_t bytes,
 void delay_aec_reset(DelayAec *d);
 
 /* Per-hop drive: near (HPF mic) and far (raw reference) are float[hop] at the caller's rate.
- * Returns 1 iff a new delay value was emitted this hop. With run_matched_filter = 0 the hop is fed
- * (decimators and ring) but not analysed, so latest_* is unchanged. */
-int  delay_aec_accumulate_ex(DelayAec *d, const float *near, const float *far,
+ * With run_matched_filter = 0 the hop is fed (decimators and ring) but not analysed, so latest_* is unchanged. */
+void delay_aec_accumulate_ex(DelayAec *d, const float *near, const float *far,
                              int hop, int run_matched_filter);
 
 /* accessors */

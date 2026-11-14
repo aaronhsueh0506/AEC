@@ -91,7 +91,7 @@ int main(int argc, char* argv[]) {
         int dts_drift = REL_DRIFT(dt.dt_from_shadow, exp_dts, EMA_REL);
         if (far_drift || dte_drift || div_drift || dts_drift || adv_drift ||
             ra_res.is_active != exp_active ||
-            ra_res.is_stationary != exp_stat ||
+            ra.is_stationary != exp_stat ||
             ra_res.warmup_active != exp_warm ||
             fc.converged != exp_conv || fc.once_converged != exp_once ||
             just != exp_just) {

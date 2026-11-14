@@ -1117,13 +1117,11 @@ void delay_aec_reset(DelayAec *d) {
 /* Driven by aec.c's duty-cycle state machine. With run_matched_filter = 0 the hop is decimated and
  * pushed into the ring (buffers stay gapless) but no matched-filter or aggregator work runs, so
  * latest_* is unchanged. */
-int delay_aec_accumulate_ex(DelayAec *d, const float *near, const float *far,
-                            int hop, int run_matched_filter) {
+void delay_aec_accumulate_ex(DelayAec *d, const float *near, const float *far,
+                             int hop, int run_matched_filter) {
     DelayQuality q = DELAY_QUALITY_COARSE;
     int delay = 0;
     int produced;
-    int prev_delay = d->latest_valid ? d->latest_delay : -1;
-    int emitted_new = 0;
     const float *near_fed = near;
     const float *far_fed = far;
     int hop_fed = hop;
@@ -1147,9 +1145,7 @@ int delay_aec_accumulate_ex(DelayAec *d, const float *near, const float *far,
         /* estimate_count is a public counter with no internal threshold, so it saturates at
          * INT_MAX. */
         if (d->estimate_count < INT_MAX) d->estimate_count += 1;
-        if (delay != prev_delay) emitted_new = 1;
     }
-    return emitted_new;
 }
 
 int delay_aec_estimated_delay(const DelayAec *d) {

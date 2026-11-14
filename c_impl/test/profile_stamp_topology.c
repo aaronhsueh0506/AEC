@@ -4,7 +4,7 @@
  * nothing about WHERE the stamps sit, and a stage window whose opening stamp is missing reports 0, indistinguishable from a
  * stage that genuinely cost under a microsecond.
  *
- * Built against a library whose stamp advances by one per read (see profile_timer_count.h), so each window's value is the
+ * Built against a library whose stamp advances by one per read (see profile_timer_fixtures.h), so each window's value is the
  * number of stamps it spans. One hop through aec_process() then produces an exact tuple:
  *
  *   read 0  entry, opens frontend

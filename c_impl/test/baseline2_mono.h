@@ -1,8 +1,8 @@
 /* baseline2_mono.h -- the second single-channel scene set: case table and runner of the test of the entry points
- * (test/test_split_entry2.c; test/test_split_entry3.c adds baseline3_mono.h on top).
+ * (test/test_split_entry2.c; test/test_split_entry3.c adds its own case table on top).
  *
  * The includer provides, before including this header: <aec.h> and the header of the stand-alone residual gain stage
- * (AecRes: src/aec_res_internal.h), <utility/simd_kernels.h>, and (the cases switch internal tuning, so it is built with AEC_TESTING=1)
+ * (AecRes: include/internal/aec_res_internal.h), <utility/simd_kernels.h>, and (the cases switch internal tuning, so it is built with AEC_TESTING=1)
  *   static void g2_mode_cfg(AecConfig* c, int ctx);     ctx = 1: the lane that exposes its residual view with every field
  *                                                       (residual FULL, driven by aec_process_linear + aec_process_residual);
  *                                                       ctx = 0: the instance that applies its own gain (aec_process)

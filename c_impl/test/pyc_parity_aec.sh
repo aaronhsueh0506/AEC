@@ -7,7 +7,7 @@
 #
 # Grids 8k/256, 16k/256, 16k/512, 48k/1024; levels balanced, aggressive (mild sampled); inputs: the tracked
 # aec_record recording (+ 8k/48k resamples) and seeded synthetic echo / double-talk scenes; observer off/on,
-# mic HPF on/off, context seam, plus a regenerate-and-diff check of aec_balanced_config.h.
+# mic HPF on/off, context seam, plus a regenerate-and-diff check of include/internal/aec_balanced_config.h.
 #
 # Known gaps are registered as EXPECTED_RED in test/pyc_parity/pyc_parity.py; an expected-red cell that turns green FAILS
 # the run (remove the marker). Tolerances are frozen there, and every cell prints the measured numbers beside them.

@@ -9,7 +9,7 @@
  */
 #include "aec.h"
 #include "aec_internal.h"
-#include "../src/aec_res_internal.h"
+#include "aec_res_internal.h"
 #include "zero_heap_hook.h"
 
 #include <stdio.h>

@@ -15,7 +15,7 @@ Source material: the SAME 16 kHz doubletalk case at every rate.
 directly. --sr 8000 / --sr 48000 resample that case with
 scipy.signal.resample_poly (1:2 down to 8k, 3:1 up to 48k). FL (filter_length)
 defaults to None, which lets AecConfig.__post_init__ derive it from sr (52ms
-<44.1kHz / 64ms >=44.1kHz), the same policy aec_config_defaults mirrors in C
+<44.1kHz / 64ms >=44.1kHz), the same policy aec_config_from_level mirrors in C
 (aec.c).
 
 Run:

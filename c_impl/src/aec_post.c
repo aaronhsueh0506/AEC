@@ -52,9 +52,7 @@ void aec_post_init(AecPost *p, const AecPostConfig *cfg,
                    float *comfort_noise, float *nf,
                    Complex *e_out_spec, float *e_out_full) {
     p->cfg = *cfg;
-    p->trace.aec_converged = 0;
-    p->trace.far_active = 0;
-    p->trace.gain_mean = 0.0f;
+    p->far_active = 0;
     /* Convergence-flags y2 threshold: 50^2 * 64 / 32768^2 at the reference grid, scaled to the live
      * hop_size (it is compared against y2_time summed over the hop). */
     p->y2_thr = aec_block_energy_scale(50.0f * 50.0f * 64.0f, cfg->hop_size)
@@ -90,10 +88,7 @@ void aec_post_reset(AecPost *p) {
     int nb = p->cfg.n_bins;
     /* Reset: OLA, CNG, coherence and avg-reverb cleared. */
     if (p->ola_buf) memset(p->ola_buf, 0, (size_t)p->cfg.block_size * sizeof(float));
-    /* The trace stash is restarted so a trace row after a reset does not show a pre-reset hop. */
-    p->trace.aec_converged = 0;
-    p->trace.far_active = 0;
-    p->trace.gain_mean = 0.0f;
+    p->far_active = 0;
     p->cng_seed = AEC_CNG_SEED;
     p->output_guard_active = 0;
     p->reset_serial += 1u;
@@ -329,13 +324,13 @@ void aec_post_eval_output_guard(AecPost *p, AecPostRunScratch *sc, int usable) {
     }
 }
 
-int aec_post_run(AecPost *p,
-                 const AecPostRunIn *in,
-                 const AecPostRunObj *obj,
-                 AecPostRunScratch *sc,
-                 float *out,
-                 int *out_pending_gain_change,
-                 int *out_pending_delay_change)
+void aec_post_run(AecPost *p,
+                  const AecPostRunIn *in,
+                  const AecPostRunObj *obj,
+                  AecPostRunScratch *sc,
+                  float *out,
+                  int *out_pending_gain_change,
+                  int *out_pending_delay_change)
 {
     const AecPostConfig *c = &p->cfg;
     int nb = c->n_bins;
@@ -415,7 +410,6 @@ int aec_post_run(AecPost *p,
             coarse_conv = (e2_coarse < 0.05f * y2_time) && (y2_time > y2_thr);
         }
         aec_converged = refined_conv || coarse_conv;
-        p->trace.aec_converged = aec_converged;
 
         {
             FilterDelayEstimate ext;
@@ -469,14 +463,13 @@ int aec_post_run(AecPost *p,
                 int active_render = in->shared_far_psd
                     ? in->shared_far_active
                     : (sum_sq_f32_pairwise(in->far_end, (size_t)hop) / (float)hop > in->active_render_threshold);
-                p->trace.far_active = active_render;
+                p->far_active = active_render;
                 int x2r_present_state =
                     (in->x2_cache != NULL && n_part > 0);
                 aec_state_update(obj->state,
                                  aec_converged,
                                  ext_p,
                                  far_psd, p->near_psd, p->error_psd,
-                                 p->echo_psd,
                                  active_render,
                                  in->s_ref_max, in->s_coa_max,
                                   1.0,
@@ -547,8 +540,6 @@ int aec_post_run(AecPost *p,
 
                     {
                         int saturated = aec_state_saturated_echo(obj->state);
-                        int transparent =
-                            aec_state_transparent_mode_active(obj->state);
                         int onset_comp = obj->ree->erle_onset_comp_in_dominant;
                         int onset = onset_comp || !dominant_ne;
                         const float *erle =
@@ -557,7 +548,7 @@ int aec_post_run(AecPost *p,
                             aec_state_erle_unbounded(obj->state);
                         ree_estimate(obj->ree,
                                      far_psd, p->near_psd, p->echo_psd,
-                                     dominant_ne, usable, saturated, transparent,
+                                     dominant_ne, usable, saturated, /*transparent_mode=*/0,
                                      erle, erle_unb,
                                      delay_blocks, n_part,
                                      0,
@@ -615,12 +606,6 @@ int aec_post_run(AecPost *p,
                                         obj->sg, sc->nearend_pwr, sc->r2, sc->r2_unb,
                                         p->comfort_noise, render_block,
                                         0, sat_echo);
-
-                                    if (!in->context_only) {
-                                        float gsum = 0.0f;
-                                        for (k = 0; k < nb; ++k) gsum += gain[k];
-                                        p->trace.gain_mean = (nb > 0) ? gsum / (float)nb : 0.0f;
-                                    }
                                 }
 
                                 /* hold_state_only implies context_only
@@ -652,5 +637,4 @@ int aec_post_run(AecPost *p,
 post_done:
     if (out_pending_gain_change) *out_pending_gain_change = pgc;
     if (out_pending_delay_change) *out_pending_delay_change = pdc;
-    return 0;
 }

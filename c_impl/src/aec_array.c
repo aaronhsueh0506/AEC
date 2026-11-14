@@ -450,7 +450,7 @@ static AecDelayState update_shared_delay(AecArray* p, const float* capture, cons
     /* The estimator is fed every hop (decimators and ring stay gapless); only the analysis is decimated once the estimate held
      * still, so a movement is seen within duty.period_hops. */
     run_filter = aec_duty_begin(&p->duty);
-    (void)delay_aec_accumulate_ex(&p->delay, capture, render, p->hop_size, run_filter);
+    delay_aec_accumulate_ex(&p->delay, capture, render, p->hop_size, run_filter);
     p->delay_calls += 1;
     aec_duty_end(&p->duty, delay_aec_estimated_delay(&p->delay), delay_aec_is_solid(&p->delay), max_lane_erle_windowed(p));
 

@@ -8,7 +8,7 @@
  *
  * Run from c_impl/:  make test-split-entry-2   (G2_VERBOSE=<file> writes every hop's unchained group hashes) */
 #include "aec.h"
-#include "../src/aec_res_internal.h"
+#include "aec_res_internal.h"
 #include "aec_test_tuning.h"
 #include "utility/simd_kernels.h"
 

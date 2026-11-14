@@ -99,11 +99,6 @@ int aec_state_saturated_echo(const AecState *s) {
     return saturation_detector_saturated_echo(&s->saturation_detector);
 }
 
-int aec_state_transparent_mode_active(const AecState *s) {
-    (void)s;
-    return 0;
-}
-
 int aec_state_transition_triggered(const AecState *s) {
     return initial_state_transition_triggered(&s->initial_state);
 }
@@ -168,7 +163,6 @@ void aec_state_update(AecState *s,
                       const float *render_psd,
                       const float *capture_psd,
                       const float *error_psd,
-                      const float *echo_psd,
                       int active_render,
                       float subtractor_s_refined_max_abs,
                       float subtractor_s_coarse_max_abs,
@@ -178,8 +172,6 @@ void aec_state_update(AecState *s,
                       const float *x2_reverb_for_erle,
                       const float *capture_psd_erle,
                       const unsigned char *erle_coh_gate_mask) {
-    (void)echo_psd;
-
     /* Step 1: any_filter_converged. */
     int any_filter_converged = bridge_filter_converged ? 1 : 0;
 

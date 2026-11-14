@@ -12,7 +12,7 @@
 #include "aec.h"
 #include "aec_internal.h"
 #include "aec_white_box.h"
-#include "../src/aec_res_internal.h"
+#include "aec_res_internal.h"
 #include "utility/simd_kernels.h"
 #include "array_signal.h"
 #include "res_gain_of.h"

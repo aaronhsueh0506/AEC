@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Every aec.h / aec_internal.h function that takes an Aec handle is exercised by test_handle_ready.c.
 
-usage: check_handle_entries.py include/aec.h test/test_handle_ready.c [include/aec_internal.h]
+usage: check_handle_entries.py include/aec.h test/test_handle_ready.c [include/internal/aec_internal.h]
 The entries are the calls between the "BEGIN entries" and "END entries" markers of check_refused(); aec_create() takes no
 handle (the NULL of a failed build is checked by the failed-create scenarios of the same file). Exit 1 and a list when a
 prototype is missing there or a call there has no prototype."""

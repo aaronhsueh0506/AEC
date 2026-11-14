@@ -26,7 +26,6 @@ typedef struct RenderActivity {
 typedef struct RenderActivityResult {
     float  far_pwr;
     int    is_active;
-    int    is_stationary;
     int    warmup_active;
 } RenderActivityResult;
 

@@ -91,8 +91,8 @@ context API 的應用。只呼叫 `aec_process()`（`AecConfig.residual` 維持�
 | `DA_NUM_FILTERS`、`DA_FILTER_SIZE`、`DA_FILTER_INTRA_SHIFT`、`DA_DOWN_SAMPLING_FACTOR` | `AEC_DELAY_NUM_FILTERS_MAX`、`AEC_DELAY_FILTER_SIZE`、`AEC_DELAY_FILTER_INTRA_SHIFT`、`AEC_DELAY_DOWN_SAMPLING_FACTOR`（`aec.h`，無別名） |
 | `aec_res.h`：`AecRes`、`AecResInput`、`aec_res_init()`、`aec_res_process()`、`aec_res_set_level()` | 增益階段不再是公開介面。單聲道的 `G_res` 在 `Aec` 裡（`aec_get_residual().res_gain`）；多路融合用陣列實例（`AecConfig.n_mics = 4`，`aec_process_residual(a, &beam)`），強度用 `aec_set_level()` |
 | Audio_ALG 的 `mcab_*` 四聲道流程 | `AecConfig.n_mics = AEC_ARRAY_MICS`（4）的陣列實例：`aec_process_linear()` → `aec_get_array()` → 呼叫端的 beamformer → `aec_process_residual()`；見 `reference/integration.md` §8.8 |
-| 由 `include/` 取用內部標頭（`aec_post.h`、`pbfdkf.h` 等）裡的常數與型別 | `AEC_CNG_SEED`、`AEC_PSD_SCALE_F`／`AEC_PSD_SCALE_INV_F`、`AecStageTiming`、`aec_level_name()` 在 `aec.h`；`include/` 只剩 `aec.h`、`aec_internal.h`、`aec_balanced_config.h`、`aec_debug.h`，其餘內部標頭在 `src/` |
-| `aec_debug_set_level()`、`aec_debug_set_log()`、`aec_wav` 的 `--debug-level`、`--debug-log`、`--no-shadow`、`--no-hpf`、`--delay-est-period` | 已刪除（前兩者只儲存、從不讀取；後三個對應的欄位已是內部值）。`aec_debug_set_trace()` 與 `--debug-trace` 仍在 |
+| 由 `include/` 取用內部標頭（`aec_post.h`、`pbfdkf.h` 等）裡的常數與型別 | `AEC_CNG_SEED`、`AEC_PSD_SCALE_F`／`AEC_PSD_SCALE_INV_F`、`AecStageTiming`、`aec_level_name()` 在 `aec.h`；`include/` 只剩 `aec.h`，其餘全部（`aec_internal.h`、`aec_balanced_config.h`、內部標頭）在 `include/internal/`；編譯 `src/*.c` 的 SDK Makefile 要加 `-I include/internal` |
+| `aec_debug_set_level()`、`aec_debug_set_log()`、`aec_wav` 的 `--debug-level`、`--debug-log`、`--no-shadow`、`--no-hpf`、`--delay-est-period` | 已刪除（前兩者只儲存、從不讀取；後三個對應的欄位已是內部值）。`aec_debug.h`（`aec_debug_set_trace()`、`aec_debug_set_frame()`、`AecDebugTraceRow`）與 `aec_wav --debug-trace` 一併刪除，改用 `aec_debug_status()` 與 `--debug` |
 | 合成視窗 `aec_synthesis_window()` 指向靜態表 | 指向實例自己的 pool（init／create 時建好）：借用它的 `AcIstft` 不得比 `Aec` 活得久（§6） |
 | 存檔的 `AecMemReq` 描述子（`AEC_LAYOUT_VERSION` 1） | `AEC_LAYOUT_VERSION` 2：舊描述子被 `aec_init_ex()` 拒絕；每次建置重新查詢（`aec_init()`／`aec_create()` 不比對描述子） |
 

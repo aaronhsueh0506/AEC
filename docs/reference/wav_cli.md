@@ -26,7 +26,6 @@ BIN="$(make -s -C c_impl print-bin-dir)"
 | `--delay-num-filters <n>` | 覆寫 `cfg.delay_num_filters`（僅 `matched` 合法，1–5，預設 5） |
 | `--fixed-delay <samples>` | 覆寫 `cfg.fixed_delay_samples`（僅 `fixed` 合法，native-rate sample，≥0） |
 | `--print-mem-size` | 印出 resolved grid／mode／n 與 static-pool byte 拆解後**直接退出**：仍會讀兩個輸入 WAV 的取樣率，但不寫輸出檔、不跑任何一個 hop（見下方「`--print-mem-size` 輸出」） |
-| `--debug-trace <path>` | 每 frame 的 CSV trace |
 | `--debug` | 每秒印一行 `aec_debug_status()` 狀態 |
 
 > 兩個容易誤解的地方：**沒有** `--filter-length` 或 `--filter-length-ms` 這個旗標
@@ -106,5 +105,5 @@ duty: matched_filter_ran=0/0 hops (n/a -- no matched-filter estimator in delay_m
 ## 回報問題
 
 請附上：mic/ref 測試片段、完整的呼叫方式（CLI 命令或 `AecConfig` 設定）、
-sample rate 與 level、使用的 BACKEND，以及問題發生前後至少一秒的
-`--debug-trace <path>` CSV。
+sample rate 與 level、使用的 BACKEND，以及加 `--debug` 跑 `aec_wav` 的輸出
+（每秒一行 `aec_debug_status()`）。

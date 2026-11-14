@@ -13,8 +13,6 @@
 /* int16^2 power scale of r2 / comfort_noise relative to audio-scale spectra */
 #define AEC_RES_PSD_SCALE (32768.0f * 32768.0f)
 #define AEC_RES_SATURATION_THRESHOLD 0.5f
-/* Same bound as the suppressor's render statistics */
-#define AEC_RES_STATS_MAX_HOP 1024
 
 struct AecRes {
     int n_bins;
@@ -127,7 +125,7 @@ int aec_res_hop_size(const AecRes* r) { return r ? r->hop_size : 0; }
 const float* aec_res_process(AecRes* r, const AecResInput* in) {
     int k;
     float sum_sq, peak_sq;
-    if (!r || !in || !in->error_spec || !in->near_spec || !in->r2 || !in->comfort_noise)
+    if (!r || !in || !in->error_spec || !in->near_spec || !in->r2 || !in->comfort_noise || !in->render_hop)
         return NULL;
 
     /* Near-end power on the int16^2 scale; once every filter has converged the residual power caps
@@ -142,13 +140,8 @@ const float* aec_res_process(AecRes* r, const AecResInput* in) {
         }
         r->near_power[k] = n2 * AEC_RES_PSD_SCALE;
     }
-    if (in->render_hop) {
-        sk_scale_f32(r->render_scaled, in->render_hop, 32768.0f, r->hop_size);
-        suppression_gain_render_stats(r->render_scaled, r->hop_size, &sum_sq, &peak_sq);
-    } else {
-        sum_sq = in->render_sum_sq;
-        peak_sq = in->render_peak_sq;
-    }
+    sk_scale_f32(r->render_scaled, in->render_hop, 32768.0f, r->hop_size);
+    suppression_gain_render_stats(r->render_scaled, r->hop_size, &sum_sq, &peak_sq);
 
     if (r->sg.initial_state && in->all_converged)
         suppression_gain_set_initial_state(&r->sg, 0);
@@ -159,29 +152,12 @@ const float* aec_res_process(AecRes* r, const AecResInput* in) {
                                            in->max_saturation > AEC_RES_SATURATION_THRESHOLD);
 }
 
-void aec_render_stats(const float* hop, int n, AecRenderStats* out) {
-    float scaled[AEC_RES_STATS_MAX_HOP];
-    if (!out) return;
-    out->sum_sq = 0.0f;
-    out->peak_sq = 0.0f;
-    if (!hop || n <= 0 || n > AEC_RES_STATS_MAX_HOP) return;
-    sk_scale_f32(scaled, hop, 32768.0f, n);
-    suppression_gain_render_stats(scaled, n, &out->sum_sq, &out->peak_sq);
-}
-
 int aec_res_set_level(AecRes* r, AecLevel level) {
     if (!r) return -1;
     if (aec_sg_apply_level(&r->sg, level) != 0) return -1;
     r->sg_cfg.split_floor_far_active = r->sg.cfg.split_floor_far_active;
     r->sg_cfg.split_floor_dt = r->sg.cfg.split_floor_dt;
     r->sg_cfg.split_floor_enabled = r->sg.cfg.split_floor_enabled;
-    return 0;
-}
-
-int aec_res_split_floor(const AecRes* r, float* live, float* target) {
-    if (!r) return -1;
-    if (live) *live = r->sg.split_floor_far_active_live;
-    if (target) *target = r->sg_cfg.split_floor_far_active;
     return 0;
 }
 

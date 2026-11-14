@@ -15,7 +15,7 @@
 #include "aec_test_tuning.h"
 #include "audio_stft.h"
 #include "fft_wrapper.h"
-#include "../src/aec_array_internal.h"
+#include "aec_array_internal.h"
 #include "utility/simd_kernels.h"
 #include "array_signal.h"
 
@@ -1052,7 +1052,7 @@ static void test_known_delay_memory_and_cost(void) {
         cfg.fft_size = 512;
         cfg.delay_num_filters = n;
         af_to_aec(&cfg, &ac);
-        if (aec_tcfg_mem_breakdown(&ac, &b[n]) != AEC_OK || aec_tcfg_mem_requirements(&ac, &req[n]) != 0 ||
+        if (aec_get_mem_breakdown(&ac.c, &b[n]) != AEC_OK || aec_tcfg_mem_requirements(&ac, &req[n]) != 0 ||
             b[n].estimator_bytes == 0) {
             ok = 0;
             break;
@@ -3535,7 +3535,7 @@ static void test_create_heap_path(void) {
     af_to_aec(&cfg, &ac);
     CHECK(aec_tcfg_mem_requirements(&ac, &req) == 0 && posix_memalign(&pool, 16, (size_t)req.bytes) == 0, "create: pool and descriptor");
     heap = af_test_create(&cfg);
-    if (pool) pooled = aec_tcfg_init_ex(pool, (size_t)req.bytes, &ac, &req);
+    if (pool) pooled = aec_init_ex(pool, (size_t)req.bytes, &ac.c, &req);
     CHECK(heap != NULL && pooled != NULL && af_hop_size(heap) == 128, "create: the heap array and the pooled array build");
     for (frame = 0; heap && pooled && frame < 20; ++frame) {
         AfFront fh, fp;

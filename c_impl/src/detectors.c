@@ -41,7 +41,6 @@ RenderActivityResult render_activity_update(RenderActivity* r,
         RenderActivityResult res0 = {
             .far_pwr       = 1e-10f,
             .is_active     = r->active_prev,
-            .is_stationary = r->is_stationary,
             .warmup_active = 0,
         };
         return res0;
@@ -54,7 +53,6 @@ RenderActivityResult render_activity_update(RenderActivity* r,
         RenderActivityResult res_guard = {
             .far_pwr       = 1e-10f,
             .is_active     = r->active_prev,
-            .is_stationary = r->is_stationary,
             .warmup_active = 0,
         };
         return res_guard;
@@ -110,7 +108,6 @@ RenderActivityResult render_activity_update(RenderActivity* r,
     RenderActivityResult res = {
         .far_pwr       = far_pwr,
         .is_active     = r->active_prev,
-        .is_stationary = r->is_stationary,
         .warmup_active = warmup_active,
     };
     return res;

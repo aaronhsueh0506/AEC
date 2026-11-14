@@ -167,7 +167,7 @@ shows their public configuration values, not necessarily the internal hop count.
 
 Defaults above are the Python `AecConfig` dataclass values. The C library keeps them in an internal `AecTuning` (all of them except the Python-only
 `kalman_q_high` / `kalman_q_low`, `delay_buffer_ms` and `epc_mu_floor`, which C does not have) apart from the public fields
-(`c_impl/src/aec_tuning.h`, built by `aec_resolve()` from the sample rate, the grid, `n_mics` and the level; the public `AecConfig` has 12 fields
+(`c_impl/include/internal/aec_tuning.h`, built by `aec_resolve()` from the sample rate, the grid, `n_mics` and the level; the public `AecConfig` has 12 fields
 and callers cannot set the others). The C defaults differ from the Python dataclass in three values: `enable_cng` (C: 1, a public field), `warmup_frames` (C: 100) and
 `delay_est_period_s` (C: 0.0, i.e. the matched filter analyses every hop). The C `AecConfig` does not have the Python flag pair
 `enable_res` / `return_res_context` either: its single field `residual` (`AecResidualMode`, default `AEC_RESIDUAL_FULL`)
@@ -236,7 +236,7 @@ mic-path HPF. The relationship between the two implementations is:
 * **Python↔C comparison is tolerance-based**, not 0/0.
 
 The delay-estimator matched filter is float32 fast-math and duty-cycle capable
-(see [§2.3](reference/linear_frontend.md#23-delay-estimator-aec3-aligned) and `c_impl/src/delay_aec.h`).
+(see [§2.3](reference/linear_frontend.md#23-delay-estimator-aec3-aligned) and `c_impl/include/internal/delay_aec.h`).
 
 The **FFT backend is NE10 (float32, ARM NEON)** (via the shared
 `audiolib` layer), which is not bit-exact to numpy's fp64 `np.fft`. Because

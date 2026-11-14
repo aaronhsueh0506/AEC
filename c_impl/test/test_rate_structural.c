@@ -795,7 +795,7 @@ static void test_top_level_constant_retiming(void) {
         /* Post-defaults grid override -- mirrors aec_wav.c's --fft-size
          * flag / this file's own (b)/(c)/(c2) pattern, and is exactly the
          * path that forced retiming to live in aec_carve() rather than
-         * aec_config_defaults() (see aec.c's aec_legacy10ms_hops()/
+         * aec_config_from_level() (see aec.c's aec_legacy10ms_hops()/
          * aec_legacy10ms_alpha() doc comment). */
         cfg.fft_size = fft;
 
@@ -1197,18 +1197,18 @@ static void test_render_activity_first_observation(void) {
 
     RenderActivityResult first =
         render_activity_update(&detector, active, 128);
-    CHECK(first.is_active && !first.is_stationary,
+    CHECK(first.is_active && !detector.is_stationary,
           "render activity needs two observations before stationarity");
 
     RenderActivityResult second =
         render_activity_update(&detector, active, 128);
-    CHECK(second.is_active && second.is_stationary,
+    CHECK(second.is_active && detector.is_stationary,
           "constant render becomes stationary on the second observation");
 
     (void)render_activity_update(&detector, silent, 128);
     RenderActivityResult after_silence =
         render_activity_update(&detector, active, 128);
-    CHECK(after_silence.is_active && !after_silence.is_stationary,
+    CHECK(after_silence.is_active && !detector.is_stationary,
           "stationarity requires a fresh second observation after silence");
 }
 

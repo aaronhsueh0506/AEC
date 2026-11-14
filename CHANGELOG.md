@@ -27,8 +27,7 @@ grep -oE '\bdocs/[A-Za-z0-9_/-]+\.(md|html)' CHANGELOG.md \
 Versioning: `__version__` in [python/aec.py](python/aec.py) versions this
 library's PUBLIC API and OUTPUT CONTRACT — the C header
 `c_impl/include/aec.h` (struct layouts, entry-point signatures, context-field
-semantics), the auto-derived default signal grid, the `--debug-trace` CSV
-schema, and whether `aec_process()` output stays bit-identical. MAJOR bumps
+semantics), the auto-derived default signal grid, and whether `aec_process()` output stays bit-identical. MAJOR bumps
 when any of those break; MINOR when production BALANCED behaviour changes
 compatibly or new surface is added; PATCH for fixes that keep both the API and
 the output contract intact. Through `[3.24.1]` this field instead tracked only
@@ -42,6 +41,26 @@ when verdict requires it.
 
 ---
 
+
+## [Unreleased] — 2026-11-14 — Headers under `include/internal/`, per-hop trace removed, unused code removed
+
+**`aec_process()` output unchanged.** The five baseline streams written from this tree (`split_entry`, `split_entry2`, `split_entry3`, `aec_array`, `aec_array2`) differ from the pre-round streams in exactly one place: the `META sizeof_Aec` line of `split_entry` (3 lines per build), `0x1840` to `0x1838`, i.e. `sizeof(Aec)` 6208 to 6200 B on the 64-bit host. The pool sizes are unchanged (the pool carves `ALIGN16(sizeof(Aec))`, 6208 B before and after; `aec_get_mem_size()` and the three pinned single-channel and array pool sizes are identical), `AEC_LAYOUT_VERSION` stays 2. `aec_wav` output is byte-identical at `SIMD=1` and `SIMD=0` on 17 runs (two files at 16 kHz and 48 kHz, levels 0 to 3, `--cng`, `--no-res`, `--fft-size 512`, fixed delay, `--delay-num-filters 2`) and its rejection of `--fft-size 512` at 48 kHz prints the same message.
+
+**Header layout (integrators read this).** `include/` now holds only `aec.h`, the public header. `aec_internal.h`, `aec_balanced_config.h` and every header that was in `src/` (`aec_impl.h`, `aec_tuning.h`, `aec_post.h`, `delay_aec.h`, `pbfdkf.h`, ...) moved to `include/internal/`. An SDK Makefile that compiles `src/*.c` needs `-I include/internal` in addition to `-I include`; an integrator that uses only the public API (including `aec.h`) still needs just `-I include`. `aec_internal.h` is not public API and now sits beside the other internal headers, so a pipeline that includes it adds `-I <AEC>/c_impl/include/internal`. The `Makefile` adds both paths for the library, the CLI and the tests (`TEST_INC` is gone); `test-header-cpp` compiles `aec.h` with `include/` alone on the path. Preprocessed output of every `.c` under `src/`, `example/` and `test/` is identical before and after the move. `python/diag/gen_aec_balanced_config_h.py` writes `include/internal/aec_balanced_config.h`; `docs/c_python_function_map.md` and `docs/timing_constant_inventory.*` carry the new paths (the map's `pbfdkf.h` row counts in the header column now: `c_src_total` 521 to 520, `c_hdr_total` 4 to 5).
+
+**Trace removed.** `include/aec_debug.h`, `src/aec_debug.c`, the per-hop trace block in `aec_process()` and `aec_wav --debug-trace` are deleted (`aec_debug_set_frame()`, `aec_debug_set_trace()`, `aec_debug_trace_active()`, `aec_debug_trace_row()`, `AecDebugTraceRow`). `aec_debug_status()` (in `aec.h`) and `aec_wav --debug` stay; a problem report attaches the `--debug` output instead of the CSV. The library has no stdio TU any more, so `NO_STDIO=1` selects no source and no flag (it only keys its own obj/bin directory) and `audit-no-stdio` is the regression gate. The versioning paragraph above no longer lists the `--debug-trace` CSV schema in the output contract.
+
+**Trace scratch fields removed.** `AecPostTrace` (`aec_converged`, `gain_mean`) and the per-hop mean of the suppression gain are gone; `AecPost.far_active` replaces `trace.far_active`. `sizeof(Aec)` 6208 to 6200 (`AEC_SIZEOF_PIN` in `test/test_memory_layout.c`); the 16 B-aligned pool header stays 6208.
+
+**Unused code removed** (internal headers, test hooks and the example only; the public headers lose nothing but `aec_debug.h`):
+- `WAV_IO_WRITER_STYLE` default in `example/wav_io.h` (the shared header already defaults to the AEC style).
+- `aec_config_defaults()` (internal one-line alias of `aec_config_from_level(..., AEC_LEVEL_BALANCED, ...)`); tests call `aec_config_from_level()`.
+- Test hooks `aec_testing_get_mem_breakdown()` and `aec_testing_init_ex()` (21 `aec_testing_*` hooks remain); the one test that used them calls `aec_get_mem_breakdown()` and `aec_init_ex()`.
+- `aec_render_stats()`, `AecRenderStats`, `AecResInput.render_sum_sq` and `.render_peak_sq`, `aec_res_split_floor()`. One behaviour change in the stand-alone gain stage: `aec_res_process()` with a NULL `render_hop` now returns NULL (it used the removed statistics fields). Every in-tree caller sets `render_hop`; the stage is not in the pool or the layout hash.
+- `aec_state_transparent_mode_active()` (always 0; `ree_estimate()` gets the literal `0`), the unused `echo_psd` parameter of `aec_state_update()`, the unused `render_sq_scratch` parameter of the consistency detector in `filter_analyzer.c`.
+- Return values nobody read: `aec_post_run()`, `delay_aec_accumulate_ex()`, `filter_delay_update()`, `epc_force_delay()` and `shadow_copy_update()` are `void`; `ShadowCopyDecision` (including the never-read `reverse_copy`) and `RenderActivityResult.is_stationary` (read from `RenderActivity` instead) are gone.
+- Tests: `test/baseline3_mono.h` is folded into `test/test_split_entry3.c`, `test/profile_timer_count.h` and `profile_timer_stub.h` are one `test/profile_timer_fixtures.h`, `test/modules/parity_detectors.c` is `test/parity_detectors.c`.
+- `docs/c_python_function_map.md`: the rows of the removed functions are gone, `aec_config_from_level` carries the removed alias's gap labels, `AecState.transparent_mode_active` is listed as Python-only, and the statistics block is recounted.
 
 ## [Unreleased] — 2026-11-14 — Review round: shared pool and hash helpers, one level-apply helper, strict `aec_wav` integers, fail-closed pin gate
 

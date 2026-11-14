@@ -82,10 +82,6 @@ typedef struct AecResolved {
     AecTuning tun;
 } AecResolved;
 
-/* The balanced single-channel public configuration for a rate (aec_config_from_level(..., AEC_LEVEL_BALANCED, sr)). Internal:
- * callers outside the library use aec_config_from_level(). */
-void aec_config_defaults(AecConfig* cfg, int sample_rate);
-
 /* The tuning for cfg: a pure function of cfg.sample_rate, cfg.fft_size, cfg.n_mics and cfg.level. An out-of-enum level reads as
  * balanced. */
 void aec_tuning_defaults(AecTuning* tun, const AecConfig* cfg);

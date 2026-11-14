@@ -1,6 +1,6 @@
 /* aec_test_tuning.h -- a public AecConfig together with the internal AecTuning it resolves to, for tests that override tuning
  * (the shadow filter, the high-pass, a retiming constant, the delay ring, ...). Needs the AEC_TESTING hooks (aec_test_hooks.h)
- * and -I./src (TEST_INC). A test that never overrides tuning uses aec_config_from_level() and the public calls as a product
+ * and include/internal/ on the include path. A test that never overrides tuning uses aec_config_from_level() and the public calls as a product
  * does. Changing c.sample_rate or c.level after the fact leaves t stale: call aec_tcfg_refresh() (it drops every override). */
 #ifndef AEC_TEST_TUNING_H
 #define AEC_TEST_TUNING_H
@@ -33,14 +33,6 @@ static inline Aec* aec_tcfg_init(void* mem, size_t mem_size, const AecTestCfg* x
 
 static inline int aec_tcfg_mem_requirements(const AecTestCfg* x, AecMemReq* out) {
     return aec_testing_get_mem_requirements(&x->c, &x->t, out);
-}
-
-static inline int aec_tcfg_mem_breakdown(const AecTestCfg* x, AecMemBreakdown* out) {
-    return aec_testing_get_mem_breakdown(&x->c, &x->t, out);
-}
-
-static inline Aec* aec_tcfg_init_ex(void* mem, size_t mem_size, const AecTestCfg* x, const AecMemReq* expected) {
-    return aec_testing_init_ex(mem, mem_size, &x->c, &x->t, expected);
 }
 
 static inline Aec* aec_tcfg_create(const AecTestCfg* x) {

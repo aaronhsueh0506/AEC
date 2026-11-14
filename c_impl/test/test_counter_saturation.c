@@ -394,14 +394,13 @@ static void section_epc_shadow(void) {
         const int SC_STREAK_FRAMES_MIRROR = 5;
         int max_seen = 0;
         for (i = 0; i < 100; i++) {
-            ShadowCopyDecision dec = shadow_copy_update(
+            shadow_copy_update(
                 &s, /*shadow_frame_count=*/100, /*warmup_hops=*/50,
                 /*far_pwr=*/1.0f,
                 /*main_err_smooth=*/1.0f, /*shadow_err_smooth=*/0.5f,
                 /*epc_active=*/0, /*saturation_level=*/0.0f,
                 /*dt_from_energy=*/0.0f, /*dt_from_coherence=*/0.0f,
                 /*delay_reliable=*/1);
-            (void)dec;
             if (s.copy_counter > max_seen) max_seen = s.copy_counter;
             CHECK(s.copy_counter < SC_STREAK_FRAMES_MIRROR,
                   "ShadowCopy(STREAK): streak never reaches/exceeds its own fire threshold"
@@ -471,10 +470,10 @@ static void section_epc_shadow(void) {
                 ShadowCopy* live = grids[grid];
                 live->copy_err_baseline = 10.0f;
                 for (int i = 0; i < fire_hops[grid]; ++i) {
-                    ShadowCopyDecision d = shadow_copy_update(
+                    shadow_copy_update(
                         live, 200 + i, 50, 1e-2f, 1e-3f, 1e-7f,
                         0, 0.0f, 0.0f, 0.0f, 1);
-                    CHECK(d.pause_main == (i == fire_hops[grid] - 1),
+                    CHECK(live->main_paused == (i == fire_hops[grid] - 1),
                           "ShadowCopy: the 10-hop streak minimum decides the live pause hop");
                 }
 

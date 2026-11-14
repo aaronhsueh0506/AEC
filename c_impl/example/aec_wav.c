@@ -1,10 +1,9 @@
 /* aec_wav.c -- WAV processing CLI on top of aec.
  *  - --level takes 0 mild, 1 balanced, 2 aggressive or 3 no_floor (a whole decimal number); --preset is an alias.
  *  - The hop size comes from the library's signal grid (fft_size / 2).
- *  - --debug prints the periodic status line; --debug-trace writes the per-frame CSV trace. */
+ *  - --debug prints the periodic status line. */
 #include "aec.h"
 #include "cli_level.h"
-#include "aec_debug.h"
 #include "wav_io.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -29,7 +28,6 @@ static void print_usage(const char* prog) {
         "  --print-mem-size               print the resolved grid/mode/n and the\n"
         "                                 static-pool byte breakdown, then exit\n"
         "                                 without touching any audio\n"
-        "  --debug-trace <path>           per-frame CSV trace (logr) of post-filter state\n"
         "  --debug                        print one aec_debug_status() line per second\n",
         prog);
 }
@@ -80,7 +78,6 @@ int main(int argc, char* argv[]) {
     AecLevel level = AEC_LEVEL_BALANCED;
     int explicit_cng = -1;
     int no_delay_est = 0, no_res = 0;
-    const char* debug_trace = NULL;
     int debug_status = 0;
     int fft_size = 0;
     /* Delay-mode overrides use a separate "given" flag, and are handed to aec_create() unvalidated
@@ -120,8 +117,6 @@ int main(int argc, char* argv[]) {
             have_fixed_delay = 1;
         } else if (!strcmp(arg, "--print-mem-size"))
             print_mem_size = 1;
-        else if (!strcmp(arg, "--debug-trace") && i + 1 < argc)
-            debug_trace = argv[++i];
         else if (!strcmp(arg, "--debug"))
             debug_status = 1;
         else {
@@ -201,22 +196,13 @@ int main(int argc, char* argv[]) {
         return 0;
     }
 
-    FILE* trace_fp = NULL;
-    if (debug_trace) {
-        trace_fp = fopen(debug_trace, "w");
-        if (trace_fp) aec_debug_set_trace(trace_fp);
-        else fprintf(stderr, "WARN: cannot open trace file '%s'\n", debug_trace);
-    }
-
     Aec* aec = aec_create(&cfg);
     if (!aec) {
         print_config_rejected("aec_create", sr, &cfg);
         wav_close_read(mr); wav_close_read(rr);
-        if (trace_fp) { aec_debug_set_trace(NULL); fclose(trace_fp); }
         return 4;
     }
     int hop = aec_hop_size(aec);
-    aec_debug_set_frame(0, hop, sr);
 
     /* Default to float32 output; AEC_OUT_FLOAT=0 selects 16-bit PCM. */
     if (!getenv("AEC_OUT_FLOAT")) setenv("AEC_OUT_FLOAT", "1", 1);
@@ -235,7 +221,6 @@ int main(int argc, char* argv[]) {
     for (int i = 0; i + hop <= n; i += hop) {
         wav_read_float(mr, mic, hop);
         wav_read_float(rr, ref, hop);
-        aec_debug_set_frame(frame_idx, hop, sr);
         aec_process(aec, mic, ref, out);
         wav_write_float(ww, out, hop);
         frame_idx++;
@@ -283,6 +268,5 @@ int main(int argc, char* argv[]) {
     wav_close_write(ww);
     wav_close_read(mr); wav_close_read(rr);
     aec_destroy(aec);
-    if (trace_fp) { aec_debug_set_trace(NULL); fclose(trace_fp); }
     return 0;
 }

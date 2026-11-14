@@ -37,11 +37,9 @@ void epc_reset(EpcDetector* e) {
     e->prev_total_err = 0.0f;
 }
 
-EpcEvent epc_force_delay(EpcDetector* e) {
+void epc_force_delay(EpcDetector* e) {
     e->active   = 1;
     e->hangover = e->epc_hangover;
-    EpcEvent ev = { .fired = 1 };
-    return ev;
 }
 
 EpcEvent epc_update_epv(EpcDetector* e, float far_pwr_global,
@@ -153,7 +151,7 @@ static int dt_safe(const ShadowCopy* s,
     return dt_from_energy < 0.3f;
 }
 
-ShadowCopyDecision shadow_copy_update(
+void shadow_copy_update(
     ShadowCopy* s,
     int    shadow_frame_count,
     int    warmup_hops,
@@ -166,8 +164,7 @@ ShadowCopyDecision shadow_copy_update(
     float  dt_from_coherence,
     int    delay_reliable) {
 
-    ShadowCopyDecision d = {0,0};
-    if (shadow_frame_count < warmup_hops) return d;
+    if (shadow_frame_count < warmup_hops) return;
 
     float threshold = s->shadow_copy_threshold;
     int   far_active = far_pwr > 1e-4f;
@@ -202,13 +199,7 @@ ShadowCopyDecision shadow_copy_update(
             if (s->pause_resume > 0) s->pause_resume--;
             else s->main_paused = 0;
         }
-        if (copy_allowed
-            && main_err_smooth < shadow_err_smooth * threshold
-            && error_is_normal) {
-            d.reverse_copy = 1;
-        }
-        d.pause_main = s->main_paused;
-        return d;
+        return;
     }
 
     if (copy_allowed) {
@@ -226,13 +217,8 @@ ShadowCopyDecision shadow_copy_update(
             if (s->pause_resume > 0) s->pause_resume--;
             else s->main_paused = 0;
         }
-        if (main_err_smooth < shadow_err_smooth * threshold && error_is_normal) {
-            d.reverse_copy = 1;
-        }
     } else {
         s->copy_counter = 0;
         s->main_paused  = 0;
     }
-    d.pause_main = s->main_paused;
-    return d;
 }

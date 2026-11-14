@@ -14,7 +14,7 @@ static size_t align16(size_t n) { return (n + 15u) & ~(size_t)15u; }
 
 /* Absolute pins, LP64 only: sizeof(Aec) and the single-channel pool sizes at the balanced level, default delay mode, with and
  * without the shadow filter. They are literals, not recomputed from the build under test. */
-#define AEC_SIZEOF_PIN 6208u
+#define AEC_SIZEOF_PIN 6200u
 static int check_pinned_sizes(void) {
     static const struct { int sr, fft; size_t with_shadow, without_shadow; } pin[3] = {
         {16000, 256, 239920u, 212032u}, {16000, 512, 352288u, 312176u}, {48000, 1024, 776224u, 675664u} };

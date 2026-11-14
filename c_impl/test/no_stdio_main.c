@@ -1,4 +1,4 @@
-/* no_stdio_main.c — minimal-main ELF gate for AEC_NO_STDIO.
+/* no_stdio_main.c — minimal-main ELF gate for NO_STDIO=1.
  *
  * Deliberately does NOT itself use stdio (no <stdio.h>, no printf/fprintf
  * anywhere in this file) so that `nm` run over the linked executable can
@@ -22,7 +22,7 @@
 #include "aec.h"
 #include "aec_internal.h"
 #ifndef AEC_NO_ARRAY
-#include "../src/aec_res_internal.h"
+#include "aec_res_internal.h"
 #endif
 #include <string.h>
 

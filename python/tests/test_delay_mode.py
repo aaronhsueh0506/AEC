@@ -157,7 +157,7 @@ class DelayModeTranslationTests(unittest.TestCase):
         """``cfg.enable_delay_est = False`` after construction still works.
 
         Mirrors the C port, which resolves inside aec_create()/aec_init()
-        rather than aec_config_defaults(), so a caller that pokes the field
+        rather than aec_config_from_level(), so a caller that pokes the field
         on an already-built config (a shape several call sites in this repo
         use) gets the mode it asked for rather than silently keeping
         MATCHED.
