@@ -71,7 +71,7 @@ pre code{background:none;padding:0}
 <tr><td><code>AEC_ERR_ARG</code></td><td>-1</td><td>NULL、太短的 <code>struct_size</code>、範圍外引數,或(陣列)輸入含非有限值;實例不動</td></tr>
 <tr><td><code>AEC_ERR_MODE</code></td><td>-2</td><td>呼叫需要比 <code>AecConfig.residual</code> 更深的模式(例如 <code>OFF</code> 時的 <code>aec_process_residual()</code>),或對陣列實例呼叫 <code>aec_process()</code></td></tr>
 <tr><td><code>AEC_ERR_SEQUENCE</code></td><td>-3</td><td>呼叫順序不對(後級之前讀 <code>aec_get_residual()</code>、<code>residual</code> 不是 <code>OFF</code> 的單聲道實例連續兩次 <code>aec_process_linear()</code>、陣列 <code>FULL</code> 同 hop 第二次 <code>aec_process_residual()</code>…;<code>residual = OFF</code> 時 <code>aec_process_linear()</code> 就結束整個 hop,連續呼叫合法)</td></tr>
-<tr><td><code>AEC_ERR_DSP</code></td><td>-4</td><td>僅陣列實例:某條 lane 或融合拒絕該 hop(有限輸入的乘積溢位、內部一致性檢查);<b>整個實例已像 <code>aec_reset()</code> 重設</b></td></tr>
+<tr><td><code>AEC_ERR_DSP</code></td><td>-4</td><td>該 hop 被拒絕:有限但極大的輸入使結果溢位(單聲道:線性檢視、殘餘檢視或功率追蹤值不是有限值;陣列:融合拒絕、內部一致性檢查);<b>整個實例已像 <code>aec_reset()</code> 重設</b>,<code>aec_process()</code> 的 <code>out</code> 寫成零。呼叫端把該 hop 當靜音、清自己的 OLA／CNG,下一個 hop 照常送</td></tr>
 </table></div>
 <p class="small">被拒絕的呼叫不寫任何輸出,唯一例外是 <code>AEC_ERR_DSP</code>。<code>aec_get_mem_requirements</code>、<code>aec_set_level</code>、<code>aec_synthesis_window</code> 沿用「0 成功、-1 失敗」;<code>aec_apply_external_realign()</code> 回結果(1／0／-1);<code>aec_is_valid_sample_rate()</code> 是述詞(1／0)。</p>
 

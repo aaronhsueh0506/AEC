@@ -155,7 +155,7 @@ int run_aec(int sample_rate)
 
     if (mic && ref && out) {
         while (app_read_hop(mic, ref, hop)) {
-            aec_process(aec, mic, ref, out);         /* 回傳 AecStatus；引數有效時為 AEC_OK */
+            aec_process(aec, mic, ref, out);         /* AecStatus；AEC_ERR_DSP 時 out 已是零，實例已重設（見下） */
             app_write_hop(out, hop);
         }
     }
@@ -189,6 +189,11 @@ Beamformer 與合成**不在函式庫內**，由呼叫端提供。建立與記�
 - 型別一律是 `float`（32-bit），**不是** `int16`。
 - 標稱範圍是 **[-1.0, +1.0]**。從 PCM16 轉入時除以 32768。
 - 超出 [-1, 1] 不會被拒絕，但內部的飽和偵測（門檻 0.95）會判定為削波。
+- 有限但極大、讓內部運算溢位的 sample（實測 mic 約 1.9e19 起、ref 約 1.3e19 起，`ESTIMATE`／`FULL` 的 ref 約 5.6e14 起）：
+  該次呼叫回 **`AEC_ERR_DSP`**，實例已像 `aec_reset()` 一樣重設，`aec_process()` 的 `out` 寫成零。呼叫端把這個 hop 當靜音，
+  清自己的 ISTFT／OLA 尾巴與 CNG 狀態（serial 已前進），需要的話重啟吃 AEC 輸出、帶歷史的後級（NR、模型串流），下一個 hop 照常送；
+  之後的輸出與「從下一個 hop 起的新實例」逐位元相同。非有限的 sample（NaN／Inf）仍是 `AEC_ERR_ARG`，實例不動。
+  細節見 `aec.h` 的 “Refused hop” 與 [§5 錯誤處理](reference/lifecycle.md)。
 - AEC 不做輸出 peak limiting；`out` 可能短暫超過 [-1, 1]。需要限制峰值時，
   請在整條 AEC/beamforming/NR 流程的最後加 AGC/DRC/limiter；轉成 PCM 時仍須飽和裁切。
 

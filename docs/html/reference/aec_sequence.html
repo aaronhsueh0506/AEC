@@ -114,7 +114,8 @@ pre code{background:none;padding:0}
  |- aec_create(&amp;bad_cfg) -----------------------------------&gt;|
  |&lt; NULL ------------------------------------------------------| cfg 無效或 malloc 失敗
  |- aec_process(...) ----------------------------------------&gt;|
- |&lt; AecStatus --------------------------------------------| 設定錯誤在建立階段擋下;呼叫錯誤回 AEC_ERR_ARG／AEC_ERR_MODE／AEC_ERR_SEQUENCE,實例原封不動、不寫 out
+ |&lt; AecStatus --------------------------------------------| 設定錯誤在建立階段擋下;呼叫錯誤回 AEC_ERR_ARG／AEC_ERR_MODE／AEC_ERR_SEQUENCE,實例原封不動、不寫 out;
+ |                                                         | 結果溢位的 hop 回 AEC_ERR_DSP:實例已像 aec_reset() 重設,out 寫成零
  |- aec_set_level(aec, bad_level) -------------------------&gt;|
  |&lt; -1 -------------------------------------------------------| NULL / enum 外;什麼都沒寫
  |- aec_set_level(residual 低於 FULL 的 lane, ...) ---------&gt;|

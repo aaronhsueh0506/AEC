@@ -75,8 +75,9 @@ typedef enum AecStatus {
     AEC_ERR_ARG      = -1,   /* NULL, a short struct_size, or an argument out of range */
     AEC_ERR_MODE     = -2,   /* the call needs a higher AecConfig.residual than the instance has */
     AEC_ERR_SEQUENCE = -3,   /* a call out of order (residual before linear, linear twice, ...) */
-    AEC_ERR_DSP      = -4    /* an array instance: a stage refused the hop (non-finite or overflowing data); the instance
-                              * has been reset. A non-finite INPUT sample is AEC_ERR_ARG and changes nothing. */
+    AEC_ERR_DSP      = -4    /* the hop was refused (finite input samples whose products overflow, or an array stage's own
+                              * check); the instance has been reset. See "Refused hop". A non-finite INPUT sample is
+                              * AEC_ERR_ARG and changes nothing. */
 } AecStatus;
 
 /* Delay estimator geometry. The matched-filter bank holds at most AEC_DELAY_NUM_FILTERS_MAX filters (AecConfig.delay_num_filters
@@ -248,8 +249,21 @@ typedef struct AecBeam {
  * generator advance only in aec_process() and aec_apply_cng().
  * The linear output depends on AecConfig.residual: OFF uses the simpler step-size rule, STATE / ESTIMATE / FULL share one
  * linear path, so compare a linear part with the full chain only on STATE or above.
- * Returns AEC_OK, or AEC_ERR_ARG / AEC_ERR_MODE / AEC_ERR_SEQUENCE with the instance untouched. An array instance can also
- * answer AEC_ERR_DSP, and then the instance has been reset (see "Array instance"). */
+ * Returns AEC_OK, or AEC_ERR_ARG / AEC_ERR_MODE / AEC_ERR_SEQUENCE with the instance untouched, or AEC_ERR_DSP (below).
+ *
+ * Refused hop (AEC_ERR_DSP). A single-channel instance checks what each call hands out: aec_process_linear() the AecLinearView
+ * vectors; the call that closes the hop (aec_process(), aec_process_residual(), aec_process_linear() with AEC_RESIDUAL_OFF)
+ * its power trackers and the AecResidualView vectors as far as AecConfig.residual reaches. A finite sample large enough to
+ * overflow one of them (measured: |mic| from about 1.9e19, |ref| from about 1.3e19, or 5.6e14 with ESTIMATE / FULL, where r2
+ * squares the echo; full scale is 1.0) makes that call return AEC_ERR_DSP with the instance reset as by aec_reset():
+ *   - aec_process() has written hop_size zeros to `out`;
+ *   - aec_post_reset_serial() has moved; no hop is open (aec_process_residual() after a refused aec_process_linear() is
+ *     AEC_ERR_SEQUENCE); aec_get_residual(), aec_apply_gain() and aec_apply_cng() return AEC_ERR_SEQUENCE until the next hop;
+ *     AecLinearView's linear_hop and spectra read zeros;
+ *   - the caller renders this hop as silence, clears its own inverse-transform / overlap-add tail and comfort-noise state
+ *     (as for any serial change), restarts a stage it fed from this instance if that stage keeps history (a denoiser, a
+ *     model stream), and continues with the next hop. From that hop on the instance behaves as a fresh one.
+ * An array instance answers AEC_ERR_DSP from its own checks, listed under "Array instance". */
 int aec_process(Aec* a, const float* mic, const float* ref, float* out);
 int aec_process_linear(Aec* a, const float* mic, const float* ref);
 int aec_process_residual(Aec* a, const AecBeam* beam);
@@ -347,6 +361,7 @@ void aec_apply_cng_spec(uint32_t* rng, Complex* spec, const float* cn, const flo
  *     synthesis: the hard branch of a first delay acquisition (Path A: no warm tap transfer and no
  *     DT-aware soft acquisition) and the hard branch of a confirmed delay shift (Path B: no DT-aware soft
  *     realign).
+ *   - a call that returns AEC_ERR_DSP: it has reset the instance as aec_reset() does ("Refused hop").
  * It never moves on the bad-relock revert (a soft revert to the pre-shift delay and its tap snapshot), on
  * warm tap transfers or DT-aware soft acquisitions / realignments, on aec_apply_external_realign(), or
  * when only AecLinearView.generation changes. At each counted reset the library clears its own OLA
@@ -459,7 +474,10 @@ int aec_get_linear(const Aec* a, AecLinearView* out);
  * beam up front: weights that are NULL, non-finite or all zero, or a beamformed_error with a non-finite bin, are AEC_ERR_ARG
  * with the instance untouched (no reset; the hop stays open and the previous views stay readable, so the caller can fix the
  * beam and call again). A lane or the fusion refusing a hop after that (finite inputs whose products overflow, an internal
- * consistency check) is AEC_ERR_DSP and the whole instance has been reset, as by aec_reset().
+ * consistency check) is AEC_ERR_DSP and the whole instance has been reset, as by aec_reset(). Unlike a single channel, the
+ * array checks the fused spectra only, not each lane: with STATE (no fusion) nothing refuses an overflowing hop, and a
+ * microphone sample that overflows a lane's power trackers but not the fusion (measured: 1e20 at 16 kHz/256) is accepted and
+ * leaves that lane unconverged until aec_reset().
  * Call order. A second aec_process_linear() before the residual stage replaces the pending hop (the four filters have already
  * adapted on the first). A second aec_process_residual() on the same hop is AEC_ERR_SEQUENCE with AEC_RESIDUAL_FULL (the gain
  * stage advances once per hop) and allowed with ESTIMATE (a stateless re-fusion, e.g. of another weight set). aec_set_level()

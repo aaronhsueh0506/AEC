@@ -28,7 +28,7 @@
 #include "aec_res_internal.h"
 #include "delay_aec.h"
 #include "utility/mem_align.h"
-#include "utility/simd_kernel_nn.h"    /* skn_all_finite_f32, skn_all_finite_cf32 */
+#include "utility/simd_kernel_nn.h"    /* skn_all_finite_f32 */
 
 /* Matched-filter duty cycle: full-rate analysis until the estimate has been solid and unchanged for DUTY_HOLD_S, then one hop in
  * K = round(delay_est_period_s / hop_s) / AEC_DUTY_PERIOD_DIVISOR. The period floor is 1, so 0.0 means true full rate. */
@@ -545,11 +545,6 @@ void aec_array_impl_reset(Aec* a) {
     if (p->generation != 0xFFFFFFFFu) p->generation++;
 }
 
-static int array_dsp_error(Aec* a) {
-    aec_array_impl_reset(a);
-    return AEC_ERR_DSP;
-}
-
 /* ---- linear stage --------------------------------------------------------------------------------------------------- */
 
 /* Points dst at the lane's per-hop buffers instead of copying: a lane runs again only inside aec_array_impl_process_linear() or
@@ -644,7 +639,7 @@ int aec_array_impl_process_linear(Aec* a, const float* mics, const float* ref) {
     t0 = aec_now_us();
     delay = update_shared_delay(p, p->mic_lane, ref);
     p->timing.delay_us = aec_now_us() - t0;
-    if (!align_render(p, ref, delay.delay_samples)) return array_dsp_error(a);
+    if (!align_render(p, ref, delay.delay_samples)) return aec_refuse_hop(a);
     if (delay.changed) {
         /* Realign instead of reset: each converged filter is shifted by the alignment delta (warm when the evidence gate holds,
          * filter-only reset otherwise), so cancellation survives and the WOLA sequences continue. */
@@ -687,7 +682,7 @@ int aec_array_impl_process_linear(Aec* a, const float* mics, const float* ref) {
         if (share.analysis) p->far_stale = (unsigned char)(p->far_stale | (1u << ch));
         if (rc == AEC_OK) rc = aec_lane_process_residual(p->lanes[ch], ch == 0 ? NULL : &share);
         if (rc != AEC_OK || !bind_lane_view(&p->snapshots[ch], p->lanes[ch], p->n_freqs, p->post))
-            return array_dsp_error(a);
+            return aec_refuse_hop(a);
         if (ch == 0) shared_far_spec = p->snapshots[0].far_spec;
         {
             AecStageTiming lane_time;
@@ -721,11 +716,6 @@ int aec_array_impl_process_linear(Aec* a, const float* mics, const float* ref) {
 
 /* ---- fusion ---------------------------------------------------------------------------------------------------------- */
 
-static int complex_vector_finite(const Complex* values, int count) {
-    if (!values || count < 0) return 0;
-    return skn_all_finite_cf32(values, (size_t)count);
-}
-
 /* A lane zeroed in every bin contributes nothing (bypassed beamformer: [1,0,0,0]). */
 static int lane_contributes(const Complex* lane_weights, int n) {
     int k;
@@ -752,7 +742,7 @@ static int project_render_base(AecArray* p, const Complex* weights, const Comple
     for (ch = 0; ch < AEC_ARRAY_MICS; ++ch)
         sk_cmac_f32(p->render_base, weights + (size_t)ch * (size_t)n, p->snapshots[ch].base_spec, n);
     *base = p->render_base;
-    return complex_vector_finite(p->render_base, n);
+    return aec_cvec_finite(p->render_base, n);
 }
 
 static int fuse_contexts(AecArray* p, const Complex* weights, const Complex* trusted_beamformed_error,
@@ -802,8 +792,8 @@ static int fuse_contexts(AecArray* p, const Complex* weights, const Complex* tru
 
     sk_cmag_f32(p->fused_r2, p->residual_proj, n, 0.0f);   /* no epsilon: a sum of two squares is never -0.0 */
     /* Finite weights can still overflow the projections (|w| near 1e19 squares past FLT_MAX). */
-    return complex_vector_finite(p->fused_near, n) &&
-           (trusted_beamformed_error || complex_vector_finite(p->fused_error, n)) &&
+    return aec_cvec_finite(p->fused_near, n) &&
+           (trusted_beamformed_error || aec_cvec_finite(p->fused_error, n)) &&
            skn_all_finite_f32(p->fused_r2, (size_t)n) && skn_all_finite_f32(p->fused_comfort, (size_t)n);
 }
 
@@ -823,7 +813,7 @@ int aec_array_impl_process_residual(Aec* a, const AecBeam* beam) {
      * fusion is stateless and may be repeated on the same hop with other weights. */
     if (p->fused_valid && p->full) return AEC_ERR_SEQUENCE;
     if (!aec_array_weights_valid(beam->weights, (size_t)AEC_ARRAY_MICS * (size_t)p->n_freqs)) return AEC_ERR_ARG;
-    if (beam->beamformed_error && !complex_vector_finite(beam->beamformed_error, p->n_freqs)) return AEC_ERR_ARG;
+    if (beam->beamformed_error && !aec_cvec_finite(beam->beamformed_error, p->n_freqs)) return AEC_ERR_ARG;
 
     p->timing.fuse_us = 0;
     t0 = aec_now_us();
@@ -831,7 +821,7 @@ int aec_array_impl_process_residual(Aec* a, const AecBeam* beam) {
     if (!fuse_contexts(p, beam->weights, beam->beamformed_error, &all_converged, &usable_linear, &max_dt,
                        &max_saturation) ||
         !project_render_base(p, beam->weights, analysis, &render, &guard_lanes))
-        return array_dsp_error(a);
+        return aec_refuse_hop(a);
 
     clock_drift = p->delay_mode == (int)AEC_DELAY_MATCHED ? delay_aec_has_clockdrift(&p->delay) : 0;
     if (p->full) {
@@ -847,7 +837,7 @@ int aec_array_impl_process_residual(Aec* a, const AecBeam* beam) {
         in.max_saturation = max_saturation;
         in.clock_drift = clock_drift;
         gain = aec_res_process(p->gain_stage, &in);
-        if (!gain) return array_dsp_error(a);
+        if (!gain) return aec_refuse_hop(a);
     }
     p->timing.fuse_us = aec_now_us() - t0;
 

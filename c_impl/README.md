@@ -172,6 +172,12 @@ caller-pool path (`aec_get_mem_size`/`aec_init`), and differs from numpy's fp64
   before it, 1 dB margin) comes out by itself, with the ERLE improving (kept), clearly worse (reverted), 0.5 dB either side of
   the margin, worse without an estimate (kept) and on the soft path, on the three product grids; it prints every judgment (hop,
   ERLE before / after, outcome), checks each against the case table and requires all four outcomes to occur.
+- `test/test_dsp_refusal.c` (`make test-dsp-refusal`) — the refused hop: one finite sample large enough to overflow the hop
+  (microphone or reference) on three grids and four residual modes, through `aec_process()`, the split pair and
+  `aec_process_linear_shared_far_from()`: `AEC_ERR_DSP` on that hop from the expected call, `out` zeroed, the serial moved, the
+  views refused or zeroed, and every later hop bit-identical to a fresh instance; a sweep of large samples (every accepted hop
+  leaves finite views, `out` and power trackers), silence and full-scale signals never refused, non-finite samples still
+  `AEC_ERR_ARG`, and one array row.
 - `test/test_aec_array.c` (`make test-aec-array`) — the four-microphone array instance
   (`AecConfig.n_mics = 4`) driven hop by hop in `STATE`, `ESTIMATE` and `FULL` (hashed into a line stream), plus
   the contract checks (pool vs heap, pool fills and offsets, reset equals fresh, descriptor).

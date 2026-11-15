@@ -223,7 +223,7 @@ COMMON_FWD = BACKEND=$(BACKEND) SIMD=$(SIMD) WERROR=$(WERROR) CC='$(CC)' CXX='$(
 # Goals dispatched through the two-phase audiolib resolution below; the phase-2 .PHONY list names the same goals.
 AEC_COMMON_GOALS := \
   all bench test test-full test-counter-saturation test-rate-structural test-config-validation test-process-context \
-  test-split-entry test-split-entry-2 test-aec-array test-aec-array-2 test-aec-array-flow \
+  test-split-entry test-split-entry-2 test-dsp-refusal test-aec-array test-aec-array-2 test-aec-array-flow \
   test-avg-reverb-slots test-linear-context test-guard-unify test-res-nearend-gate test-runtime-preset \
   test-delay-num-filters test-duty-census test-external-realign test-cli-delay-flags test-shared-far-spec \
   test-spectral-reuse test-heap-alignment test-lifecycle test-shared-fft-handle test-synthesis-window test-static-aec \
@@ -376,6 +376,12 @@ TEST_SE_TARGET = $(BIN_DIR)/test_split_entry
 TEST_SE2_SRCS   = $(TEST_DIR)/test_split_entry2.c
 TEST_SE2_OBJS   = $(patsubst $(TEST_DIR)/%.c,$(OBJ_DIR)/%.o,$(TEST_SE2_SRCS))
 TEST_SE2_TARGET = $(BIN_DIR)/test_split_entry2
+
+# A hop whose results are not finite (finite samples whose products overflow): AEC_ERR_DSP, out zeroed, the instance reset and
+# afterwards equal to a fresh one; single channel on three grids and four residual modes, plus one array row. Public API only.
+TEST_DSP_SRCS   = $(TEST_DIR)/test_dsp_refusal.c
+TEST_DSP_OBJS   = $(patsubst $(TEST_DIR)/%.c,$(OBJ_DIR)/%.o,$(TEST_DSP_SRCS))
+TEST_DSP_TARGET = $(BIN_DIR)/test_dsp_refusal
 
 # The four-microphone array instance (n_mics = 4) driven through its residual modes, with its contract checks; and the
 # shared-alignment / quarantine / duty-cycle /
@@ -739,6 +745,9 @@ test-split-entry: $(TEST_SE_TARGET)
 test-split-entry-2: $(TEST_SE2_TARGET)
 	"$(abspath $(TEST_SE2_TARGET))"
 
+test-dsp-refusal: $(TEST_DSP_TARGET)
+	"$(abspath $(TEST_DSP_TARGET))"
+
 test-avg-reverb-slots: $(TEST_ARS_TARGET)
 	"$(abspath $(TEST_ARS_TARGET))"
 
@@ -895,7 +904,7 @@ test-zero-heap: $(TEST_ZH_TARGET)
 #   `make test-full` adds what is slow or changes rarely: the SIMD-independent targets under SIMD=0 as well, the end-to-end
 #   gate, the full pyc matrix instead of the lean one, the UBSan --use-standard-math variants, the Makefile flag-policy
 #   script and the signal-handling script that tests the UBSan wrappers' traps.
-TEST_SIMD_DEP   = selftest test-process-context test-split-entry test-split-entry-2 test-aec-array test-aec-array-2 test-aec-array-flow test-linear-context test-guard-unify test-aec-res test-res-nearend-gate test-runtime-preset \
+TEST_SIMD_DEP   = selftest test-process-context test-split-entry test-split-entry-2 test-dsp-refusal test-aec-array test-aec-array-2 test-aec-array-flow test-linear-context test-guard-unify test-aec-res test-res-nearend-gate test-runtime-preset \
                   test-delay-num-filters test-duty-census test-external-realign test-reset-parity test-delay-reset \
                   test-delay-dominant-selection test-delay-kernels test-delay-matched-neon test-neon-twins \
                   test-rate-structural test-counter-saturation
@@ -970,6 +979,10 @@ $(TEST_SE_TARGET): $(OBJS) $(TEST_RES_OBJ) $(TEST_SE_OBJS) $(COMMON_LIB) | _cfg_
 $(TEST_AA_TARGET): $(OBJS) $(TEST_AA_OBJS) $(COMMON_LIB) | _cfg_guard
 	$(LINK) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 	@echo "test_aec_array [$(BACKEND)] -> $@"
+
+$(TEST_DSP_TARGET): $(OBJS) $(TEST_DSP_OBJS) $(COMMON_LIB) | _cfg_guard
+	$(LINK) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+	@echo "test_dsp_refusal [$(BACKEND)] -> $@"
 
 $(TEST_SE2_TARGET): $(OBJS) $(TEST_RES_OBJ) $(TEST_SE2_OBJS) $(COMMON_LIB) | _cfg_guard
 	$(LINK) $(CFLAGS) -o $@ $^ $(LDFLAGS)
@@ -1466,6 +1479,8 @@ help:
 	@echo "                  drift, reset, realign, levels, toggles, 8 kHz), the third scene set (bad-relock judgments that"
 	@echo "                  two-path scenes produce by themselves: natural reverts and non-reverts either side of the"
 	@echo "                  margin), the alternation and carve-end checks (test_split_entry2)"
+	@echo "  test-dsp-refusal  Build + run the refused-hop test: overflowing finite samples give AEC_ERR_DSP, a reset and a"
+	@echo "                  fresh-instance continuation (test_dsp_refusal)"
 	@echo "  test-aec-array  Build + run the array-instance test and its contract checks (test_aec_array)"
 	@echo "  test-aec-array-2  Build + run the second array scene set (clipped / silent microphone, proxy channel,"
 	@echo "                  caller beamformed error, drift, levels, quarantine) (test_aec_array2)"

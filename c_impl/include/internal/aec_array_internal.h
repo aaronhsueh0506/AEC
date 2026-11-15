@@ -37,6 +37,12 @@ extern "C" {
 /* A NULL, never-built, failed-create or destroyed handle: every entry point refuses it. */
 static inline int aec_unusable(const Aec* a) { return !a || !a->ready; }
 
+/* A hop whose results are not finite, either instance kind (aec.c). aec_cvec_finite: 1 when `count` bins are finite, 0 for
+ * NULL or count < 0. aec_refuse_hop: resets the instance as aec_reset() (a single channel's linear view then reads zeros) and
+ * returns AEC_ERR_DSP. */
+int aec_cvec_finite(const Complex* v, int count);
+int aec_refuse_hop(Aec* a);
+
 typedef struct AecArray AecArray;      /* the flow state, defined in aec_array.c */
 
 /* ---- dispatch from aec.c (the AecResolved is validated unless noted) -------------------------------------------------------------- */

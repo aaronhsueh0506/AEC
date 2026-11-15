@@ -37,17 +37,17 @@
 <!-- stats:begin -->
 | key | 數值 | 說明 |
 |---|---|---|
-| `c_src_total` | 511 | `src/` 下 `.c` 的 C 函式總數（唯一 (檔, 函式名)） |
+| `c_src_total` | 513 | `src/` 下 `.c` 的 C 函式總數（唯一 (檔, 函式名)） |
 | `c_src_mirror` | 221 | 關係為 mirror |
 | `c_src_partial` | 125 | 關係為 partial |
-| `c_src_c_only` | 165 | 關係為 C-only（含 21 個 `aec_testing_*` 測試鉤子） |
+| `c_src_c_only` | 167 | 關係為 C-only（含 21 個 `aec_testing_*` 測試鉤子） |
 | `c_src_unknown` | 0 | 關係為 未能判斷 |
 | `c_hdr_total` | 2 | `include/internal/` 下 header 內 static inline 函式總數（規則 2；共用 SIMD 核心不列入） |
 | `c_hdr_c_only` | 1 | 其中 C-only |
 | `c_hdr_mapped` | 1 | 其中 mirror 或 partial |
-| `c_total` | 513 | C 函式合計（src 加 header） |
+| `c_total` | 515 | C 函式合計（src 加 header） |
 | `c_mapped` | 347 | 已對應（mirror 加 partial）合計 |
-| `c_c_only` | 166 | C-only 合計 |
+| `c_c_only` | 168 | C-only 合計 |
 | `c_unknown` | 0 | 未能判斷 合計 |
 | `inferred` | 28 | 關係說明以「推定：」開頭的列（已含在上列 mirror／partial 內） |
 | `py_total` | 575 | Python 符號總數（規則 4） |
@@ -219,13 +219,17 @@
 | `src/aec.c:aec_get_last_timing` | — | C-only（效能計時） | — | `ctest:bench_rtf.c` |
 | `src/aec.c:aec_stage_linear` | `modules/orchestrator.py:AEC.process`<br>`modules/orchestrator.py:AEC._maybe_mark_diverged`<br>`modules/orchestrator.py:AEC._dt_from_energy`<br>`modules/orchestrator.py:AEC._dt_from_shadow`<br>`modules/orchestrator.py:AEC.get_erle_instant`<br>`modules/orchestrator.py:AEC._accept_delay_shift`<br>`modules/orchestrator.py:AEC._acquire_delay`<br>`modules/orchestrator.py:AEC._align_reference`<br>`modules/orchestrator.py:AEC._judge_delay_shift`<br>`modules/orchestrator.py:AEC._prepare_capture`<br>`modules/orchestrator.py:AEC._prepare_linear_gates`<br>`modules/orchestrator.py:AEC._process_frequency`<br>`modules/orchestrator.py:AEC._process_linear`<br>`modules/orchestrator.py:AEC._track_delay_shift`<br>`modules/orchestrator.py:AEC._track_erle_convergence`<br>`modules/orchestrator.py:AEC._track_linear_error`<br>`modules/orchestrator.py:AEC._update_delay_estimate`<br>`modules/orchestrator.py:AEC._update_path_changes`<br>`modules/orchestrator.py:AEC._update_render_gates`<br>`modules/orchestrator.py:AEC._update_render_stationarity`<br>`modules/orchestrator.py:AEC._update_residual_mu`<br>`modules/orchestrator.py:AEC._update_shadow`<br>`modules/orchestrator.py:AEC._update_shadow_leakage` | partial（逐 hop 主迴圈的線性 stage：前端、delay、shadow、主 filter 到 windowed ERLE；`aec_process()`／`aec_process_linear()` 共用；C 無 return_formed_output／res_audit／診斷） | T-02；T-17；D-10 | `e2e:parity_aec_e2e`<br>`ctest:test_split_entry.c`<br>`ctest:test_process_context.c` |
 | `src/aec.c:aec_stage_residual` | `modules/orchestrator.py:AEC._process_residual` | partial（逐 hop 的後級 stage：post 區塊、後級 mu、收尾；`apply` 時另套增益並合成；`AecConfig.residual` 決定做到哪裡；Python 的 res-context 路徑對應 `FULL` 搭配拆開的進入點） | T-05 | `ctest:test_split_entry.c`<br>`ctest:test_process_context.c` |
-| `src/aec.c:aec_process` | `modules/orchestrator.py:AEC.process` | partial（離線包裝：兩個 stage 加輸出複製；`residual` 為 `FULL` 時另套增益、加舒適噪音並合成） | S-19；T-02 | `e2e:parity_aec_e2e`<br>`ctest:test_split_entry.c`<br>`ctest:test_process_context.c` |
-| `src/aec.c:aec_process_linear` | `modules/orchestrator.py:AEC.process` | partial（只跑線性 stage 的入口；`residual` 為 `OFF` 時一呼叫結束整個 hop，其餘留待 `aec_process_residual`） | D-12 | `ctest:test_split_entry.c`<br>`ctest:test_process_context.c` |
+| `src/aec.c:aec_process` | `modules/orchestrator.py:AEC.process` | partial（離線包裝：兩個 stage 加輸出複製；`residual` 為 `FULL` 時另套增益、加舒適噪音並合成；結果溢位的 hop 回 `AEC_ERR_DSP`（C 專屬，見 `aec_closed_finite`）） | S-19；T-02 | `e2e:parity_aec_e2e`<br>`ctest:test_split_entry.c`<br>`ctest:test_process_context.c`<br>`ctest:test_dsp_refusal.c` |
+| `src/aec.c:aec_process_linear` | `modules/orchestrator.py:AEC.process` | partial（只跑線性 stage 的入口；`residual` 為 `OFF` 時一呼叫結束整個 hop，其餘留待 `aec_process_residual`；結果溢位的 hop 回 `AEC_ERR_DSP`（C 專屬）） | D-12 | `ctest:test_split_entry.c`<br>`ctest:test_process_context.c`<br>`ctest:test_dsp_refusal.c` |
 | `src/aec.c:aec_process_linear_shared_far_from` | — | C-only（宣告在 `aec_internal.h`；同 hop 的遠端頻譜與精確 magnitude² 成對共用；各 lane 保留自身歷史） | D-12 | `ctest:test_shared_far_spec.c`<br>`ctest:test_spectral_reuse.c` |
 | `src/aec.c:aec_close_linear` | — | C-only（第一階段收尾：`residual == OFF` 時直接結束該 hop，否則把 hop 留在待後級的狀態） | — | `ctest:test_split_entry.c` |
 | `src/aec.c:aec_far_donor_ok` | — | C-only（遠端頻譜共用的 donor 資格判斷：另一個同格點的單聲道實例） | D-12 | `ctest:test_shared_far_spec.c` |
 | `src/aec.c:aec_input_finite` | — | C-only（輸入含非有限值時在狀態變動前拒絕該 hop） | — | `ctest:test_split_entry.c` |
-| `src/aec.c:aec_process_residual` | `modules/orchestrator.py:AEC.process` | partial（緊接線性 stage 的後級入口，不套用增益、不合成；等同 Python 的 res-context 路徑） | T-05 | `ctest:test_split_entry.c`<br>`ctest:test_process_context.c` |
+| `src/aec.c:aec_cvec_finite` | — | C-only（複數向量是否全為有限值；單聲道與陣列的被拒 hop 檢查共用） | — | `ctest:test_dsp_refusal.c`<br>`ctest:test_aec_array.c` |
+| `src/aec.c:aec_refuse_hop` | — | C-only（被拒 hop 的出口，單聲道與陣列共用：像 `aec_reset()` 一樣重設、單聲道另把線性檢視清零，回 `AEC_ERR_DSP`；Python 版沒有這個拒絕：只在有限輸入使結果溢位時才作用，正常輸入（含預設設定）兩邊逐位元一致不受影響，與 ULCNet 有限值檢查同屬 C 端防護） | — | `ctest:test_dsp_refusal.c`<br>`ctest:test_aec_array.c`<br>`ctest:test_aec_array_flow.c` |
+| `src/aec.c:aec_linear_finite` | — | C-only（單聲道線性 stage 交出的向量（`AecLinearView` 的 linear_hop 與三個頻譜）是否有限；Python 版沒有這個拒絕：只在有限輸入使結果溢位時才作用，正常輸入（含預設設定）兩邊逐位元一致不受影響，與 ULCNet 有限值檢查同屬 C 端防護） | — | `ctest:test_dsp_refusal.c` |
+| `src/aec.c:aec_closed_finite` | — | C-only（單聲道 hop 收尾時的檢查：近端／線性輸出功率追蹤值與 `AecResidualView` 向量（依 `residual` 所及）是否有限；Python 版沒有這個拒絕：只在有限輸入使結果溢位時才作用，正常輸入（含預設設定）兩邊逐位元一致不受影響，與 ULCNet 有限值檢查同屬 C 端防護） | — | `ctest:test_dsp_refusal.c` |
+| `src/aec.c:aec_process_residual` | `modules/orchestrator.py:AEC.process` | partial（緊接線性 stage 的後級入口，不套用增益、不合成；等同 Python 的 res-context 路徑；結果溢位的 hop 回 `AEC_ERR_DSP`（C 專屬）） | T-05 | `ctest:test_split_entry.c`<br>`ctest:test_process_context.c`<br>`ctest:test_dsp_refusal.c` |
 | `src/aec.c:aec_get_residual` | `modules/orchestrator.py:AEC._build_res_context#AecResContext`<br>`modules/orchestrator.py:AEC._post_stash_context`<br>`modules/orchestrator.py:AEC._build_res_context#output_base_spec`<br>`modules/orchestrator.py:AEC._post_stash_context#_res_output_base` | partial（後級檢視：分析 seam 與渲染底座 `base_spec`／`guard_active` 在同一個結構，帶 `struct_size` 檢查；Python 在 process 內建構兩者並放進同一個 res-context 資料類別，欄位集合兩邊不同；底座與 `formed_hop` 不配對） | D-05 | `ctest:test_split_entry.c`<br>`ctest:test_process_context.c`<br>`ctest:test_guard_unify.c`<br>`pytest:test_guard_unify.py` |
 | `src/aec.c:aec_gain_ready` | — | C-only（`aec_apply_gain`／`aec_apply_cng` 的前置檢查：需 `FULL` 且該 hop 已處理完） | D-12 | `ctest:test_split_entry.c` |
 | `src/aec_post.c:aec_apply_gain_spec` | `modules/orchestrator.py:AEC._aec3_post#_output_base * gain` | partial（無實例形式：底座乘增益，可帶外部增益取 min；Python 在 post 內部直接套用） | — | `ctest:test_split_entry.c`<br>`ctest:test_guard_unify.c` |
@@ -767,11 +771,9 @@
 | `src/aec_array.c:live_array` | — | C-only（取出有效陣列實例的控制區塊；單聲道、NULL 或已銷毀的 handle 回 NULL，診斷函式據此回中性值） | — | `ctest:test_aec_array.c` |
 | `src/aec_array.c:array_derive_lane` | — | C-only（由陣列設定導出 lane 設定：單通道、EXTERNAL_ALIGNED delay 模式、lane 殘餘模式（STATE 或 ESTIMATE）） | — | `ctest:test_aec_array.c`<br>`ctest:test_aec_array_flow.c` |
 | `src/aec_array.c:array_dims` | — | C-only（解析陣列設定並算出各緩衝尺寸與 pool 總需求） | — | `ctest:test_aec_array.c`<br>`ctest:test_aec_array_flow.c` |
-| `src/aec_array.c:array_dsp_error` | — | C-only（陣列 hop 的非有限值錯誤出口：先 reset 再回 `AEC_ERR_DSP`） | — | `ctest:test_aec_array.c`<br>`ctest:test_aec_array_flow.c` |
 | `src/aec_array.c:array_gain_ready` | — | C-only（`aec_array_impl_apply_gain`／`apply_cng` 的前置檢查：需 `FULL` 且該 hop 已融合） | — | `ctest:test_aec_array.c`<br>`ctest:test_aec_array_flow.c` |
 | `src/aec_array.c:array_setup` | — | C-only（陣列實例的 pool 切片與初始化（靜態 pool 與堆積配置共用）） | — | `ctest:test_aec_array.c`<br>`ctest:test_aec_array_flow.c` |
 | `src/aec_array.c:bind_lane_view` | — | C-only（把一條 lane 的 per-hop 緩衝綁成陣列層級的借用視圖（不複製）） | — | `ctest:test_aec_array.c`<br>`ctest:test_aec_array_flow.c` |
-| `src/aec_array.c:complex_vector_finite` | — | C-only（複數向量是否全為有限值的檢查） | — | `ctest:test_aec_array.c`<br>`ctest:test_aec_array_flow.c` |
 | `src/aec_array.c:flow_buffer_size` | — | C-only（陣列流程緩衝（hop 緩衝、融合用複數與浮點緩衝、delay ring）的位元組計算） | — | `ctest:test_aec_array.c`<br>`ctest:test_aec_array_flow.c` |
 | `src/aec_array.c:fuse_contexts` | — | C-only（以 beam 權重融合四條 lane 的誤差、near、R²、舒適噪音（R² 為相干、舒適噪音為功率和）） | — | `ctest:test_aec_array.c`<br>`ctest:test_aec_array_flow.c` |
 | `src/aec_array.c:lane_contributes` | — | C-only（判斷一條 lane 的權重是否有非零項而參與融合） | — | `ctest:test_aec_array.c`<br>`ctest:test_aec_array_flow.c` |

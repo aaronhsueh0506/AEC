@@ -41,7 +41,8 @@ void aec_cng_fill(uint32_t* rng, Complex* spec, const float* cn,
 
 /* aec_process_linear() with the far spectrum and its squared magnitudes shared from far_owner, which must have completed
  * this same hop. Both instances must consume identical ref samples with synchronized far-buffer histories. No owner
- * pointer is retained; a NULL, self or incompatible-grid owner falls back to a local computation. */
+ * pointer is retained; a NULL, self or incompatible-grid owner falls back to a local computation. A refused hop is
+ * AEC_ERR_DSP as for aec_process_linear() (aec.h, "Refused hop"); far_owner is not reset. */
 int aec_process_linear_shared_far_from(
         Aec* a, const float* mic, const float* ref, const Aec* far_owner);
 

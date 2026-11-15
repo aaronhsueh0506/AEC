@@ -8,7 +8,7 @@
 #include "utility/simd_aec.h"
 #include "utility/mem_align.h"   /* ALIGN16 */
 #include "utility/simd_kernels.h"
-#include "utility/simd_kernel_nn.h"  /* skn_all_finite_f32 */
+#include "utility/simd_kernel_nn.h"  /* skn_all_finite_f32, skn_all_finite_cf32 */
 #include "utility/fast_math.h"
 #include "aec_array_internal.h"      /* array dispatch */
 #include "aec_res_internal.h"
@@ -2605,6 +2605,43 @@ static int aec_input_finite(const Aec* a, const float* mic, const float* ref) {
     return skn_all_finite_f32(mic, (size_t)a->hop_size) && skn_all_finite_f32(ref, (size_t)a->hop_size);
 }
 
+int aec_cvec_finite(const Complex* v, int count) {
+    if (!v || count < 0) return 0;
+    return skn_all_finite_cf32(v, (size_t)count);
+}
+
+int aec_refuse_hop(Aec* a) {
+    aec_reset(a);
+    /* A single channel's linear view then reads zeros, not the refused hop. */
+    if (!AEC_IS_ARRAY(a)) {
+        const size_t bins = (size_t)a->n_freqs * sizeof(Complex);
+        memset(a->raw_output, 0, (size_t)a->hop_size * sizeof(float));
+        memset(a->main_filter.base.echo_spec, 0, bins);
+        memset(a->main_filter.base.near_spec, 0, bins);
+        memset(a->main_filter.base.far_spec, 0, bins);
+    }
+    return AEC_ERR_DSP;
+}
+
+/* Stage 1's results: the AecLinearView vectors. */
+static int aec_linear_finite(const Aec* a) {
+    const int n = a->n_freqs;
+    return skn_all_finite_f32(a->raw_output, (size_t)a->hop_size) && aec_cvec_finite(a->main_filter.base.echo_spec, n) &&
+           aec_cvec_finite(a->main_filter.base.near_spec, n) && aec_cvec_finite(a->main_filter.base.far_spec, n);
+}
+
+/* A closed hop's results: the power trackers and the AecResidualView vectors as far as AecConfig.residual reaches (the guard's
+ * base E + echo is near_spec; G_res is clamped to [0, 1] and stays finite). The trackers also cover the linear view. */
+static int aec_closed_finite(const Aec* a) {
+    const int n = a->n_freqs;
+    if (!isfinite(a->near_power) || !isfinite(a->raw_error_power)) return 0;
+    if (a->cfg.residual == AEC_RESIDUAL_OFF) return 1;
+    if (!skn_all_finite_f32(a->a3_lfs.e_form, (size_t)a->hop_size) || !aec_cvec_finite(a->a3_sc.sel_esw, n) ||
+        !aec_cvec_finite(a->a3_sc.sel_echo, n) || !aec_cvec_finite(a->a3_sc.ybase, n)) return 0;
+    return a->cfg.residual < AEC_RESIDUAL_ESTIMATE ||
+           (skn_all_finite_f32(a->a3_sc.r2, (size_t)n) && skn_all_finite_f32(a->post.comfort_noise, (size_t)n));
+}
+
 /* Processes exactly hop_size samples: both stages plus the copy to out; no output limiter. */
 int aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
     if (aec_unusable(a) || !mic_in || !ref_in || !out) return AEC_ERR_ARG;
@@ -2615,6 +2652,10 @@ int aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
     const int apply = (a->cfg.residual == AEC_RESIDUAL_FULL);
     aec_stage_linear(a, mic_in, ref_in, NULL, NULL, NULL, NULL);
     aec_stage_residual(a, apply, a->hop_carry.t_stage, NULL);
+    if (!aec_closed_finite(a)) {
+        memset(out, 0, (size_t)hop * sizeof(float));
+        return aec_refuse_hop(a);
+    }
 
     memcpy(out, a->final_out, (size_t)hop * sizeof(float));
     return AEC_OK;
@@ -2651,7 +2692,9 @@ int aec_process_linear_shared_far_from(
         aec_stage_linear(a, mic_in, ref_in, far_owner->main_filter.base.far_spec,
                          far_owner->main_filter.base.far_cmag2_hold, NULL, NULL);
     }
+    if (!aec_linear_finite(a)) return aec_refuse_hop(a);
     aec_close_linear(a);
+    if (a->cfg.residual == AEC_RESIDUAL_OFF && !aec_closed_finite(a)) return aec_refuse_hop(a);
     return AEC_OK;
 }
 
@@ -2718,7 +2761,7 @@ int aec_process_residual(Aec* a, const AecBeam* beam) {
     if (a->hop_phase != 1) return AEC_ERR_SEQUENCE;
     a->hop_phase = 0;
     aec_stage_residual(a, 0, aec_now_us(), NULL);
-    return AEC_OK;
+    return aec_closed_finite(a) ? AEC_OK : aec_refuse_hop(a);
 }
 
 int aec_get_residual(const Aec* a, AecResidualView* out) {
