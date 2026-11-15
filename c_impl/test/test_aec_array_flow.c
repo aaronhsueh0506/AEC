@@ -101,7 +101,6 @@ typedef struct AfConfig {
     int delay_backward_quarantine_enabled;
     float delay_backward_quarantine_s;
     float delay_est_period_s;
-    float max_delay_ms;
     int enable_post;
     int with_gain;
 } AfConfig;
@@ -114,7 +113,6 @@ static AfConfig af_default_config(int sample_rate) {
     c.delay_num_filters = DA_NUM_FILTERS;
     c.fixed_delay_samples = -1;
     c.delay_backward_quarantine_s = 1.0f;
-    c.max_delay_ms = 1024.0f;
     c.enable_post = 1;
     return c;
 }
@@ -133,7 +131,6 @@ static void af_to_aec(const AfConfig* c, AecTestCfg* t) {
     a->delay_backward_quarantine_enabled = c->delay_backward_quarantine_enabled;
     a->delay_backward_quarantine_s = c->delay_backward_quarantine_s;
     t->t.delay_est_period_s = c->delay_est_period_s;
-    t->t.max_delay_ms = c->max_delay_ms;
 }
 
 static int af_get_mem_requirements(const AfConfig* c, AfMemReq* out) {
@@ -3212,39 +3209,6 @@ static void test_fuse_overflow_is_dsp_error(void) {
     af_test_destroy(p);
 }
 
-/* ---- an unservable delay is not accepted ---- */
-
-/* An echo delay the alignment ring cannot serve (max_delay_ms = 0) is never accepted: the estimator may lock on it, but no
- * hop is refused and the flow is not reset. */
-static void test_unservable_delay_is_not_accepted(void) {
-    enum { FRAMES = 300, TRUE_DELAY = 608 };
-    AfConfig cfg = af_default_config(16000);
-    Af* p;
-    float *mic = NULL, *far = NULL, *hist = NULL;
-    Complex w[AF_CHANNELS * 129];
-    AfFront front;
-    int frame, refused = 0, rc = AF_OK;
-    cfg.max_delay_ms = 0.0f;
-    p = af_test_create(&cfg);
-    CHECK(p != NULL, "unservable delay: a flow with no alignment headroom builds");
-    if (!p) return;
-    equal_weights(w, 129, 0.25f);
-    mic = (float*)malloc(128u * AF_CHANNELS * sizeof(float));
-    far = (float*)malloc(128u * sizeof(float));
-    hist = (float*)calloc((size_t)FRAMES * 128u, sizeof(float));
-    for (frame = 0; mic && far && hist && frame < FRAMES; ++frame) {
-        scene_echo_hop(frame, 128, TRUE_DELAY, hist, far, mic);
-        rc = af_process_front(p, mic, far, &front);
-        if (rc != AF_OK) { refused = 1; break; }
-    }
-    CHECK(!refused && rc == AF_OK && af_duty_hops_total(p) > 0,
-          "unservable delay: no hop refused, the flow keeps running");
-    free(hist);
-    free(far);
-    free(mic);
-    af_test_destroy(p);
-}
-
 /* af_create(): the array instance's own pool on the heap (the objects stay the caller's), the same flow as
  * a caller pool, freed by af_destroy(). */
 
@@ -4897,7 +4861,6 @@ int main(void) {
     test_flow_view_and_grid();
     test_fuse_overflow_is_dsp_error();
     test_nonfinite_hop_invalidates_front();
-    test_unservable_delay_is_not_accepted();
     test_create_heap_path();
     test_reinit_after_reset();
     test_render_base_contract(16000, 256, AEC_DELAY_EXTERNAL_ALIGNED);

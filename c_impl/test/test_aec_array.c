@@ -754,41 +754,6 @@ static void test_descriptor(void) {
     }
 }
 
-/* An echo path longer than the reference ring (max_delay_ms small) is never served: no hop is refused and the instance is
- * not reset each time the estimator relocks. */
-static void test_estimate_beyond_ring(void) {
-    static const int max_delay_ms[2] = { 20, 0 };
-    for (int c = 0; c < 2; ++c) {
-        AecTestCfg cfg;
-        void* mem = NULL;
-        const int hop = 128, delay = 1600, hops = 400;
-        float far_all[(400 + 20) * 128], mics[128 * ARR_CH], ref[128];
-        uint32_t seed = 12345u;
-        int bad = 0;
-        array_cfg(&cfg.c, 16000, 256, ARR_MATCHED, AEC_RESIDUAL_STATE);
-        aec_tcfg_refresh(&cfg);
-        cfg.t.max_delay_ms = (float)max_delay_ms[c];
-        for (int i = 0; i < (hops + 20) * hop; ++i) {
-            seed = seed * 1664525u + 1013904223u;
-            far_all[i] = ((float)(seed >> 8) / 8388608.0f - 1.0f) * 0.125f;
-        }
-        Aec* a = aec_tcfg_new_aec(&cfg, &mem, 0x00);
-        CHECK(a != NULL, "beyond-ring: init");
-        if (!a) continue;
-        for (int h = 0; h < hops; ++h) {
-            const float* far = far_all + 20 * hop + h * hop;
-            for (int i = 0; i < hop; ++i) {
-                ref[i] = far[i];
-                for (int ch = 0; ch < ARR_CH; ++ch) mics[i * ARR_CH + ch] = far[i - delay + 0] * 0.5f;
-            }
-            if (aec_process_linear(a, mics, ref) != AEC_OK) bad++;
-        }
-        CHECK(bad == 0, "an echo delay beyond the reference ring refused %d hops (max_delay_ms %d)", bad, max_delay_ms[c]);
-        aec_destroy(a);
-        free(mem);
-    }
-}
-
 static void test_static_vs_heap_and_poison(void) {
     AecConfig cfg;
     StreamHash ref_hash, h;
@@ -986,10 +951,6 @@ static void test_config_validation(void) {
         t.t.delay_est_period_s = -1.0f;   CHECK(aec_tcfg_mem_size(&t) == 0, "negative duty period refused");
         t.t.delay_est_period_s = 3601.0f; CHECK(aec_tcfg_mem_size(&t) == 0, "too long duty period refused");
         t.t.delay_est_period_s = 1.0f;    CHECK(aec_tcfg_mem_size(&t) > 0, "duty period 1 s accepted");
-        aec_tcfg_refresh(&t);
-        t.t.max_delay_ms = 4097.0f;       CHECK(aec_tcfg_mem_size(&t) == 0, "max_delay_ms above 4096 refused (array)");
-        t.t.max_delay_ms = 4096.0f;       CHECK(aec_tcfg_mem_size(&t) > 0, "max_delay_ms 4096 accepted");
-        t.t.max_delay_ms = -1.0f;         CHECK(aec_tcfg_mem_size(&t) == 0, "negative max_delay_ms refused");
     }
     /* grids */
     c = cfg; c.sample_rate = 8000;  c.fft_size = 256;  CHECK(aec_get_mem_size(&c) == 0, "array: 8 kHz refused");
@@ -1047,7 +1008,6 @@ int main(void) {
     test_use_after_destroy_and_null();
     test_apply_gain_in_place();
     test_descriptor();
-    test_estimate_beyond_ring();
     test_static_vs_heap_and_poison();
     test_reset_equals_fresh();
     test_cng_reseeds_on_serial_change();

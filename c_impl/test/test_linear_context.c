@@ -15,8 +15,7 @@
  *      confidence 1.0, frozen generation, LOCKED once the ring can serve the offset, and the exposed far is byte-equal to
  *      the caller's far delayed by exactly that many samples. EXTERNAL_ALIGNED exposes the caller's own far byte for byte
  *      every hop, with delay_samples 0, LOCKED from hop 0, frozen generation.
- *   6. Per-mode reference-ring sizing. FIXED carves exactly `fixed_delay_samples + hop` (max_delay_ms is inert
- *      there) and serves the caller's far delayed by exactly that many samples across hundreds of wraps, including
+ *   6. Per-mode reference-ring sizing. FIXED carves exactly `fixed_delay_samples + hop` and serves the caller's far delayed by exactly that many samples across hundreds of wraps, including
  *      through aec_reset()'s refill. EXTERNAL_ALIGNED carries no ring, and its pool is FIXED(0)'s minus one hop-sized
  *      array.
  *
@@ -448,12 +447,9 @@ static void scenario_fixed_zero_delay(void) {
 /* ── the FIXED ring is sized for the delay, not for a search ──────────── */
 
 /* FIXED carves exactly `fixed_delay_samples + hop` samples (the tight bound derived in
- * aec_ref_ring_samples()), not the MATCHED ring (the estimator's reach + hop).
- * Two claims: a) the size is that expression on every grid and across the interesting fixed values
- * (0, sub-hop, exact hop multiple, non-multiple, one past the max_delay_ms budget); b) max_delay_ms
- * is inert here: a config differing only in that field produces the identical ring and pool size.
- * (b) fails if an edit reintroduces a max() against a search budget; (a) alone would still pass for
- * every fixed value above that budget. */
+ * aec_ref_ring_samples()), not the MATCHED ring (the estimator's reach + hop), on every grid and
+ * across the interesting fixed values (0, sub-hop, exact hop multiple, non-multiple, past the
+ * MATCHED reach). */
 static void scenario_fixed_ring_exact_size(void) {
     static const struct { int sr, fft, fixed; const char* tag; } rows[] = {
         { 16000,  256,     0, "16k/256 fixed=0 (degenerate, write-only ring)" },
@@ -461,7 +457,7 @@ static void scenario_fixed_ring_exact_size(void) {
         { 16000,  256,   128, "16k/256 fixed=128 (exactly one hop)" },
         { 16000,  256,  1536, "16k/256 fixed=1536 (exact hop multiple)" },
         { 16000,  256,  1600, "16k/256 fixed=1600 (NOT a hop multiple)" },
-        { 16000,  256, 40000, "16k/256 fixed=40000 (past max_delay_ms)" },
+        { 16000,  256, 40000, "16k/256 fixed=40000 (past the MATCHED reach)" },
         { 16000,  512,  1600, "16k/512 fixed=1600" },
         { 48000, 1024,  4801, "48k/1024 fixed=4801 (NOT a hop multiple)" },
     };
@@ -470,9 +466,8 @@ static void scenario_fixed_ring_exact_size(void) {
     printf("--- FIXED reference-ring capacity ---\n");
     for (r = 0; r < sizeof rows / sizeof rows[0]; ++r) {
         AecConfig cfg;
-        AecTestCfg wide;
-        Aec *a = NULL, *b = NULL;
-        size_t mem_a, mem_b;
+        Aec *a = NULL;
+        size_t mem_a;
         int hop, want;
 
         context_only_config(&cfg, rows[r].sr, rows[r].fft);
@@ -491,26 +486,6 @@ static void scenario_fixed_ring_exact_size(void) {
         snprintf(msg, sizeof msg, "%s: ring carved, no estimator", rows[r].tag);
         CHECK(a->ref_ring != NULL && !a->has_delay, msg);
 
-        /* (b) the search-ring knob does not reach this mode. */
-        wide.c = cfg;
-        aec_tcfg_refresh(&wide);
-        wide.t.max_delay_ms = 60000.0f;
-        mem_b = aec_tcfg_mem_size(&wide);
-        snprintf(msg, sizeof msg,
-                 "%s: max_delay_ms inert (pool %zu == %zu)",
-                 rows[r].tag, mem_b, mem_a);
-        CHECK(mem_b == mem_a, msg);
-        if (mem_b > 0 && (b = aec_tcfg_create(&wide)) != NULL) {
-            snprintf(msg, sizeof msg,
-                     "%s: max_delay_ms inert (ring %d == %d)",
-                     rows[r].tag, b->ref_ring_size, a->ref_ring_size);
-            CHECK(b->ref_ring_size == a->ref_ring_size, msg);
-            aec_destroy(b);
-        } else {
-            snprintf(msg, sizeof msg, "%s: wide-knob instance creates",
-                     rows[r].tag);
-            CHECK(0, msg);
-        }
         aec_destroy(a);
         g_rng_state = 0x11EC5EEDu;
     }

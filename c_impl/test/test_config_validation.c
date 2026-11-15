@@ -815,9 +815,9 @@ static uint32_t fnv32_bytes(const void* p, size_t n) {
 
 static void test_tuning_defaults_pin(void) {
     static const struct { int sr; uint32_t h[4]; } rows[] = {
-        { 8000, { 0x39f16995u, 0x2a6346d5u, 0x64f50ffcu, 0x8fd8e0ccu } },
-        { 16000, { 0xcebe373fu, 0xa6ab907fu, 0x89ea8192u, 0x72001496u } },
-        { 48000, { 0xac519652u, 0x6a6f3a92u, 0xf4e4ae1fu, 0x41e4509bu } },
+        { 8000, { 0x31a4bf29u, 0x6b360969u, 0x938d2280u, 0x3ac6d3c0u } },
+        { 16000, { 0x2f25ccb3u, 0x76c2f7f3u, 0x6673fc96u, 0x37c194eau } },
+        { 48000, { 0x8940c886u, 0x1480a646u, 0xfd1cd6d3u, 0xed60372fu } },
     };
     size_t i;
     int lv;

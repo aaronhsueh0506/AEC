@@ -230,7 +230,6 @@ static int array_dims(const AecResolved* rs, ArrayDims* d) {
 
 int aec_array_impl_config_ok(const AecResolved* rs) {
     const AecConfig* cfg = &rs->cfg;
-    const AecTuning* tn = &rs->tun;
     int n = cfg->n_mics;
     if (n != 1 && n != AEC_ARRAY_MICS) return 0;
     if (n == 1) {
@@ -244,7 +243,6 @@ int aec_array_impl_config_ok(const AecResolved* rs) {
         /* The flow's three product grids only. */
         if (!((cfg->sample_rate == 16000 && (cfg->fft_size == 256 || cfg->fft_size == 512)) ||
               (cfg->sample_rate == 48000 && cfg->fft_size == 1024))) return 0;
-        if (!isfinite(tn->max_delay_ms) || tn->max_delay_ms < 0.0f || tn->max_delay_ms > 4096.0f) return 0;
         if (!array_dims(rs, &d)) return 0;
         return aec_resolve_tuned(&d.lane.cfg, &d.lane.tun, &lane_resolved);
     }

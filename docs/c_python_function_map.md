@@ -734,7 +734,7 @@
 | `src/aec_array.c:aec_array_get_timing` | — | C-only（各階段計時讀取（delay、前端、線性、lane 殘餘等）；單通道與陣列實例皆可呼叫的效能儀表） | — | `ctest:test_aec_array_flow.c` |
 | `src/aec_array.c:aec_array_impl_apply_cng` | — | C-only（陣列實例的 `aec_apply_cng` 實作：對融合頻譜加舒適噪音，產生器種子由陣列實例持有） | — | `ctest:test_aec_array.c`<br>`ctest:test_aec_array_flow.c` |
 | `src/aec_array.c:aec_array_impl_apply_gain` | — | C-only（陣列實例的 `aec_apply_gain` 實作：融合底座乘單一 `G_res`，可帶外部增益） | — | `ctest:test_aec_array.c`<br>`ctest:test_aec_array_flow.c` |
-| `src/aec_array.c:aec_array_impl_config_ok` | — | C-only（陣列設定的合法性檢查（`n_mics`、`residual` 不可為 OFF、capture_proxy 範圍、三個產品格點、`max_delay_ms` 範圍，以及導出的 lane 設定可解析）；單通道只檢查隔離欄位） | — | `ctest:test_aec_array.c`<br>`ctest:test_aec_array_flow.c` |
+| `src/aec_array.c:aec_array_impl_config_ok` | — | C-only（陣列設定的合法性檢查（`n_mics`、`residual` 不可為 OFF、capture_proxy 範圍、三個產品格點，以及導出的 lane 設定可解析）；單通道只檢查隔離欄位） | — | `ctest:test_aec_array.c`<br>`ctest:test_aec_array_flow.c` |
 | `src/aec_array.c:aec_array_impl_debug_status` | — | C-only（陣列實例的 `aec_debug_status` 實作：以 lane 0 為底，覆寫共用 delay 狀態、最大 windowed ERLE 與 duty 計數） | — | `ctest:test_aec_array.c`<br>`ctest:test_aec_array_flow.c` |
 | `src/aec_array.c:aec_array_impl_destroy` | — | C-only（陣列實例的釋放（逐 lane 銷毀；堆積實例釋放整塊記憶體，池實例只清 ready 旗標）；Python 無手動釋放） | — | `ctest:test_aec_array.c`<br>`ctest:test_aec_array_flow.c` |
 | `src/aec_array.c:aec_array_impl_far_fft_count` | — | C-only（陣列實例的 `aec_far_fft_real_compute_count` 實作：四條 lane 計數的飽和總和；遠端 FFT 計數儀表） | — | `ctest:test_aec_array.c`<br>`ctest:test_aec_array_flow.c` |
@@ -972,8 +972,8 @@ PBF/Kalman H-error refresh、subband ERLE accumulation/release、render peak cou
 | D-12 | C-only API（`aec_process_linear_shared_far_from`（`aec_internal.h`）、`AecConfig.residual` 的 `STATE`／`ESTIMATE` 模式與增益輔助函式 `aec_apply_gain`／`aec_apply_cng`、靜態記憶體、debug status）；Python-only：`get_res_audit`、`dump_p53_trace`、`get_diagnostics` |
 | D-13 | CLI／API 兩側獨有項（C `aec_wav` 與 Python `aec.py` 的旗標不同） |
 | D-15 | live observer lane 尚未鏡射 soft-realign warm IR-shift、RSA narrowband mu mask；bad-relock 還原（`aec_apply_delay_shift_soft_revert`／`_apply_delay_shift_soft_revert`）只還原 main 與 shadow 的 tap，兩邊都不還原 observer 的 tap；兩邊一致的缺口，不是移植落差 |
-| D-16 | 單通道 MATCHED 參考環：C 取 estimator 可回報延遲上限＋hop（`delay_buffer_ms` 已刪除，單通道不讀 `max_delay_ms`）；Python 取 max(delay_buffer_ms, max_delay_ms + 4096)。在 Python 預設值（環不小於上限）下兩邊的准入結果相同、輸出逐位元相同（證據：實作版對舊環 683 例逐位元相同，含真實錄音 154 例、真實 8 kHz 30 例、`delay_num_filters` < 5 共 165 例，另有 reach 邊界對照 1,138 例）；Python 把兩個欄位調小到環小於 estimator 可回報上限時，會拒收 C 會接受的延遲 |
-| D-17 | 陣列 MATCHED 共用參考環：C 取 estimator 可回報延遲上限＋hop（與單通道同式，不讀 `max_delay_ms`）；Python 孿生（Audio_ALG `pipelines/4ch/pipeline.py` 的 `_SharedReferenceDelayLine`）取 `max_delay_ms`（1024 ms）換算的 sample＋2 hop＋1。在 Python 預設值（環不小於上限）下兩邊的准入結果相同、輸出逐位元相同（證據：四組 baseline 串流 SIMD 1／0 除 META 外逐位元相同；Audio_ALG 4ch 測試與 `pyc_parity_pipelines.sh` 的 results.json 與改動前相同；reach 邊界對照 36 例相同）；Python 把 `max_delay_ms` 調小到環小於 estimator 可回報上限時，會拒收 C 會接受的延遲 |
+| D-16 | 單通道 MATCHED 參考環：C 取 estimator 可回報延遲上限＋hop（`delay_buffer_ms`、`max_delay_ms` 已刪除）；Python 取 max(delay_buffer_ms, max_delay_ms + 4096)。在 Python 預設值（環不小於上限）下兩邊的准入結果相同、輸出逐位元相同（證據：實作版對舊環 683 例逐位元相同，含真實錄音 154 例、真實 8 kHz 30 例、`delay_num_filters` < 5 共 165 例，另有 reach 邊界對照 1,138 例）；Python 把兩個欄位調小到環小於 estimator 可回報上限時，會拒收 C 會接受的延遲 |
+| D-17 | 陣列 MATCHED 共用參考環：C 取 estimator 可回報延遲上限＋hop（與單通道同式；C 已無 `max_delay_ms`）；Python 孿生（Audio_ALG `pipelines/4ch/pipeline.py` 的 `_SharedReferenceDelayLine`）取 `max_delay_ms`（1024 ms）換算的 sample＋2 hop＋1。在 Python 預設值（環不小於上限）下兩邊的准入結果相同、輸出逐位元相同（證據：四組 baseline 串流 SIMD 1／0 除 META 外逐位元相同；Audio_ALG 4ch 測試與 `pyc_parity_pipelines.sh` 的 results.json 與改動前相同；reach 邊界對照 36 例相同）；Python 把 `max_delay_ms` 調小到環小於 estimator 可回報上限時，會拒收 C 會接受的延遲 |
 | S-02 | live observer 注入守衛 `live_observer_inject_dt_energy_max`（Python 預設 0.5）C 沒有；開 observer 時實測會改輸出 |
 | S-04 | HPF cutoff 範圍驗證（`0 < cutoff < 0.45·sr`）只有 C 檢查，Python 不檢查 |
 | S-08 | CLI 預設運作點不同（Python `aec.py` 與 C `aec_wav`，兩邊都不給旗標時） |

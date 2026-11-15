@@ -49,7 +49,7 @@ typedef struct AecArray AecArray;      /* the flow state, defined in aec_array.c
 
 #ifndef AEC_NO_ARRAY
 /* Checks the array-related fields of a cfg (n_mics in {1, 4}, capture_proxy_channel, the quarantine-enabled rule and, for an
- * array, the flow's own rules: residual != OFF, the three product grids, max_delay_ms <= 4096, an estimator that can be sized,
+ * array, the flow's own rules: residual != OFF, the three product grids, an estimator that can be sized,
  * a valid derived lane). Called at the end of aec_resolve_tuned() on the resolved configuration, after the quarantine ranges.
  * 1 = acceptable. */
 int    aec_array_impl_config_ok(const AecResolved* resolved);

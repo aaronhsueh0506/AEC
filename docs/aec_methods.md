@@ -153,7 +153,7 @@ shows their public configuration values, not necessarily the internal hop count.
 | | `warmup_frames` | 80 (preset 100) | 10 ms authored basis; preset remains approximately 1.0 s after grid retiming |
 | EPC | `epc_delta_threshold` / `epc_total_rise` / `epc_hangover` | 0.3 / 1.5 / 20 | |
 | Delay estimation | `enable_delay_est` | **ON** | deprecated mirror of `delay_mode` |
-| | `max_delay_ms` / `delay_buffer_ms` | 1024 / 2048 | `delay_buffer_ms` is Python only; in C `max_delay_ms` is an internal value no ring reads (the C ring, single channel and array, = estimator reach + hop) |
+| | `max_delay_ms` / `delay_buffer_ms` | 1024 / 2048 | Python only (both deleted in C, whose ring, single channel and array, = estimator reach + hop) |
 | | `delay_est_period_s` / `delay_est_init_s` | 0.5 / 0.3 | |
 | | `delay_par_low_threshold` / `_solid_threshold` | 5.0 / 8.0 | |
 | HPF | `enable_highpass` | **ON** | mic-path only |

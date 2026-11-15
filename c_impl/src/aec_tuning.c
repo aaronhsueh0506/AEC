@@ -22,7 +22,6 @@ void aec_tuning_defaults(AecTuning* tun, const AecConfig* cfg) {
     tun->enable_saturation = 1;
     tun->enable_shadow = 1;
     tun->live_observer_enabled = 0;
-    tun->max_delay_ms = 1024.0f;
     tun->highpass_cutoff_hz = 80.0f;
     tun->saturation_threshold = 0.95f;
     tun->saturation_softclip_ref = 1;
@@ -100,7 +99,6 @@ int aec_tuning_valid(const AecTuning* tun, const AecConfig* cfg) {
     AEC_CK_RANGE_F(shadow_mu_nlms,              0.0f,    10.0f);
     AEC_CK_RANGE_F(epc_total_rise,              0.0f,  1000.0f);
     AEC_CK_RANGE_F(epc_delta_threshold,         0.0f,  1000.0f);
-    AEC_CK_RANGE_F(max_delay_ms,                0.0f, 60000.0f);
     AEC_CK_RANGE_F(delay_est_init_s,            0.0f,  3600.0f);
     AEC_CK_RANGE_F(delay_est_period_s,          0.0f,  3600.0f);
     /* With enable_highpass the cutoff must satisfy hpf_params_valid(): 0 < cutoff < 0.45 * sample_rate. */

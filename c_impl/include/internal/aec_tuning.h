@@ -26,7 +26,6 @@ typedef struct AecTuning {
     int    enable_saturation;      /* saturation limiter; 1 */
     int    enable_shadow;          /* shadow filter; 1 */
     int    live_observer_enabled;  /* 0 */
-    float  max_delay_ms;           /* ms; 1024; sizes no ring (the array checks <= 4096) */
 
     /* front end */
     float  highpass_cutoff_hz;     /* Hz; 80 */
