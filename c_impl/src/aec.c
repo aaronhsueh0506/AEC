@@ -2715,6 +2715,8 @@ int aec_lane_process_linear(Aec* a, const float* mic_in, const float* ref_in, Ae
         if (share->hop || share->analysis) in = share;
     }
     aec_stage_linear(a, mic_in, ref_in, far_spec, far_cmag2, in, publish ? share : NULL);
+    /* Checked as a single channel; the array refuses the hop and resets every lane. */
+    if (!aec_linear_finite(a)) return AEC_ERR_DSP;
     aec_close_linear(a);
     return AEC_OK;
 }
@@ -2724,7 +2726,7 @@ int aec_lane_process_residual(Aec* a, const AecFarShare* share) {
     if (a->hop_phase != 1) return AEC_ERR_SEQUENCE;
     a->hop_phase = 0;
     aec_stage_residual(a, 0, aec_now_us(), share);
-    return AEC_OK;
+    return aec_closed_finite(a) ? AEC_OK : AEC_ERR_DSP;
 }
 
 void aec_lane_adopt_far_analysis(Aec* a, const Aec* d) {

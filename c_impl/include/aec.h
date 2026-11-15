@@ -263,7 +263,7 @@ typedef struct AecBeam {
  *   - the caller renders this hop as silence, clears its own inverse-transform / overlap-add tail and comfort-noise state
  *     (as for any serial change), restarts a stage it fed from this instance if that stage keeps history (a denoiser, a
  *     model stream), and continues with the next hop. From that hop on the instance behaves as a fresh one.
- * An array instance answers AEC_ERR_DSP from its own checks, listed under "Array instance". */
+ * An array instance checks each lane the same way, inside aec_process_linear() (see "Array instance"). */
 int aec_process(Aec* a, const float* mic, const float* ref, float* out);
 int aec_process_linear(Aec* a, const float* mic, const float* ref);
 int aec_process_residual(Aec* a, const AecBeam* beam);
@@ -473,11 +473,13 @@ int aec_get_linear(const Aec* a, AecLinearView* out);
  * Errors. A non-finite input sample (mics / ref) is AEC_ERR_ARG with the state untouched. aec_process_residual() validates the
  * beam up front: weights that are NULL, non-finite or all zero, or a beamformed_error with a non-finite bin, are AEC_ERR_ARG
  * with the instance untouched (no reset; the hop stays open and the previous views stay readable, so the caller can fix the
- * beam and call again). A lane or the fusion refusing a hop after that (finite inputs whose products overflow, an internal
- * consistency check) is AEC_ERR_DSP and the whole instance has been reset, as by aec_reset(). Unlike a single channel, the
- * array checks the fused spectra only, not each lane: with STATE (no fusion) nothing refuses an overflowing hop, and a
- * microphone sample that overflows a lane's power trackers but not the fusion (measured: 1e20 at 16 kHz/256) is accepted and
- * leaves that lane unconverged until aec_reset().
+ * beam and call again). Refused hop: aec_process_linear() checks each lane as a single channel (its linear view, power
+ * trackers and residual view; every residual mode, STATE included). A lane whose results are not finite (measured: a
+ * microphone sample from about 1.9e19 on any lane, the reference from about 3.8e19 with STATE or 1.1e15 with ESTIMATE / FULL)
+ * makes it return AEC_ERR_DSP with the whole instance reset, as by aec_reset(): no hop is open (aec_process_residual() is
+ * AEC_ERR_SEQUENCE, AEC_ERR_MODE with STATE) and from the next hop the instance behaves as a fresh one. The fusion refusing a
+ * hop after the beam check (finite weights whose projections overflow, an internal consistency check) is AEC_ERR_DSP with
+ * the same reset.
  * Call order. A second aec_process_linear() before the residual stage replaces the pending hop (the four filters have already
  * adapted on the first). A second aec_process_residual() on the same hop is AEC_ERR_SEQUENCE with AEC_RESIDUAL_FULL (the gain
  * stage advances once per hop) and allowed with ESTIMATE (a stateless re-fusion, e.g. of another weight set). aec_set_level()

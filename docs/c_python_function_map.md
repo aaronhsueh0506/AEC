@@ -201,8 +201,8 @@
 | `src/aec.c:aec_lane_contract_ok` | — | C-only（lane 契約檢查：單通道、EXTERNAL_ALIGNED、`residual` 為 `STATE` 或 `ESTIMATE`，其餘設定一律拒絕） | — | `ctest:test_memory_layout.c`<br>`ctest:test_aec_array.c` |
 | `src/aec.c:aec_state_lane` | — | C-only（`STATE` lane 的判斷：這種 lane 在 AecState 更新後就結束，carve 略過殘餘回音估計器與舒適噪音陣列） | — | `ctest:test_memory_layout.c`<br>`ctest:test_aec_array.c` |
 | `src/aec.c:aec_mem_size_impl` | — | C-only（pool 位元組數的計算：單通道與 lane 共用，lane 模式扣掉契約不跑的配置；`aec_carve` 結束位置必須等於它，否則 `aec_init` 失敗；Python 沒有 pool） | — | `ctest:test_memory_layout.c`<br>`ctest:test_aec_array.c`<br>`ctest:test_split_entry2.c` |
-| `src/aec.c:aec_lane_process_linear` | — | C-only（陣列 lane 的線性 stage：lane 0 照常計算並發布只依賴遠端的結果，其餘 lane 取用；`hop`／`fft`／`analysis` 三層各有成立條件；Python 沒有陣列） | — | `ctest:test_aec_array_flow.c`<br>`ctest:test_aec_array.c` |
-| `src/aec.c:aec_lane_process_residual` | — | C-only（陣列 lane 的後級 stage：遠端頻譜相同時取 lane 0 的遠端 PSD、縮放後的 render 區塊與活動判定） | — | `ctest:test_aec_array_flow.c`<br>`ctest:test_aec_array.c` |
+| `src/aec.c:aec_lane_process_linear` | — | C-only（陣列 lane 的線性 stage：lane 0 照常計算並發布只依賴遠端的結果，其餘 lane 取用；`hop`／`fft`／`analysis` 三層各有成立條件；線性檢視不是有限值時回 `AEC_ERR_DSP`，由陣列重設；Python 沒有陣列） | — | `ctest:test_aec_array_flow.c`<br>`ctest:test_aec_array.c`<br>`ctest:test_dsp_refusal.c` |
+| `src/aec.c:aec_lane_process_residual` | — | C-only（陣列 lane 的後級 stage：遠端頻譜相同時取 lane 0 的遠端 PSD、縮放後的 render 區塊與活動判定；收尾檢查不通過時回 `AEC_ERR_DSP`，由陣列重設） | — | `ctest:test_aec_array_flow.c`<br>`ctest:test_aec_array.c`<br>`ctest:test_dsp_refusal.c` |
 | `src/aec.c:aec_lane_adopt_far_analysis` | — | C-only（把 lane 0 的 RSA 計數器與噪聲底限複製給一條一直沿用 lane 0 結果、自身狀態落後的 lane，讓它之後自己更新） | — | `ctest:test_aec_array_flow.c` |
 | `src/aec.c:aec_lane_far_history_equal` | — | C-only（兩條 lane 的遠端歷史（main／shadow 的 far_buffer 與前一 hop 的功率譜）是否位元相同；陣列用它判定誰還能沿用 lane 0 的遠端分析） | — | `ctest:test_aec_array_flow.c` |
 | `src/aec.c:aec_destroy` | — | C-only（Python 無手動釋放；堆積實例釋放整塊記憶體） | — | `ctest:test_lifecycle.c` |
@@ -227,8 +227,8 @@
 | `src/aec.c:aec_input_finite` | — | C-only（輸入含非有限值時在狀態變動前拒絕該 hop） | — | `ctest:test_split_entry.c` |
 | `src/aec.c:aec_cvec_finite` | — | C-only（複數向量是否全為有限值；單聲道與陣列的被拒 hop 檢查共用） | — | `ctest:test_dsp_refusal.c`<br>`ctest:test_aec_array.c` |
 | `src/aec.c:aec_refuse_hop` | — | C-only（被拒 hop 的出口，單聲道與陣列共用：像 `aec_reset()` 一樣重設、單聲道另把線性檢視清零，回 `AEC_ERR_DSP`；Python 版沒有這個拒絕：只在有限輸入使結果溢位時才作用，正常輸入（含預設設定）兩邊逐位元一致不受影響，與 ULCNet 有限值檢查同屬 C 端防護） | — | `ctest:test_dsp_refusal.c`<br>`ctest:test_aec_array.c`<br>`ctest:test_aec_array_flow.c` |
-| `src/aec.c:aec_linear_finite` | — | C-only（單聲道線性 stage 交出的向量（`AecLinearView` 的 linear_hop 與三個頻譜）是否有限；Python 版沒有這個拒絕：只在有限輸入使結果溢位時才作用，正常輸入（含預設設定）兩邊逐位元一致不受影響，與 ULCNet 有限值檢查同屬 C 端防護） | — | `ctest:test_dsp_refusal.c` |
-| `src/aec.c:aec_closed_finite` | — | C-only（單聲道 hop 收尾時的檢查：近端／線性輸出功率追蹤值與 `AecResidualView` 向量（依 `residual` 所及）是否有限；Python 版沒有這個拒絕：只在有限輸入使結果溢位時才作用，正常輸入（含預設設定）兩邊逐位元一致不受影響，與 ULCNet 有限值檢查同屬 C 端防護） | — | `ctest:test_dsp_refusal.c` |
+| `src/aec.c:aec_linear_finite` | — | C-only（線性 stage 交出的向量（單聲道與陣列每條 lane；`AecLinearView` 的 linear_hop 與三個頻譜）是否有限；Python 版沒有這個拒絕：只在有限輸入使結果溢位時才作用，正常輸入（含預設設定）兩邊逐位元一致不受影響，與 ULCNet 有限值檢查同屬 C 端防護） | — | `ctest:test_dsp_refusal.c` |
+| `src/aec.c:aec_closed_finite` | — | C-only（hop 收尾時的檢查（單聲道與陣列每條 lane）：近端／線性輸出功率追蹤值與 `AecResidualView` 向量（依 `residual` 所及）是否有限；Python 版沒有這個拒絕：只在有限輸入使結果溢位時才作用，正常輸入（含預設設定）兩邊逐位元一致不受影響，與 ULCNet 有限值檢查同屬 C 端防護） | — | `ctest:test_dsp_refusal.c` |
 | `src/aec.c:aec_process_residual` | `modules/orchestrator.py:AEC.process` | partial（緊接線性 stage 的後級入口，不套用增益、不合成；等同 Python 的 res-context 路徑；結果溢位的 hop 回 `AEC_ERR_DSP`（C 專屬）） | T-05 | `ctest:test_split_entry.c`<br>`ctest:test_process_context.c`<br>`ctest:test_dsp_refusal.c` |
 | `src/aec.c:aec_get_residual` | `modules/orchestrator.py:AEC._build_res_context#AecResContext`<br>`modules/orchestrator.py:AEC._post_stash_context`<br>`modules/orchestrator.py:AEC._build_res_context#output_base_spec`<br>`modules/orchestrator.py:AEC._post_stash_context#_res_output_base` | partial（後級檢視：分析 seam 與渲染底座 `base_spec`／`guard_active` 在同一個結構，帶 `struct_size` 檢查；Python 在 process 內建構兩者並放進同一個 res-context 資料類別，欄位集合兩邊不同；底座與 `formed_hop` 不配對） | D-05 | `ctest:test_split_entry.c`<br>`ctest:test_process_context.c`<br>`ctest:test_guard_unify.c`<br>`pytest:test_guard_unify.py` |
 | `src/aec.c:aec_gain_ready` | — | C-only（`aec_apply_gain`／`aec_apply_cng` 的前置檢查：需 `FULL` 且該 hop 已處理完） | D-12 | `ctest:test_split_entry.c` |
@@ -745,7 +745,7 @@
 | `src/aec_array.c:aec_array_impl_init` | — | C-only（陣列實例在呼叫端 pool 內的建構（共用 delay、對齊遠端與四條 lane 都切在同一個 pool）） | — | `ctest:test_aec_array.c`<br>`ctest:test_aec_array_flow.c` |
 | `src/aec_array.c:aec_array_impl_is_cancelling` | — | C-only（陣列實例的 `aec_linear_is_cancelling` 實作：回報 capture proxy lane 的狀態） | — | `ctest:test_aec_array.c`<br>`ctest:test_aec_array_flow.c` |
 | `src/aec_array.c:aec_array_impl_post_reset_serial` | — | C-only（陣列實例的 `aec_post_reset_serial` 實作：四條 lane 序號的和（模 2^32）） | — | `ctest:test_aec_array.c`<br>`ctest:test_aec_array_flow.c` |
-| `src/aec_array.c:aec_array_impl_process_linear` | — | C-only（陣列實例的 `aec_process_linear` 實作：共用 delay、對齊遠端，再跑四條 lane 的線性 stage 與 lane 殘餘 stage） | — | `ctest:test_aec_array.c`<br>`ctest:test_aec_array_flow.c` |
+| `src/aec_array.c:aec_array_impl_process_linear` | — | C-only（陣列實例的 `aec_process_linear` 實作：共用 delay、對齊遠端，再跑四條 lane 的線性 stage 與 lane 殘餘 stage；任一條 lane 的檢查不通過即 `aec_refuse_hop`） | — | `ctest:test_aec_array.c`<br>`ctest:test_aec_array_flow.c`<br>`ctest:test_dsp_refusal.c` |
 | `src/aec_array.c:aec_array_impl_process_residual` | — | C-only（陣列實例的 `aec_process_residual` 實作：先驗證權重與 `beamformed_error`（無效回 `AEC_ERR_ARG`，不動實例），再以呼叫端的 beam 權重融合 lane context，`FULL` 另算融合頻譜上的增益；波束成形在函式庫外） | — | `ctest:test_aec_array.c`<br>`ctest:test_aec_array_flow.c` |
 | `src/aec_array.c:aec_array_impl_reset` | — | C-only（陣列實例的 `aec_reset` 實作：重設共用 delay、四條 lane 與增益 stage，清對齊緩衝與陣列層級狀態） | — | `ctest:test_aec_array.c`<br>`ctest:test_aec_array_flow.c` |
 | `src/aec_array.c:aec_array_impl_set_level` | — | C-only（陣列實例的 `aec_set_level` 實作：先驗證 level 查表，再切換增益 stage 並更新設定內的地板值） | — | `ctest:test_aec_array.c`<br>`ctest:test_aec_array_flow.c` |

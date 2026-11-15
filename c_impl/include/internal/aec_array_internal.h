@@ -119,7 +119,8 @@ typedef struct AecFarShare {
 } AecFarShare;
 
 #ifndef AEC_NO_ARRAY
-/* One linear-stage hop of an array lane. Donor (`publish` != 0): runs locally and fills *share. Otherwise reads *share. */
+/* One linear-stage hop of an array lane. Donor (`publish` != 0): runs locally and fills *share. Otherwise reads *share.
+ * Both lane stages answer AEC_ERR_DSP on the single-channel checks (aec.h "Refused hop"); the caller resets the array. */
 int aec_lane_process_linear(Aec* lane, const float* mic, const float* ref, AecFarShare* share, int publish);
 /* The residual stage of a lane that ran aec_lane_process_linear() (share: this hop's, or NULL for the donor). */
 int aec_lane_process_residual(Aec* lane, const AecFarShare* share);

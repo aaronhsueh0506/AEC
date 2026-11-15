@@ -260,7 +260,7 @@ aec_reset(aec);                 /* aec 是 Aec*；NULL 與已銷毀的 handle �
 | `aec_reset` | — | 不會失敗 | 直接返回（安全）；已銷毀的 handle 也是 no-op |
 | `aec_process`、`aec_process_linear`、`aec_process_residual` | 回傳 `AEC_OK`（0） | 負值 `AecStatus`：`AEC_ERR_ARG`（NULL 或引數不合法、輸入含非有限值）、`AEC_ERR_MODE`（`residual` 不夠）、`AEC_ERR_SEQUENCE`（呼叫順序不對），這三種實例保持原狀、不寫任何輸出；**`AEC_ERR_DSP`**（有限輸入使該 hop 的輸出或功率追蹤值溢位）：實例已像 `aec_reset()` 一樣重設，`aec_process` 的 `out` 寫成零，線性檢視讀到零（見下方第 1 點） | 回傳 `AEC_ERR_ARG`（安全） |
 | `aec_process_linear_shared_far_from`（`aec_internal.h`） | 同上 | 同上（含 `AEC_ERR_DSP`；owner 不被重設）；無效 owner 退回本地計算；對陣列實例回 `AEC_ERR_MODE` | 回傳 `AEC_ERR_ARG`（安全） |
-| 陣列實例（`n_mics = 4`）的 `aec_process`、`aec_process_linear`、`aec_process_residual` | 回傳 `AEC_OK` | `aec_process`：`AEC_ERR_MODE`（陣列用 `aec_process_linear` + `aec_process_residual`）；`aec_process_residual`：`residual = STATE` 回 `AEC_ERR_MODE`，`FULL` 的同 hop 第二次回 `AEC_ERR_SEQUENCE`；輸入含非有限值回 `AEC_ERR_ARG`；`aec_process_residual` 的權重（NULL、非有限、全零）或 `beamformed_error`（含非有限值）不合法也回 `AEC_ERR_ARG`，實例完全不動、該 hop 保持開啟；某條 lane 或融合在引數檢查之後拒絕該 hop（例如有限的極大權重使投影溢位）回 **`AEC_ERR_DSP`** | 回傳 `AEC_ERR_ARG`（安全） |
+| 陣列實例（`n_mics = 4`）的 `aec_process`、`aec_process_linear`、`aec_process_residual` | 回傳 `AEC_OK` | `aec_process`：`AEC_ERR_MODE`（陣列用 `aec_process_linear` + `aec_process_residual`）；`aec_process_residual`：`residual = STATE` 回 `AEC_ERR_MODE`，`FULL` 的同 hop 第二次回 `AEC_ERR_SEQUENCE`；輸入含非有限值回 `AEC_ERR_ARG`；`aec_process_residual` 的權重（NULL、非有限、全零）或 `beamformed_error`（含非有限值）不合法也回 `AEC_ERR_ARG`，實例完全不動、該 hop 保持開啟；`aec_process_linear` 在某條 lane 的結果不是有限值時、`aec_process_residual` 在融合拒絕（例如有限的極大權重使投影溢位）時回 **`AEC_ERR_DSP`** | 回傳 `AEC_ERR_ARG`（安全） |
 | `aec_init_ex`、`aec_get_mem_requirements` | `aec_init_ex` 回傳 `Aec*`；`aec_get_mem_requirements` 回傳 `0` 並填入 `AecMemReq` | `aec_init_ex`：`NULL`（同 `aec_init`，另加描述子與目前建置不符）；`aec_get_mem_requirements`：`-1` 並把 `req` 清零 | 回傳 `NULL`／`-1`（安全） |
 | `aec_get_array` | 回傳 `AEC_OK`，填入 `AecArrayView` | `AEC_ERR_ARG`（`struct_size` 太小或 `a` 為 NULL）；`AEC_ERR_SEQUENCE`（陣列：尚無 `aec_process_linear()`；單聲道：後級尚未跑） | 回傳 `AEC_ERR_ARG`（安全） |
 | `aec_apply_external_realign` | `1`（warm）／`0`（filter 重置） | `-1`：NULL、`delay_mode` 不是 `EXTERNAL_ALIGNED`，或對象是陣列實例（它自己對四條 lane 做 realign） | 回傳 `-1`（安全） |
@@ -279,14 +279,16 @@ aec_reset(aec);                 /* aec 是 Aec*；NULL 與已銷毀的 handle �
 
 1. **處理函式回傳 `AecStatus`，只報告呼叫本身的錯誤。** 回傳值是 `AEC_OK`（0）或負的錯誤碼
    （`AEC_ERR_ARG`、`AEC_ERR_MODE`、`AEC_ERR_SEQUENCE`、`AEC_ERR_DSP`），前三種被拒絕的呼叫完全不動實例。
-   `AEC_ERR_DSP` 是例外：該 hop 的結果不是有限值（有限但極大的輸入使乘積溢位；陣列另有融合的內部一致性檢查），
+   `AEC_ERR_DSP` 是例外：該 hop 的結果不是有限值（有限但極大的輸入使乘積溢位；陣列逐 lane 檢查，另有融合的內部一致性檢查），
    **整個實例已像 `aec_reset()` 一樣重設**。單聲道：`aec_process_linear()` 檢查線性檢視的向量，結束該 hop 的呼叫
    （`aec_process()`、`aec_process_residual()`、`residual = OFF` 的 `aec_process_linear()`）檢查功率追蹤值與殘餘檢視
    （依 `residual` 所及）；`aec_process()` 的 `out` 寫成零，`aec_post_reset_serial()` 前進，沒有開著的 hop，
    `aec_get_residual()`／`aec_apply_*` 回 `AEC_ERR_SEQUENCE`，線性檢視讀到零。呼叫端把這個 hop 當靜音、清自己的
    ISTFT／OLA 與 CNG、視需要重啟帶歷史的後級，下一個 hop 照常送；之後的輸出等於從下一個 hop 起的新實例。
-   陣列只檢查融合後的頻譜，不逐 lane 檢查：`STATE` 沒有融合，不會回 `AEC_ERR_DSP`；只讓 lane 功率追蹤值溢位、
-   融合沒溢位的 mic sample（實測 16 kHz/256 的 1e20）會被接受，該 lane 之後不再收斂，直到 `aec_reset()`。
+   陣列實例的 `aec_process_linear()` 逐 lane 做與單聲道相同的檢查（線性檢視、功率追蹤值、殘餘檢視；`STATE` 也檢查）：
+   任一條 lane 的結果不是有限值（實測任一路 mic 約 1.9e19 起；ref 在 `STATE` 約 3.8e19 起、`ESTIMATE`／`FULL` 約 1.1e15 起）
+   就回 `AEC_ERR_DSP`，整個實例重設，沒有開著的 hop（`aec_process_residual()` 回 `AEC_ERR_SEQUENCE`，`STATE` 回 `AEC_ERR_MODE`），
+   之後等於從下一個 hop 起的新實例。融合在權重檢查之後拒絕（有限的極大權重使投影溢位）同樣是 `AEC_ERR_DSP`。
    陣列的 `aec_process_linear()` 因輸入含非有限值回 `AEC_ERR_ARG` 時，實例完全不動，上一個 hop 的檢視仍可讀。
    `aec_get_mem_breakdown`、`aec_resolve_signal_grid` 也回 `AecStatus`（0 = 成功），不再是 `1` = 成功。
    設定問題在建立階段（`aec_create` / `aec_init`）擋掉；之後 pointer 有效、長度正確、串流同步仍是呼叫端的責任

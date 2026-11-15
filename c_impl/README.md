@@ -177,7 +177,9 @@ caller-pool path (`aec_get_mem_size`/`aec_init`), and differs from numpy's fp64
   `aec_process_linear_shared_far_from()`: `AEC_ERR_DSP` on that hop from the expected call, `out` zeroed, the serial moved, the
   views refused or zeroed, and every later hop bit-identical to a fresh instance; a sweep of large samples (every accepted hop
   leaves finite views, `out` and power trackers), silence and full-scale signals never refused, non-finite samples still
-  `AEC_ERR_ARG`, and one array row.
+  `AEC_ERR_ARG`; and the array on three grids, `STATE` / `ESTIMATE` / `FULL`: each lane's microphone poisoned (3e38, 1e25, 1e20)
+  refused by `aec_process_linear()` with fresh-instance equality afterwards, the sweep on lanes 0 and 3 and the reference, and
+  the silence / full-scale controls.
 - `test/test_aec_array.c` (`make test-aec-array`) — the four-microphone array instance
   (`AecConfig.n_mics = 4`) driven hop by hop in `STATE`, `ESTIMATE` and `FULL` (hashed into a line stream), plus
   the contract checks (pool vs heap, pool fills and offsets, reset equals fresh, descriptor).

@@ -154,7 +154,7 @@ pre code{background:none;padding:0}
  |                                         | 共用 delay 估計器(capture_proxy_channel)-&gt; 接納規則 -&gt; 對齊後 far
  |                                         |   delay 改變(changed)-&gt; 對四條 lane 做 realign
  |                                         | lane 0 算遠端 FFT;lane 1..3 借用;每條 lane:線性 stage + lane 後級
- |&lt; AEC_OK ---------------------------------| lane 或融合拒絕 -&gt; AEC_ERR_DSP,整個實例已像 aec_reset() 重設
+ |&lt; AEC_OK ---------------------------------| 任一條 lane 的結果不是有限值 -&gt; AEC_ERR_DSP,整個實例已像 aec_reset() 重設
  |- aec_get_array(a, &amp;av) ---------------&gt;|                                                  |
  |&lt; lane_error_spec[4] / lane_base_spec[4] / aligned_ref / delay -|                              |
  |- av -----------------------------------------------------------------------------------------&gt;| 權重 W[4][n_freqs]、波束頻譜 E

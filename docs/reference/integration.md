@@ -441,7 +441,7 @@ int app_run_hop(Aec *aec, const float *mics, const float *ref,
 - `aec_process_residual()` 之前沒有同一 hop 的 `aec_process_linear()`，或 `aec_get_array()` 在第一個 `aec_process_linear()` 之前：`AEC_ERR_SEQUENCE`。
 - `aec_process_linear()` 一呼叫，上一個 hop 的融合檢視就失效：在新 hop 的 `aec_process_residual()` 之前，`aec_get_residual()`、`aec_apply_gain()`、`aec_apply_cng()` 回 `AEC_ERR_SEQUENCE`。在後級之前再呼叫一次 `aec_process_linear()` 會取代尚未完成的那個 hop。
 - 輸入含非有限值：`aec_process_linear()` 回 `AEC_ERR_ARG`，被拒絕的呼叫不改變任何狀態：上一個 hop 的檢視仍可讀，待處理的 linear 幀保留，逐階段耗時記錄不動。
-- 某條 lane 或融合在引數檢查之後拒絕了該 hop（內部一致性檢查失敗，或有限的極大權重使投影溢位）：`AEC_ERR_DSP`（-4），**整個實例已像 `aec_reset()` 一樣重設**，serial 前進。
+- 某條 lane 的結果不是有限值（有限但極大的 mic／ref sample；`aec_process_linear()` 逐 lane 檢查，`STATE` 也檢查），或融合在引數檢查之後拒絕了該 hop（內部一致性檢查失敗，或有限的極大權重使投影溢位）：`AEC_ERR_DSP`（-4），**整個實例已像 `aec_reset()` 一樣重設**，serial 前進，之後等於從下一個 hop 起的新實例。
 - `aec_set_level()` 重新設定融合後的增益階段（`FULL`）；lane 自己的 level 沒有作用。`STATE`／`ESTIMATE` 沒有增益階段，呼叫回 0 但依構造無效。
 
 **陣列實例上被拒絕的呼叫**：

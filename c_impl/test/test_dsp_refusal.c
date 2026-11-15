@@ -5,8 +5,10 @@
  * aec_process_linear_shared_far_from(); one poisoned sample on hop POISON_HOP. Per row: the refused call and hop, `out` zeroed,
  * the reset serial moved, the views after the refusal, then every later hop bit-identical to a fresh instance started on the
  * hop after the refusal. A sweep of large finite samples checks that every accepted hop leaves finite outputs and power
- * trackers; silence and full-scale signals are never refused. Non-finite input samples stay AEC_ERR_ARG with the instance untouched. One array row covers the shared reset
- * path.
+ * trackers; silence and full-scale signals are never refused. Non-finite input samples stay AEC_ERR_ARG with the instance untouched.
+ * Array (n_mics = 4), three grids, STATE / ESTIMATE / FULL: one microphone sample of each lane poisoned (3e38, 1e25, 1e20) is
+ * refused by aec_process_linear() and every later hop equals a fresh instance's; the same sweep and controls on lanes 0 and 3
+ * and the reference.
  *
  * Run from c_impl/:  make test-dsp-refusal */
 #include "aec.h"
@@ -342,7 +344,7 @@ static void run_nonfinite_inputs(const Grid* g) {
 }
 
 #ifndef AEC_NO_ARRAY
-/* The array answers the same way through the same reset: ESTIMATE, mic 3e38 on lane 0, refused by the fusion. */
+/* The array answers the same way through the same reset: ESTIMATE, mic 3e38 on lane 0, through the split pair. */
 static void run_array_row(void) {
     AecConfig c;
     Aec *a, *fresh = NULL;
@@ -386,6 +388,205 @@ static void run_array_row(void) {
           differ);
     aec_destroy(a); aec_destroy(fresh);
 }
+
+/* ---- the array's lanes are checked as single channels ---------------------------------------------------------------- */
+
+#define ARR_REC_MAX (5 * HOP_MAX + 26 * NB_MAX + 2)   /* aligned far + 4 lane hops; up to 25 floats per bin; delay pair */
+static const char* const ARR_POISON_NAME[3] = { "mic 3e38", "mic 1e25", "mic 1e20" };
+static const float ARR_POISON[3] = { 3.0e38f, 1.0e25f, 1.0e20f };
+
+static Aec* make_array(const Grid* g, int mode) {
+    AecConfig c;
+    aec_config_from_level(&c, AEC_LEVEL_BALANCED, g->sr);
+    c.fft_size = g->fft;
+    c.n_mics = AEC_ARRAY_MICS;
+    c.residual = (AecResidualMode)mode;
+    return aec_create(&c);
+}
+
+/* Lane ch hears the scene's echo at gain 1 - ch/8. */
+static void array_hop(int h, int hop, float* mics) {
+    int i, ch;
+    for (i = 0; i < hop; ++i)
+        for (ch = 0; ch < AEC_ARRAY_MICS; ++ch) mics[i * AEC_ARRAY_MICS + ch] = g_mic[h][i] * (1.0f - 0.125f * (float)ch);
+}
+
+/* One array hop: aec_process_linear(), then (ESTIMATE / FULL) aec_process_residual() and (FULL) aec_apply_gain(). *lin_rc: the
+ * linear call's code. */
+static int array_run(Aec* a, int mode, const float* mics, const float* ref, const Complex* w, Complex* gained, int* lin_rc) {
+    AecBeam beam = { w, NULL };
+    int rc = aec_process_linear(a, mics, ref);
+    *lin_rc = rc;
+    if (rc != AEC_OK || mode == AEC_RESIDUAL_STATE) return rc;
+    rc = aec_process_residual(a, &beam);
+    if (rc == AEC_OK && mode == AEC_RESIDUAL_FULL) rc = aec_apply_gain(a, NULL, gained);
+    return rc;
+}
+
+/* Everything the hop hands out, packed: the aligned far, the lanes' hops and spectra, the fused views, the gained spectrum. */
+static int array_record(const Aec* a, int mode, const Complex* gained, float* rec) {
+    AecArrayView av;
+    AecResidualView rv;
+    int hop = aec_hop_size(a), n, ch, k = 0;
+    memset(&av, 0, sizeof av); av.struct_size = sizeof av;
+    if (aec_get_array(a, &av) != AEC_OK || !av.aligned_ref) return -1;
+    n = av.n_freqs;
+    memcpy(rec + k, av.aligned_ref, (size_t)hop * sizeof(float)); k += hop;
+    for (ch = 0; ch < AEC_ARRAY_MICS; ++ch) {
+        if (!av.lane_formed_hop[ch] || !av.lane_error_spec[ch] || !av.lane_base_spec[ch]) return -1;
+        memcpy(rec + k, av.lane_formed_hop[ch], (size_t)hop * sizeof(float)); k += hop;
+        memcpy(rec + k, av.lane_error_spec[ch], (size_t)n * sizeof(Complex)); k += 2 * n;
+        memcpy(rec + k, av.lane_base_spec[ch], (size_t)n * sizeof(Complex)); k += 2 * n;
+    }
+    rec[k++] = (float)av.delay.delay_samples;
+    rec[k++] = (float)av.delay.solid;
+    if (mode == AEC_RESIDUAL_STATE) return k;
+    memset(&rv, 0, sizeof rv); rv.struct_size = sizeof rv;
+    if (aec_get_residual(a, &rv) != AEC_OK) return -1;
+    memcpy(rec + k, rv.error_spec, (size_t)n * sizeof(Complex)); k += 2 * n;
+    memcpy(rec + k, rv.base_spec, (size_t)n * sizeof(Complex)); k += 2 * n;
+    memcpy(rec + k, rv.r2, (size_t)n * sizeof(float)); k += n;
+    memcpy(rec + k, rv.comfort_noise, (size_t)n * sizeof(float)); k += n;
+    if (mode == AEC_RESIDUAL_FULL) {
+        memcpy(rec + k, rv.res_gain, (size_t)n * sizeof(float)); k += n;
+        memcpy(rec + k, gained, (size_t)n * sizeof(Complex)); k += 2 * n;
+    }
+    return k;
+}
+
+static void equal_weights(Complex* w, int n) {
+    int i;
+    for (i = 0; i < AEC_ARRAY_MICS * n; ++i) { w[i].r = 0.25f; w[i].i = 0.0f; }
+}
+
+/* One microphone sample of lane `lane` poisoned on POISON_HOP: aec_process_linear() refuses that hop with AEC_ERR_DSP (the lane
+ * checks run there in every residual mode), the instance is reset, and every later hop equals a fresh instance's. */
+static void run_array_lane_row(const Grid* g, int mode, int lane, int poison) {
+    static Complex w[AEC_ARRAY_MICS * NB_MAX], gained[NB_MAX], gained_f[NB_MAX];
+    static float mics[AEC_ARRAY_MICS * HOP_MAX], rec[ARR_REC_MAX], rec_f[ARR_REC_MAX];
+    Aec* a = make_array(g, mode);
+    Aec* fresh = NULL;
+    int hop, h, refused = -1, compared = 0, differ = 0, accepted_bad = 0;
+    char tag[160];
+    snprintf(tag, sizeof tag, "array %s %s lane %d %s", g->name, MODE_NAME[mode], lane, ARR_POISON_NAME[poison]);
+    g_rows++;
+    if (!a) { CHECK(0, "%s: create", tag); return; }
+    hop = aec_hop_size(a);
+    equal_weights(w, hop + 1);
+    for (h = 0; h < HOPS; ++h) {
+        int rc, lin_rc;
+        uint32_t serial_before = aec_post_reset_serial(a);
+        array_hop(h, hop, mics);
+        if (h == POISON_HOP) mics[POISON_AT * AEC_ARRAY_MICS + lane] = ARR_POISON[poison];
+        rc = array_run(a, mode, mics, g_far[h], w, gained, &lin_rc);
+        if (fresh) {
+            int rf = array_run(fresh, mode, mics, g_far[h], w, gained_f, &lin_rc);
+            int k = rc == AEC_OK ? array_record(a, mode, gained, rec) : -1;
+            int kf = rf == AEC_OK ? array_record(fresh, mode, gained_f, rec_f) : -2;
+            compared++;
+            if (k < 0 || k != kf || memcmp(rec, rec_f, (size_t)k * sizeof(float)) != 0) differ++;
+            continue;
+        }
+        if (rc == AEC_OK) {
+            int k = array_record(a, mode, gained, rec);
+            if (k < 0 || !all_finite(rec, k)) accepted_bad++;
+            continue;
+        }
+        refused = h;
+        CHECK(lin_rc == AEC_ERR_DSP, "%s: hop %d: aec_process_linear() returned %d, want AEC_ERR_DSP", tag, h, lin_rc);
+        CHECK(h == POISON_HOP, "%s: refused on hop %d, want %d", tag, h, POISON_HOP);
+        CHECK(aec_post_reset_serial(a) != serial_before, "%s: the reset serial moves on the refusal", tag);
+        {
+            AecBeam beam = { w, NULL };
+            AecResidualView rv;
+            memset(&rv, 0, sizeof rv); rv.struct_size = sizeof rv;
+            CHECK(aec_process_residual(a, &beam) == (mode == AEC_RESIDUAL_STATE ? AEC_ERR_MODE : AEC_ERR_SEQUENCE),
+                  "%s: no hop open after the refusal", tag);
+            CHECK(aec_get_residual(a, &rv) != AEC_OK, "%s: no residual view after the refusal", tag);
+        }
+        fresh = make_array(g, mode);
+        if (!fresh) { CHECK(0, "%s: fresh create", tag); break; }
+    }
+    CHECK(refused >= 0, "%s: never refused", tag);
+    CHECK(accepted_bad == 0, "%s: %d accepted hops left a non-finite result", tag, accepted_bad);
+    CHECK(refused < 0 || (compared == HOPS - 1 - refused && differ == 0),
+          "%s: %d of %d hops after the refusal differ from a fresh instance", tag, differ, compared);
+    aec_destroy(a); aec_destroy(fresh);
+}
+
+/* Large finite samples on lane 0 (the capture proxy), lane 3 or the reference: an accepted hop never hands out a non-finite
+ * result, and from 1e20 the hop is refused. */
+static void run_array_sweep(const Grid* g) {
+    static const float values[] = { 1e10f, 1e15f, 1e19f, 2e19f, 1e20f, 1e25f, 1e30f, 1e35f, 3e38f, FLT_MAX, -FLT_MAX };
+    static const int target[3] = { 0, 3, -1 };   /* lane, or -1: the reference */
+    static Complex w[AEC_ARRAY_MICS * NB_MAX], gained[NB_MAX];
+    static float mics[AEC_ARRAY_MICS * HOP_MAX], ref[HOP_MAX], rec[ARR_REC_MAX];
+    int mode, t, v, h, hop;
+    for (mode = AEC_RESIDUAL_STATE; mode <= AEC_RESIDUAL_FULL; ++mode)
+        for (t = 0; t < 3; ++t)
+            for (v = 0; v < (int)(sizeof(values) / sizeof(values[0])); ++v) {
+                Aec* a = make_array(g, mode);
+                int bad = 0, refused = 0;
+                if (!a) { CHECK(0, "array sweep create"); return; }
+                hop = aec_hop_size(a);
+                equal_weights(w, hop + 1);
+                g_rows++;
+                for (h = 0; h < 90; ++h) {
+                    int rc, lin_rc;
+                    array_hop(h, hop, mics);
+                    memcpy(ref, g_far[h], (size_t)hop * sizeof(float));
+                    if (h >= POISON_HOP && h < POISON_HOP + 3) {
+                        if (target[t] < 0) ref[POISON_AT + h] = values[v];
+                        else mics[(POISON_AT + h) * AEC_ARRAY_MICS + target[t]] = values[v];
+                    }
+                    rc = array_run(a, mode, mics, ref, w, gained, &lin_rc);
+                    if (rc == AEC_OK) {
+                        int k = array_record(a, mode, gained, rec);
+                        bad += k < 0 || !all_finite(rec, k);
+                    } else if (rc == AEC_ERR_DSP) {
+                        refused++;
+                    } else {
+                        bad++;
+                    }
+                }
+                CHECK(bad == 0, "array sweep %s %s %s %g: %d hops with a non-finite result or another error", g->name,
+                      MODE_NAME[mode], target[t] < 0 ? "ref" : target[t] ? "lane 3" : "lane 0", (double)values[v], bad);
+                CHECK(values[v] < 1e20f || refused > 0, "array sweep %s %s %s %g: an overflowing sample is refused", g->name,
+                      MODE_NAME[mode], target[t] < 0 ? "ref" : target[t] ? "lane 3" : "lane 0", (double)values[v]);
+                aec_destroy(a);
+            }
+}
+
+/* Digital silence, a full-scale square wave and full-scale DC of opposite signs on all four microphones: never refused. */
+static void run_array_controls(const Grid* g) {
+    static Complex w[AEC_ARRAY_MICS * NB_MAX], gained[NB_MAX];
+    static float mics[AEC_ARRAY_MICS * HOP_MAX], ref[HOP_MAX], rec[ARR_REC_MAX];
+    int sig, mode, h, i, ch, hop;
+    for (sig = 0; sig < 3; ++sig)
+        for (mode = AEC_RESIDUAL_STATE; mode <= AEC_RESIDUAL_FULL; ++mode) {
+            Aec* a = make_array(g, mode);
+            int bad = 0;
+            if (!a) { CHECK(0, "array control create"); return; }
+            hop = aec_hop_size(a);
+            equal_weights(w, hop + 1);
+            g_rows++;
+            for (h = 0; h < 300; ++h) {
+                int lin_rc, k;
+                for (i = 0; i < hop; ++i) {
+                    int n = h * hop + i;
+                    float sq = ((n / 16) & 1) ? 1.0f : -1.0f;
+                    ref[i] = sig == 0 ? 0.0f : sig == 1 ? sq : -1.0f;
+                    for (ch = 0; ch < AEC_ARRAY_MICS; ++ch) mics[i * AEC_ARRAY_MICS + ch] = sig == 0 ? 0.0f : sig == 1 ? sq : 1.0f;
+                }
+                if (array_run(a, mode, mics, ref, w, gained, &lin_rc) != AEC_OK) { bad++; continue; }
+                k = array_record(a, mode, gained, rec);
+                bad += k < 0 || !all_finite(rec, k);
+            }
+            CHECK(bad == 0, "array control %s %s %s: %d hops refused or not finite", g->name, MODE_NAME[mode],
+                  sig == 0 ? "silence" : sig == 1 ? "full-scale square" : "full-scale DC", bad);
+            aec_destroy(a);
+        }
+}
 #endif
 
 int main(void) {
@@ -405,6 +606,15 @@ int main(void) {
         run_nonfinite_inputs(&GRIDS[g]);
     }
 #ifndef AEC_NO_ARRAY
+    for (g = 0; g < 3; ++g) {
+        int lane, poison;
+        make_scene(GRIDS[g].fft / 2);
+        for (mode = AEC_RESIDUAL_STATE; mode <= AEC_RESIDUAL_FULL; ++mode)
+            for (lane = 0; lane < AEC_ARRAY_MICS; ++lane)
+                for (poison = 0; poison < 3; ++poison) run_array_lane_row(&GRIDS[g], mode, lane, poison);
+        run_array_sweep(&GRIDS[g]);
+        run_array_controls(&GRIDS[g]);
+    }
     make_scene(128);
     run_array_row();
 #endif
