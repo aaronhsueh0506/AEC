@@ -42,6 +42,17 @@ when verdict requires it.
 ---
 
 
+## [Unreleased] — 2026-11-15 — `AecResidualView.delay_changed` / `delay_locked` removed, `AEC_LAYOUT_VERSION` 4
+
+**Output unchanged.** The four baseline streams (`split_entry`, `split_entry2`, `aec_array`, `aec_array2`) compare with 0 mismatches, `META` lines included, against streams captured from the previous commit (`13e804a`) at 16k/256, 16k/512 and 48k/1024, `SIMD=1` and `SIMD=0`. (`split_entry3` was folded into `split_entry2` earlier, and the pre-split golden files under `test/golden/` are no longer in the tree.)
+
+**Removed from `aec.h`.** `AecResidualView.delay_changed` and `AecResidualView.delay_locked`. They repeated what two other views already carry, hop for hop: a single channel reads `aec_get_linear()` `delay_state` (`delay_changed` was `delay_state == AEC_LINEAR_DELAY_CHANGED`, `delay_locked` was `delay_state != AEC_LINEAR_DELAY_UNLOCKED`), an array reads `aec_get_array()` `delay.changed` / `delay.solid`. No code outside the tests read them. `sizeof(AecResidualView)` 144 to 136 B (LP64), 96 to 88 B (ILP32); the view is `struct_size`-checked, but a caller built against the old header passes the larger size, is accepted and reads `guard_lanes` / `far_hop` at the old offsets: rebuild every consumer.
+
+**Pool layout.** The array's fused-frame record loses the same two fields, so every array pool is 16 B smaller (LP64): 16k/256 `STATE` / `ESTIMATE` / `FULL` 594,944 / 690,480 / 700,480 to 594,928 / 690,464 / 700,464 B, 16k/512 883,136 / 1,072,880 / 1,091,072 to 883,120 / 1,072,864 / 1,091,056 B, 48k/1024 1,994,912 / 2,373,072 / 2,410,720 to 1,994,896 / 2,373,056 / 2,410,704 B; `fusion_bytes` -16 B in every array configuration. Single-channel pools are unchanged. On ILP32 (clang `armv7`, `sizeof` only) the array control block goes from 1,932 to 1,924 B and the fused-frame record from 68 to 60 B; both control-block sizes round to 1,936 B in the 16-B carve, so the 32-bit array pools are expected not to move (not measured end to end). `AEC_LAYOUT_VERSION` 3 to 4 (a stored descriptor from layout 3 is refused by `aec_init_ex()`); the carve text and `build_flags_hash` are unchanged.
+
+- Tests: the `frame_flags` hash of `test_aec_array.c` and the frame hash of `test/baseline2_array.h` take the same values from `AecArrayView.delay` (`changed`, `solid`), so the streams do not move; the equality checks between the removed fields and their duplicates (`test_aec_array.c`, `test_aec_array_flow.c`, `test_split_entry2.c`) are gone with them. Mutation: hashing a constant in place of `delay.solid` gives 52,046 `aec_array` and 3,204 `aec_array2` mismatches.
+- `test/test_memory_layout.c` array pins and `AEC_LAYOUT_VERSION_PIN`, `c_impl/STATIC_MEMORY.md`, `docs/reference/lifecycle.md`, `docs/reference/integration.md`, `docs/sdk_migration_output_guard.md` and the HTML references follow.
+
 ## [Unreleased] — 2026-11-15 — No `_Static_assert` or `static_assert` remains; the tests pin those facts at run time
 
 **Library output and object code unchanged.** Every `.o` of `libaec.a` and of `aec_wav` (`SIMD=1` and `SIMD=0`) is byte-identical to the previous commit's (a static assert emits no code), and the four baseline streams compare with 0 mismatches against streams captured from the previous commit. `AEC_LAYOUT_VERSION` stays 3.

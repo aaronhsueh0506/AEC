@@ -2757,8 +2757,6 @@ int aec_get_residual(const Aec* a, AecResidualView* out) {
         out->max_dt = lv.dt_indicator;
         out->max_saturation = lv.saturation_level;
         out->clock_drift = (a->cfg.delay_mode == AEC_DELAY_MATCHED && a->has_delay) ? delay_aec_has_clockdrift(&a->delay) : 0;
-        out->delay_changed = (lv.delay_state == AEC_LINEAR_DELAY_CHANGED);
-        out->delay_locked = (lv.delay_state != AEC_LINEAR_DELAY_UNLOCKED);
         out->guard_lanes = out->guard_active ? 1u : 0u;
         out->far_hop = a->far_hop;
     }

@@ -54,7 +54,7 @@ typedef struct G2AFrame {
     unsigned       guard_lanes;
     uint32_t       serial;
     float          far_power, max_dt, max_sat;
-    int            all_converged, usable_linear, clock_drift, delay_changed, delay_locked;
+    int            all_converged, usable_linear, clock_drift;
     const float*   instance_gain;      /* the instance's own gain (new tree, FULL), else NULL */
 } G2AFrame;
 
@@ -340,7 +340,7 @@ static int g2a_run_case(const G2ACase* c, int mode) {
             x = g2_fnv_u32(x, fr.guard_lanes); x = g2_fnv_u32(x, fr.serial); x = g2_fnv_f32(x, fr.far_power);
             x = g2_fnv_f32(x, fr.max_dt); x = g2_fnv_f32(x, fr.max_sat); x = g2_fnv_u32(x, (uint32_t)fr.all_converged);
             x = g2_fnv_u32(x, (uint32_t)fr.usable_linear); x = g2_fnv_u32(x, (uint32_t)fr.clock_drift);
-            x = g2_fnv_u32(x, (uint32_t)fr.delay_changed); x = g2_fnv_u32(x, (uint32_t)fr.delay_locked);
+            x = g2_fnv_u32(x, (uint32_t)f.delay_changed); x = g2_fnv_u32(x, (uint32_t)f.delay_solid);
             hh[G2AG_FRAME] = x;
             memset(&in, 0, sizeof in);
             in.error_spec = fr.e; in.near_spec = fr.y; in.r2 = fr.r2; in.comfort_noise = fr.cn;

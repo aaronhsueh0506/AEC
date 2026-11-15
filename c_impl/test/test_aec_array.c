@@ -185,14 +185,13 @@ static int run_case(const ArrCase* c, int id, AecResidualMode residual) {
             hh = ah_u32(hh, (uint32_t)rv.all_converged);
             hh = ah_u32(hh, (uint32_t)rv.usable_linear);
             hh = ah_u32(hh, (uint32_t)rv.clock_drift);
-            hh = ah_u32(hh, (uint32_t)rv.delay_changed);
-            hh = ah_u32(hh, (uint32_t)rv.delay_locked);
+            hh = ah_u32(hh, (uint32_t)av.delay.changed);
+            hh = ah_u32(hh, (uint32_t)av.delay.solid);
             emit(cid, "frame_flags", h, hh);
         }
         /* view invariants */
         CHECK(rv.guard_active == (rv.guard_lanes != 0), "guard_active vs guard_lanes");
         CHECK((rv.guard_lanes == 0) == (rv.base_spec == rv.error_spec), "base_spec is error_spec exactly when no guard fired");
-        CHECK(rv.delay_changed == av.delay.changed && rv.delay_locked == av.delay.solid, "residual delay flags vs array view");
         CHECK(rv.res_gain == (full ? res_gain_of(a) : NULL), "gain pointer vs mode");
         CHECK(!full || rv.res_gain, "FULL exposes the gain");
         CHECK(estimate ? (rv.res_gain == NULL && res_gain_of(a) == NULL) : 1, "ESTIMATE exposes a gain");

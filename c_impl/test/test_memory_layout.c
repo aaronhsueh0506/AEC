@@ -70,7 +70,7 @@ static int check_header_facts(void) {
 
 /* The pool descriptor: layout_version is a literal (bump it, and the pin, when a carved layout changes size or order) and, on LP64
  * (where the ABI hash is the identity), so is the FNV-1a-32 of the carve text, which every edit of that text moves. */
-#define AEC_LAYOUT_VERSION_PIN 3u
+#define AEC_LAYOUT_VERSION_PIN 4u
 #define AEC_CARVE_HASH_PIN_LP64 3368782680u
 static int check_descriptor_pin(void) {
     AecConfig cfg;
@@ -100,8 +100,8 @@ static int check_descriptor_pin(void) {
  * comfort-noise arrays. */
 static int check_array_pins(void) {
     static const struct { int sr, fft; size_t state, estimate, full; } pin[3] = {
-        {16000, 256, 594944u, 690480u, 700480u}, {16000, 512, 883136u, 1072880u, 1091072u},
-        {48000, 1024, 1994912u, 2373072u, 2410720u} };
+        {16000, 256, 594928u, 690464u, 700464u}, {16000, 512, 883120u, 1072864u, 1091056u},
+        {48000, 1024, 1994896u, 2373056u, 2410704u} };
     int i, bad = 0;
     if (sizeof(void*) != 8 || sizeof(size_t) != 8) {
         printf("test_memory_layout: array pool pins are LP64 values; skipped on this %zu-byte-pointer ABI\n", sizeof(void*));

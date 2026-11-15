@@ -67,7 +67,7 @@ typedef struct ArrayFrame {
     const float* far_hop;
     int guard_lanes;
     uint32_t serial;
-    int all_converged, usable_linear, clock_drift, delay_changed, delay_locked;
+    int all_converged, usable_linear, clock_drift;
     float max_dt, max_sat;
 } ArrayFrame;
 
@@ -865,8 +865,6 @@ int aec_array_impl_process_residual(Aec* a, const AecBeam* beam) {
     p->frame.all_converged = all_converged;
     p->frame.usable_linear = usable_linear;
     p->frame.clock_drift = clock_drift;
-    p->frame.delay_changed = p->last_delay.changed;
-    p->frame.delay_locked = p->last_delay.solid;
     p->frame.max_dt = max_dt;
     p->frame.max_sat = max_saturation;
     p->fused_valid = 1;
@@ -906,8 +904,6 @@ int aec_array_impl_get_residual(const Aec* a, AecResidualView* out) {
     out->max_dt = f->max_dt;
     out->max_saturation = f->max_sat;
     out->clock_drift = f->clock_drift;
-    out->delay_changed = f->delay_changed;
-    out->delay_locked = f->delay_locked;
     out->guard_lanes = (unsigned int)f->guard_lanes;
     out->far_hop = f->far_hop;
     return AEC_OK;

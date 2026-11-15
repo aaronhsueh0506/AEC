@@ -137,7 +137,7 @@ AEC magnitude² 必須來自同一個 AEC kernel，不能任意以其他 power �
 | `res_floor_protect` | 本 hop 是否啟用 double-talk RES floor 保護。它就是近端最近有聲音 latch 的實際決定；自己做後級的消費端應讀這個欄位，不要用 `dt_indicator` 另外推導一套規則（陣列實例：`max_dt > 0.2`，`max_dt` 只取權重非零的 lane；單聲道：近端最近有聲音的 latch）。 |
 | `usable_linear` | 本 hop 的可用線性估計判定。`0` 時 `r2` 是保守的非線性估計（遠端功率乘上預設 echo-path 增益），並非由線性回音估計推導，可能遠高於根本不存在的殘留回音。 |
 | `post_reset_serial` | 與 `aec_post_reset_serial()` 相同的計數（見下）。 |
-| `all_converged`、`max_dt`、`max_saturation`、`clock_drift`、`delay_changed`、`delay_locked`、`guard_lanes`、`far_hop` | 後級增益階段本 hop 的輸入摘要（單聲道：來自自己的線性 stage），給自己做後級的消費端使用。 |
+| `all_converged`、`max_dt`、`max_saturation`、`clock_drift`、`guard_lanes`、`far_hop` | 後級增益階段本 hop 的輸入摘要（單聲道：來自自己的線性 stage），給自己做後級的消費端使用。對齊狀態不在這裡：單聲道讀 `AecLinearView.delay_state`（`UNLOCKED`／`LOCKED`／`CHANGED`），陣列讀 `AecArrayView.delay`（`changed`、`solid`）。 |
 
 `aec_get_linear(a, &lin)`（`AecLinearView`）：線性 stage 的檢視，`residual == OFF` 時就是整個 hop 的結果。
 含 `linear_hop`（refined PBFDKF 輸出，FORM 選擇之前）、主 filter 的回音／近端／遠端頻譜、`aligned_far_hop`、delay 狀態（§8.6），

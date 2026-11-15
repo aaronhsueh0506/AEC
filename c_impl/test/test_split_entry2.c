@@ -71,8 +71,6 @@ static int g2_step_ctx(Aec* a, const float* mic, const float* ref, G2View* v) {
     CHECK(rv.max_dt == lv.dt_indicator && rv.max_saturation == lv.saturation_level && rv.all_converged == lv.filter_converged,
           "residual view inputs != linear view");
     CHECK(rv.guard_lanes == (rv.guard_active ? 1u : 0u), "guard_lanes");
-    CHECK(rv.delay_locked == (lv.delay_state != AEC_LINEAR_DELAY_UNLOCKED) && rv.delay_changed == (lv.delay_state == AEC_LINEAR_DELAY_CHANGED),
-          "delay flags");
     return 0;
 }
 

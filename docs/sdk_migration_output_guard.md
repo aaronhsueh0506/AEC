@@ -94,7 +94,8 @@ context API 的應用。只呼叫 `aec_process()`（`AecConfig.residual` 維持�
 | 由 `include/` 取用內部標頭（`aec_post.h`、`pbfdkf.h` 等）裡的常數與型別 | `AEC_CNG_SEED`、`AEC_PSD_SCALE_F`／`AEC_PSD_SCALE_INV_F`、`AecStageTiming`、`aec_level_name()` 在 `aec.h`；`include/` 只剩 `aec.h`，其餘全部（`aec_internal.h`、`aec_balanced_config.h`、內部標頭）在 `include/internal/`；編譯 `src/*.c` 的 SDK Makefile 要加 `-I include/internal` |
 | `aec_debug_set_level()`、`aec_debug_set_log()`、`aec_wav` 的 `--debug-level`、`--debug-log`、`--no-shadow`、`--no-hpf`、`--delay-est-period` | 已刪除（前兩者只儲存、從不讀取；後三個對應的欄位已是內部值）。`aec_debug.h`（`aec_debug_set_trace()`、`aec_debug_set_frame()`、`AecDebugTraceRow`）與 `aec_wav --debug-trace` 一併刪除，改用 `aec_debug_status()` 與 `--debug` |
 | 合成視窗 `aec_synthesis_window()` 指向靜態表 | 指向實例自己的 pool（init／create 時建好）：借用它的 `AcIstft` 不得比 `Aec` 活得久（§6） |
-| 存檔的 `AecMemReq` 描述子（`AEC_LAYOUT_VERSION` 1 或 2） | `AEC_LAYOUT_VERSION` 3：舊描述子被 `aec_init_ex()` 拒絕；每次建置重新查詢（`aec_init()`／`aec_create()` 不比對描述子） |
+| 存檔的 `AecMemReq` 描述子（`AEC_LAYOUT_VERSION` 1、2 或 3） | `AEC_LAYOUT_VERSION` 4：舊描述子被 `aec_init_ex()` 拒絕；每次建置重新查詢（`aec_init()`／`aec_create()` 不比對描述子） |
+| `AecResidualView.delay_changed`、`AecResidualView.delay_locked` | 已刪除：單聲道讀 `aec_get_linear()` 的 `delay_state`（`delay_changed` ＝ `== AEC_LINEAR_DELAY_CHANGED`，`delay_locked` ＝ `!= AEC_LINEAR_DELAY_UNLOCKED`），陣列讀 `aec_get_array()` 的 `delay.changed`／`delay.solid`（值與舊欄位逐 hop 相同）。`AecResidualView` 變小（LP64 144 → 136 B，ILP32 96 → 88 B）；以舊 `sizeof` 呼叫會被接受但讀到位移後的欄位，呼叫端必須重新編譯 |
 | `AecArrayView.n_channels`、`AecArrayView.hop_size` | 已刪除：通道數用 `aec_array_linear_aec_count()`、hop 長度用 `aec_hop_size()`。`AecArrayView` 變小，沒有版本巨集保護，用舊標頭編譯的呼叫端必須重新編譯（以較大的 `struct_size` 呼叫會被接受並讀到位移後的欄位） |
 
 位元結果：同一份輸入、同樣的組態，新舊對應的模式輸出逐位元相同（函式庫端曾以 `make test-split-entry` 與 `make test-split-entry-2`（第三組場景當時是獨立的 `test-split-entry-3`，現已併入後者）對舊 API 產生的

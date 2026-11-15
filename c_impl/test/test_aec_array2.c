@@ -133,8 +133,7 @@ static int g2a_fuse(void* p, const Complex* weights, const Complex* beamformed_e
     o->r2 = h->rv.r2; o->cn = h->rv.comfort_noise; o->far_hop = h->rv.far_hop;
     o->guard_lanes = h->rv.guard_lanes; o->serial = h->rv.post_reset_serial; o->far_power = h->lv.far_power;
     o->max_dt = h->rv.max_dt; o->max_sat = h->rv.max_saturation; o->all_converged = h->rv.all_converged;
-    o->usable_linear = h->rv.usable_linear; o->clock_drift = h->rv.clock_drift; o->delay_changed = h->rv.delay_changed;
-    o->delay_locked = h->rv.delay_locked;
+    o->usable_linear = h->rv.usable_linear; o->clock_drift = h->rv.clock_drift;
     o->instance_gain = h->rv.res_gain;
     return 0;
 }

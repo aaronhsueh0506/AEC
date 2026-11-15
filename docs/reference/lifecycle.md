@@ -62,7 +62,7 @@ free(pool);                                 /* 記憶池由呼叫端自行回收
 `aec_get_mem_size()`，另有描述子／佈局版本、backend、建置旗標雜湊與對齊）；設定無效回 -1 並把 `req` 清零。
 `aec_init_ex(mem, size, &cfg, &req)` 帶非 NULL 的描述子時，要求它與目前建置的描述子完全一致（`reserved` 為 0、`req.bytes` 與
 `size` 都不小於目前需要的 byte 數），用來擋掉「舊建置查到的記憶池配給新函式庫」。`aec_init(mem, size, &cfg)` 就是描述子為 `NULL` 的 `aec_init_ex()`。
-描述子不可存檔或自行拼湊，每次建置重新查。`layout_version`（`AEC_LAYOUT_VERSION` = 3）在記憶池的配置大小或順序改變時遞增；
+描述子不可存檔或自行拼湊，每次建置重新查。`layout_version`（`AEC_LAYOUT_VERSION` = 4）在記憶池的配置大小或順序改變時遞增；
 `build_flags_hash` 是配置文字（不是可調數值）的 FNV-1a-32。
 
 `AecConfig.n_mics = AEC_ARRAY_MICS`（4）建出陣列實例：四條 lane、共用的 delay 估計器與對齊後 far、融合緩衝都在**同一塊**記憶池，
@@ -190,17 +190,17 @@ estimator 只省 5,120 B。
 
 | 格點 | `STATE` | `ESTIMATE` | `FULL`（預設） |
 |---|---:|---:|---:|
-| 16 kHz / 256 | 594,944 B | 690,480 B | 700,480 B |
-| 16 kHz / 512 | 883,136 B | 1,072,880 B | 1,091,072 B |
-| 48 kHz / 1024 | 1,994,912 B | 2,373,072 B | 2,410,720 B |
+| 16 kHz / 256 | 594,928 B | 690,464 B | 700,464 B |
+| 16 kHz / 512 | 883,120 B | 1,072,864 B | 1,091,056 B |
+| 48 kHz / 1024 | 1,994,896 B | 2,373,056 B | 2,410,704 B |
 
 `aec_get_mem_breakdown()` 的欄位（`FULL`）：
 
 | 格點 | `total_bytes` | `estimator_bytes` | `ring_bytes` | `lane_bytes` | `fusion_bytes` | `Aec` 標頭 |
 |---|---:|---:|---:|---:|---:|---:|
-| 16 kHz / 256 | 700,480 | 29,248 | 66,576 | 570,880 | 27,728 | 6,048 |
-| 16 kHz / 512 | 1,091,072 | 29,248 | 67,600 | 937,664 | 50,512 | 6,048 |
-| 48 kHz / 1024 | 2,410,720 | 30,624 | 200,720 | 2,074,176 | 99,152 | 6,048 |
+| 16 kHz / 256 | 700,464 | 29,248 | 66,576 | 570,880 | 27,712 | 6,048 |
+| 16 kHz / 512 | 1,091,056 | 29,248 | 67,600 | 937,664 | 50,496 | 6,048 |
+| 48 kHz / 1024 | 2,410,704 | 30,624 | 200,720 | 2,074,176 | 99,136 | 6,048 |
 
 - 陣列池 = `Aec` 標頭（對齊 16 B，上表最後一欄）+ `estimator_bytes` + `ring_bytes` + `lane_bytes` + `fusion_bytes`。
   **標頭不在任何一個拆解欄位內**，所以四個欄位加起來比 `total_bytes` 少一個標頭。
@@ -210,7 +210,7 @@ estimator 只省 5,120 B。
   單聲道實例同樣沒有 render-history 列與 `x2_past`，穩態歷史列剛好是環形長度，shadow 濾波器是主濾波器的 follower（同輸入、同清除、同分區步進，
   直接共用主濾波器的遠端歷史，也沒有它不形成的 `near_spec`／`error_spec_windowed`／`spec_scratch`）。
 - `fusion_bytes`：控制區塊、麥克風／對齊後 far／融合緩衝、四條 lane 共用的一個 FFT 控制代碼（7,152／13,552／26,352 B），`FULL` 另含共用的抑制增益階段（內部 `aec_res_get_mem_size()`：10,000／18,192／37,648 B）；
-  **不含** lane 池。`STATE` 沒有融合緩衝（11,472／19,920／36,816 B）；`ESTIMATE` 有融合緩衝但沒有增益階段（17,728／32,320／61,504 B）。
+  **不含** lane 池。`STATE` 沒有融合緩衝（11,456／19,904／36,800 B）；`ESTIMATE` 有融合緩衝但沒有增益階段（17,712／32,304／61,488 B）。
 - `estimator_bytes`／`ring_bytes` 與單聲道同義，但環形緩衝的容量依陣列的公式（[§8.8](integration.md#88-麥克風陣列實例n_mics--4)）：
   `MATCHED` 為 `ceil(1024 ms × sample_rate / 1000) + 2 × hop + 1` 個 sample，`FIXED` 為 `fixed_delay_samples + hop_size`，`EXTERNAL_ALIGNED` 為 0。
 - 其他 `delay_mode`（`FULL`）：`EXTERNAL_ALIGNED` 為 605,456／995,024／2,180,176 B；`FIXED`、`fixed_delay_samples = 0` 為 605,968／996,048／2,182,224 B；

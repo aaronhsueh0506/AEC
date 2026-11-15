@@ -210,7 +210,7 @@ typedef struct AfFrame {
     const float* far_hop;
     const float* formed_hop;
     float far_power, max_dt, max_sat;
-    int all_converged, usable_linear, clock_drift, delay_changed, delay_locked;
+    int all_converged, usable_linear, clock_drift;
 } AfFrame;
 
 static int af_process_front(Af* p, const float* mics, const float* ref, AfFront* out) {
@@ -272,8 +272,6 @@ static int af_fuse(Af* p, const Complex* weights, const Complex* beamformed_erro
     frame->all_converged = rv.all_converged;
     frame->usable_linear = rv.usable_linear;
     frame->clock_drift = rv.clock_drift;
-    frame->delay_changed = rv.delay_changed;
-    frame->delay_locked = rv.delay_locked;
     return AEC_OK;
 }
 
@@ -2827,7 +2825,7 @@ static void test_fuse_frame_contract(void) {
     AfFront front;
     AfFrame fr;
     uint32_t rng = 7u;
-    int h, i, hop, n, ok = 1, flags_match = 1, finite = 1;
+    int h, i, hop, n, ok = 1, finite = 1;
     int usable_linear_valid = 1, usable_linear_seen = 0;
 
     cfg.fft_size = 1024;
@@ -2846,9 +2844,6 @@ static void test_fuse_frame_contract(void) {
             fr.r2 == NULL || fr.cn == NULL || fr.g_res_ctx != NULL ||
             fr.far_hop != front.aligned_ref)
             ok = 0;
-        if (fr.delay_changed != front.delay.changed ||
-            fr.delay_locked != front.delay.solid)
-            flags_match = 0;
         if (!(fr.max_dt >= 0.0f) || !(fr.max_sat >= 0.0f) ||
             !all_finite(fr.r2, n) || !all_finite(fr.cn, n))
             finite = 0;
@@ -2858,8 +2853,6 @@ static void test_fuse_frame_contract(void) {
             usable_linear_seen = 1;
     }
     CHECK(ok, "fuse frame: shape, pointers and no lane-level gain on every hop");
-    CHECK(flags_match,
-          "fuse frame: delay flags follow the shared aligner");
     CHECK(finite, "fuse frame: R^2, comfort noise and the worst-lane scalars are valid");
     CHECK(usable_linear_valid,
           "fuse frame: usable_linear is a 0/1 verdict on every hop");
@@ -4507,8 +4500,7 @@ static int hoist_frames_equal(const AfFrame* a, const AfFrame* b, int n_freqs, i
            memcmp(&a->far_power, &b->far_power, sizeof(float)) == 0 &&
            memcmp(&a->max_dt, &b->max_dt, sizeof(float)) == 0 &&
            memcmp(&a->max_sat, &b->max_sat, sizeof(float)) == 0 &&
-           a->all_converged == b->all_converged && a->usable_linear == b->usable_linear &&
-           a->delay_changed == b->delay_changed && a->delay_locked == b->delay_locked;
+           a->all_converged == b->all_converged && a->usable_linear == b->usable_linear;
 }
 
 static void hoist_scene_hop(const HoistSpec* sp, ArraySig* sg, const GuardScene* gs, const float* history, uint32_t* rng,

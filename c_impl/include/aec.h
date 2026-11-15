@@ -306,8 +306,6 @@ typedef struct AecResidualView {
     float          max_dt;             /* worst double-talk indicator; above 0.2 the DT gain floor applies */
     float          max_saturation;     /* worst saturation level; above 0.5 the echo is treated as saturated */
     int            clock_drift;        /* far / near clocks drift (MATCHED alignment only) */
-    int            delay_changed;      /* this hop starts a new alignment generation (array: the shared one) */
-    int            delay_locked;       /* a usable alignment is in force */
     unsigned int   guard_lanes;        /* bit ch: contributing lane ch's output guard fired (single channel: bit 0 = guard_active) */
     const float*   far_hop;            /* the aligned far-end samples of this hop */
 } AecResidualView;
@@ -522,7 +520,7 @@ int aec_get_array(const Aec* a, AecArrayView* out);
  * bytes. aec_init(mem, size, cfg) is aec_init_ex(..., NULL). Query a fresh descriptor for every build; never persist or
  * synthesize one. */
 #define AEC_DESCRIPTOR_VERSION 1u
-#define AEC_LAYOUT_VERSION     3u
+#define AEC_LAYOUT_VERSION     4u
 #define AEC_BACKEND_NE10       2u   /* backend_id 1 is never returned */
 typedef struct AecMemReq {
     uint32_t descriptor_version;
