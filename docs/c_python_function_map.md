@@ -37,17 +37,17 @@
 <!-- stats:begin -->
 | key | 數值 | 說明 |
 |---|---|---|
-| `c_src_total` | 513 | `src/` 下 `.c` 的 C 函式總數（唯一 (檔, 函式名)） |
+| `c_src_total` | 514 | `src/` 下 `.c` 的 C 函式總數（唯一 (檔, 函式名)） |
 | `c_src_mirror` | 221 | 關係為 mirror |
 | `c_src_partial` | 126 | 關係為 partial |
-| `c_src_c_only` | 166 | 關係為 C-only（含 21 個 `aec_testing_*` 測試鉤子） |
+| `c_src_c_only` | 167 | 關係為 C-only（含 21 個 `aec_testing_*` 測試鉤子） |
 | `c_src_unknown` | 0 | 關係為 未能判斷 |
 | `c_hdr_total` | 2 | `include/internal/` 下 header 內 static inline 函式總數（規則 2；共用 SIMD 核心不列入） |
 | `c_hdr_c_only` | 1 | 其中 C-only |
 | `c_hdr_mapped` | 1 | 其中 mirror 或 partial |
-| `c_total` | 515 | C 函式合計（src 加 header） |
+| `c_total` | 516 | C 函式合計（src 加 header） |
 | `c_mapped` | 348 | 已對應（mirror 加 partial）合計 |
-| `c_c_only` | 167 | C-only 合計 |
+| `c_c_only` | 168 | C-only 合計 |
 | `c_unknown` | 0 | 未能判斷 合計 |
 | `inferred` | 28 | 關係說明以「推定：」開頭的列（已含在上列 mirror／partial 內） |
 | `py_total` | 575 | Python 符號總數（規則 4） |
@@ -226,7 +226,7 @@
 | `src/aec.c:aec_far_donor_ok` | — | C-only（遠端頻譜共用的 donor 資格判斷：另一個同格點的單聲道實例） | D-12 | `ctest:test_shared_far_spec.c` |
 | `src/aec.c:aec_input_finite` | — | C-only（輸入含非有限值時在狀態變動前拒絕該 hop） | — | `ctest:test_split_entry.c` |
 | `src/aec.c:aec_cvec_finite` | — | C-only（複數向量是否全為有限值；單聲道與陣列的被拒 hop 檢查共用） | — | `ctest:test_dsp_refusal.c`<br>`ctest:test_aec_array.c` |
-| `src/aec.c:aec_refuse_hop` | — | C-only（被拒 hop 的出口，單聲道與陣列共用：像 `aec_reset()` 一樣重設、單聲道另把線性檢視清零，回 `AEC_ERR_DSP`；Python 版沒有這個拒絕：只在有限輸入使結果溢位時才作用，正常輸入（含預設設定）兩邊逐位元一致不受影響，與 ULCNet 有限值檢查同屬 C 端防護） | — | `ctest:test_dsp_refusal.c`<br>`ctest:test_aec_array.c`<br>`ctest:test_aec_array_flow.c` |
+| `src/aec.c:aec_refuse_hop` | — | C-only（被拒 hop 的出口，單聲道與陣列共用：像 `aec_reset()` 一樣重設、把線性檢視清零（陣列為 lane 0 的），回 `AEC_ERR_DSP`；Python 版沒有這個拒絕：只在有限輸入使結果溢位時才作用，正常輸入（含預設設定）兩邊逐位元一致不受影響，與 ULCNet 有限值檢查同屬 C 端防護） | — | `ctest:test_dsp_refusal.c`<br>`ctest:test_aec_array.c`<br>`ctest:test_aec_array_flow.c` |
 | `src/aec.c:aec_linear_finite` | — | C-only（線性 stage 交出的向量（單聲道與陣列每條 lane；`AecLinearView` 的 linear_hop 與三個頻譜）是否有限；Python 版沒有這個拒絕：只在有限輸入使結果溢位時才作用，正常輸入（含預設設定）兩邊逐位元一致不受影響，與 ULCNet 有限值檢查同屬 C 端防護） | — | `ctest:test_dsp_refusal.c` |
 | `src/aec.c:aec_closed_finite` | — | C-only（hop 收尾時的檢查（單聲道與陣列每條 lane）：近端／線性輸出功率追蹤值與 `AecResidualView` 向量（依 `residual` 所及）是否有限；Python 版沒有這個拒絕：只在有限輸入使結果溢位時才作用，正常輸入（含預設設定）兩邊逐位元一致不受影響，與 ULCNet 有限值檢查同屬 C 端防護） | — | `ctest:test_dsp_refusal.c` |
 | `src/aec.c:aec_process_residual` | `modules/orchestrator.py:AEC.process` | partial（緊接線性 stage 的後級入口，不套用增益、不合成；等同 Python 的 res-context 路徑；結果溢位的 hop 回 `AEC_ERR_DSP`（C 專屬）） | T-05 | `ctest:test_split_entry.c`<br>`ctest:test_process_context.c`<br>`ctest:test_dsp_refusal.c` |
@@ -744,6 +744,7 @@
 | `src/aec_array.c:aec_array_impl_get_residual` | — | C-only（陣列實例的 `aec_get_residual` 實作：融合後的 near、R²、舒適噪音、渲染底座檢視） | — | `ctest:test_aec_array.c`<br>`ctest:test_aec_array_flow.c` |
 | `src/aec_array.c:aec_array_impl_init` | — | C-only（陣列實例在呼叫端 pool 內的建構（共用 delay、對齊遠端與四條 lane 都切在同一個 pool）） | — | `ctest:test_aec_array.c`<br>`ctest:test_aec_array_flow.c` |
 | `src/aec_array.c:aec_array_impl_is_cancelling` | — | C-only（陣列實例的 `aec_linear_is_cancelling` 實作：回報 capture proxy lane 的狀態） | — | `ctest:test_aec_array.c`<br>`ctest:test_aec_array_flow.c` |
+| `src/aec_array.c:aec_array_impl_linear_lane` | — | C-only（`aec_get_linear()` 背後的 lane（lane 0）；被拒 hop 時 `aec_refuse_hop` 把它的線性檢視清零） | — | `ctest:test_dsp_refusal.c` |
 | `src/aec_array.c:aec_array_impl_post_reset_serial` | — | C-only（陣列實例的 `aec_post_reset_serial` 實作：四條 lane 序號的和（模 2^32）） | — | `ctest:test_aec_array.c`<br>`ctest:test_aec_array_flow.c` |
 | `src/aec_array.c:aec_array_impl_process_linear` | — | C-only（陣列實例的 `aec_process_linear` 實作：共用 delay、對齊遠端，再跑四條 lane 的線性 stage 與 lane 殘餘 stage；任一條 lane 的檢查不通過即 `aec_refuse_hop`） | — | `ctest:test_aec_array.c`<br>`ctest:test_aec_array_flow.c`<br>`ctest:test_dsp_refusal.c` |
 | `src/aec_array.c:aec_array_impl_process_residual` | — | C-only（陣列實例的 `aec_process_residual` 實作：先驗證權重與 `beamformed_error`（無效回 `AEC_ERR_ARG`，不動實例），再以呼叫端的 beam 權重融合 lane context，`FULL` 另算融合頻譜上的增益；波束成形在函式庫外） | — | `ctest:test_aec_array.c`<br>`ctest:test_aec_array_flow.c` |

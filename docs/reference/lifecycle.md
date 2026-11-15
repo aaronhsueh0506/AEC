@@ -287,7 +287,7 @@ aec_reset(aec);                 /* aec 是 Aec*；NULL 與已銷毀的 handle �
    ISTFT／OLA 與 CNG、視需要重啟帶歷史的後級，下一個 hop 照常送；之後的輸出等於從下一個 hop 起的新實例。
    陣列實例的 `aec_process_linear()` 逐 lane 做與單聲道相同的檢查（線性檢視、功率追蹤值、殘餘檢視；`STATE` 也檢查）：
    任一條 lane 的結果不是有限值（實測任一路 mic 約 1.9e19 起；ref 在 `STATE` 約 3.8e19 起、`ESTIMATE`／`FULL` 約 1.1e15 起）
-   就回 `AEC_ERR_DSP`，整個實例重設，沒有開著的 hop（`aec_process_residual()` 回 `AEC_ERR_SEQUENCE`，`STATE` 回 `AEC_ERR_MODE`），
+   就回 `AEC_ERR_DSP`，整個實例重設，沒有開著的 hop（`aec_process_residual()` 回 `AEC_ERR_SEQUENCE`，`STATE` 回 `AEC_ERR_MODE`；`aec_get_array()` 回 `AEC_ERR_SEQUENCE`），線性檢視（lane 0 的）讀到零，
    之後等於從下一個 hop 起的新實例。融合在權重檢查之後拒絕（有限的極大權重使投影溢位）同樣是 `AEC_ERR_DSP`。
    陣列的 `aec_process_linear()` 因輸入含非有限值回 `AEC_ERR_ARG` 時，實例完全不動，上一個 hop 的檢視仍可讀。
    `aec_get_mem_breakdown`、`aec_resolve_signal_grid` 也回 `AecStatus`（0 = 成功），不再是 `1` = 成功。

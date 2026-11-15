@@ -38,7 +38,7 @@ extern "C" {
 static inline int aec_unusable(const Aec* a) { return !a || !a->ready; }
 
 /* A hop whose results are not finite, either instance kind (aec.c). aec_cvec_finite: 1 when `count` bins are finite, 0 for
- * NULL or count < 0. aec_refuse_hop: resets the instance as aec_reset() (a single channel's linear view then reads zeros) and
+ * NULL or count < 0. aec_refuse_hop: resets the instance as aec_reset() (the linear view then reads zeros; an array's is lane 0's) and
  * returns AEC_ERR_DSP. */
 int aec_cvec_finite(const Complex* v, int count);
 int aec_refuse_hop(Aec* a);
@@ -71,6 +71,7 @@ int    aec_array_impl_synthesis_window(const Aec* a, const float** window, int* 
 void   aec_array_impl_debug_status(const Aec* a, AecDebugStatus* out);
 long   aec_array_impl_far_fft_count(const Aec* a);
 int    aec_array_impl_is_cancelling(const Aec* a);
+Aec*   aec_array_impl_linear_lane(Aec* a);                                     /* the lane behind aec_get_linear() */
 /* aec_get_array() (both kinds) and the diagnostics of aec.h are defined in aec_array.c directly. */
 #else
 /* -DAEC_NO_ARRAY: src/aec_array.c is not built and no instance is an array, so aec.c never reaches these; they only keep its
@@ -92,6 +93,7 @@ int    aec_array_impl_is_cancelling(const Aec* a);
 #define aec_array_impl_debug_status(a, out)          ((void)0)
 #define aec_array_impl_far_fft_count(a)              0L
 #define aec_array_impl_is_cancelling(a)              0
+#define aec_array_impl_linear_lane(a)                (a)
 #endif
 
 /* ---- lane construction (aec.c) -------------------------------------------------------------------------------------- *

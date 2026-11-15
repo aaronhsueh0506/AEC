@@ -2611,15 +2611,16 @@ int aec_cvec_finite(const Complex* v, int count) {
 }
 
 int aec_refuse_hop(Aec* a) {
+    Aec* v;
+    size_t bins;
     aec_reset(a);
-    /* A single channel's linear view then reads zeros, not the refused hop. */
-    if (!AEC_IS_ARRAY(a)) {
-        const size_t bins = (size_t)a->n_freqs * sizeof(Complex);
-        memset(a->raw_output, 0, (size_t)a->hop_size * sizeof(float));
-        memset(a->main_filter.base.echo_spec, 0, bins);
-        memset(a->main_filter.base.near_spec, 0, bins);
-        memset(a->main_filter.base.far_spec, 0, bins);
-    }
+    /* The linear view then reads zeros, not the refused hop (an array's is lane 0's). */
+    v = AEC_IS_ARRAY(a) ? aec_array_impl_linear_lane(a) : a;
+    bins = (size_t)v->n_freqs * sizeof(Complex);
+    memset(v->raw_output, 0, (size_t)v->hop_size * sizeof(float));
+    memset(v->main_filter.base.echo_spec, 0, bins);
+    memset(v->main_filter.base.near_spec, 0, bins);
+    memset(v->main_filter.base.far_spec, 0, bins);
     return AEC_ERR_DSP;
 }
 

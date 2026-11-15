@@ -42,6 +42,13 @@ when verdict requires it.
 ---
 
 
+## [Unreleased] — 2026-11-16 — A refused array hop leaves the linear view reading zeros, as a single channel
+
+After an array `AEC_ERR_DSP`, `aec_get_linear()` (lane 0's view with the shared alignment) still answered `AEC_OK` with the refused hop's lane-0 buffers, which the reset does not clear; with `3e38` on microphone 0 they were not finite. `aec_refuse_hop()` now zeroes that lane's `linear_hop` and spectra as it does a single channel's (`aec_array_impl_linear_lane()`); `aligned_far_hop` was already zero. Output of accepted hops unchanged (the four baseline streams byte-identical, `SIMD=1` / `0`).
+
+- `test/test_dsp_refusal.c`: each of the 108 array rows also asserts `aec_get_array()` is `AEC_ERR_SEQUENCE` and the linear view reads zeros after the refusal; with the zeroing removed all 108 fail.
+- Docs: `aec.h` (array refused hop), `aec_array_internal.h`, `docs/reference/lifecycle.md`, the function map (`aec_refuse_hop`, new row `aec_array_impl_linear_lane`).
+
 ## [Unreleased] — 2026-11-16 — Internal `AecTuning.max_delay_ms` deleted
 
 **Nothing reads it any more.** Since the array's shared ring follows the estimator reach (entry below), `max_delay_ms` was read only by the array's `<= 4096` config check. The field, its default (1024 ms), its `[0, 60000]` range check and the array check are deleted. `sizeof(AecTuning)` 168 to 164 B (`sizeof(AecResolved)` 216 to 212 B); `sizeof(Aec)` stays 6,048 B (padding), every pool (single channel and array, every grid, residual mode, delay mode and `delay_num_filters`) is unchanged, and the `split_entry` `META` lines (pool sizes, `sizeof_Aec`) are identical before and after. `AEC_LAYOUT_VERSION` stays 4 and `build_flags_hash` is unchanged. The four baseline streams are byte-identical to the previous commit's (`SIMD=1` and `SIMD=0`, `META` included) and the reach boundary band is identical.

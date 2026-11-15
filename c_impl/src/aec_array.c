@@ -973,6 +973,10 @@ int aec_array_impl_is_cancelling(const Aec* a) {
     return aec_linear_is_cancelling(p->lanes[p->capture_proxy]);
 }
 
+Aec* aec_array_impl_linear_lane(Aec* a) {
+    return a->array->lanes[0];
+}
+
 /* The aggregate linear view of an array: lane 0 stands for the four lanes (they share one far end, so far_power and the
  * lane-independent status agree; the fusion checks it); the alignment fields are the shared ones. */
 int aec_array_impl_get_linear(const Aec* a, AecLinearView* out) {

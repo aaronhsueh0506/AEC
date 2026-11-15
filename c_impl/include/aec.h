@@ -477,9 +477,9 @@ int aec_get_linear(const Aec* a, AecLinearView* out);
  * trackers and residual view; every residual mode, STATE included). A lane whose results are not finite (measured: a
  * microphone sample from about 1.9e19 on any lane, the reference from about 3.8e19 with STATE or 1.1e15 with ESTIMATE / FULL)
  * makes it return AEC_ERR_DSP with the whole instance reset, as by aec_reset(): no hop is open (aec_process_residual() is
- * AEC_ERR_SEQUENCE, AEC_ERR_MODE with STATE) and from the next hop the instance behaves as a fresh one. The fusion refusing a
- * hop after the beam check (finite weights whose projections overflow, an internal consistency check) is AEC_ERR_DSP with
- * the same reset.
+ * AEC_ERR_SEQUENCE, AEC_ERR_MODE with STATE; aec_get_array() is AEC_ERR_SEQUENCE), AecLinearView reads zeros, and from the
+ * next hop the instance behaves as a fresh one. The fusion refusing a hop after the beam check (finite weights whose
+ * projections overflow, an internal consistency check) is AEC_ERR_DSP with the same reset.
  * Call order. A second aec_process_linear() before the residual stage replaces the pending hop (the four filters have already
  * adapted on the first). A second aec_process_residual() on the same hop is AEC_ERR_SEQUENCE with AEC_RESIDUAL_FULL (the gain
  * stage advances once per hop) and allowed with ESTIMATE (a stateless re-fusion, e.g. of another weight set). aec_set_level()

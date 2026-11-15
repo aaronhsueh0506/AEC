@@ -504,6 +504,17 @@ static void run_array_lane_row(const Grid* g, int mode, int lane, int poison) {
                   "%s: no hop open after the refusal", tag);
             CHECK(aec_get_residual(a, &rv) != AEC_OK, "%s: no residual view after the refusal", tag);
         }
+        {
+            AecArrayView av;
+            AecLinearView lv;
+            memset(&av, 0, sizeof av); av.struct_size = sizeof av;
+            memset(&lv, 0, sizeof lv); lv.struct_size = sizeof lv;
+            CHECK(aec_get_array(a, &av) == AEC_ERR_SEQUENCE, "%s: no array view after the refusal", tag);
+            CHECK(aec_get_linear(a, &lv) == AEC_OK && all_zero(lv.linear_hop, hop) &&
+                  all_zero((const float*)lv.echo_spec, 2 * lv.n_freqs) && all_zero((const float*)lv.near_spec, 2 * lv.n_freqs) &&
+                  all_zero((const float*)lv.far_spec, 2 * lv.n_freqs) && all_zero(lv.aligned_far_hop, hop),
+                  "%s: the linear view reads zeros after the refusal", tag);
+        }
         fresh = make_array(g, mode);
         if (!fresh) { CHECK(0, "%s: fresh create", tag); break; }
     }
