@@ -334,7 +334,7 @@ mic, ref (hop 個 float)
 | `n_mics` | `1` | `1` 或 `AEC_ARRAY_MICS`（4），其他值被拒絕。 |
 | `capture_proxy_channel` | `0` | `[0, 3]`：共用 delay 估計器的 capture 輸入取哪一路麥克風。單聲道必須是 `0`。`MATCHED` 時**只有這一路**餵給估計器；該路失效或被遮住，陣列就鎖不到 delay，四條 lane 以未對齊的 far 運作。 |
 | `residual` | `FULL` | `STATE`／`ESTIMATE`／`FULL`；`OFF` 被拒絕。**陣列的記憶池大小隨它改變**（見 [§4](lifecycle.md#陣列實例的記憶池)）。 |
-| `delay_mode`、`delay_num_filters`、`fixed_delay_samples` | 同單聲道 | 描述**共用**的對齊；每條 lane 一律以 `EXTERNAL_ALIGNED` 吃共用的對齊後 far。`MATCHED` 的共用環形緩衝為 `ceil(1024 ms × sample_rate / 1000) + 2 × hop + 1` 個 sample（`FIXED` 為 `fixed_delay_samples + hop_size`），duty-cycle 的保持時間固定為 0.3 s。 |
+| `delay_mode`、`delay_num_filters`、`fixed_delay_samples` | 同單聲道 | 描述**共用**的對齊；每條 lane 一律以 `EXTERNAL_ALIGNED` 吃共用的對齊後 far。共用環形緩衝與單聲道同式（`MATCHED` 為 estimator 可回報的最大延遲加 `hop_size`，`FIXED` 為 `fixed_delay_samples + hop_size`），duty-cycle 的保持時間固定為 0.3 s。 |
 | `level` | `BALANCED` | 只作用在融合後的一次增益階段（`aec_set_level()` 同）；lane 自己的 level 沒有效果。融合增益的 DT 下限在最差 lane 的雙講指標高於 0.2 時一律啟用；lane 自己仍用內部的近端保護門檻決定回音路徑變化後的恢復方式。融合增益是獨立的增益階段（近端功率取 `|near|²`，所有貢獻 lane 都收斂後再以 `|E|²` 為上限；融合後的 r2 同時當有界與無界估計），不保證與單聲道實例的增益相同。 |
 | `delay_backward_quarantine_enabled`、`delay_backward_quarantine_s` | `0`、`1.0` | 只在 `MATCHED` 有意義，`_s` 範圍 `[0, 3600]`。開啟時，比目前 delay **更早**的新估計在 capture-proxy lane 仍在消除期間先被保留 `_s` 秒再採用；消除失效就立刻採用。前向移動與首次取得不受影響。單聲道必須維持 `0`。 |
 | 格點 | — | 只接受 16 kHz／256、16 kHz／512、48 kHz／1024；8 kHz 被拒絕。 |

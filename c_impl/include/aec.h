@@ -495,7 +495,7 @@ int aec_get_linear(const Aec* a, AecLinearView* out);
  * far end). FIXED and EXTERNAL_ALIGNED use no estimator.
  * Differences from a single channel: the fused gain's DT floor applies whenever the worst lane double-talk indicator is above 0.2
  * (the lanes still use their own near-end-recent gate for echo-path-change recovery), the duty-cycle hold is a fixed 0.3 s,
- * the shared ring holds the library's 1024 ms reach plus 2 hops + 1 samples, and 8 kHz is refused.
+ * and 8 kHz is refused. The shared ring is sized as a single channel's (the estimator's reach plus one hop).
  * Fused gain. With AEC_RESIDUAL_FULL the gain comes from a stand-alone gain stage fed with the fused spectra: near power is
  * |near|^2, limited by |E|^2 once every contributing lane has converged; the fused r2 serves as both the bounded and the
  * unbounded residual-echo estimate; the comfort-noise PSD is the weighted power sum; the far level is the aligned far hop's.

@@ -184,7 +184,6 @@ static size_t flow_buffer_size(int hop, int fft, int n, int ring, int post) {
 /* Fills *d for a validated array cfg; 0 when a size cannot be formed. */
 static int array_dims(const AecResolved* rs, ArrayDims* d) {
     const AecConfig* cfg = &rs->cfg;
-    const AecTuning* tn = &rs->tun;
     AecSignalGrid g;
     size_t total;
     memset(d, 0, sizeof(*d));
@@ -196,8 +195,9 @@ static int array_dims(const AecResolved* rs, ArrayDims* d) {
     array_derive_lane(rs, &d->lane);
 
     if (d->matched) {
-        int max_delay_samples = (int)ceilf(tn->max_delay_ms * (float)cfg->sample_rate / 1000.0f);
-        d->ring = max_delay_samples + 2 * d->hop + 1;
+        /* As the single channel: the estimator's largest reportable delay + hop (eligible up to ring - hop). */
+        int reach = delay_aec_max_delay_samples(cfg->sample_rate, cfg->delay_num_filters);
+        d->ring = reach > 0 ? reach + d->hop : 0;
         d->delay_bytes = delay_aec_get_mem_size(cfg->sample_rate, d->hop, cfg->delay_num_filters);
         /* An estimator that cannot be sized makes the config invalid. */
         if (d->ring <= 0 || d->delay_bytes == 0) return 0;

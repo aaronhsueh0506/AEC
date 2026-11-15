@@ -1037,7 +1037,7 @@ static void test_known_delay_mislock_is_detectable(void) {
 static void test_known_delay_memory_and_cost(void) {
     AecMemBreakdown b[6];
     AecMemReq req[6];
-    size_t lanes[6], est[6], total[6], rest[6];
+    size_t lanes[6], est[6], total[6], ring[6], flow[6];
     KnownDelayRun cost;
     int n;
     int ok = 1;
@@ -1058,15 +1058,16 @@ static void test_known_delay_memory_and_cost(void) {
         lanes[n] = b[n].lane_bytes;
         est[n] = b[n].estimator_bytes;
         total[n] = b[n].total_bytes;
-        rest[n] = b[n].ring_bytes + b[n].fusion_bytes;
+        ring[n] = b[n].ring_bytes;
+        flow[n] = b[n].fusion_bytes;
     }
     CHECK(ok, "4ch memory breakdown and pool query answer for every n=1..5");
     if (!ok) return;
 
     printf("4ch pool vs matched-filter bank size (16 kHz, fft 512):\n");
     for (n = 1; n <= 5; ++n) {
-        printf("  n=%d  lanes(4x AEC) %9zu  shared est %9zu  ring + flow buffers %9zu  total %9zu",
-               n, lanes[n], est[n], rest[n], total[n]);
+        printf("  n=%d  lanes(4x AEC) %9zu  shared est %9zu  ring %9zu  flow buffers %9zu  total %9zu",
+               n, lanes[n], est[n], ring[n], flow[n], total[n]);
         if (n > 1)
             printf("  (+%lld vs n=%d)", (long long)total[n] - (long long)total[n - 1], n - 1);
         printf("\n");
@@ -1081,8 +1082,12 @@ static void test_known_delay_memory_and_cost(void) {
         snprintf(label, sizeof(label), "n=%d costs strictly more estimator RAM than n=%d (%zu > %zu)", n, n - 1, est[n], est[n - 1]);
         CHECK(est[n] > est[n - 1], label);
 
-        snprintf(label, sizeof(label), "n=%d leaves the ring and the flow's own buffers untouched (%zu bytes)", n, rest[n]);
-        CHECK(rest[n] == rest[1], label);
+        snprintf(label, sizeof(label), "n=%d leaves the flow's own buffers untouched (%zu bytes)", n, flow[n]);
+        CHECK(flow[n] == flow[1], label);
+
+        /* The ring is the estimator's reach + hop: one more filter reaches 384 * 4 samples further. */
+        snprintf(label, sizeof(label), "n=%d ring grows by one filter's reach (%zu - %zu bytes)", n, ring[n], ring[n - 1]);
+        CHECK(ring[n] - ring[n - 1] == 384u * 4u * sizeof(float), label);
 
         snprintf(label, sizeof(label),
                  "n=%d total grows by exactly the per-filter cost of one shared estimator bank (%lld bytes, same as every other "

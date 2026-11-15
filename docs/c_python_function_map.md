@@ -39,15 +39,15 @@
 |---|---|---|
 | `c_src_total` | 513 | `src/` 下 `.c` 的 C 函式總數（唯一 (檔, 函式名)） |
 | `c_src_mirror` | 221 | 關係為 mirror |
-| `c_src_partial` | 125 | 關係為 partial |
-| `c_src_c_only` | 167 | 關係為 C-only（含 21 個 `aec_testing_*` 測試鉤子） |
+| `c_src_partial` | 126 | 關係為 partial |
+| `c_src_c_only` | 166 | 關係為 C-only（含 21 個 `aec_testing_*` 測試鉤子） |
 | `c_src_unknown` | 0 | 關係為 未能判斷 |
 | `c_hdr_total` | 2 | `include/internal/` 下 header 內 static inline 函式總數（規則 2；共用 SIMD 核心不列入） |
 | `c_hdr_c_only` | 1 | 其中 C-only |
 | `c_hdr_mapped` | 1 | 其中 mirror 或 partial |
 | `c_total` | 515 | C 函式合計（src 加 header） |
-| `c_mapped` | 347 | 已對應（mirror 加 partial）合計 |
-| `c_c_only` | 168 | C-only 合計 |
+| `c_mapped` | 348 | 已對應（mirror 加 partial）合計 |
+| `c_c_only` | 167 | C-only 合計 |
 | `c_unknown` | 0 | 未能判斷 合計 |
 | `inferred` | 28 | 關係說明以「推定：」開頭的列（已含在上列 mirror／partial 內） |
 | `py_total` | 575 | Python 符號總數（規則 4） |
@@ -770,7 +770,7 @@
 | `src/aec_array.c:array_clear_state` | — | C-only（清除陣列層級的逐 hop、duty 與融合狀態（建構與 `aec_array_impl_reset` 共用）） | — | `ctest:test_aec_array.c`<br>`ctest:test_aec_array_flow.c` |
 | `src/aec_array.c:live_array` | — | C-only（取出有效陣列實例的控制區塊；單聲道、NULL 或已銷毀的 handle 回 NULL，診斷函式據此回中性值） | — | `ctest:test_aec_array.c` |
 | `src/aec_array.c:array_derive_lane` | — | C-only（由陣列設定導出 lane 設定：單通道、EXTERNAL_ALIGNED delay 模式、lane 殘餘模式（STATE 或 ESTIMATE）） | — | `ctest:test_aec_array.c`<br>`ctest:test_aec_array_flow.c` |
-| `src/aec_array.c:array_dims` | — | C-only（解析陣列設定並算出各緩衝尺寸與 pool 總需求） | — | `ctest:test_aec_array.c`<br>`ctest:test_aec_array_flow.c` |
+| `src/aec_array.c:array_dims` | `modules/config.py:ref_ring_samples` | partial（解析陣列設定並算出各緩衝尺寸與 pool 總需求；其中 MATCHED 共用參考環與單通道同式＝estimator 可回報延遲上限＋hop。`python/` 沒有陣列實例，環公式對照單通道 helper；陣列的 Python 孿生在 Audio_ALG `pipelines/4ch/pipeline.py`，以 `max_delay_ms` 定環） | D-17 | `ctest:test_aec_array.c`<br>`ctest:test_aec_array_flow.c` |
 | `src/aec_array.c:array_gain_ready` | — | C-only（`aec_array_impl_apply_gain`／`apply_cng` 的前置檢查：需 `FULL` 且該 hop 已融合） | — | `ctest:test_aec_array.c`<br>`ctest:test_aec_array_flow.c` |
 | `src/aec_array.c:array_setup` | — | C-only（陣列實例的 pool 切片與初始化（靜態 pool 與堆積配置共用）） | — | `ctest:test_aec_array.c`<br>`ctest:test_aec_array_flow.c` |
 | `src/aec_array.c:bind_lane_view` | — | C-only（把一條 lane 的 per-hop 緩衝綁成陣列層級的借用視圖（不複製）） | — | `ctest:test_aec_array.c`<br>`ctest:test_aec_array_flow.c` |
@@ -973,6 +973,7 @@ PBF/Kalman H-error refresh、subband ERLE accumulation/release、render peak cou
 | D-13 | CLI／API 兩側獨有項（C `aec_wav` 與 Python `aec.py` 的旗標不同） |
 | D-15 | live observer lane 尚未鏡射 soft-realign warm IR-shift、RSA narrowband mu mask；bad-relock 還原（`aec_apply_delay_shift_soft_revert`／`_apply_delay_shift_soft_revert`）只還原 main 與 shadow 的 tap，兩邊都不還原 observer 的 tap；兩邊一致的缺口，不是移植落差 |
 | D-16 | 單通道 MATCHED 參考環：C 取 estimator 可回報延遲上限＋hop（`delay_buffer_ms` 已刪除，單通道不讀 `max_delay_ms`）；Python 取 max(delay_buffer_ms, max_delay_ms + 4096)。在 Python 預設值（環不小於上限）下兩邊的准入結果相同、輸出逐位元相同（證據：實作版對舊環 683 例逐位元相同，含真實錄音 154 例、真實 8 kHz 30 例、`delay_num_filters` < 5 共 165 例，另有 reach 邊界對照 1,138 例）；Python 把兩個欄位調小到環小於 estimator 可回報上限時，會拒收 C 會接受的延遲 |
+| D-17 | 陣列 MATCHED 共用參考環：C 取 estimator 可回報延遲上限＋hop（與單通道同式，不讀 `max_delay_ms`）；Python 孿生（Audio_ALG `pipelines/4ch/pipeline.py` 的 `_SharedReferenceDelayLine`）取 `max_delay_ms`（1024 ms）換算的 sample＋2 hop＋1。在 Python 預設值（環不小於上限）下兩邊的准入結果相同、輸出逐位元相同（證據：四組 baseline 串流 SIMD 1／0 除 META 外逐位元相同；Audio_ALG 4ch 測試與 `pyc_parity_pipelines.sh` 的 results.json 與改動前相同；reach 邊界對照 36 例相同）；Python 把 `max_delay_ms` 調小到環小於 estimator 可回報上限時，會拒收 C 會接受的延遲 |
 | S-02 | live observer 注入守衛 `live_observer_inject_dt_energy_max`（Python 預設 0.5）C 沒有；開 observer 時實測會改輸出 |
 | S-04 | HPF cutoff 範圍驗證（`0 < cutoff < 0.45·sr`）只有 C 檢查，Python 不檢查 |
 | S-08 | CLI 預設運作點不同（Python `aec.py` 與 C `aec_wav`，兩邊都不給旗標時） |

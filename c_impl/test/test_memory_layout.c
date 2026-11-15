@@ -100,8 +100,8 @@ static int check_descriptor_pin(void) {
  * comfort-noise arrays. */
 static int check_array_pins(void) {
     static const struct { int sr, fft; size_t state, estimate, full; } pin[3] = {
-        {16000, 256, 594928u, 690464u, 700464u}, {16000, 512, 883120u, 1072864u, 1091056u},
-        {48000, 1024, 1994896u, 2373056u, 2410704u} };
+        {16000, 256, 561456u, 656992u, 666992u}, {16000, 512, 849136u, 1038880u, 1057072u},
+        {48000, 1024, 1894000u, 2272160u, 2309808u} };
     int i, bad = 0;
     if (sizeof(void*) != 8 || sizeof(size_t) != 8) {
         printf("test_memory_layout: array pool pins are LP64 values; skipped on this %zu-byte-pointer ABI\n", sizeof(void*));

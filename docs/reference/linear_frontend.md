@@ -41,7 +41,7 @@ nonlinear envelope.
 API on top of the estimator; the orchestrator imports it via the public
 alias so external callers (`from aec import DelayEstimator`) work.
 
-The reference ring holds `max_delay_ms` (1024 ms by default) of skew (Python; the C single-channel `MATCHED` ring is sized to the estimator's reach plus one hop, the C array instance's shared ring uses its internal `max_delay_ms` of 1024 ms; see `docs/reference/lifecycle.md` §4); the
+The reference ring holds `max_delay_ms` (1024 ms by default) of skew (Python; the C `MATCHED` ring, single channel and array, is sized to the estimator's reach plus one hop; see `docs/reference/lifecycle.md` §4); the
 matched filter's own reliable reach is about 509 ms (see
 [`delay_estimator_design_zh_TW.md`](../delay_estimator_design_zh_TW.md)). The
 estimate feeds the refined filter through a delay-line on the reference.

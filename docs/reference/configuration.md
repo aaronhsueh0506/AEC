@@ -79,8 +79,8 @@ shadow filter 佔 27,888 B（16 kHz/256，見 [§4](lifecycle.md#4-生命週期)
 | `delay_num_filters` | `int` | `5` | 1 – 5（**只在 `MATCHED`**；其他 mode 必須維持 5） | Matched-filter bank 大小（決定記憶體與可搜尋的延遲範圍）。可靠搜尋上限隨之縮小：n=1→125ms／2→221ms／3→317ms／4→413ms／5→509ms；每少一組省 ~4.2 MMAC/s 的搜尋算力（每 hop 全速分析時），**並省 11,264 B 記憶池（單通道 MATCHED，48 kHz 為 23,552 B；陣列的共用 estimator 為 5,120 B）**（bank、render ring、兩個 histogram 都依 n 從記憶池切出，見 [§4](lifecycle.md#4-生命週期) 記憶池表）。縮小的正確場景是**上游已先提供 coarse-compensated far**（HAL/系統層自行移除 bulk delay 後才餵進來）、matched filter 只需追殘差的 `MATCHED` 部署——注意這與 `FIXED` 無關：`FIXED`（`fixed_delay_samples`）根本不建 matched filter，`EXTERNAL_ALIGNED` 連 estimator/ring 都沒有。bench/dataset 一律維持 5（見 `delay_estimator_design_zh_TW.md` §5）。`FIXED` / `EXTERNAL_ALIGNED` 根本沒有 matched filter，改這個值會被拒絕（不是忽略）；`0` 在任何 mode 都是錯誤，不是「關閉延遲估計」的入口。 |
 
 估計器的時間常數是內部常數：延遲估計值需穩定 0.3 s 才視為鎖定，之後 matched filter 預設每個 hop 都分析（不做 duty-cycle 節流）；
-單聲道 `MATCHED` 的參考環形緩衝取 estimator 可回報的最大延遲加 `hop_size`（見 [§4](lifecycle.md#4-生命週期) 環形緩衝大小公式），
-它只決定記憶體，**不是**可擷取的延遲上限（上限由 `delay_num_filters` 決定，環永遠放得下 estimator 報得出的延遲）。陣列實例的共用環形緩衝為 `ceil(1024 ms × sample_rate / 1000) + 2 × hop + 1` sample。
+`MATCHED` 的參考環形緩衝取 estimator 可回報的最大延遲加 `hop_size`（見 [§4](lifecycle.md#4-生命週期) 環形緩衝大小公式；陣列實例的共用環同式），
+它只決定記憶體，**不是**可擷取的延遲上限（上限由 `delay_num_filters` 決定，環永遠放得下 estimator 報得出的延遲）。
 
 ### 6.5 以 10 ms 為單位撰寫的時間常數（內部，唯讀參考）⚠️
 
@@ -257,7 +257,7 @@ int aec_get_mem_breakdown(const AecConfig* cfg, AecMemBreakdown* out);
 - `residual` 必須是 `STATE`、`ESTIMATE` 或 `FULL`（`OFF` 被拒絕），並改變池大小；
 - 格點只接受 16 kHz／256、16 kHz／512、48 kHz／1024；
 - `delay_mode`、`delay_num_filters`、`fixed_delay_samples` 描述**共用**的對齊，每條 lane 一律以 `EXTERNAL_ALIGNED` 吃對齊後的 far；
-  共用環形緩衝大小固定由 1024 ms 的可達延遲決定（見 [§6.4](#64-延遲估計)），duty-cycle 保持時間固定 0.3 s；
+  共用環形緩衝大小與單聲道同式，取 estimator 可回報的最大延遲加 `hop_size`（見 [§6.4](#64-延遲估計)），duty-cycle 保持時間固定 0.3 s；
 - 其餘內部調校值（濾波器長度、步進、shadow filter、偵測器門檻…）與 level 的內部值原樣交給每條 lane；level 只作用在融合後的一次增益階段，lane 自己的 level 沒有效果；
 - `aec_set_level()` 重新設定融合的增益階段（`FULL`）並記錄新 level；`STATE`／`ESTIMATE` 沒有增益階段，呼叫回 0 但只更新記錄的 level。
 

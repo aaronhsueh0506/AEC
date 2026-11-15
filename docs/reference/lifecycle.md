@@ -135,7 +135,7 @@ estimator 只省 5,120 B。
 
 | `delay_mode` | 環形緩衝容量（sample） |
 |---|---|
-| `MATCHED`（單通道） | estimator 可回報的最大延遲加 `hop_size`：`4 × ((n−1) × 384 + 501) + hop_size` sample（`n` = `delay_num_filters`；48 kHz 為三倍的第一項；n=5、16 kHz 為 8,148 + hop）。陣列實例另用 `max_delay_ms + 2 × hop + 1`。Python 孿生仍用 `max(delay_buffer_ms, max_delay_ms + 4096)`，輸出相同 |
+| `MATCHED` | estimator 可回報的最大延遲加 `hop_size`：`4 × ((n−1) × 384 + 501) + hop_size` sample（`n` = `delay_num_filters`；48 kHz 為三倍的第一項；n=5、16 kHz 為 8,148 + hop）。陣列實例的共用環（`aec_array.c` 的 `array_dims()`）同式。Python 孿生仍用 `max(delay_buffer_ms, max_delay_ms + 4096)`，輸出相同 |
 | `FIXED` | `fixed_delay_samples + hop_size` |
 | `EXTERNAL_ALIGNED` | 0（完全不配置） |
 
@@ -190,17 +190,17 @@ estimator 只省 5,120 B。
 
 | 格點 | `STATE` | `ESTIMATE` | `FULL`（預設） |
 |---|---:|---:|---:|
-| 16 kHz / 256 | 594,928 B | 690,464 B | 700,464 B |
-| 16 kHz / 512 | 883,120 B | 1,072,864 B | 1,091,056 B |
-| 48 kHz / 1024 | 1,994,896 B | 2,373,056 B | 2,410,704 B |
+| 16 kHz / 256 | 561,456 B | 656,992 B | 666,992 B |
+| 16 kHz / 512 | 849,136 B | 1,038,880 B | 1,057,072 B |
+| 48 kHz / 1024 | 1,894,000 B | 2,272,160 B | 2,309,808 B |
 
 `aec_get_mem_breakdown()` 的欄位（`FULL`）：
 
 | 格點 | `total_bytes` | `estimator_bytes` | `ring_bytes` | `lane_bytes` | `fusion_bytes` | `Aec` 標頭 |
 |---|---:|---:|---:|---:|---:|---:|
-| 16 kHz / 256 | 700,464 | 29,248 | 66,576 | 570,880 | 27,712 | 6,048 |
-| 16 kHz / 512 | 1,091,056 | 29,248 | 67,600 | 937,664 | 50,496 | 6,048 |
-| 48 kHz / 1024 | 2,410,704 | 30,624 | 200,720 | 2,074,176 | 99,136 | 6,048 |
+| 16 kHz / 256 | 666,992 | 29,248 | 33,104 | 570,880 | 27,712 | 6,048 |
+| 16 kHz / 512 | 1,057,072 | 29,248 | 33,616 | 937,664 | 50,496 | 6,048 |
+| 48 kHz / 1024 | 2,309,808 | 30,624 | 99,824 | 2,074,176 | 99,136 | 6,048 |
 
 - 陣列池 = `Aec` 標頭（對齊 16 B，上表最後一欄）+ `estimator_bytes` + `ring_bytes` + `lane_bytes` + `fusion_bytes`。
   **標頭不在任何一個拆解欄位內**，所以四個欄位加起來比 `total_bytes` 少一個標頭。
@@ -211,13 +211,13 @@ estimator 只省 5,120 B。
   直接共用主濾波器的遠端歷史，也沒有它不形成的 `near_spec`／`error_spec_windowed`／`spec_scratch`）。
 - `fusion_bytes`：控制區塊、麥克風／對齊後 far／融合緩衝、四條 lane 共用的一個 FFT 控制代碼（7,152／13,552／26,352 B），`FULL` 另含共用的抑制增益階段（內部 `aec_res_get_mem_size()`：10,000／18,192／37,648 B）；
   **不含** lane 池。`STATE` 沒有融合緩衝（11,456／19,904／36,800 B）；`ESTIMATE` 有融合緩衝但沒有增益階段（17,712／32,304／61,488 B）。
-- `estimator_bytes`／`ring_bytes` 與單聲道同義，但環形緩衝的容量依陣列的公式（[§8.8](integration.md#88-麥克風陣列實例n_mics--4)）：
-  `MATCHED` 為 `ceil(1024 ms × sample_rate / 1000) + 2 × hop + 1` 個 sample，`FIXED` 為 `fixed_delay_samples + hop_size`，`EXTERNAL_ALIGNED` 為 0。
-- 其他 `delay_mode`（`FULL`）：`EXTERNAL_ALIGNED` 為 605,456／995,024／2,180,176 B；`FIXED`、`fixed_delay_samples = 0` 為 605,968／996,048／2,182,224 B；
-  `FIXED`、100 ms 為 612,368（1600 sample）／1,002,448（1600 sample）／2,201,424 B（4800 sample）。
+- `estimator_bytes`／`ring_bytes` 與單聲道同義，環形緩衝的容量也與單聲道同式：
+  `MATCHED` 為 estimator 可回報的最大延遲加 `hop_size`（n=5、16 kHz／256 為 8,276 個 sample），`FIXED` 為 `fixed_delay_samples + hop_size`，`EXTERNAL_ALIGNED` 為 0。
+- 其他 `delay_mode`（`FULL`）：`EXTERNAL_ALIGNED` 為 604,640／994,208／2,179,360 B；`FIXED`、`fixed_delay_samples = 0` 為 605,152／995,232／2,181,408 B；
+  `FIXED`、100 ms 為 611,552（1600 sample）／1,001,632（1600 sample）／2,200,608 B（4800 sample）。
 
 **尚未做到**：遠端側狀態仍是每條 lane 各一份（共用的是 delay 估計器、對齊後 far、FFT 控制代碼，以及 hop 內由 lane 0 借給 lane 1–3 的遠端 FFT 結果）；
-lane 約占 `FULL` 陣列池的 81%／86%／86%。
+lane 約占 `FULL` 陣列池的 86%／89%／90%。
 這些是主機的實測值，**實際請以 `aec_get_mem_requirements()` 為準**。
 
 ### `aec_reset`

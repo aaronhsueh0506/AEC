@@ -252,9 +252,9 @@ instance 存活期間不可變）** 決定。這是唯一的真實來源：
 matched filter 的 reliability 條件 `lag < FILTER_SIZE-10`，實際可靠取得
 peak 的上界約 509 ms——`nn_integration_interface.md` 引用的就是後者，兩
 個數字定義不同、不矛盾。）
-參考訊號環形緩衝的大小是內部決定的，只影響記憶體：單聲道 `MATCHED` 取 estimator 可回報的最大延遲加 `hop_size`
+參考訊號環形緩衝的大小是內部決定的，只影響記憶體：`MATCHED` 取 estimator 可回報的最大延遲加 `hop_size`
 （`4 × ((n−1) × 384 + 501) + hop_size` sample，n = `delay_num_filters`；48 kHz 的第一項乘 3），所以它永遠放得下 estimator 報得出的延遲；
-陣列實例的共用環取 `max_delay_ms`（內部值，1024 ms）換算的 sample 加 `2 × hop + 1`（[§4](reference/lifecycle.md#環形緩衝大小公式)）。
+陣列實例的共用環同式（[§4](reference/lifecycle.md#環形緩衝大小公式)）。
 超過約 509 ms（8 kHz 約 1,018 ms）的延遲請在上游先粗對齊，實機仍應先量測總延遲。
 
 **超出可靠上界（~509 ms）的真延遲不會「估不到」，而是可能在範圍內
