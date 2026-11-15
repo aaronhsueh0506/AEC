@@ -266,7 +266,7 @@
 
 ### 1.3 `aec_res.c`　aec_res.c（RES 增益階段，內部模組，供陣列實例的融合後增益使用）
 
-依據：本檔是 `SuppressionGain` 的內部包裝（標頭 `include/internal/aec_res_internal.h`，不對外公開），由陣列實例（`src/aec_array.c`）對融合後的頻譜算一次 RES 增益；範圍內（`AEC/python`）沒有對應的 Python 類別。Python 孿生在 `Audio_ALG/pipelines/4ch/pipeline.py` 的 `PostBeamResidualSuppressor`（範圍外，不在本表驗證；落差見 S-26）。`aec_cng_fill`（宣告在 `aec_internal.h`，定義在 `src/aec.c`）的 Python 孿生是範圍內的 `modules/cng.py:cng_fill`（見該列）；`Audio_ALG/pipelines/common/cng_aec3.py` 是範圍外的另一份應用端副本，不在本表驗證。
+依據：本檔是 `SuppressionGain` 的內部包裝（標頭 `include/internal/aec_res_internal.h`，不對外公開），由陣列實例（`src/aec_array.c`）對融合後的頻譜算一次 RES 增益；範圍內（`AEC/python`）沒有對應的 Python 類別。Python 孿生在 `Audio_ALG/pipelines/4ch/pipeline.py` 的 `PostBeamResidualSuppressor`（範圍外，不在本表驗證；落差見 S-26）。`aec_cng_fill`（宣告在 `aec_internal.h`，定義在 `src/aec.c`）的 Python 孿生是範圍內的 `modules/cng.py:cng_fill`（見該列）；`Audio_ALG/pipelines/mono/cng_aec3.py` 是範圍外的另一份應用端副本，不在本表驗證。
 
 | C 檔:函式 | Python 檔:符號 | 關係 | 已知落差 | 對拍工具／測試 |
 |---|---|---|---| --- |
