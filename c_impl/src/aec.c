@@ -2236,8 +2236,23 @@ static float aec_update_windowed_erle(Aec* a) {
     return erle_windowed;
 }
 
+/* This hop's mean squares, each + 1e-10f: the reference, the microphone and the linear residual; and the raw sums of squares of
+ * the last two, which the post chain reads. */
+typedef struct { float far, mic, err, mic_sum_sq, err_sum_sq; } HopPowers;
+
+static HopPowers aec_hop_powers(const Aec* a, float far_hop_mean_sq) {
+    HopPowers pw;
+    const size_t n = (size_t)a->hop_size;
+    pw.far = far_hop_mean_sq + 1e-10f;
+    pw.mic_sum_sq = sk_sum_sq_pairwise_f32(a->near_hop, n);
+    pw.err_sum_sq = sk_sum_sq_pairwise_f32(a->raw_output, n);
+    pw.mic = pw.mic_sum_sq / (float)n + 1e-10f;
+    pw.err = pw.err_sum_sq / (float)n + 1e-10f;
+    return pw;
+}
+
 static void aec_run_post_chain(Aec* a, int stationarity_block_for_post, int render_active, float far_hop_mean_sq,
-                               int apply, const AecFarShare* share) {
+                               const HopPowers* pw, int apply, const AecFarShare* share) {
     const int hop = a->hop_size, N = a->n_partitions;
     /* filter_taps_full is filled on demand by aec_fill_filter_taps(). */
 
@@ -2281,6 +2296,8 @@ static void aec_run_post_chain(Aec* a, int stationarity_block_for_post, int rend
     in.linear_context_only = (a->cfg.residual == AEC_RESIDUAL_STATE);
     in.active_render_threshold = AECB_ACTIVE_RENDER_THRESHOLD;
     in.far_mean_sq = far_hop_mean_sq;
+    in.mic_sum_sq = pw->mic_sum_sq;
+    in.err_sum_sq = pw->err_sum_sq;
 
     AecPostRunObj obj;
     obj.state = &a->a3_state; obj.ree = &a->a3_ree; obj.sg = &a->a3_sg;
@@ -2308,17 +2325,6 @@ static void aec_run_post_chain(Aec* a, int stationarity_block_for_post, int rend
     a->pending_delay_change = pdc;
 
     /* In context-only mode aec_post_run emits raw_output. */
-}
-
-/* This hop's mean squares, each + 1e-10f: the reference, the microphone and the linear residual. */
-typedef struct { float far, mic, err; } HopPowers;
-
-static HopPowers aec_hop_powers(const Aec* a, float far_hop_mean_sq) {
-    HopPowers pw;
-    pw.far = far_hop_mean_sq + 1e-10f;
-    pw.mic = mean_sq(a->near_hop, a->hop_size, a->scr_sq) + 1e-10f;
-    pw.err = mean_sq(a->raw_output, a->hop_size, a->scr_sq) + 1e-10f;
-    return pw;
 }
 
 /* The converged mu freeze, else the simple mu ratio. clear_per_bin: the unconverged branch drops the per-bin mu flag. */
@@ -2546,7 +2552,7 @@ static void aec_stage_residual(Aec* a, int apply, uint32_t t_stage, const AecFar
     if (a->cfg.residual != AEC_RESIDUAL_OFF) {
         HopPowers pw;
         is_stationary_dt = aec_prepare_post_dt(a, c->far_hop_mean_sq, c->erle_inst, c->erle_windowed, c->render_active, &pw);
-        aec_run_post_chain(a, c->stationarity_block_for_post, c->render_active, c->far_hop_mean_sq, apply, share);
+        aec_run_post_chain(a, c->stationarity_block_for_post, c->render_active, c->far_hop_mean_sq, &pw, apply, share);
 
         aec_steer_mu(a, is_stationary_dt, 1, &pw);
         a->residual_valid = 1;

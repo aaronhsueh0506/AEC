@@ -380,8 +380,8 @@ void aec_post_run(AecPost *p,
     render_block = in->shared_far_psd ? in->shared_render_block : sc->render_block_scaled;
 
     {
-        float y2_time = sk_sum_sq_pairwise_f32(in->near_end, (size_t)hop);
-        float e2_refined = sk_sum_sq_pairwise_f32(in->raw_output, (size_t)hop);
+        float y2_time = in->mic_sum_sq;
+        float e2_refined = in->err_sum_sq;
         float y2_thr = p->y2_thr;
         float e2_coarse = 0.0f;
         int refined_conv, coarse_conv = 0;

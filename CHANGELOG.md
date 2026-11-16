@@ -42,6 +42,10 @@ when verdict requires it.
 ---
 
 
+## [Unreleased] — 2026-11-16 — The post chain reuses the hop's sums of squares
+
+**No output change.** `aec_hop_powers()` formed the microphone and linear-residual mean squares through a scratch store plus pairwise sum, and `aec_post_run()` then summed the same two hops again. `HopPowers` now carries the two raw sums (`sk_sum_sq_pairwise_f32`, the same reduction; the mean is the sum divided by `hop_size`, as before) and `AecPostRunIn` takes them as `mic_sum_sq` / `err_sum_sq`; the second pair of passes is gone. The four baseline streams (`SIMD=1` / `0`) and `test_memory_layout` are unchanged; scaling either sum turns the streams red (236 to 5540 mismatches per test).
+
 ## [Unreleased] — 2026-11-16 — The render base is chosen in one place
 
 **No output change.** The rule "the guard's base while it is active, else the selected error" was written in `aec_render_base()` (`aec_get_residual()`, `aec_apply_gain()`) and spelled out again in `aec_post_run()`. It is now one inline function, `aec_post_render_base()` in `aec_post.h`, called by both. The four baseline streams (`SIMD=1` / `0`) are unchanged; returning the selected error alone from the helper turns all four red (61 / 2388 / 74 / 7198 mismatches).

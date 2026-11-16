@@ -229,6 +229,8 @@ typedef struct {
     const float   *shared_render_block;
     float          far_mean_sq;           /* mean square of far_end over the hop (the active-render test against
                                            * active_render_threshold) */
+    float          mic_sum_sq;            /* sum of near_end^2 over the hop (pairwise float32) */
+    float          err_sum_sq;            /* sum of raw_output^2 over the hop (pairwise float32) */
 } AecPostRunIn;
 
 /* Sub-module bundle the driver wires; caller-owned. */
