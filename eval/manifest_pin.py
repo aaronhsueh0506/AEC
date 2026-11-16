@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Resolve and pin the 90-case manifest against the git-ignored corpus.
+"""Resolve and pin the fixed manifest against the git-ignored corpus.
 
 The corpus under wav/aec_challenge_blind/ is local data. A stem resolves to
-<dataset>/<scenario>/<stem>_{mic,lpb}.wav, or, when the clip was moved aside,
-to <dataset>/<scenario>/_quarantine_non_official/. The same 90 clips are
-compared either way.
+<dataset>/<scenario>/<stem>_{mic,lpb}.wav and nowhere else: the manifest lists
+official clips only, so a clip moved out of its scenario directory is reported
+as missing rather than read from another place. The file names keep the
+original "90case" label.
 
   prepare  resolve every stem, check manifest_90case.sha256, and link the
            resolved clips into a scratch view <view>/<scenario>/<stem>_*.wav.
@@ -25,7 +26,6 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 STEMS = os.path.join(_HERE, 'manifest_90case_stems.txt')
 MANIFEST = os.path.join(_HERE, 'manifest_90case.json')
 PIN = os.path.join(_HERE, 'manifest_90case.sha256')
-QUARANTINE = '_quarantine_non_official'
 SCENARIOS = ('farend_singletalk', 'nearend_singletalk', 'doubletalk')
 KINDS = ('mic', 'lpb')
 STEMS_KEY = 'eval/manifest_90case_stems.txt'
@@ -56,13 +56,9 @@ def logical_name(stem, kind):
 
 
 def locate(dataset, rel):
-    """Scenario directory first, then that scenario's quarantine directory."""
-    sc, name = rel.split('/', 1)
-    for cand in (os.path.join(dataset, sc, name),
-                 os.path.join(dataset, sc, QUARANTINE, name)):
-        if os.path.isfile(cand):
-            return cand
-    return None
+    """The clip's path under its scenario directory, or None."""
+    cand = os.path.join(dataset, *rel.split('/', 1))
+    return cand if os.path.isfile(cand) else None
 
 
 def sha256_file(path):
@@ -89,10 +85,9 @@ def resolve_all(dataset, stems):
             missing.append('%s (%s)' % (stem, '+'.join(gone)))
     if missing:
         raise PinError(
-            'cannot resolve %d of %d stems under %s (tried <scenario>/ and '
-            '<scenario>/%s/):\n  %s'
-            % (len(missing), len(stems), dataset, QUARANTINE,
-               '\n  '.join(missing)))
+            'cannot resolve %d of %d stems under %s (looked in '
+            '<scenario>/):\n  %s'
+            % (len(missing), len(stems), dataset, '\n  '.join(missing)))
     return found
 
 
@@ -156,11 +151,10 @@ def cmd_prepare(args):
     stems = read_stems()
     check_manifest_consistent(stems)
     found = resolve_all(args.dataset, stems)
-    n_q = sum(1 for p in found.values() if QUARANTINE in p.split(os.sep))
     n = verify(found)
     link_view(found, args.view)
-    print('manifest: %d stems resolved (%d clips, %d from %s), %d sha256 pins '
-          'verified' % (len(stems), len(found), n_q, QUARANTINE, n))
+    print('manifest: %d stems resolved (%d clips), %d sha256 pins verified'
+          % (len(stems), len(found), n))
 
 
 def cmd_write(args):
@@ -170,11 +164,10 @@ def cmd_write(args):
     rows = sorted((k, sha256_file(v)) for k, v in found.items())
     rows += [(STEMS_KEY, sha256_file(STEMS)), (JSON_KEY, sha256_file(MANIFEST))]
     with open(PIN, 'w', encoding='utf-8') as fh:
-        fh.write('# sha256 of the %d clips of the 90-case manifest (scenario-'
-                 'relative names; a clip may sit in\n# <scenario>/ or '
-                 '<scenario>/%s/), the stems list and the '
-                 'manifest JSON.\n# Checked by eval/manifest_pin.py prepare '
-                 'before every A/B render.\n' % (len(found), QUARANTINE))
+        fh.write('# sha256 of the %d clips of the fixed manifest (scenario-'
+                 'relative names), the stems list and the manifest JSON.\n'
+                 '# Checked by eval/manifest_pin.py prepare before every A/B '
+                 'render.\n' % len(found))
         for k, d in rows:
             fh.write('%s  %s\n' % (d, k))
     print('wrote %s (%d entries)' % (PIN, len(rows)))

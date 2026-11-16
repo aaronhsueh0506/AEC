@@ -1,5 +1,5 @@
 #!/bin/bash
-# Python-path 90-case blind A/B.
+# Python-path blind A/B over the fixed manifest (eval/manifest_90case_stems.txt).
 #
 # The C twin is eval/run_c_ab.sh; run BOTH for any change that lands in both
 # ports. Neither can see the other's regressions: eval_aec_challenge.py drives
@@ -14,8 +14,7 @@
 #
 # The dataset and the manifest come from THIS checkout, not the worktrees, so
 # both sides see byte-identical input. A stem resolves to
-# <scenario>/<stem>_{mic,lpb}.wav, else to the same name under
-# <scenario>/_quarantine_non_official/ (eval/manifest_pin.py); the run stops
+# <scenario>/<stem>_{mic,lpb}.wav (eval/manifest_pin.py); the run stops
 # naming every unresolved stem, and when a clip or the manifest no longer
 # matches eval/manifest_90case.sha256. The resolved clips are linked into
 # $OUT/dataset_view, which the renderer and the scorer read. PYBIN selects the interpreter; WORKERS

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Combined ERLE/SDR + AECMOS eval over the fixed, checked-in 90-case manifest.
+"""Combined ERLE/SDR + AECMOS eval over the fixed, checked-in manifest (61 cases).
 
 eval_aec_challenge.py's doubletalk ERLE has no near-end preservation term (a
 run that destroys near-end speech along with the echo scores better), so each
@@ -13,11 +13,10 @@ Every category is reported with its static and movement subsets SEPARATE
 (never pooled): movement cases track delay differently and pooling hides that.
 
 Cases come from eval/manifest_90case.json, so every run reads the identical
-list: 30 far-end / 30 doubletalk / 30 near-end (near-end is all static). A clip
-is read from its scenario directory, else from that directory's
-_quarantine_non_official/; the run stops naming unresolved stems and, for the
-checked-in manifest, when a clip no longer matches eval/manifest_90case.sha256
-(see eval/manifest_pin.py).
+list: 30 far-end / 30 doubletalk / 1 near-end (near-end is all static). A clip
+is read from its scenario directory only; the run stops naming unresolved stems
+and, for the checked-in manifest, when a clip no longer matches
+eval/manifest_90case.sha256 (see eval/manifest_pin.py).
 
 Rendering reuses eval_aec_challenge.py's `run_ours` (same AEC invocation,
 offline pre-align and online delay-est policy as the 800-case bench), so
@@ -56,7 +55,7 @@ sys.path.insert(0, os.path.join(_REPO, 'eval'))
 import eval_aec_challenge as eac  # run_ours, compute_erle, compute_sdr
 from bench_aecmos import FastAECMOS
 from preset_arg import PRESET_METAVAR, PRESET_NAMES, parse_preset_arg
-import manifest_pin  # stem -> clip resolution (scenario dir, then quarantine) and the sha256 pin
+import manifest_pin  # stem -> clip resolution and the sha256 pin
 
 # ---------------------------------------------------------------------------
 # Run provenance: a run's scores.json records what produced the numbers (signal
@@ -361,7 +360,7 @@ def main():
 
     print()
     print(f"{'='*78}")
-    print(f"90-case manifest eval -- preset={args.preset} filter={args.filter} cng={args.cng}")
+    print(f"manifest eval ({len(results)} cases) -- preset={args.preset} filter={args.filter} cng={args.cng}")
     print(f"{'='*78}")
     for key in bucket_order:
         label = f"{key[0]}/{key[1]}"

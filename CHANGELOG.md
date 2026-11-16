@@ -42,6 +42,14 @@ when verdict requires it.
 ---
 
 
+## [Unreleased] — 2026-11-16 — The fixed eval manifest keeps official clips only (61 cases)
+
+`eval/manifest_90case_stems.txt` and `eval/manifest_90case.json` lose the 29 near-end stems whose clips exist only under `nearend_singletalk/_quarantine_non_official/`: evaluation data comes from the official sets and own recordings. 61 cases remain (30 far-end singletalk, 30 doubletalk, 1 near-end singletalk), 122 clips. The file names keep the `90case` label so the runners, the pin keys and the references in older entries still resolve.
+
+- `eval/manifest_pin.py` resolves a stem under its scenario directory only; the quarantine fallback is gone, so a clip that sits anywhere else is reported as unresolved. `eval/manifest_90case.sha256` is rewritten from the corpus: the 122 remaining clip digests are the ones the old pin held, and the stems and JSON digests are new.
+- `python/eval_manifest90.py` prints its case count instead of "90-case"; `run_c_ab.sh` and `run_py_ab.sh` count the stems from the file as before.
+- The near-end bucket now has one case, so its SDR / `deg_mos` means are a single clip. A near-end bucket of useful size needs a new selection from the official near-end clips, which changes the frozen set and is not done here.
+
 ## [Unreleased] — 2026-11-16 — `AEC_STAGE_TIMING` is on by default
 
 `aec_get_last_timing()` and `aec_array_get_timing()` report real per-hop costs in the default build. `aec.h` defines `AEC_STAGE_TIMING` as 1 when the build does not say otherwise, and the Makefile's `PROFILE` defaults to 1 and always passes `-DAEC_STAGE_TIMING=$(PROFILE)`; `make PROFILE=0` is the way to turn it off (every field reads 0, the archive references no `clock_gettime`). `PROFILE` stays in `CFG_SIG`. No ABI change: `sizeof(Aec)`, every offset and every sample are unchanged. The four baseline streams (`split_entry`, `split_entry2`, `aec_array`, `aec_array2`, `SIMD=1`) compare byte-identical between the build before this change and the new default build, `META` lines included.

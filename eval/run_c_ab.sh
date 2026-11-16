@@ -1,5 +1,5 @@
 #!/bin/bash
-# C-path 90-case blind A/B.
+# C-path blind A/B over the fixed manifest (eval/manifest_90case_stems.txt).
 #
 # eval_aec_challenge.py drives the Python AEC ("from aec import AEC"), so it
 # cannot observe a C-only change; this script drives the C CLI (aec_wav).
@@ -24,8 +24,7 @@
 # if the two binaries are byte-identical (SELF_CHECK=1 allows it: a null run
 # whose every delta must be exactly zero). PYBIN selects the interpreter.
 #
-# Input: a stem resolves to <scenario>/<stem>_{mic,lpb}.wav, else to the same
-# name under <scenario>/_quarantine_non_official/ (eval/manifest_pin.py). The
+# Input: a stem resolves to <scenario>/<stem>_{mic,lpb}.wav (eval/manifest_pin.py). The
 # run stops naming every unresolved stem, and when a clip or the manifest no
 # longer matches eval/manifest_90case.sha256. The resolved clips are linked into
 # $OUT/dataset_view, which the renderer and the scorer read.

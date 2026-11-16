@@ -70,21 +70,22 @@ python3 python/bench_aecmos.py out_python/ results/ --baseline /path/to/baseline
 regression check, A/B, and audit; other settings produce results that are not
 comparable.
 
-### 90-case blind A/B (baseline vs candidate worktrees)
+### Fixed-manifest blind A/B (baseline vs candidate worktrees)
 
 `eval/run_py_ab.sh` (Python path, `NO_PREALIGN=1`) and `eval/run_c_ab.sh` (C path, `aec_wav`) render and score the stems in
 `eval/manifest_90case_stems.txt`; `eval/ab_report.py` summarises. A change that lands in both ports needs both runners: neither
 sees the other's regressions.
 
-The corpus under `wav/aec_challenge_blind/` is git-ignored local data, and 29 of the 90 near-end clips now sit in
-`nearend_singletalk/_quarantine_non_official/`. `eval/manifest_pin.py prepare` resolves each stem to its scenario directory, else
-to that directory's `_quarantine_non_official/`, so the frozen set is compared unchanged (do not regenerate it:
+The manifest holds 61 cases (30 far-end, 30 doubletalk, 1 near-end; every clip is official AEC Challenge data, as the evaluation
+rule requires). The file names keep the original `90case` label: the set started as 90 cases and lost the 29 near-end stems whose
+clips are not official. The corpus under `wav/aec_challenge_blind/` is git-ignored local data. `eval/manifest_pin.py prepare`
+resolves each stem to its scenario directory and nowhere else, so the frozen set is compared unchanged (do not regenerate it:
 `build_manifest_90case.py` run today selects a different set). It stops naming every stem it cannot find, and verifies
-`eval/manifest_90case.sha256` (sha256 of the 180 clips by scenario-relative name, of the stems list and of the manifest JSON), so
+`eval/manifest_90case.sha256` (sha256 of the 122 clips by scenario-relative name, of the stems list and of the manifest JSON), so
 drift of the corpus or the manifest aborts the run with the list of files. The resolved clips are linked into `$OUT/dataset_view`,
 which the renderer and `bench_aecmos.py --dataset` read; `python/eval_manifest90.py` applies the same resolution and check. After
 an intended corpus change, re-pin with `python3 eval/manifest_pin.py write --dataset wav/aec_challenge_blind`. `SELF_CHECK=1
-eval/run_c_ab.sh` accepts two byte-identical builds: a null run in which every delta must be exactly 0 (all 90 byte-equal at 16k/256
+eval/run_c_ab.sh` accepts two byte-identical builds: a null run in which every delta must be exactly 0 (all 61 byte-equal at 16k/256
 and 16k/512). Run the scripts from a scratch copy of the tree, not from inside the repository.
 
 ### Byte-equal regression check (behaviour-neutral changes)

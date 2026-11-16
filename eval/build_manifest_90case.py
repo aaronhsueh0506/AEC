@@ -2,9 +2,10 @@
 """Select a balanced, deterministic 90-case subset of the local blind corpus.
 
 This does NOT reproduce the checked-in eval/manifest_90case.json. That set was
-frozen from an earlier state of the git-ignored corpus (29 near-end clips have
-since moved to nearend_singletalk/_quarantine_non_official/), and running this
-today picks a different set. Do not regenerate the checked-in files: A/B runs
+frozen from an earlier state of the git-ignored corpus and then lost its 29
+near-end stems whose clips are not official AEC Challenge data (61 cases are
+left), and running this today picks a different set. Do not regenerate the
+checked-in files: A/B runs
 compare on the frozen set, which eval/manifest_pin.py resolves and pins by
 sha256. --out and --stems-out are required so that a run cannot overwrite them
 by default.
