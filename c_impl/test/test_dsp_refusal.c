@@ -233,7 +233,7 @@ static void run_row(const Grid* g, int mode, Entry e, const Poison* p) {
             memset(&rv, 0, sizeof rv); rv.struct_size = sizeof rv;
             CHECK(aec_get_linear(a, &lv) == AEC_OK && all_zero(lv.linear_hop, hop) &&
                   all_zero((const float*)lv.echo_spec, 2 * lv.n_freqs) && all_zero((const float*)lv.near_spec, 2 * lv.n_freqs) &&
-                  all_zero((const float*)lv.far_spec, 2 * lv.n_freqs),
+                  all_zero((const float*)lv.far_spec, 2 * lv.n_freqs) && all_zero(lv.aligned_far_hop, hop),
                   "%s: the linear view reads zeros after the refusal", tag);
             CHECK(aec_get_residual(a, &rv) == (mode == AEC_RESIDUAL_OFF ? AEC_ERR_MODE : AEC_ERR_SEQUENCE),
                   "%s: no residual view after the refusal", tag);

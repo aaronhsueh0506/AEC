@@ -2576,6 +2576,7 @@ int aec_refuse_hop(Aec* a) {
     v = AEC_IS_ARRAY(a) ? aec_array_impl_linear_lane(a) : a;
     bins = (size_t)v->n_freqs * sizeof(Complex);
     memset(v->raw_output, 0, (size_t)v->hop_size * sizeof(float));
+    memset(v->far_hop, 0, (size_t)v->hop_size * sizeof(float));
     memset(v->main_filter.base.echo_spec, 0, bins);
     memset(v->main_filter.base.near_spec, 0, bins);
     memset(v->main_filter.base.far_spec, 0, bins);

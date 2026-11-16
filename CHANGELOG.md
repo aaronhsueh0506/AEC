@@ -42,6 +42,10 @@ when verdict requires it.
 ---
 
 
+## [Unreleased] — 2026-11-16 — A refused single-channel hop zeroes aligned_far_hop as well
+
+After `AEC_ERR_DSP` a single channel's `aec_get_linear()` returned zeros in `linear_hop` and the spectra but the refused hop's reference in `aligned_far_hop`, although the documented view reads zeros. `aec_refuse_hop()` now zeroes that buffer as well (an array's was already zero). `test/test_dsp_refusal.c` checks `aligned_far_hop` on every single-channel row; 146 rows fail without the memset.
+
 ## [Unreleased] — 2026-11-16 — aec.c: scaffolding left from the function split removed
 
 **No output change; the compiled code is identical.** `aec.c` after the stage split carried a blank line before nine closing braces, whole-body bare blocks (`aec_run_post_chain`, `aec_finish_hop`), whole-body `if (a->has_shadow) {` wrappers (now `if (!a->has_shadow) return;`), two empty `if` branches in `aec_update_echo_path` (now one condition each), `_sn` / `_ei` / `_h` locals with leading underscores, and an unused `(n)` argument on the three carve slice macros. Cleaned; no statement changed. `cc -S -O2` of `aec.c`, `aec_post.c`, `aec_array.c`, `aec_res.c` and `aec_config_build.c` (`SIMD=1`, `SIMD=0`, `AEC_NO_ARRAY=1`) is byte-identical before and after (14 assembly files); the baseline streams are unchanged.
