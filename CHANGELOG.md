@@ -42,6 +42,10 @@ when verdict requires it.
 ---
 
 
+## [Unreleased] — 2026-11-16 — A redundant alias and two misplaced comments in the hop functions removed
+
+**No output change; the compiled code is identical** (`cc -S -O2` of `aec.c` is byte-identical on `SIMD=1`, `SIMD=0` and `AEC_NO_ARRAY=1`). `aec_prepare_post_dt()` held the reference power under a third name (`const float far_power`), and `aec_run_post_chain()` began with a stray comment and blank line and ended with a comment that described a call already made. The alias is gone and the two comments sit beside what they describe.
+
 ## [Unreleased] — 2026-11-16 — Whole-body bare blocks and odd indentation left from the function split removed
 
 **No output change; the compiled code is identical.** `aec_carve_state()`, `aec_carve_residual()`, `aec_carve_suppression()`, `aec_carve_stationarity()` and `aec_carve_post_scratch()` wrapped their whole body in a bare block that only scoped locals, and `aec_align_reference()` opened its `has_delay` block at six spaces with the body at eight. The blocks are gone and the indentation is regular. `cc -S -O2` of the seven library sources is byte-identical on `SIMD=1`, `SIMD=0` and `AEC_NO_ARRAY=1`.

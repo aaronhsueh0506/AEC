@@ -2244,8 +2244,6 @@ static HopPowers aec_hop_powers(const Aec* a, float far_hop_mean_sq) {
 static void aec_run_post_chain(Aec* a, int stationarity_block_for_post, int render_active, float far_hop_mean_sq,
                                const HopPowers* pw, int apply, const AecFarShare* share) {
     const int hop = a->hop_size, N = a->n_partitions;
-    /* filter_taps_full is filled on demand by aec_fill_filter_taps(). */
-
     AecPostRunIn in;
     memset(&in, 0, sizeof(in));
     in.near_spec = a->main_filter.base.near_spec;
@@ -2257,7 +2255,7 @@ static void aec_run_post_chain(Aec* a, int stationarity_block_for_post, int rend
     in.sqrt_hann = a->main_filter.base.sqrt_hann;
     in.partition_idx = a->main_filter.base.partition_idx;
     in.n_partitions = N;
-    in.filter_taps_full = a->filter_taps_full;
+    in.filter_taps_full = a->filter_taps_full;   /* filled on demand by aec_fill_filter_taps() */
     in.filter_taps_full_len = N * hop;
     in.shadow_present = a->has_shadow;
     in.shadow_error_spec = a->has_shadow ? a->shadow_filter.error_spec : NULL;
@@ -2279,7 +2277,7 @@ static void aec_run_post_chain(Aec* a, int stationarity_block_for_post, int rend
     in.erle_coh_gate_enabled = AECB_ERLE_COH_GATE_ENABLED;
     in.use_stationarity_properties = AECB_USE_STATIONARITY_PROPERTIES;
     /* Without `apply` the caller consumes comfort noise, R^2 and the gain (aec_get_residual()); only final
-     * synthesis is skipped. Below FULL the gain is never computed (apply is 0 there). */
+     * synthesis is skipped (aec_post_run then emits raw_output). Below FULL the gain is never computed (apply is 0 there). */
     in.context_only = !apply;
     in.hold_state_only = (a->cfg.residual == AEC_RESIDUAL_STATE ||
                                  a->cfg.residual == AEC_RESIDUAL_ESTIMATE);
@@ -2313,8 +2311,6 @@ static void aec_run_post_chain(Aec* a, int stationarity_block_for_post, int rend
     aec_post_run(&a->post, &in, &obj, &a->a3_sc, a->final_out, &pgc, &pdc);
     a->pending_gain_change = pgc;
     a->pending_delay_change = pdc;
-
-    /* In context-only mode aec_post_run emits raw_output. */
 }
 
 /* The converged mu freeze, else the simple mu ratio. clear_per_bin: the unconverged branch drops the per-bin mu flag. */
@@ -2336,7 +2332,6 @@ static int aec_prepare_post_dt(Aec* a, float far_hop_mean_sq, float erle_inst,
     const int K = a->n_freqs;
     int is_stationary_dt = 0;
     float dt_indicator = 0.0f;
-    const float far_power = far_hop_mean_sq;
     /* erle_for_factor = max(inst ERLE, windowed ERLE). */
     float erle_for_factor = erle_inst > erle_windowed ? erle_inst : erle_windowed;
     float erle_factor = erle_for_factor / 10.0f;
@@ -2404,7 +2399,7 @@ static int aec_prepare_post_dt(Aec* a, float far_hop_mean_sq, float erle_inst,
     float shadow_dt_v = a->dt_analyzer.dt_from_energy;
     if (a->dt_analyzer.dt_from_shadow > shadow_dt_v) shadow_dt_v = a->dt_analyzer.dt_from_shadow;
     if (a->epc.active) shadow_dt_v *= 0.08f;
-    a->last_far_power = far_power;
+    a->last_far_power = far_hop_mean_sq;
     a->last_shadow_dt = shadow_dt_v;
     a->last_is_stationary_dt = is_stationary_dt;
     a->last_dt_indicator = dt_indicator;
