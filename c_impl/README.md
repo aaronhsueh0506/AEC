@@ -99,7 +99,7 @@ it builds that archive, scans it and a minimal linked consumer for stdio symbols
 `make lib AEC_NO_ARRAY=1` builds a `libaec.a` without the four-microphone array instance: `src/aec_array.c` and `src/aec_res.c` are not compiled
 (`-DAEC_NO_ARRAY`), `AecConfig.n_mics` other than 1 is refused (`aec_get_mem_size()` 0, `aec_init()` NULL, `aec_create()` NULL), and
 `aec_get_array()` and the `aec_array_*()` diagnostics are not defined. Everything single-channel behaves byte for byte as in the full library. On the host
-the archive's `__TEXT` drops by about 21 kB at `SIMD=1` (160,122 -> 139,234 B) and 18 kB at `SIMD=0` (140,678 -> 122,914 B); measured as `size "$(make -s print-lib-path [SIMD=0] [AEC_NO_ARRAY=1])" | awk 'NR>1{t+=$1} END{print t}'` after `make lib` with the same flags (Apple clang, arm64). The flag is part of the config hash, so the
+the archive's `__TEXT` drops by about 24 kB at `SIMD=1` (167,730 -> 143,686 B) and 22 kB at `SIMD=0` (147,482 -> 125,694 B) in the default build (stage timing on); measured as `size "$(make -s print-lib-path [SIMD=0] [AEC_NO_ARRAY=1])" | awk 'NR>1{t+=$1} END{print t}'` after `make lib` with the same flags (Apple clang, arm64). The flag is part of the config hash, so the
 two builds keep separate `obj/` and `bin/` directories; the array-only test targets print "SKIPPED" under it. Consumers pass it through to this build
 (`make AEC_NO_ARRAY=1` in Audio_ALG/pipelines).
 

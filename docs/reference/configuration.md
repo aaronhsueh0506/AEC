@@ -256,7 +256,7 @@ int aec_get_mem_breakdown(const AecConfig* cfg, AecMemBreakdown* out);
 | `delay_backward_quarantine_enabled` | `int` | `0` | 0 / 1（單聲道必須是 0） | 只在 `MATCHED` 有意義。比目前 delay 更早的新估計，在 capture-proxy lane 仍在消除期間先保留 `delay_backward_quarantine_s` 秒再採用；消除失效就立刻採用。前向移動與首次取得不受影響。 |
 | `delay_backward_quarantine_s` | `float` | `1.0` | 0 – 3600 | 上一項的保留時間（秒），建立時換算成 hop 數（下限 1）。 |
 
-以 `make AEC_NO_ARRAY=1` 建置的單聲道函式庫沒有陣列實例：`n_mics` 不是 1 時 `aec_get_mem_size()` 回 0、`aec_init()` 回 NULL、`aec_create()` 回 NULL，`aec_get_array()` 與 `aec_array_*()` 診斷函式不存在（呼叫即連結錯誤）。flag 折進 config hash，與一般建置各有自己的 `bin/<backend>-<hash>/`；實測 `libaec.a` 的 `__TEXT` 減少約 21 kB（SIMD=1，160,122 → 139,234 B；SIMD=0 為 140,678 → 122,914 B）。
+以 `make AEC_NO_ARRAY=1` 建置的單聲道函式庫沒有陣列實例：`n_mics` 不是 1 時 `aec_get_mem_size()` 回 0、`aec_init()` 回 NULL、`aec_create()` 回 NULL，`aec_get_array()` 與 `aec_array_*()` 診斷函式不存在（呼叫即連結錯誤）。flag 折進 config hash，與一般建置各有自己的 `bin/<backend>-<hash>/`；實測 `libaec.a` 的 `__TEXT` 減少約 24 kB（SIMD=1，167,730 → 143,686 B；SIMD=0 為 147,482 → 125,694 B；預設建置，階段計時開）。
 
 陣列實例對既有欄位的規則：
 

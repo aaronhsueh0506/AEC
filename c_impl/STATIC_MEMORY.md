@@ -95,8 +95,8 @@ host (the same for every `AecConfig.residual`, for `SIMD=0/1` and for `AEC_NO_AR
 These figures depend on the struct sizes of the library's internals; re-run
 `aec_get_mem_size()` (or `aec_wav --print-mem-size`) rather than carrying
 them forward. The pool holds the instance and everything it carves, including the synthesis window and the decoded
-gain-threshold tables (see "Ownership model"); the code and flash side is separate: `libaec.a` `__TEXT` is 160,122 B at `SIMD=1`
-and 140,678 B at `SIMD=0`, and 139,234 B / 122,914 B built with `AEC_NO_ARRAY=1` (host Apple clang, arm64, `size` summed over the
+gain-threshold tables (see "Ownership model"); the code and flash side is separate: `libaec.a` `__TEXT` is 167,730 B at `SIMD=1`
+and 147,482 B at `SIMD=0`, and 143,686 B / 125,694 B built with `AEC_NO_ARRAY=1` (host Apple clang, arm64, `size` summed over the
 members as in `README.md`; the target toolchain's numbers differ).
 
 The delay configuration moves these numbers, because the matched-filter bank,

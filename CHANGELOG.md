@@ -42,6 +42,10 @@ when verdict requires it.
 ---
 
 
+## [Unreleased] — 2026-11-16 — `libaec.a` `__TEXT` sizes in the docs are re-measured on the default build
+
+`c_impl/README.md` and `c_impl/STATIC_MEMORY.md` quoted the sizes measured before `AEC_LAYOUT_VERSION` 5 and before `AEC_STAGE_TIMING` became the default. Same method (`size` summed over the members, Apple clang, arm64, `make lib` with the same flags): `SIMD=1` 160,122 -> 167,730 B, `SIMD=0` 140,678 -> 147,482 B, `AEC_NO_ARRAY=1` 139,234 -> 143,686 B and 122,914 -> 125,694 B. With `PROFILE=0` the same builds are 167,086, 146,822 (`SIMD=0`), 143,134 B (`AEC_NO_ARRAY=1`, `SIMD=1`).
+
 ## [Unreleased] — 2026-11-16 — The shadow-copy rescue streak is 80 ms on every grid
 
 The shadow-copy streak minimum (`sc_hys_streak_min()` in `epc_shadow.c`, `PathChangeRegimeHandler._streak_min_hops()`) is `ceil(sample_rate * 80 / (1000 * hop_size))` hops, computed in integers by both ports: 10 at 16 kHz hop 128, 5 at 16 kHz hop 256 and 8 kHz hop 128, 8 at 48 kHz hop 512 (it was 10 on every grid). Output changes on the other grids (16 kHz hop 256, 48 kHz hop 512); 16 kHz hop 128 is bit-identical; `docs/timing_constant_inventory.md` moves the entry to "Already retimed".
