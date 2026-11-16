@@ -75,7 +75,7 @@ pre code{background:none;padding:0}
     aec_prepare_post_dt -> aec_run_post_chain (aec_post_run:AecState / ResidualEchoEstimator /
                            SuppressionGain / StationarityEstimator / LinearFilterSelect / CNG -> WOLA 合成 -> final_out;
                            只有 aec_process() 在 residual == FULL 時套用增益與合成,拆開的進入點把結果留給 aec_get_residual())
-    -> aec_update_post_mu
+    -> aec_steer_mu
  aec_update_linear_only_steering
                   v
  aec_finish_hop (功率 EMA、filter_convergence_update_convergence)

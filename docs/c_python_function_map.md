@@ -180,7 +180,8 @@
 | `src/aec.c:aec_update_echo_path` | `modules/orchestrator.py:AEC._update_path_changes` | partial（逐 hop 子步驟；保留原始先後順序與 scratch 生命週期） | — | `ctest:test_process_context.c` |
 | `src/aec.c:aec_update_linear_only_steering` | `modules/orchestrator.py:AEC._update_linear_only_steering` | partial（逐 hop 子步驟；保留原始先後順序與 scratch 生命週期） | — | `ctest:test_process_context.c` |
 | `src/aec.c:aec_update_misadjustment_erle` | `modules/orchestrator.py:AEC._track_linear_error` | partial（逐 hop 子步驟；保留原始先後順序與 scratch 生命週期） | — | `ctest:test_process_context.c` |
-| `src/aec.c:aec_update_post_mu` | `modules/orchestrator.py:AEC._update_residual_mu` | partial（逐 hop 子步驟；保留原始先後順序與 scratch 生命週期） | — | `ctest:test_process_context.c` |
+| `src/aec.c:aec_hop_powers` | — | C-only（hop 的參考／麥克風／線性殘差三個均方，各加 1e-10；Python 在各呼叫點內聯） | — | `ctest:test_process_context.c` |
+| `src/aec.c:aec_steer_mu` | `modules/orchestrator.py:AEC._update_residual_mu` | partial（逐 hop 子步驟；保留原始先後順序與 scratch 生命週期；殘差級與 `residual = OFF` 的線性步驟共用） | — | `ctest:test_process_context.c` |
 | `src/aec.c:aec_update_shadow_dt` | `modules/orchestrator.py:AEC._update_shadow` | partial（逐 hop 子步驟；保留原始先後順序與 scratch 生命週期） | — | `ctest:test_process_context.c` |
 | `src/aec.c:aec_update_shadow_quality` | `modules/orchestrator.py:AEC._update_shadow_leakage` | partial（逐 hop 子步驟；保留原始先後順序與 scratch 生命週期） | — | `ctest:test_process_context.c` |
 | `src/aec.c:aec_update_windowed_erle` | `modules/orchestrator.py:AEC._track_linear_error` | partial（逐 hop 子步驟；保留原始先後順序與 scratch 生命週期） | — | `ctest:test_process_context.c` |
@@ -260,7 +261,6 @@
 | `src/aec_post.c:aec_post_compute_comfort_noise` | `modules/orchestrator.py:AEC._post_comfort_noise#_aec3_cng` | partial（`_aec3_post` stage 5：CNG N2 追蹤） | — | — |
 | `src/aec_post.c:aec_post_apply_output` | `modules/orchestrator.py:AEC._post_add_comfort_noise#cng_noise_terms`<br>`modules/orchestrator.py:AEC._post_synthesize` | partial（`_aec3_post` stage 6：對渲染底座套增益、注入 CNG、irfft、OLA；底座已由 `aec_post_eval_output_guard` 在每 hop 決定，這裡不再選；CNG 走 `aec_cng_fill`） | — | `ctest:test_guard_unify.c` |
 | `src/aec_post.c:aec_post_eval_output_guard` | `modules/orchestrator.py:AEC._post_output_base`<br>`modules/orchestrator.py:AEC._guard_energy` | mirror（輸出守衛，每 hop 在 usable 判定確定後、任何 context 提前離開之前求值一次；`sum(abs(E)²)` 與 `sum(abs(Y)²)` 同為 float32 pairwise 歸約、嚴格 `>`；相同頻譜得到相同決定；C 對 Python 的對拍允許雙方都 unusable 且相對能量差在 1e-6 tie band 內的 hop 不一致並逐 cell 計數，band 外不一致即失敗） | — | `ctest:test_guard_unify.c`<br>`pytest:test_guard_unify.py` |
-| `src/aec_post.c:sum_sq_f32_pairwise` | — | C-only（`np.sum(x**2)` 的 float32 pairwise 等價） | — | — |
 | `src/aec_post.c:aec_post_run_observer_step` | `modules/orchestrator.py:AEC._post_observer_residual#_observer_corrob_margin` | partial（live observer 注入步驟；C 缺 `live_observer_inject_dt_energy_max` 守衛） | S-02；D-15 | — |
 | `src/aec_post.c:aec_post_run` | `modules/orchestrator.py:AEC._aec3_post`<br>`modules/orchestrator.py:AEC._post_estimate_residual`<br>`modules/orchestrator.py:AEC._post_external_delay`<br>`modules/orchestrator.py:AEC._post_filter_bridge`<br>`modules/orchestrator.py:AEC._post_filter_taps`<br>`modules/orchestrator.py:AEC._post_nearend_power`<br>`modules/orchestrator.py:AEC._post_pending_changes`<br>`modules/orchestrator.py:AEC._post_stationary_residual`<br>`modules/orchestrator.py:AEC._post_suppression_gain` | partial（完整 `_aec3_post` 編排；C 版不含 Python-only 研究旋鈕） | S-22；T-03 | `e2e:parity_aec_e2e` |
 

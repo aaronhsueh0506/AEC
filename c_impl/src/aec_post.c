@@ -53,7 +53,6 @@ void aec_post_init(AecPost *p, const AecPostConfig *cfg,
                    float *comfort_noise, float *nf,
                    Complex *e_out_spec, float *e_out_full) {
     p->cfg = *cfg;
-    p->far_active = 0;
     /* Convergence-flags y2 threshold: 50^2 * 64 / 32768^2 at the reference grid, scaled to the live
      * hop_size (it is compared against y2_time summed over the hop). */
     p->y2_thr = aec_block_energy_scale(50.0f * 50.0f * 64.0f, cfg->hop_size)
@@ -89,7 +88,6 @@ void aec_post_reset(AecPost *p) {
     int nb = p->cfg.n_bins;
     /* Reset: OLA, CNG, coherence and avg-reverb cleared. */
     if (p->ola_buf) memset(p->ola_buf, 0, (size_t)p->cfg.block_size * sizeof(float));
-    p->far_active = 0;
     p->cng_seed = AEC_CNG_SEED;
     p->output_guard_active = 0;
     p->reset_serial += 1u;
@@ -252,10 +250,6 @@ static void aec_post_apply_output(AecPost *p,
 
 /* aec_post_run: full orchestration of the post-filter step, driving the sub-modules in order. */
 
-static float sum_sq_f32_pairwise(const float *a, size_t n) {
-    return sk_sum_sq_pairwise_f32(a, n);
-}
-
 /* Live observer injection step. Runs after the stationarity R^2 zeroing and before the comfort-noise
  * and gain steps, and needs this hop's dominant_ne and usable verdicts, so aec_post_run calls it in
  * place. */
@@ -386,8 +380,8 @@ void aec_post_run(AecPost *p,
     render_block = in->shared_far_psd ? in->shared_render_block : sc->render_block_scaled;
 
     {
-        float y2_time = sum_sq_f32_pairwise(in->near_end, (size_t)hop);
-        float e2_refined = sum_sq_f32_pairwise(in->raw_output, (size_t)hop);
+        float y2_time = sk_sum_sq_pairwise_f32(in->near_end, (size_t)hop);
+        float e2_refined = sk_sum_sq_pairwise_f32(in->raw_output, (size_t)hop);
         float y2_thr = p->y2_thr;
         float e2_coarse = 0.0f;
         int refined_conv, coarse_conv = 0;
@@ -460,10 +454,7 @@ void aec_post_run(AecPost *p,
             }
 
             {
-                int active_render = in->shared_far_psd
-                    ? in->shared_far_active
-                    : (sum_sq_f32_pairwise(in->far_end, (size_t)hop) / (float)hop > in->active_render_threshold);
-                p->far_active = active_render;
+                int active_render = in->far_mean_sq > in->active_render_threshold;
                 int x2r_present_state =
                     (in->x2_cache != NULL && n_part > 0);
                 aec_state_update(obj->state,

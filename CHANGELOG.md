@@ -42,6 +42,13 @@ when verdict requires it.
 ---
 
 
+## [Unreleased] — 2026-11-16 — The hop's mean squares are computed once
+
+**No output change.** A hop with a residual stage computed the mean square of `raw_output` twice (`aec_prepare_post_dt()`, then `update_simple_mu_ratio()`), of the reference three times (`aec_stage_linear()`, `update_simple_mu_ratio()`, and `aec_post_run()` for the active-render test), and the residual `OFF` path repeated the same pairs; each is now computed once and passed on. `update_simple_mu_ratio()` takes the two powers; `aec_hop_powers()` returns the reference / microphone / residual triple; `aec_steer_mu()` is the one converged-mu-freeze-or-simple-ratio rule that `aec_update_post_mu()` and the `OFF` branch of `aec_update_linear_only_steering()` each spelled out. `AecPostRunIn.shared_far_active` and `AecPost::far_active` (whose only reader was the donor-lane copy) are replaced by `AecPostRunIn.far_mean_sq`; `aec_post.c`'s one-line `sum_sq_f32_pairwise()` wrapper is gone.
+
+- The four baseline streams (`SIMD=1` / `0`) are byte-identical to the previous commit's, `test_memory_layout` pins are unchanged (`sizeof(Aec)` and every pool size). Mutations that go red: the `OFF` branch's reference power times 100 (1105 stream mismatches), `far_mean_sq` times 0.001 (11699), the post path's `clear_per_bin` flag dropped (2190).
+- Docs: the function map (`aec_update_post_mu` becomes `aec_steer_mu`, new `aec_hop_powers`, `sum_sq_f32_pairwise` removed; the totals are unchanged), the two HTML sequence pages.
+
 ## [Unreleased] — 2026-11-16 — A fresh instance's linear view reads zeros
 
 `aec_get_linear()` before the first hop returned `AEC_OK` with `linear_hop` and `aligned_far_hop` pointing at two pool buffers the carve never cleared, so a caller read whatever the pool (or `aec_create()`'s heap block) held: 128 of 128 samples of a `0xAB` pool, stale heap bytes after a freed block. The same for an array through lane 0. `aec_carve_hop_scratch()` now zeroes `raw_output` and `far_hop` (once, at init; both `aec_init()` and `aec_create()`, every lane). Processing is unchanged: the four baseline streams (`SIMD=1` / `0`) are byte-identical to the previous commit's. `aec_reset()` still leaves the last hop's views readable until the next hop (only a refused hop zeroes them).

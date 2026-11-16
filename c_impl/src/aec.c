@@ -334,10 +334,8 @@ static void advance_erl_and_dt(Aec* a, int render_active, float far_pwr,
                                 far_pwr, mic_pwr, a->erl_estimate);
 }
 
-static void update_simple_mu_ratio(Aec* a, const float* output,
-                                   const float* far_end, int n) {
-    float error_power = mean_sq(output, n, a->scr_sq) + 1e-10f;
-    float far_power   = mean_sq(far_end, n, a->scr_sq) + 1e-10f;
+/* error_power and far_power: the hop's mean squares of the linear residual and of the reference, each + 1e-10f. */
+static void update_simple_mu_ratio(Aec* a, float error_power, float far_power) {
     if (far_power < 1e-6f && error_power < 1e-6f) return;
     if (far_power > 1e-4f && a->simple_mu_ratio < 0.1f) {
         a->simple_mu_ratio = 0.8f;
@@ -376,7 +374,7 @@ static void update_simple_mu_ratio(Aec* a, const float* output,
 #ifdef AEC_TESTING
 void aec_testing_update_simple_mu_ratio(Aec* a, const float* output,
                                         const float* far_end, int n) {
-    update_simple_mu_ratio(a, output, far_end, n);
+    update_simple_mu_ratio(a, mean_sq(output, n, a->scr_sq) + 1e-10f, mean_sq(far_end, n, a->scr_sq) + 1e-10f);
 }
 
 void aec_testing_reset_filter_latches(Aec* a) {
@@ -2265,8 +2263,8 @@ static float aec_update_windowed_erle(Aec* a) {
     return erle_windowed;
 }
 
-static void aec_run_post_chain(Aec* a, int stationarity_block_for_post, int render_active, int apply,
-                               const AecFarShare* share) {
+static void aec_run_post_chain(Aec* a, int stationarity_block_for_post, int render_active, float far_hop_mean_sq,
+                               int apply, const AecFarShare* share) {
     const int hop = a->hop_size, N = a->n_partitions;
     {
         /* filter_taps_full is filled on demand by aec_fill_filter_taps(). */
@@ -2310,6 +2308,7 @@ static void aec_run_post_chain(Aec* a, int stationarity_block_for_post, int rend
                                      a->cfg.residual == AEC_RESIDUAL_ESTIMATE);
         in.linear_context_only = (a->cfg.residual == AEC_RESIDUAL_STATE);
         in.active_render_threshold = AECB_ACTIVE_RENDER_THRESHOLD;
+        in.far_mean_sq = far_hop_mean_sq;
 
         AecPostRunObj obj;
         obj.state = &a->a3_state; obj.ree = &a->a3_ree; obj.sg = &a->a3_sg;
@@ -2323,10 +2322,9 @@ static void aec_run_post_chain(Aec* a, int stationarity_block_for_post, int rend
          * knows this hop's dominant_ne / usable_linear verdicts. */
         in.render_activity_is_active = render_active;
         if (share && share->post) {
-            /* Same far spectrum and far hop as the donor's, so its PSD, scaled block and verdict are this lane's. */
+            /* Same far spectrum and far hop as the donor's, so its PSD and scaled block are this lane's. */
             in.shared_far_psd = share->donor->post.far_psd;
             in.shared_render_block = share->donor->a3_sc.render_block_scaled;
-            in.shared_far_active = share->donor->post.far_active;
         }
         in.observer_far_end = (a->has_observer && a->observer_far_hop_valid)
                                ? a->observer_far_hop : NULL;
@@ -2342,24 +2340,46 @@ static void aec_run_post_chain(Aec* a, int stationarity_block_for_post, int rend
 
 }
 
-static int aec_prepare_post_dt(Aec* a, float far_hop_mean_sq, float _ei,
-                               float erle_windowed, int render_active) {
-    const int hop = a->hop_size, K = a->n_freqs;
+/* This hop's mean squares, each + 1e-10f: the reference, the microphone and the linear residual. */
+typedef struct { float far, mic, err; } HopPowers;
+
+static HopPowers aec_hop_powers(const Aec* a, float far_hop_mean_sq) {
+    HopPowers pw;
+    pw.far = far_hop_mean_sq + 1e-10f;
+    pw.mic = mean_sq(a->near_hop, a->hop_size, a->scr_sq) + 1e-10f;
+    pw.err = mean_sq(a->raw_output, a->hop_size, a->scr_sq) + 1e-10f;
+    return pw;
+}
+
+/* The converged mu freeze, else the simple mu ratio. clear_per_bin: the unconverged branch drops the per-bin mu flag. */
+static void aec_steer_mu(Aec* a, int stationary_dt, int clear_per_bin, const HopPowers* pw) {
+    if (a->convergence.converged) {
+        const float mu_min = a->tun.shadow_mu_min;
+        for (int k = 0; k < a->n_freqs; ++k) a->per_bin_mu_scale[k] = mu_min;
+        a->simple_mu_ratio = stationary_dt ? mu_min : 0.0f;
+        a->has_per_bin_mu = 1;
+    } else {
+        if (clear_per_bin) a->has_per_bin_mu = 0;
+        update_simple_mu_ratio(a, pw->err, pw->far);
+    }
+}
+
+/* Leaves this hop's powers in *pw for the mu steering that follows the post chain. */
+static int aec_prepare_post_dt(Aec* a, float far_hop_mean_sq, float erle_inst,
+                               float erle_windowed, int render_active, HopPowers* pw) {
+    const int K = a->n_freqs;
     int is_stationary_dt = 0;
-    float dt_indicator = 0.0f, far_power = 0.0f;
-    far_power = far_hop_mean_sq;
-    /* erle_for_factor = max(inst ERLE, windowed ERLE); _ei is the same
-     * expression. */
-    float erle_inst = _ei;
+    float dt_indicator = 0.0f;
+    const float far_power = far_hop_mean_sq;
+    /* erle_for_factor = max(inst ERLE, windowed ERLE). */
     float erle_for_factor = erle_inst > erle_windowed ? erle_inst : erle_windowed;
     float erle_factor = erle_for_factor / 10.0f;
     if (erle_factor < 0.0f) erle_factor = 0.0f;
     if (erle_factor > 1.0f) erle_factor = 1.0f;
     a->erle_factor_prev = erle_factor;
 
-    float far_pwr = far_power + 1e-10f;
-    float mic_pwr = mean_sq(a->near_hop, hop, a->scr_sq) + 1e-10f;
-    float raw_err_pwr = mean_sq(a->raw_output, hop, a->scr_sq) + 1e-10f;
+    *pw = aec_hop_powers(a, far_hop_mean_sq);
+    const float far_pwr = pw->far, mic_pwr = pw->mic, raw_err_pwr = pw->err;
 
     advance_erl_and_dt(a, render_active, far_pwr, mic_pwr, raw_err_pwr);
 
@@ -2426,45 +2446,13 @@ static int aec_prepare_post_dt(Aec* a, float far_hop_mean_sq, float _ei,
     return is_stationary_dt;
 }
 
-static void aec_update_post_mu(Aec* a, int is_stationary_dt) {
-    const int hop = a->hop_size, K = a->n_freqs;
-    if (a->convergence.converged) {
-        float mu_min = a->tun.shadow_mu_min;
-        for (int k = 0; k < K; ++k) a->per_bin_mu_scale[k] = mu_min;
-        a->simple_mu_ratio = 0.0f;
-        if (is_stationary_dt) {
-            a->simple_mu_ratio = mu_min;
-        }
-        a->has_per_bin_mu = 1;
-    } else {
-        a->has_per_bin_mu = 0;
-        update_simple_mu_ratio(a, a->raw_output, a->far_hop, hop);
-    }
-}
-
+/* Mu ratio, converged mu freeze and ERL/DT trackers must advance even without the RES gate; has_per_bin_mu is not cleared. */
 static void aec_update_linear_only_steering(Aec* a, float far_hop_mean_sq, int render_active) {
-    const int hop = a->hop_size;
-    /* Mu ratio, converged mu freeze and ERL/DT trackers must advance even
-     * without the RES gate; has_per_bin_mu is not cleared here. */
-    if (a->cfg.residual == AEC_RESIDUAL_OFF) {
-        if (a->convergence.converged) {
-            int k;
-            float mu_min = a->tun.shadow_mu_min;
-            for (k = 0; k < a->n_freqs; ++k) a->per_bin_mu_scale[k] = mu_min;
-            a->has_per_bin_mu = 1;
-            a->simple_mu_ratio = 0.0f;
-        } else {
-            update_simple_mu_ratio(a, a->raw_output, a->far_hop, hop);
-        }
-
-        {
-            float far_pwr = far_hop_mean_sq + 1e-10f;
-            float mic_pwr = mean_sq(a->near_hop, hop, a->scr_sq) + 1e-10f;
-            float raw_err_pwr = mean_sq(a->raw_output, hop, a->scr_sq) + 1e-10f;
-            advance_erl_and_dt(a, render_active, far_pwr, mic_pwr, raw_err_pwr);
-        }
-    }
-
+    HopPowers pw;
+    if (a->cfg.residual != AEC_RESIDUAL_OFF) return;
+    pw = aec_hop_powers(a, far_hop_mean_sq);
+    aec_steer_mu(a, 0, 0, &pw);
+    advance_erl_and_dt(a, render_active, pw.far, pw.mic, pw.err);
 }
 
 static void aec_finish_hop(Aec* a, float far_hop_mean_sq) {
@@ -2590,10 +2578,11 @@ static void aec_stage_residual(Aec* a, int apply, uint32_t t_stage, const AecFar
     const struct AecHopCarry* c = &a->hop_carry;
     int is_stationary_dt = 0;
     if (a->cfg.residual != AEC_RESIDUAL_OFF) {
-        is_stationary_dt = aec_prepare_post_dt(a, c->far_hop_mean_sq, c->erle_inst, c->erle_windowed, c->render_active);
-        aec_run_post_chain(a, c->stationarity_block_for_post, c->render_active, apply, share);
+        HopPowers pw;
+        is_stationary_dt = aec_prepare_post_dt(a, c->far_hop_mean_sq, c->erle_inst, c->erle_windowed, c->render_active, &pw);
+        aec_run_post_chain(a, c->stationarity_block_for_post, c->render_active, c->far_hop_mean_sq, apply, share);
 
-        aec_update_post_mu(a, is_stationary_dt);
+        aec_steer_mu(a, is_stationary_dt, 1, &pw);
         a->residual_valid = 1;
     }
     aec_update_linear_only_steering(a, c->far_hop_mean_sq, c->render_active);

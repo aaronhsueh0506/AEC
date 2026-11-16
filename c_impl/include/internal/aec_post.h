@@ -72,9 +72,6 @@ typedef struct {
 typedef struct {
     AecPostConfig cfg;
 
-    /* This hop's active-render decision; a lane that shares the far-end PSD reads the donor's value. */
-    int far_active;
-
     /* Convergence-flags y2 threshold, scaled to the live hop_size. */
     float y2_thr;
 
@@ -226,11 +223,12 @@ typedef struct {
     int            render_activity_is_active;
     /* Non-NULL iff the live observer is enabled and this hop's shifted ring read was valid. */
     const float   *observer_far_end;
-    /* Non-NULL: the far PSD and the scaled render block of another instance fed this same far spectrum and far hop, and
-     * its active-render verdict; they replace the computation here (and p->far_psd / render_block_scaled stay unwritten). */
+    /* Non-NULL: the far PSD and the scaled render block of another instance fed this same far spectrum and far hop; they
+     * replace the computation here (and p->far_psd / render_block_scaled stay unwritten). */
     const float   *shared_far_psd;
     const float   *shared_render_block;
-    int            shared_far_active;
+    float          far_mean_sq;           /* mean square of far_end over the hop (the active-render test against
+                                           * active_render_threshold) */
 } AecPostRunIn;
 
 /* Sub-module bundle the driver wires; caller-owned. */
