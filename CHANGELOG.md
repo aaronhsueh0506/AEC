@@ -42,6 +42,10 @@ when verdict requires it.
 ---
 
 
+## [Unreleased] — 2026-11-16 — Test and example helpers shared instead of repeated
+
+**No behaviour change.** `example/cli_level.h`: `aec_cli_parse_level()` calls `aec_cli_parse_int()` instead of repeating its `strtol` body (identical result on 24 inputs including NULL, padded, trailing-character and out-of-range strings). `test/baseline2_signal.h` takes the LCG step, the syllabic modulation and the FNV-1a hash from `split_signal.h` (the `g2_*` names stay as aliases) instead of a second copy; the four baseline streams, whose lines are hashes, are byte-identical. `test/bench_rtf.c`: the `--live-observer` help text no longer carries an internal round label.
+
 ## [Unreleased] — 2026-11-16 — The array shares the single channel's reference-ring sizing; smaller view and counter helpers
 
 **No output change.** `aec_array.c`'s `array_dims()` repeated the reference-ring sizing of `aec_ref_ring_samples()` (MATCHED: the estimator's reach + hop; FIXED: fixed delay + hop) in two arms, without the single channel's overflow guard; it now calls `aec_ref_ring_samples()` (declared in `aec_array_internal.h`), so the two cannot drift. `aec_far_fft_real_compute_count()` uses `aec_array_count_add_sat()` instead of two hand-written saturating adds. `aec_get_residual()` reads `convergence.converged`, `last_dt_indicator` and `saturation_level` directly instead of filling a whole `AecLinearView` for three fields, and `aec_render_base()` names the guard-or-selected base the residual view and `aec_apply_gain()` both pick.

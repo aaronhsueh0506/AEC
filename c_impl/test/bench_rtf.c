@@ -162,7 +162,7 @@ static void print_usage(const char* prog) {
         "  --stage {full|linear|both}            stages to run (default: both)\n"
         "  --scene {noise|bursts}                synthetic input: white noise (default) or the speech-like scene\n"
         "  --wav <mic.wav> <ref.wav>             use a recording instead of synthetic input\n"
-        "  --live-observer                       A21 Stage 2 observer on (default off; needs make bench AEC_TESTING=1)\n",
+        "  --live-observer                       live observer filter on (default off; needs make bench AEC_TESTING=1)\n",
         prog);
 }
 

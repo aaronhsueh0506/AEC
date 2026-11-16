@@ -1,5 +1,6 @@
 /* baseline2_signal.h -- deterministic stimulus generator for the second scene sets (test_split_entry2/3.c, test_aec_array2.c).
- * Header-only, plain C, no libm, no AEC API: every includer regenerates bit-identical inputs.
+ * Header-only, plain C, no libm, no AEC API (the LCG step, the syllabic modulation and the FNV-1a hash are split_signal.h's):
+ * every includer regenerates bit-identical inputs.
  *
  * A stimulus (G2Stim) is a far end made of coloured LCG-noise bursts (5 ms ramps, 5 Hz syllabic modulation), optionally
  * driven into hard clipping at +-1 inside "loud" segments; a microphone made of the far end through a 5-tap echo path whose
@@ -14,6 +15,8 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
+
+#include "split_signal.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -40,7 +43,7 @@ typedef struct G2Stim {
 
 #define G2_FIR_MAX 8
 
-static inline uint32_t g2_lcg(uint32_t* s) { *s = *s * 1664525u + 1013904223u; return *s; }
+static inline uint32_t g2_lcg(uint32_t* s) { *s = ss_lcg_step(*s); return *s; }
 static inline float g2_white(uint32_t* s) { return (float)(g2_lcg(s) >> 8) * (1.0f / 8388608.0f) - 1.0f; }
 
 static inline float g2_burst_env(const G2Seg* seg, int nseg, int sr, int64_t n, int ramp_ms) {
@@ -64,11 +67,7 @@ static inline int g2_in_segs(const G2Seg* seg, int nseg, int sr, int64_t n) {
     return 0;
 }
 
-static inline float g2_syllable(int sr, int64_t n, int64_t shift) {
-    int64_t period = sr / 5, ph = (n + shift) % period;
-    int64_t tri = ph < period / 2 ? ph : period - ph;
-    return 0.55f + 0.45f * ((float)(2 * tri) / (float)period);
-}
+#define g2_syllable ss_syllable
 
 static inline float g2_clip1(float x) { return x > 1.0f ? 1.0f : (x < -1.0f ? -1.0f : x); }
 
@@ -181,16 +180,11 @@ static inline void g2_stim_bad(G2Stim* st, int near_end) {
     g2_dly(st, 0, 640); g2_dly(st, 4000, 1440); g2_dly(st, 8200, 640);
 }
 
-/* --- FNV-1a 64 (same definition as split_signal.h; redefined here so this header stands alone) ------------------------ */
-#define G2_FNV_BASIS 0xCBF29CE484222325ull
-#define G2_FNV_PRIME 0x00000100000001B3ull
-
-static inline uint64_t g2_fnv_u32(uint64_t h, uint32_t v) {
-    for (int b = 0; b < 4; ++b) { h ^= (uint64_t)((v >> (8 * b)) & 0xFFu); h *= G2_FNV_PRIME; }
-    return h;
-}
-static inline uint32_t g2_f32_bits(float f) { uint32_t u; memcpy(&u, &f, sizeof u); return u; }
-static inline uint64_t g2_fnv_f32(uint64_t h, float f) { return g2_fnv_u32(h, g2_f32_bits(f)); }
+/* --- FNV-1a 64 (split_signal.h's) ------------------------------------------------------------------------------------ */
+#define G2_FNV_BASIS SPLIT_FNV_BASIS
+#define g2_fnv_u32   split_fnv_u32
+#define g2_f32_bits  split_f32_bits
+#define g2_fnv_f32   split_fnv_f32
 /* Running hash over n floats; a NULL pointer folds a fixed marker so that "absent" differs from any value. */
 static inline uint64_t g2_fnv_f32v(uint64_t h, const float* p, int n) {
     if (!p) return g2_fnv_u32(h, 0xFFFFFFFFu);
