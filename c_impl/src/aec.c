@@ -2313,15 +2313,14 @@ static void aec_run_post_chain(Aec* a, int stationarity_block_for_post, int rend
     a->pending_delay_change = pdc;
 }
 
-/* The converged mu freeze, else the simple mu ratio. clear_per_bin: the unconverged branch drops the per-bin mu flag. */
-static void aec_steer_mu(Aec* a, int stationary_dt, int clear_per_bin, const HopPowers* pw) {
+/* The converged mu freeze, else the simple mu ratio. */
+static void aec_steer_mu(Aec* a, int stationary_dt, const HopPowers* pw) {
     if (a->convergence.converged) {
         const float mu_min = a->tun.shadow_mu_min;
         for (int k = 0; k < a->n_freqs; ++k) a->per_bin_mu_scale[k] = mu_min;
         a->simple_mu_ratio = stationary_dt ? mu_min : 0.0f;
         a->has_per_bin_mu = 1;
     } else {
-        if (clear_per_bin) a->has_per_bin_mu = 0;
         update_simple_mu_ratio(a, pw->err, pw->far);
     }
 }
@@ -2407,12 +2406,11 @@ static int aec_prepare_post_dt(Aec* a, float far_hop_mean_sq, float erle_inst,
     return is_stationary_dt;
 }
 
-/* Mu ratio, converged mu freeze and ERL/DT trackers must advance even without the RES gate; has_per_bin_mu is not cleared. */
+/* With AEC_RESIDUAL_OFF there is no residual stage: the mu ratio, the converged mu freeze and the ERL/DT trackers still advance;
+ * has_per_bin_mu is not cleared. */
 static void aec_update_linear_only_steering(Aec* a, float far_hop_mean_sq, int render_active) {
-    HopPowers pw;
-    if (a->cfg.residual != AEC_RESIDUAL_OFF) return;
-    pw = aec_hop_powers(a, far_hop_mean_sq);
-    aec_steer_mu(a, 0, 0, &pw);
+    HopPowers pw = aec_hop_powers(a, far_hop_mean_sq);
+    aec_steer_mu(a, 0, &pw);
     advance_erl_and_dt(a, render_active, pw.far, pw.mic, pw.err);
 }
 
@@ -2533,16 +2531,17 @@ static void aec_stage_linear(Aec* a, const float* mic_in, const float* ref_in,
  * final_out (aec_process() with AEC_RESIDUAL_FULL); `t_stage` opens the residual timing window. */
 static void aec_stage_residual(Aec* a, int apply, uint32_t t_stage, const AecFarShare* share) {
     const struct AecHopCarry* c = &a->hop_carry;
-    int is_stationary_dt = 0;
     if (a->cfg.residual != AEC_RESIDUAL_OFF) {
         HopPowers pw;
-        is_stationary_dt = aec_prepare_post_dt(a, c->far_hop_mean_sq, c->erle_inst, c->erle_windowed, c->render_active, &pw);
+        const int is_stationary_dt = aec_prepare_post_dt(a, c->far_hop_mean_sq, c->erle_inst, c->erle_windowed, c->render_active, &pw);
         aec_run_post_chain(a, c->stationarity_block_for_post, c->render_active, c->far_hop_mean_sq, &pw, apply, share);
 
-        aec_steer_mu(a, is_stationary_dt, 1, &pw);
+        a->has_per_bin_mu = 0;   /* the converged branch of the steering sets it again */
+        aec_steer_mu(a, is_stationary_dt, &pw);
         a->residual_valid = 1;
+    } else {
+        aec_update_linear_only_steering(a, c->far_hop_mean_sq, c->render_active);
     }
-    aec_update_linear_only_steering(a, c->far_hop_mean_sq, c->render_active);
 
     a->last_timing.res_us = aec_now_us() - t_stage;
 

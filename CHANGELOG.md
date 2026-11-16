@@ -42,6 +42,10 @@ when verdict requires it.
 ---
 
 
+## [Unreleased] — 2026-11-16 — The residual stage's two exclusive branches are an if / else
+
+**No output change.** `aec_stage_residual()` ran its residual block under `residual != OFF` and then called `aec_update_linear_only_steering()`, whose first line returned unless `residual == OFF`: two exclusive branches written in sequence. They are now `if` / `else`. `aec_steer_mu()` lost its `clear_per_bin` flag (the residual path clears `has_per_bin_mu` itself before the call; the converged branch sets it again) and `is_stationary_dt` lives in the block that uses it. The four baseline streams (`SIMD=1` / `0`) are unchanged; dropping the clear turns three of them red (2190 / 1967 / 7045 mismatches).
+
 ## [Unreleased] — 2026-11-16 — A redundant alias and two misplaced comments in the hop functions removed
 
 **No output change; the compiled code is identical** (`cc -S -O2` of `aec.c` is byte-identical on `SIMD=1`, `SIMD=0` and `AEC_NO_ARRAY=1`). `aec_prepare_post_dt()` held the reference power under a third name (`const float far_power`), and `aec_run_post_chain()` began with a stray comment and blank line and ended with a comment that described a call already made. The alias is gone and the two comments sit beside what they describe.
