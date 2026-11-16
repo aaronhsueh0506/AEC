@@ -212,11 +212,19 @@ int main(int argc, char* argv[]) {
     int frames_per_sec = hop > 0 ? sr / hop : 0;
     if (frames_per_sec <= 0) frames_per_sec = 1;
 
-    int frame_idx = 0;
+    int frame_idx = 0, dsp_refusals = 0, status = 0;
     for (int i = 0; i + hop <= n; i += hop) {
         wav_read_float(mr, mic, hop);
         wav_read_float(rr, ref, hop);
-        aec_process(aec, mic, ref, out);
+        int rc = aec_process(aec, mic, ref, out);
+        if (rc == AEC_ERR_DSP) {
+            /* The instance has reset itself and `out` is zero: write the hop as silence and carry on. */
+            dsp_refusals++;
+        } else if (rc != AEC_OK) {
+            fprintf(stderr, "ERROR: aec_process failed (%d) at frame %d\n", rc, frame_idx);
+            status = 5;
+            break;
+        }
         wav_write_float(ww, out, hop);
         frame_idx++;
 
@@ -233,6 +241,7 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    if (dsp_refusals) fprintf(stderr, "WARNING: %d hops refused (AEC_ERR_DSP), written as silence\n", dsp_refusals);
     fprintf(stderr, "Processed %d frames @ hop=%d sr=%d level=%s cng=%d delay_est=%d "
             "delay_mode=%s num_filters=%d fixed_delay_samples=%d\n",
             frame_idx, hop, sr,
@@ -263,5 +272,5 @@ int main(int argc, char* argv[]) {
     wav_close_write(ww);
     wav_close_read(mr); wav_close_read(rr);
     aec_destroy(aec);
-    return 0;
+    return status;
 }

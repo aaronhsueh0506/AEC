@@ -60,6 +60,11 @@ byte 數、`delay_aec_get_mem_size()` 回傳的 estimator byte 數（非 `matche
 "$BIN"/aec_wav mic.wav ref.wav /dev/null --print-mem-size --delay-mode fixed --fixed-delay 1600
 ```
 
+### 被拒絕的 hop 與處理錯誤
+
+`aec_process()` 回 `AEC_ERR_DSP`（有限但極大的輸入使結果溢位）時，函式庫已自行重設、輸出為零：`aec_wav` 把該 hop 當靜音寫出並繼續，結尾印出
+`WARNING: N hops refused (AEC_ERR_DSP), written as silence`。其他非 `AEC_OK` 的回傳值印出 `ERROR: aec_process failed (...)` 並以結束碼 5 停止。
+
 ### Duty census 診斷輸出
 
 正常處理完（非 `--print-mem-size`）結尾，`aec_wav` 會在既有的 `Processed ...`
