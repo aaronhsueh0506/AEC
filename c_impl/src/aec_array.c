@@ -30,8 +30,8 @@
 #include "utility/mem_align.h"
 #include "utility/simd_kernel_nn.h"    /* skn_all_finite_f32 */
 
-/* Matched-filter duty cycle: full-rate analysis until the estimate has been solid and unchanged for DUTY_HOLD_S, then one hop in
- * K = round(delay_est_period_s / hop_s) / AEC_DUTY_PERIOD_DIVISOR. The period floor is 1, so 0.0 means true full rate. */
+/* Matched-filter duty cycle: full-rate analysis until the estimate has been solid and unchanged for DUTY_HOLD_S (the decimated
+ * rate that follows is in aec_array_internal.h, AEC_DUTY_PERIOD_DIVISOR). */
 #define DUTY_HOLD_S               0.3f
 
 typedef struct ArraySnapshot {

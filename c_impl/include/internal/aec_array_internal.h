@@ -51,10 +51,8 @@ typedef struct AecArray AecArray;      /* the flow state, defined in aec_array.c
 /* ---- dispatch from aec.c (the AecResolved is validated unless noted) -------------------------------------------------------------- */
 
 #ifndef AEC_NO_ARRAY
-/* Checks the array-related fields of a cfg (n_mics in {1, 4}, capture_proxy_channel, the quarantine-enabled rule and, for an
- * array, the flow's own rules: residual != OFF, the three product grids, an estimator that can be sized,
- * a valid derived lane). Called at the end of aec_resolve_tuned() on the resolved configuration, after the quarantine ranges.
- * 1 = acceptable. */
+/* Checks the array fields of a cfg (n_mics in {1, 4}, capture_proxy_channel, the quarantine rule and, for an array, the flow's own: residual != OFF,
+ * the three product grids, a sizeable estimator, a valid derived lane). Called at the end of aec_resolve_tuned(). 1 = acceptable. */
 int    aec_array_impl_config_ok(const AecResolved* resolved);
 size_t aec_array_impl_get_mem_size(const AecResolved* resolved);                    /* 0 on failure */
 int    aec_array_impl_get_mem_breakdown(const AecResolved* resolved, AecMemBreakdown* out);   /* AecStatus as aec_get_mem_breakdown */
@@ -109,9 +107,9 @@ Aec*   aec_lane_init(void* mem, size_t mem_size, const AecResolved* lane, FftHan
 #endif
 
 /* ---- far-only analysis shared across lanes ------------------------------------------------------------------------- *
- * Lane 0 publishes its far-only results each hop; lanes 1-3 reuse them. hop: stages that read the far hop alone; fft: the
- * donor's far spectrum and what derives from it (needs the lanes' spectra to agree); analysis: the tonal counters and noise
- * floor, valid while the lane's far history has equalled the donor's since the last reset; post: the donor's far PSD. */
+ * Lane 0 publishes its far-only results each hop and lanes 1-3 reuse them: hop (stages that read the far hop alone), fft (the donor's far
+ * spectrum and what derives from it), analysis (tonal counters, noise floor; valid while the far history has equalled the donor's
+ * since the last reset), post (the donor's far PSD). */
 typedef struct AecFarShare {
     const Aec* donor;
     int hop, fft, analysis, post;

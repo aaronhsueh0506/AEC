@@ -766,9 +766,6 @@ int aec_get_mem_breakdown(const AecConfig* cfg_in, AecMemBreakdown* out) {
     return aec_mem_breakdown_resolved(&rs, out);
 }
 
-/* Carve of an instance whose Aec sits at the start of its pool (aec_init() and aec_create()). `a` must be zeroed. Returns 0,
- * or -1 if a stage refused (no unwinding: every handle lives in the carved memory). */
-
 /* Wall-clock-preserving counter thresholds shared by aec_carve() and
  * aec_reset(). */
 static void aec_recompute_wallclock_thresholds(Aec* a, int hop, int sample_rate) {
@@ -1272,6 +1269,8 @@ static void aec_init_scalar_state(Aec* a, const AecResolved* rs, const AecBalanc
     a->is_static = 1;
 }
 
+/* Carve of an instance whose Aec sits at the start of its pool (aec_init() and aec_create()). `a` must be zeroed. Returns 0,
+ * or -1 if a stage refused (no unwinding: every handle lives in the carved memory). */
 static int aec_carve(Aec* a, uint8_t* ptr, const AecResolved* rs,
                       int hop, int blk, int fft, int K, int np,
                       int buf_samp, const AecCarveOpt* opt) {

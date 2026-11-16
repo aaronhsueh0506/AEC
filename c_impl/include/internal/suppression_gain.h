@@ -162,10 +162,8 @@ void suppression_gain_update_dominant_nearend(
     const float *residual_echo_unbounded,
     const float *comfort_noise);
 
-/* Far-end statistics of one hop, as get_gain() derives them from its render block: the sum of the
- * squared samples (pairwise float32 sum) and the largest squared sample. `render_block` has `n`
- * samples in the scale get_gain() receives (int16-scaled); both outputs are 0 for NULL, n <= 0 or
- * n > 1024. */
+/* Far-end statistics of one hop as get_gain() derives them from its int16-scaled render block of n samples: the pairwise float32 sum of
+ * the squares and the largest square; both are 0 for NULL, n <= 0 or n > 1024. */
 void suppression_gain_render_stats(const float *render_block, int n,
                                    float *sum_sq, float *peak_sq);
 
