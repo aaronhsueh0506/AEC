@@ -30,6 +30,7 @@
  * constants. test_signal_grid_resolver() pins it against the shared
  * resolver so the instance can never be split across two grids. */
 #include "aec_balanced_config.h"
+#include "aec_config_build.h"
 #include "aec_ref_tables.h"   /* the twin's full tables: the oracle for what aec_init decodes into the pool */
 #include <stdio.h>
 #include <stdlib.h>
@@ -1002,6 +1003,34 @@ static void test_delay_mode_illegal_combinations(void) {
     free(mem);
 }
 
+/* aec_build_sg_config() hands out a fully defined tuning: the four ENR/SU table pointers are NULL (the carve decodes them), whatever the
+ * caller's struct held before. Three signal grids. */
+static void test_sg_tuning_tables_null(void) {
+    static const int sr[3] = { 16000, 16000, 48000 };
+    static const int fft[3] = { 256, 512, 1024 };
+    int i;
+    for (i = 0; i < 3; ++i) {
+        AecConfig cfg;
+        AecResolved rs;
+        SuppressionGainConfig scfg;
+        SuppressionGainTuning stun;
+        char label[96];
+        aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, sr[i]);
+        cfg.fft_size = fft[i];
+        snprintf(label, sizeof(label), "sg tuning %d/%d: resolve", sr[i], fft[i]);
+        CHECK(aec_resolve(&cfg, &rs) == 1, label);
+        memset(&scfg, 0xCD, sizeof(scfg));
+        memset(&stun, 0xCD, sizeof(stun));
+        snprintf(label, sizeof(label), "sg tuning %d/%d: aec_build_sg_config() == 0", sr[i], fft[i]);
+        CHECK(aec_build_sg_config(&rs, &scfg, &stun) == 0, label);
+        snprintf(label, sizeof(label), "sg tuning %d/%d: the four ENR/SU table pointers are NULL", sr[i], fft[i]);
+        CHECK(stun.nearend_enr_tr == NULL && stun.nearend_enr_su == NULL && stun.normal_enr_tr == NULL && stun.normal_enr_su == NULL,
+              label);
+        snprintf(label, sizeof(label), "sg tuning %d/%d: the EMR tables and the length are set", sr[i], fft[i]);
+        CHECK(stun.nearend_emr_tr != NULL && stun.normal_emr_tr != NULL && stun.table_len > 0, label);
+    }
+}
+
 int main(void) {
     test_sample_rate();
     test_filter_length();
@@ -1016,6 +1045,7 @@ int main(void) {
     test_valid_config_smoke();
     test_multi_rate_valid_smoke();
     test_direct_init_rejects_bad_rate();
+    test_sg_tuning_tables_null();
 
     printf("\n%d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;

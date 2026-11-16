@@ -74,6 +74,7 @@ int aec_build_sg_config(const AecResolved* rs, SuppressionGainConfig* out_cfg,
     hop = grid.hop_size;
     K = grid.n_freqs;
     memset(&scfg, 0, sizeof(scfg));
+    memset(&stun, 0, sizeof(stun));
     scfg.n_bins = K; scfg.sr = cfg->sample_rate; scfg.hop_size = hop;
     scfg.last_lf_smoothing_band = rd->sg_last_lf_smoothing_band;
     scfg.last_permanent_lf_smoothing_band = AECB_SG_LAST_PERMANENT;

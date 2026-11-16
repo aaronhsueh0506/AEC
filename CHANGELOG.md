@@ -42,6 +42,12 @@ when verdict requires it.
 ---
 
 
+## [Unreleased] — 2026-11-16 — aec_build_sg_config() zeroes the tuning it hands out
+
+`aec_build_sg_config()` assigned three fields of a local `SuppressionGainTuning` and copied the struct out, so the four ENR/SU table pointers its comment promises to be NULL carried whatever the stack held (the lane carve stores the struct without decoding the tables, so the values reached `sg->tun`; no code reads them there, hence no behaviour change, but a valgrind / MSan run saw undefined values). The local is now zeroed first. No output changes.
+
+- `test/test_config_validation.c`: `test_sg_tuning_tables_null()` pre-fills the caller's struct with `0xCD` on three grids and requires the four pointers to be NULL; it fails 3 of 3 without the memset.
+
 ## [Unreleased] — 2026-11-16 — A hop whose detector state overflows is refused
 
 **Behaviour change (integrators read this).** A hop of large finite microphone samples whose sum of squares overflows `float` (`hop_size * rms^2` above 3.4e38: about 1.6e18 rms at `hop_size` 128, 1.15e18 at 256, 8e17 at 512) was accepted with `AEC_OK` although the detector state it produced was not finite: `aec_get_linear().dt_indicator` read NaN on every later hop and the instantaneous ERLE stayed NaN until `aec_reset()`, so the double-talk gate and, in an array, the lane-maximum DT never fired. `aec_closed_finite()` now also requires `inst_erle_smooth` and `last_dt_indicator` to be finite (with `AEC_RESIDUAL_OFF` neither runs): such a hop is `AEC_ERR_DSP` with the instance reset, a single channel and an array lane alike. Normal input is unchanged: the four baseline streams (`SIMD=1` / `0`) are byte-identical to the previous commit's.
