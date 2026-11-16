@@ -17,7 +17,7 @@ make PROFILE=0  # build without the per-hop stage timing (on by default; aec_get
 make clean
 ```
 
-The workspace path and the `CFLAGS` and include paths must not contain spaces or quotes.
+A workspace path with spaces builds; a quote in it makes `make -s print-lib-path` fail. The flag variables (`EXTRA_CFLAGS`, `EXTRA_LDFLAGS`) take only letters, digits and `_ . / = , + -`, separated by spaces, so a quoted token or an `-I` path with a space stops the Makefile with an FP policy conflict.
 
 Artifacts land in a config-hashed `bin/<backend>-<config-hash>/` directory
 (switching `BACKEND`/`SIMD`/`PROFILE`/`EXTRA_CFLAGS`/`WERROR` always lands in a fresh one
