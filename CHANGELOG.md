@@ -42,6 +42,12 @@ when verdict requires it.
 ---
 
 
+## [Unreleased] — 2026-11-16 — Comfort-noise draws as a kernel
+
+No output change: the four baseline streams compare with 0 mismatches at `SIMD=1` and `SIMD=0`, and `aec_wav --cng` output on four clips (16 kHz / 256, 16 kHz / 512 twice, 48 kHz / 1024; levels 1 and 2) is byte-identical to the previous build at both settings.
+
+`aec_cng_fill()` draws through `sk_cng_inject_f32()` (`simd_aec.h`). The NEON twin takes the generator steps of four bins at once from the jump-ahead form of the one-step recurrence, so the draw sequence and the stored generator state are the one-per-bin sequence for every starting value. 40 % less time per call at 129, 257 and 513 bins and 3 % less in the residual stage on this host; at `SIMD=0` the loop is the old one and takes 0 to 10 % longer.
+
 ## [Unreleased] — 2026-11-16 — `AEC_LAYOUT_VERSION` 5: smaller pools, one admission rule, `aec_level_floors()`
 
 `aec_process()` output is unchanged (the four baseline streams compare with 0 mismatches at `SIMD=1` and, for the changes before the lane buffer sharing and the view split below, at `SIMD=0` too; those two touch no SIMD kernel; `split_entry` differs in its 21 `META` pool-size lines against the layout-4 streams). A stored descriptor from layout 4 is refused by `aec_init_ex()`; re-query `aec_get_mem_size()`. `sizeof(Aec)` 6,048 to 6,032 B; single-channel pools -528 / -1,040 / -2,064 B at 16k/256 / 16k/512 / 48k/1024 (239,232 / 351,088 / 774,000 B balanced `MATCHED`), array `STATE` / `ESTIMATE` / `FULL` (balanced `MATCHED`, `delay_num_filters = 5`) 420,736 / 514,688 / 524,448 B at 16k/256 (-140,720 / -142,304 / -142,544 B), 615,536 / 802,160 / 820,112 B at 16k/512 (-233,600 / -236,720 / -236,960 B) and 1,366,976 / 1,738,944 / 1,776,352 B at 48k/1024 (-527,024 / -533,216 / -533,456 B; the lanes are now 73 / 76 / 77 % of the `FULL` pool, were 86 / 89 / 90 %), `aec_res_get_mem_size()` -240 B; the array carve text gains the shared per-call region (`build_flags_hash` 3,368,782,680 to 72,260,157, LP64).

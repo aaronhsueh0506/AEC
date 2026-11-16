@@ -1275,6 +1275,81 @@ static void test_mask_zero_edge(void) {
 
 /* ═══════════════════════════ correctness: kernel 23 ══════════════════════ */
 
+/* sk_cng_inject_f32 against its scalar twin: four generator starting values (including bit 31 set and 0x7FFFFFFF), with and without
+ * the denoiser gain, three input families (special values, NaN sprinkle, in-range gains), every offset form of the edge sweep. */
+static void test_cng_inject_edge(void) {
+    static const uint32_t seeds[4] = { 42u, 0u, 0x7FFFFFFFu, 0xFFFFFFFFu };
+    static const float lut[32] = {
+        0.0f, 0.27589938f, 0.541196108f, 0.785694957f, 1.0f, 1.17587554f, 1.30656302f, 1.3870399f,
+        1.41421354f, 1.3870399f, 1.30656302f, 1.17587554f, 1.0f, 0.785694957f, 0.541196108f, 0.27589938f,
+        1.73191212e-16f, -0.27589938f, -0.541196108f, -0.785694957f, -1.0f, -1.17587554f, -1.30656302f, -1.3870399f,
+        -1.41421354f, -1.3870399f, -1.30656302f, -1.17587554f, -1.0f, -0.785694957f, -0.541196108f, -0.27589938f };
+    float *amp_a = (float *)edge_aligned_alloc((size_t)EDGE_ARENA_LEN * sizeof(float));
+    float *g_a = (float *)edge_aligned_alloc((size_t)EDGE_ARENA_LEN * sizeof(float));
+    float *nr_a = (float *)edge_aligned_alloc((size_t)EDGE_ARENA_LEN * sizeof(float));
+    Complex *sp_s = (Complex *)edge_aligned_alloc((size_t)EDGE_ARENA_LEN * sizeof(Complex));
+    Complex *sp_v = (Complex *)edge_aligned_alloc((size_t)EDGE_ARENA_LEN * sizeof(Complex));
+    float fs[2 * SK_TEST_MAX_N], fv[2 * SK_TEST_MAX_N];
+    int ni, form, o, fam, si, use_nr, i;
+    for (ni = 0; ni < N_LIST_COUNT; ++ni) {
+        int n = N_LIST[ni];
+        for (form = 0; form < EDGE_FORM_COUNT; ++form) {
+            for (o = 1; o <= EDGE_OFFSET_MAX; ++o) {
+                int in_off, out_off;
+                edge_offsets_for_form(form, o, &in_off, &out_off);
+                for (fam = 0; fam < 3; ++fam) {
+                    for (si = 0; si < 4; ++si) {
+                        for (use_nr = 0; use_nr < 2; ++use_nr) {
+                            uint32_t seed_s = seeds[si], seed_v = seeds[si];
+                            edge_fill_canary_f(amp_a, EDGE_ARENA_LEN);
+                            edge_fill_canary_f(g_a, EDGE_ARENA_LEN);
+                            edge_fill_canary_f(nr_a, EDGE_ARENA_LEN);
+                            edge_fill_canary_c(sp_s, EDGE_ARENA_LEN);
+                            edge_fill_canary_c(sp_v, EDGE_ARENA_LEN);
+                            if (fam == 0) {
+                                fill_floats(amp_a + in_off, n); fill_floats(g_a + in_off, n); fill_floats(nr_a + in_off, n);
+                            } else if (fam == 1) {
+                                fill_floats_nan_sprinkle(amp_a + in_off, n); fill_floats_nan_sprinkle(g_a + in_off, n);
+                                fill_floats_nan_sprinkle(nr_a + in_off, n);
+                            } else {
+                                for (i = 0; i < n; ++i) {
+                                    amp_a[in_off + i] = (float)((i * 29 + si) % 61) * 0.37f;
+                                    g_a[in_off + i] = (float)((i * 37 + o) % 131) / 100.0f;
+                                    nr_a[in_off + i] = (float)((i * 53 + form) % 97) / 100.0f;
+                                }
+                            }
+                            fill_complex(sp_s + out_off, n);
+                            memcpy(sp_v + out_off, sp_s + out_off, (size_t)n * sizeof(Complex));
+                            sk_cng_inject_f32_scalar(&seed_s, sp_s + out_off, amp_a + in_off, g_a + in_off,
+                                                     use_nr ? nr_a + in_off : NULL, 0.31622777f, lut, n);
+                            sk_cng_inject_f32(&seed_v, sp_v + out_off, amp_a + in_off, g_a + in_off,
+                                              use_nr ? nr_a + in_off : NULL, 0.31622777f, lut, n);
+                            for (i = 0; i < n; ++i) {
+                                fs[2 * i] = sp_s[out_off + i].r; fs[2 * i + 1] = sp_s[out_off + i].i;
+                                fv[2 * i] = sp_v[out_off + i].r; fv[2 * i + 1] = sp_v[out_off + i].i;
+                            }
+                            check_bits_classify("cng_inject_f32_edge", n, form * 100 + o, fv, fs, 2 * n);
+                            g_total_checks++;
+                            if (seed_s != seed_v) {
+                                fprintf(stderr, "MISMATCH kernel=cng_inject_f32_edge n=%d seed 0x%08x vs 0x%08x\n",
+                                        n, (unsigned)seed_v, (unsigned)seed_s);
+                                exit(1);
+                            }
+                            edge_check_canary_f("cng_inject_f32_edge:amp", amp_a, EDGE_ARENA_LEN, in_off, n);
+                            edge_check_canary_f("cng_inject_f32_edge:g", g_a, EDGE_ARENA_LEN, in_off, n);
+                            edge_check_canary_f("cng_inject_f32_edge:nr", nr_a, EDGE_ARENA_LEN, in_off, n);
+                            edge_check_canary_c("cng_inject_f32_edge:spec_scalar", sp_s, EDGE_ARENA_LEN, out_off, n);
+                            edge_check_canary_c("cng_inject_f32_edge:spec_simd", sp_v, EDGE_ARENA_LEN, out_off, n);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    free(amp_a); free(g_a); free(nr_a); free(sp_s); free(sp_v);
+    printf("PASS cng_inject_f32_edge (n=0..17+existing x offset 1..15 x 3 forms x 3 input families x 4 seeds x 2 gain modes, canary-guarded)\n");
+}
+
 static void test_noise_spectrum_update_edge(void) {
     float *spec_arena = (float *)edge_aligned_alloc((size_t)EDGE_ARENA_LEN * sizeof(float));
     float *noise_scalar_arena = (float *)edge_aligned_alloc((size_t)EDGE_ARENA_LEN * sizeof(float));
@@ -2899,6 +2974,7 @@ int main(void) {
     test_coherence_ema_gate_edge();
     test_ema_delta_edge();
     test_n2_track_edge();
+    test_cng_inject_edge();
     test_n2_initial_track_edge();
     test_mask_zero_edge();
     test_noise_spectrum_update_edge();

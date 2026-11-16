@@ -816,7 +816,7 @@
 
 AEC 的 C 呼叫端直接包含 `utility/simd_aec.h`。NLMS／Kalman 權重更新、複數模平方、CNG EMA、ERL 追蹤、pairwise 加總與穩態遮罩等共用核心位於 `audiolib/common/utility/simd_aec.h`，由 `Audio_ALG/docs/c_python_function_map.md` 的 AC-SIMD-07 統計；依規則 3，不在本表重複列出。相容別名與搬移紀錄見 CHANGELOG。
 
-PBF/Kalman H-error refresh、subband ERLE accumulation/release、render peak counters、stationarity hangover/smoothing/threshold 與 saturation predicate counts 的 array kernels 位於 `audiolib/common/utility/simd_aec.h`（Audio_ALG 對照表 AC-SIMD-07）；上表各 local wrapper 與 Python 方法對應不變。`ctest:simd_selftest_aec.c` 逐位元比較這八組純量與 SIMD 核心，涵蓋所有 lane 邊界、三種頻點數與狀態分支。
+PBF/Kalman H-error refresh、subband ERLE accumulation/release、render peak counters、stationarity hangover/smoothing/threshold、saturation predicate counts 與 comfort-noise 抽樣的 array kernels 位於 `audiolib/common/utility/simd_aec.h`（Audio_ALG 對照表 AC-SIMD-07）；上表各 local wrapper 與 Python 方法對應不變。`ctest:simd_selftest_aec.c` 逐位元比較這九組純量與 SIMD 核心，涵蓋所有 lane 邊界、三種頻點數與狀態分支。
 
 ## 3. Python-only：沒有任何 C 函式對應的 Python 符號
 

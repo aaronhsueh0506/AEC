@@ -627,8 +627,8 @@ post_done:
     if (out_pending_delay_change) *out_pending_delay_change = pdc;
 }
 
-/* Bins per chunk of the shared comfort-noise core: the N^2 -> amplitude conversion is vectorised per chunk, the random phase
- * draws stay strictly sequential in bin order. */
+/* Bins per chunk of the shared comfort-noise core: the N^2 -> amplitude conversion and the draws are vectorised per chunk; the
+ * draw sequence is one generator step per bin in bin order. */
 #define AEC_CNG_CHUNK 64
 
 void aec_apply_gain_spec(Complex* out, const Complex* base, const float* g_res, const float* g_extra, int n) {
@@ -659,27 +659,13 @@ void aec_cng_fill(uint32_t* rng, Complex* spec, const float* cn,
     if (!rng || !spec || !cn || !g_res || n < 3) return;
     seed = *rng;
     for (k0 = 1; k0 < n - 1; k0 += AEC_CNG_CHUNK) {
-        int m = n - 1 - k0, j;
+        int m = n - 1 - k0;
         if (m > AEC_CNG_CHUNK) m = AEC_CNG_CHUNK;
         /* amp[j] = sqrt(max(cn / 32768^2, 0)); the square root reads pw and writes amp (no in-place call) */
         sk_scale_f32(pw, cn + k0, inv_psd_scale, m);
         sk_clip_f32(pw, 0.0f, (float)INFINITY, m);
         sk_fast_sqrt_f32(pw, amp, m);
-        for (j = 0; j < m; ++j) {
-            int bin = k0 + j;
-            uint32_t ix;
-            float ng, cn_re, cn_im, t;
-            seed = (seed * 69069u + 1u) & 0x7FFFFFFFu;
-            ix = seed >> 26;
-            cn_re = amp[j] * AECB_SQRT2_SIN_LUT[ix];
-            cn_im = amp[j] * AECB_SQRT2_SIN_LUT[(ix + 8u) & 31u];
-            t = 1.0f - g_res[bin] * g_res[bin];
-            if (t < 0.0f) t = 0.0f;
-            ng = fast_sqrt(t);
-            if (g_nr) ng = ng * fmaxf(g_nr[bin], nr_floor);
-            spec[bin].r += ng * cn_re;
-            spec[bin].i += ng * cn_im;
-        }
+        sk_cng_inject_f32(&seed, spec + k0, amp, g_res + k0, g_nr ? g_nr + k0 : NULL, nr_floor, AECB_SQRT2_SIN_LUT, m);
     }
     *rng = seed;
 }
