@@ -49,7 +49,7 @@ cfg.enable_cng = 0;                                       /* 只覆寫你真的�
 
 | 欄位 | 預設 | 說明／何時調整 |
 |---|---:|---|
-| `residual` | `AEC_RESIDUAL_FULL` | `AecResidualMode`：後級（殘留回音抑制）做到哪裡，允許範圍 `AEC_RESIDUAL_OFF`（0）…`AEC_RESIDUAL_FULL`（3），範圍外會被驗證拒絕。`FULL`＝完整抑制（`aec_process()` 套用增益、加舒適噪音並合成）；`OFF`＝只有線性 filter，輸出是純線性殘差、延遲降為 0，但回音殘留明顯變多，診斷時可用（見 [§9](integration.md#9-常見問題排除)）。`STATE`、`ESTIMATE` 給自己套增益的整合者，見 [§8](integration.md#8-進階整合-seam)。不影響**單聲道**實例的記憶池大小；`n_mics = 4` 的陣列實例則隨它改變，且不接受 `OFF`（[§6.8](#68-陣列實例欄位n_mics--4)）。 |
+| `residual` | `AEC_RESIDUAL_FULL` | `AecResidualMode`：後級（殘留回音抑制）做到哪裡，允許範圍 `AEC_RESIDUAL_OFF`（0）…`AEC_RESIDUAL_FULL`（3），範圍外會被驗證拒絕。`FULL`＝完整抑制（`aec_process()` 套用增益、加舒適噪音並合成）；`OFF`＝只有線性 filter，輸出是線性 filter 的輸出（`AecLinearView.linear_hop`）、延遲降為 0，但回音殘留明顯變多，診斷時可用（見 [§9](integration.md#9-常見問題排除)）。`STATE`、`ESTIMATE` 給自己套增益的整合者，見 [§8](integration.md#8-進階整合-seam)。不影響**單聲道**實例的記憶池大小；`n_mics = 4` 的陣列實例則隨它改變，且不接受 `OFF`（[§6.8](#68-陣列實例欄位n_mics--4)）。 |
 | `enable_cng` | `1` | 舒適噪音，0 或 1。若下游還有另一套噪音處理／CNG，**請關掉這個**，兩層疊加會讓噪音底變得不自然。 |
 
 內部的模組開關（mic 路徑高通 80 Hz、削波偵測與參考訊號軟限幅、shadow filter）一律開啟，不可設定。

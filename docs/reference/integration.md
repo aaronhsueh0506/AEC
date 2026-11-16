@@ -24,7 +24,7 @@
 
 三個進入點（回傳 `AecStatus`：`AEC_OK`、`AEC_ERR_ARG`、`AEC_ERR_MODE`、`AEC_ERR_SEQUENCE`）：
 
-- `aec_process(a, mic, ref, out)`：線性 + 後級；`FULL` 時 `out` 是完成的 hop，低於 `FULL` 時 `out` 是線性殘差。
+- `aec_process(a, mic, ref, out)`：線性 + 後級；`FULL` 時 `out` 是完成的 hop，低於 `FULL` 時 `out` 是 `AecLinearView.linear_hop`（精修後的線性輸出，在 FORM 選擇之前；`formed_hop`／`error_spec` 用 `aec_get_residual()` 讀）。
 - `aec_process_linear(a, mic, ref)`：第一段；`OFF` 時這一呼叫就結束整個 hop。
 - `aec_process_residual(a, NULL)`：第二段，必須緊接在同一個 hop 的 `aec_process_linear()` 之後（`beam` 參數給陣列實例，單聲道傳 `NULL`，見 [§8.8](#88-麥克風陣列實例n_mics--4)）。
 
@@ -441,7 +441,7 @@ int app_run_hop(Aec *aec, const float *mics, const float *ref,
 - `aec_process_residual()` 之前沒有同一 hop 的 `aec_process_linear()`，或 `aec_get_array()` 在第一個 `aec_process_linear()` 之前：`AEC_ERR_SEQUENCE`。
 - `aec_process_linear()` 一呼叫，上一個 hop 的融合檢視就失效：在新 hop 的 `aec_process_residual()` 之前，`aec_get_residual()`、`aec_apply_gain()`、`aec_apply_cng()` 回 `AEC_ERR_SEQUENCE`。在後級之前再呼叫一次 `aec_process_linear()` 會取代尚未完成的那個 hop。
 - 輸入含非有限值：`aec_process_linear()` 回 `AEC_ERR_ARG`，被拒絕的呼叫不改變任何狀態：上一個 hop 的檢視仍可讀，待處理的 linear 幀保留，逐階段耗時記錄不動。
-- 某條 lane 的結果不是有限值（有限但極大的 mic／ref sample；`aec_process_linear()` 逐 lane 檢查，`STATE` 也檢查；mic 在帶它的那個 hop 被拒，ref 經對齊環到達各 lane 時才被拒，晚數個 hop），或融合在引數檢查之後拒絕了該 hop（內部一致性檢查失敗，或有限的極大權重使投影溢位）：`AEC_ERR_DSP`（-4），**整個實例已像 `aec_reset()` 一樣重設**，serial 前進，之後等於從下一個 hop 起的新實例。
+- 某條 lane 的結果不是有限值（有限但極大的 mic／ref sample；`aec_process_linear()` 逐 lane 檢查，`STATE` 也檢查；mic 在帶它的那個 hop 被拒，ref 在對齊後的 ref hop 含有它的那個 hop 被拒：直接到達各 lane 時就是帶它的那個 hop，經對齊環則晚 floor((延遲＋位置)／hop_size) 個 hop），或融合在引數檢查之後拒絕了該 hop（內部一致性檢查失敗，或有限的極大權重使投影溢位）：`AEC_ERR_DSP`（-4），**整個實例已像 `aec_reset()` 一樣重設**，serial 前進，之後等於從下一個 hop 起的新實例。
 - `aec_set_level()` 重新設定融合後的增益階段（`FULL`）；lane 自己的 level 沒有作用。`STATE`／`ESTIMATE` 沒有增益階段，呼叫回 0 但依構造無效。
 
 **陣列實例上被拒絕的呼叫**：

@@ -189,11 +189,11 @@ Beamformer 與合成**不在函式庫內**，由呼叫端提供。建立與記�
 - 型別一律是 `float`（32-bit），**不是** `int16`。
 - 標稱範圍是 **[-1.0, +1.0]**。從 PCM16 轉入時除以 32768。
 - 超出 [-1, 1] 不會被拒絕，但內部的飽和偵測（門檻 0.95）會判定為削波。
-- 有限但極大、讓內部運算溢位的 sample（單一場景實測：mic 約 1.9e19 起；ref 在 `OFF`／`STATE` 約 1e19 起，`ESTIMATE`／`FULL` 約 3e13 到 6e14 起；門檻隨場景而變，PCM16 輸入到不了。ref 的極大 sample 是在經對齊環到達濾波器時才被拒，晚數個 hop。陣列實例逐 lane 同樣檢查，任一路 mic 約 1.9e19 起，在帶它的那個 hop 被拒）：
+- 有限但極大、讓內部運算溢位的 sample（單一場景實測：mic 約 1.9e19 起；ref 在 `OFF`／`STATE` 約 1e19 起，`ESTIMATE`／`FULL` 約 3e13 到 6e14 起；門檻隨場景而變，PCM16 輸入到不了。整個 mic hop 的 `hop_size × rms²` 超過 3.4e38 即被拒（hop 128／256／512 的 rms 約 1.6e18／1.2e18／8.2e17，四種 `residual` 皆然）。ref 的極大 sample 在對齊後的 ref hop 含有它的那個 hop 被拒：直接到達濾波器時（`EXTERNAL_ALIGNED`、延遲尚未鎖定、或延遲加上該 sample 在 hop 內的位置小於 hop_size）就是帶它的那個 hop，否則晚 floor((延遲＋位置)／hop_size) 個 hop。`residual = OFF` 不算 ref 功率：約 2e19 的 sample 在到達濾波器後再晚兩到三個 hop 才被拒，1e20 以上當下就被拒。陣列實例逐 lane 同樣檢查，任一路 mic 約 1.9e19 起，在帶它的那個 hop 被拒）：
   該次呼叫回 **`AEC_ERR_DSP`**，實例已像 `aec_reset()` 一樣重設，`aec_process()` 的 `out` 寫成零。呼叫端把這個 hop 當靜音，
   清自己的 ISTFT／OLA 尾巴與 CNG 狀態（serial 已前進），需要的話重啟吃 AEC 輸出、帶歷史的後級（NR、模型串流），下一個 hop 照常送；
   之後的輸出與「從下一個 hop 起的新實例」逐位元相同。非有限的 sample（NaN／Inf）仍是 `AEC_ERR_ARG`，實例不動。
-  細節見 `aec.h` 的 “Refused hop” 與 [§5 錯誤處理](reference/lifecycle.md)。
+  細節見 [§5 錯誤處理](reference/lifecycle.md)（`aec.h` 的 “Refused hop” 只留契約）。
 - AEC 不做輸出 peak limiting；`out` 可能短暫超過 [-1, 1]。需要限制峰值時，
   請在整條 AEC/beamforming/NR 流程的最後加 AGC/DRC/limiter；轉成 PCM 時仍須飽和裁切。
 

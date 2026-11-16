@@ -238,7 +238,8 @@ typedef struct AecBeam {
  * (lockstep). Three entry points on one instance; the residual stage's reach is AecConfig.residual.
  *
  *   aec_process           linear + residual and, with AEC_RESIDUAL_FULL, the gain, the comfort noise and the library's
- *                         own synthesis: `out` is the finished hop. Below FULL, `out` is the linear residual.
+ *                         own synthesis: `out` is the finished hop. Below FULL, `out` is
+ *                         AecLinearView.linear_hop (the refined linear output, before FORM).
  *   aec_process_linear    stage 1: front end, delay, shadow and main filter. With AEC_RESIDUAL_OFF it also ends the hop.
  *   aec_process_residual  stage 2, directly after aec_process_linear of the same hop: FORM, the echo-state classifier, r2,
  *                         comfort noise and G_res, as far as AecConfig.residual reaches. It applies nothing and synthesizes nothing:
@@ -256,8 +257,11 @@ typedef struct AecBeam {
  * its power trackers and the AecResidualView vectors as far as AecConfig.residual reaches. A finite sample large enough to
  * overflow one of them makes that call return AEC_ERR_DSP with the instance reset as by aec_reset(). Measured on one scene
  * (full scale is 1.0): |mic| from about 1.9e19; |ref| about 1e19 with OFF / STATE, about 3e13 to 6e14 with ESTIMATE / FULL
- * (r2 squares the echo). The onsets depend on the scene and are not guarantees; PCM16 input cannot reach them. A reference
- * sample is refused when it reaches the filters through the alignment ring, hops after the call that carried it.
+ * (r2 squares the echo). A whole microphone hop is refused once hop_size * rms^2 exceeds 3.4e38 (rms 1.6e18 at hop 128, 1.2e18 at
+ * 256, 8.2e17 at 512), in every residual mode. The onsets depend on the scene and are not guarantees; PCM16 input cannot reach
+ * them. A reference sample is refused on the hop that carried it when it reaches the filters at once (AEC_DELAY_EXTERNAL_ALIGNED,
+ * or a delay not yet locked or shorter than the sample's offset in the hop), otherwise when the ring delay brings it there, up to
+ * ceil(delay / hop_size) hops later.
  *   - aec_process() has written hop_size zeros to `out`;
  *   - aec_post_reset_serial() has moved; no hop is open (aec_process_residual() after a refused aec_process_linear() is
  *     AEC_ERR_SEQUENCE); aec_get_residual() returns AEC_ERR_SEQUENCE until the next hop, and with FULL so do aec_apply_gain()
@@ -356,8 +360,9 @@ void aec_apply_cng_spec(uint32_t* rng, Complex* spec, const float* cn, const flo
  * steps are in docs/sdk_migration_output_guard.md. */
 
 /* Counter of hard post-chain resets (wrapping uint32_t, 0 on a freshly created instance), read without
- * consuming it. It advances by one on each of:
- *   - aec_reset(): a separate call, not part of any processing call; the serial already reads +1 when
+ * consuming it. Compare it only for inequality with the stored value: a single channel advances by one on each of the events
+ * below, an array instance by four (the sum of its four lanes' counters). The events:
+ *   - aec_reset(): a separate call, not part of any processing call; the serial has already moved when
  *     aec_reset() returns, and the next processing call starts from the cleared state.
  *   - a hard reset inside a processing call (aec_process / aec_process_linear), done before that hop's
  *     synthesis: the hard branch of a first delay acquisition (Path A: no warm tap transfer and no
@@ -481,7 +486,8 @@ int aec_get_linear(const Aec* a, AecLinearView* out);
  * FULL; scene-dependent, and PCM16 input cannot reach them) makes it return AEC_ERR_DSP with the whole instance reset, as by
  * aec_reset(): no hop is open (aec_process_residual() is AEC_ERR_SEQUENCE, AEC_ERR_MODE with STATE; aec_get_array() is
  * AEC_ERR_SEQUENCE), AecLinearView reads zeros, and from the next hop the instance behaves as a fresh one. A microphone sample
- * is refused on the hop that carried it; a reference sample when it reaches the lanes through the alignment ring, hops later.
+ * is refused on the hop that carried it; a reference sample on the hop that carried it when it reaches the lanes at once, otherwise
+ * when the ring delay brings it there, up to ceil(delay / hop_size) hops later.
  * The fusion refusing a hop after the beam check (finite weights whose projections overflow, an internal consistency check) is
  * AEC_ERR_DSP with the same reset.
  * Call order. A second aec_process_linear() before the residual stage replaces the pending hop (the four filters have already

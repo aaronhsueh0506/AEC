@@ -42,6 +42,16 @@ when verdict requires it.
 ---
 
 
+## [Unreleased] — 2026-11-16 — Refusal timing, the whole-hop threshold, the output below FULL and the array reset serial documented
+
+Comment and documentation text only; the compiled code is unchanged (`cc -E -P` of `aec.h` differs only in comments).
+
+- A reference sample is refused on the hop that carries it when it reaches the filters at once (`EXTERNAL_ALIGNED`, a delay not yet locked, or a delay shorter than the sample's offset in the hop), otherwise when the ring delay brings it there, up to `ceil(delay / hop)` hops later. The old text said "hops later" for every case.
+- A whole microphone hop is refused once `hop_size * rms^2` exceeds 3.4e38 (rms 1.6e18 at hop 128, 1.2e18 at 256, 8.2e17 at 512) in every residual mode (measured by bisection on `aec_process()`, `EXTERNAL_ALIGNED`, three grids).
+- Below `FULL`, `aec_process()`'s `out` is `AecLinearView.linear_hop` (before FORM selection), not `formed_hop`.
+- `aec_post_reset_serial()`: compare for inequality only; an array instance moves it by four per reset event.
+- Files: `aec.h`, `lifecycle.md`, `integration.md`, `c_user_manual_zh_TW.md`, `aec_c_api.html`.
+
 ## [Unreleased] — 2026-11-16 — A hop whose energy detector or reference power overflows is refused in every mode
 
 **Behaviour change (integrators read this).** `aec_closed_finite()` did not look at `dt_from_energy` or the hop's reference power. A whole microphone hop with `hop_size * rms^2` above 3.4e38 was accepted by residual `OFF` although it left `dt_from_energy` at NaN until the next reset (no output difference measured; the state was only latent). One reference sample near 2e19 (the hop's sum of squares overflows) was accepted by `STATE` with `far_power` inf and refused hops later; it is now refused on the hop that carries it, as `ESTIMATE` and `FULL` already did. Residual `OFF` still computes no reference power, so a poisoned reference sample is refused there when it reaches the filters.
