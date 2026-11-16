@@ -17,6 +17,8 @@ make PROFILE=0  # build without the per-hop stage timing (on by default; aec_get
 make clean
 ```
 
+The workspace path and the `CFLAGS` and include paths must not contain spaces or quotes.
+
 Artifacts land in a config-hashed `bin/<backend>-<config-hash>/` directory
 (switching `BACKEND`/`SIMD`/`PROFILE`/`EXTRA_CFLAGS`/`WERROR` always lands in a fresh one
 automatically — no stale-object risk, no manual clean needed). Run `make
