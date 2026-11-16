@@ -82,6 +82,11 @@ static void make_scene(int hop) {
         }
 }
 
+/* Sample i of a whole-hop poison: +-value noise with an uneven envelope. */
+static float whole_hop_sample(int i, float value) {
+    return ((i * 7 + 3) % 5 < 2 ? -1.0f : 1.0f) * value * (0.5f + 0.1f * (float)(i % 6));
+}
+
 static int all_finite(const float* x, int n) {
     int i;
     if (!x) return 1;
@@ -194,7 +199,7 @@ static void run_row(const Grid* g, int mode, Entry e, const Poison* p) {
         memcpy(ref, g_far[h], (size_t)hop * sizeof(float));
         if (h == POISON_HOP) {
             if (p->whole_hop) {
-                for (int i = 0; i < hop; ++i) mic[i] = ((i * 7 + 3) % 5 < 2 ? -1.0f : 1.0f) * p->value * (0.5f + 0.1f * (float)(i % 6));
+                for (int i = 0; i < hop; ++i) mic[i] = whole_hop_sample(i, p->value);
             } else if (p->on_ref) {
                 ref[POISON_AT] = p->value;
             } else {
@@ -409,9 +414,10 @@ static void run_array_row(void) {
 /* ---- the array's lanes are checked as single channels ---------------------------------------------------------------- */
 
 #define ARR_REC_MAX (5 * HOP_MAX + 26 * NB_MAX + 2)   /* aligned far + 4 lane hops; up to 25 floats per bin; delay pair */
-#define ARR_N_POISONS 5   /* the last two put the value on every sample of the lane's hop */
+#define ARR_N_POISONS 5
 static const char* const ARR_POISON_NAME[ARR_N_POISONS] = { "mic 3e38", "mic 1e25", "mic 1e20", "mic hop 3e18", "mic hop 1e19" };
 static const float ARR_POISON[ARR_N_POISONS] = { 3.0e38f, 1.0e25f, 1.0e20f, 3.0e18f, 1.0e19f };
+static const int ARR_WHOLE_HOP[ARR_N_POISONS] = { 0, 0, 0, 1, 1 };   /* 1: the value is on every sample of the lane's hop */
 
 static Aec* make_array(const Grid* g, int mode) {
     AecConfig c;
@@ -496,11 +502,10 @@ static void run_array_lane_row(const Grid* g, int mode, int lane, int poison) {
         uint32_t serial_before = aec_post_reset_serial(a);
         array_hop(h, hop, mics);
         if (h == POISON_HOP) {
-            if (poison < 3) {
-                mics[POISON_AT * AEC_ARRAY_MICS + lane] = ARR_POISON[poison];
+            if (ARR_WHOLE_HOP[poison]) {
+                for (int i = 0; i < hop; ++i) mics[i * AEC_ARRAY_MICS + lane] = whole_hop_sample(i, ARR_POISON[poison]);
             } else {
-                for (int i = 0; i < hop; ++i)
-                    mics[i * AEC_ARRAY_MICS + lane] = ((i * 7 + 3) % 5 < 2 ? -1.0f : 1.0f) * ARR_POISON[poison] * (0.5f + 0.1f * (float)(i % 6));
+                mics[POISON_AT * AEC_ARRAY_MICS + lane] = ARR_POISON[poison];
             }
         }
         rc = array_run(a, mode, mics, g_far[h], w, gained, &lin_rc);

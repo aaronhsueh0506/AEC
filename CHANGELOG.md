@@ -42,6 +42,10 @@ when verdict requires it.
 ---
 
 
+## [Unreleased] — 2026-11-16 — test_dsp_refusal: the whole-hop poison sample exists once
+
+Test only. `test/test_dsp_refusal.c` wrote the whole-hop poison expression twice (single channel and array); it is now `whole_hop_sample()`, and the array poison table carries a `whole_hop` flag like the single-channel one instead of a `poison < 3` index test. The row count is unchanged (1037); marking the array poisons as single samples turns 72 assertions red.
+
 ## [Unreleased] — 2026-11-16 — The residual stage's two exclusive branches are an if / else
 
 **No output change.** `aec_stage_residual()` ran its residual block under `residual != OFF` and then called `aec_update_linear_only_steering()`, whose first line returned unless `residual == OFF`: two exclusive branches written in sequence. They are now `if` / `else`. `aec_steer_mu()` lost its `clear_per_bin` flag (the residual path clears `has_per_bin_mu` itself before the call; the converged branch sets it again) and `is_stationary_dt` lives in the block that uses it. The four baseline streams (`SIMD=1` / `0`) are unchanged; dropping the clear turns three of them red (2190 / 1967 / 7045 mismatches).
