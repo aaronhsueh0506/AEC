@@ -8,10 +8,6 @@
 #include <math.h>
 #include <string.h>
 
-/* Bins per accumulator block in the row-major flag walk; a working-set knob that does not change
- * the output. */
-#define STAT_ACC_BLOCK 128
-
 /* NoiseSpectrum */
 
 static void noise_spectrum_init(NoiseSpectrum *n, int n_freqs,
@@ -142,7 +138,7 @@ static void smooth_per_freq(StationarityEstimator *s) {
 void stationarity_estimator_update_stationarity_flags(StationarityEstimator *s,
                                                       const float *render_psd,
                                                       const float *average_reverb) {
-    int k, row;
+    int k;
     float *slot = &s->history[s->history_write * s->n_freqs];
 
     /* Store the latest PSD in the history ring. */
@@ -150,37 +146,10 @@ void stationarity_estimator_update_stationarity_flags(StationarityEstimator *s,
     s->history_write = (s->history_write + 1) % s->window_hops;
     if (s->history_filled < s->window_hops) s->history_filled += 1;
 
-    /* acum_power = sum of the filled history rows + average_reverb. The bins are walked row-major
-     * over STAT_ACC_BLOCK-wide blocks, so each bin keeps its own add order and reads stay
-     * contiguous. */
-    {
-        float acc[STAT_ACC_BLOCK];
-        int base;
-        for (base = 0; base < s->n_freqs; base += STAT_ACC_BLOCK) {
-            int m = s->n_freqs - base;
-            if (m > STAT_ACC_BLOCK) m = STAT_ACC_BLOCK;
-            for (k = 0; k < m; ++k) {
-                acc[k] = s->history[0 * s->n_freqs + base + k];
-            }
-            for (row = 1; row < s->history_filled; ++row) {
-                const float *hrow = s->history + (size_t)row * s->n_freqs + base;
-                for (k = 0; k < m; ++k) {
-                    acc[k] = acc[k] + hrow[k];
-                }
-            }
-            /* Add the reverb (zeros if NULL). */
-            if (average_reverb != NULL) {
-                const float *rev = average_reverb + base;
-                for (k = 0; k < m; ++k) {
-                    acc[k] = acc[k] + rev[k];
-                }
-            }
-            /* Stationary if acum < STAT_THR_RATIO * window_hops * max(noise, 1e-30). */
-            sk_stationarity_flags_u8(s->stationarity_flags + base, acc,
-                                      s->noise.noise + base, s->window_hops,
-                                      STAT_THR_RATIO, m);
-        }
-    }
+    /* Stationary if sum(filled history rows) + average_reverb (zeros if NULL) < STAT_THR_RATIO * window_hops * max(noise, 1e-30).
+     * The rows are added in storage order. */
+    sk_stationarity_window_flags_u8(s->stationarity_flags, s->history, (size_t)s->n_freqs, s->history_filled,
+                                    average_reverb, s->noise.noise, s->window_hops, STAT_THR_RATIO, s->n_freqs);
 
     update_hangover(s);
     smooth_per_freq(s);

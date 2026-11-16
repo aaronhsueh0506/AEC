@@ -42,6 +42,12 @@ when verdict requires it.
 ---
 
 
+## [Unreleased] — 2026-11-16 — The stationarity window sums and flags as one kernel
+
+No output change: the four baseline streams compare with 0 mismatches at `SIMD=1` and `SIMD=0`, and `aec_wav` output on the same clips is byte-identical to the previous build at both settings.
+
+`stationarity_estimator_update_stationarity_flags()` forms the window sums and the flags in one pass, `sk_stationarity_window_flags_u8()` (`simd_aec.h`); the NEON twin keeps each bin group's sum in registers over the rows (storage order, reverb last). 19 to 23 % less time per call at 129, 257 and 513 bins and 6 to 9 % less in the steering stage on this host; at `SIMD=0` the scalar twin keeps the 128-bin row-major blocks and the time is unchanged.
+
 ## [Unreleased] — 2026-11-16 — Comfort-noise draws as a kernel
 
 No output change: the four baseline streams compare with 0 mismatches at `SIMD=1` and `SIMD=0`, and `aec_wav --cng` output on four clips (16 kHz / 256, 16 kHz / 512 twice, 48 kHz / 1024; levels 1 and 2) is byte-identical to the previous build at both settings.

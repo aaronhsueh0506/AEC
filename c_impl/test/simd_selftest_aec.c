@@ -2593,6 +2593,84 @@ static void test_stationary_mask(void) {
     printf("PASS stationary_mask_u8 (flags any byte, hangovers incl. INT32 extremes, NULL mask, offsets 1..15 canary-guarded)\n");
 }
 
+/* sk_stationarity_window_flags_u8 against its scalar twin and against the row sums written out in front of
+ * sk_stationarity_flags_u8_scalar: 1..7 rows, row stride >= n, with and without the reverb row, offsets 1..15, special-value and
+ * NaN-sprinkled inputs. The flag bytes are compared exactly. */
+static void test_stationarity_window_flags(void) {
+    enum { MAXROWS = 7, STRIDE_PAD = 5 };
+    const int stride_max = SK_TEST_MAX_N + STRIDE_PAD;
+    float *hist = (float *)edge_aligned_alloc((size_t)(MAXROWS * stride_max + EDGE_OFFSET_MAX + 8) * sizeof(float));
+    float *noise = (float *)edge_aligned_alloc((size_t)EDGE_ARENA_LEN * sizeof(float));
+    float *rev = (float *)edge_aligned_alloc((size_t)EDGE_ARENA_LEN * sizeof(float));
+    unsigned char *fl_s = (unsigned char *)edge_aligned_alloc((size_t)EDGE_ARENA_LEN);
+    unsigned char *fl_v = (unsigned char *)edge_aligned_alloc((size_t)EDGE_ARENA_LEN);
+    unsigned char *fl_r = (unsigned char *)edge_aligned_alloc((size_t)EDGE_ARENA_LEN);
+    float acc[SK_TEST_MAX_N];
+    int ni, rows, o, fam, use_rev, k, r;
+    for (ni = 0; ni < N_LIST_COUNT; ++ni) {
+        int n = N_LIST[ni];
+        for (rows = 1; rows <= MAXROWS; ++rows) {
+            for (o = 1; o <= EDGE_OFFSET_MAX; o += (n > 20 ? 7 : 1)) {
+                int stride = n + (o % STRIDE_PAD);
+                for (fam = 0; fam < 4; ++fam) {
+                    for (use_rev = 0; use_rev < 2; ++use_rev) {
+                        const float ratio = fam == 3 ? 1.0f : 10.0f;
+                        const int window_hops = fam == 3 ? 1 : 3 + rows;
+                        edge_fill_canary_b(fl_s, EDGE_ARENA_LEN);
+                        edge_fill_canary_b(fl_v, EDGE_ARENA_LEN);
+                        edge_fill_canary_b(fl_r, EDGE_ARENA_LEN);
+                        edge_fill_canary_f(noise, EDGE_ARENA_LEN);
+                        edge_fill_canary_f(rev, EDGE_ARENA_LEN);
+                        if (fam == 0) {
+                            for (r = 0; r < rows; ++r) fill_floats(hist + o + (size_t)r * stride, n);
+                            fill_floats(noise + o, n);
+                            fill_floats(rev + o, n);
+                        } else if (fam == 1) {
+                            for (r = 0; r < rows; ++r) fill_floats_nan_sprinkle(hist + o + (size_t)r * stride, n);
+                            fill_floats_nan_sprinkle(noise + o, n);
+                            fill_floats_nan_sprinkle(rev + o, n);
+                        } else if (fam == 3) {
+                            /* 2^24 first, then ones: the sum stays 2^24 only when added in row order, so the flag against 2^24 + 2 tells the orders apart. */
+                            for (r = 0; r < rows; ++r)
+                                for (k = 0; k < n; ++k) hist[o + (size_t)r * stride + k] = r == 0 ? 16777216.0f : 1.0f;
+                            for (k = 0; k < n; ++k) { noise[o + k] = 16777218.0f; rev[o + k] = 1.0f; }
+                        } else {
+                            for (r = 0; r < rows; ++r)
+                                for (k = 0; k < n; ++k) hist[o + (size_t)r * stride + k] = (float)((k * 7 + r * 13) % 29) * 0.01f;
+                            for (k = 0; k < n; ++k) {
+                                noise[o + k] = (float)((k * 5 + o) % 17) * 0.004f;
+                                rev[o + k] = (float)((k * 3) % 11) * 0.002f;
+                            }
+                        }
+                        sk_stationarity_window_flags_u8_scalar(fl_s + o, hist + o, (size_t)stride, rows,
+                                                                use_rev ? rev + o : NULL, noise + o, window_hops, ratio, n);
+                        sk_stationarity_window_flags_u8(fl_v + o, hist + o, (size_t)stride, rows,
+                                                         use_rev ? rev + o : NULL, noise + o, window_hops, ratio, n);
+                        for (k = 0; k < n; ++k) {
+                            acc[k] = hist[o + k];
+                            for (r = 1; r < rows; ++r) acc[k] = acc[k] + hist[o + (size_t)r * stride + k];
+                            if (use_rev) acc[k] = acc[k] + rev[o + k];
+                        }
+                        sk_stationarity_flags_u8_scalar(fl_r + o, acc, noise + o, window_hops, ratio, n);
+                        g_total_checks += 2 * n;
+                        if (memcmp(fl_s + o, fl_v + o, (size_t)n) != 0 || memcmp(fl_r + o, fl_v + o, (size_t)n) != 0) {
+                            fprintf(stderr, "MISMATCH kernel=stationarity_window_flags_u8 n=%d rows=%d offset=%d fam=%d rev=%d\n",
+                                    n, rows, o, fam, use_rev);
+                            exit(1);
+                        }
+                        edge_check_canary_b("stationarity_window_flags_u8:scalar", fl_s, EDGE_ARENA_LEN, o, n);
+                        edge_check_canary_b("stationarity_window_flags_u8:simd", fl_v, EDGE_ARENA_LEN, o, n);
+                        edge_check_canary_f("stationarity_window_flags_u8:noise", noise, EDGE_ARENA_LEN, o, n);
+                        edge_check_canary_f("stationarity_window_flags_u8:rev", rev, EDGE_ARENA_LEN, o, n);
+                    }
+                }
+            }
+        }
+    }
+    free(hist); free(noise); free(rev); free(fl_s); free(fl_v); free(fl_r);
+    printf("PASS stationarity_window_flags_u8 (1..7 rows, strides, reverb row on/off, offsets, special/NaN inputs, add-order probe, canary-guarded)\n");
+}
+
 /* The loops sk_stationary_mask_u8 stands for, written out. */
 static int ref_stationary_loop(const unsigned char *flags, const int32_t *hang,
                                unsigned char *mask, int n) {
@@ -2929,6 +3007,7 @@ int main(void) {
     test_noise_floor_track();
     test_raise_to();
     test_stationary_mask();
+    test_stationarity_window_flags();
     test_stationary_mask_large();
     test_inline_aec_oracles();
     test_inline_aec_blocks();
