@@ -328,8 +328,8 @@ uint32_t aec_post_reset_serial(const Aec* a);
 int aec_synthesis_window(const Aec* a, const float** window, int* length);
 
 /* Read-only seam for an external post-filter: aligned_far_hop aliases the aligned far hop (raw while UNLOCKED), valid until the
- * next process or reset call; generation increments (saturating) on every ring-offset change and CHANGED marks the hop that
- * bumped it. Per-mode delay_samples / delay_confidence and the bulk-delay policy: docs/reference/integration.md. */
+ * next process or reset call; CHANGED marks the hop that bumped the alignment. Per-mode delay_samples / delay_confidence and
+ * the bulk-delay policy: docs/reference/integration.md. */
 typedef enum AecLinearDelayState {
     AEC_LINEAR_DELAY_UNLOCKED = 0,  /* far_hop is raw / not compensated */
     AEC_LINEAR_DELAY_LOCKED   = 1,  /* compensated with a stable offset */

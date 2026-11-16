@@ -172,7 +172,7 @@ aec_get_linear(aec, &amp;lin);              /* 時域 seam:線性殘差 + 已對
 <tr><td><code>residual = OFF</code> 不要用</td><td><b>關鍵</b>。<code>OFF</code> 時沒有後級:<code>aec_process_residual()</code>／<code>aec_get_residual()</code> 回 <code>AEC_ERR_MODE</code>,<code>error_spec</code>／<code>res_gain</code>／<code>r2</code>／<code>comfort_noise</code>／<code>formed_hop</code> 都拿不到</td></tr>
 </table></div>
 <div class="warn"><b>borrowed pointer 的效期只到下一次 process。</b><code>AecResidualView</code>／<code>AecLinearView</code> 的每個指標都 alias 內部 per-hop buffer,<b>任一個 process 入口</b>都會覆寫它們。要跨 hop 保存必須自己複製走。</div>
-<div class="note"><b>接 NR 時 <code>r2</code> 要先換尺度</b>:<code>AecResidualView.r2</code> 與 <code>comfort_noise</code> 是 <b>int16² scale</b>,要除以 <code>32768²</code> 才是 audio power。<code>res_gain</code> 則是 amplitude <code>[0,1]</code>。<br><b>用 <code>generation</code> 做快取失效</b>:<code>AecLinearView.generation</code> 每次 ring offset 改變就 +1(飽和不 wrap)。只比較 <code>delay_samples</code> 會漏掉 A→B→A 的暫態。</div>
+<div class="note"><b>接 NR 時 <code>r2</code> 要先換尺度</b>:<code>AecResidualView.r2</code> 與 <code>comfort_noise</code> 是 <b>int16² scale</b>,要除以 <code>32768²</code> 才是 audio power。<code>res_gain</code> 則是 amplitude <code>[0,1]</code>。<br><b>快取失效</b>:每個 hop 讀 <code>AecLinearView.delay_state</code>;<code>CHANGED</code> 標出對齊移動的那個 hop,A→B→A 的每次移動各標一次。只比較 <code>delay_samples</code> 會漏掉 A→B→A 的暫態。</div>
 <p class="small">完整的 NN seam 規格(三個 swap point、wiring contract)見 <code>AEC/docs/nn_integration_interface.md</code>。</p>
 
 <h2>7. 四種後級模式(<code>AecConfig.residual</code>)</h2>
