@@ -2595,9 +2595,9 @@ static int aec_linear_finite(const Aec* a) {
  * near_spec; G_res is clamped to [0, 1] and stays finite). The trackers also cover the linear view. */
 static int aec_closed_finite(const Aec* a) {
     const int n = a->n_freqs;
-    if (!isfinite(a->near_power) || !isfinite(a->raw_error_power)) return 0;
+    if (!isfinite(a->near_power) || !isfinite(a->raw_error_power) || !isfinite(a->dt_analyzer.dt_from_energy)) return 0;
     if (a->cfg.residual == AEC_RESIDUAL_OFF) return 1;
-    if (!isfinite(a->inst_erle_smooth) || !isfinite(a->last_dt_indicator)) return 0;
+    if (!isfinite(a->inst_erle_smooth) || !isfinite(a->last_dt_indicator) || !isfinite(a->last_far_power)) return 0;
     if (!skn_all_finite_f32(a->a3_lfs.e_form, (size_t)a->hop_size) || !aec_cvec_finite(a->a3_sc.sel_esw, n) ||
         !aec_cvec_finite(a->a3_sc.sel_echo, n) || !aec_cvec_finite(a->a3_sc.ybase, n)) return 0;
     return a->cfg.residual < AEC_RESIDUAL_ESTIMATE ||

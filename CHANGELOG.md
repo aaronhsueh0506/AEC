@@ -42,6 +42,12 @@ when verdict requires it.
 ---
 
 
+## [Unreleased] — 2026-11-16 — A hop whose energy detector or reference power overflows is refused in every mode
+
+**Behaviour change (integrators read this).** `aec_closed_finite()` did not look at `dt_from_energy` or the hop's reference power. A whole microphone hop with `hop_size * rms^2` above 3.4e38 was accepted by residual `OFF` although it left `dt_from_energy` at NaN until the next reset (no output difference measured; the state was only latent). One reference sample near 2e19 (the hop's sum of squares overflows) was accepted by `STATE` with `far_power` inf and refused hops later; it is now refused on the hop that carries it, as `ESTIMATE` and `FULL` already did. Residual `OFF` still computes no reference power, so a poisoned reference sample is refused there when it reaches the filters.
+
+- `test/test_dsp_refusal.c`: the whole-hop rows now run with residual `OFF`, and a new `ref 2e19` row covers `STATE` / `ESTIMATE` / `FULL`; 29 assertions fail without the checks, all 1037 rows pass with them.
+
 ## [Unreleased] — 2026-11-16 — A refused single-channel hop zeroes aligned_far_hop as well
 
 After `AEC_ERR_DSP` a single channel's `aec_get_linear()` returned zeros in `linear_hop` and the spectra but the refused hop's reference in `aligned_far_hop`, although the documented view reads zeros. `aec_refuse_hop()` now zeroes that buffer as well (an array's was already zero). `test/test_dsp_refusal.c` checks `aligned_far_hop` on every single-channel row; 146 rows fail without the memset.

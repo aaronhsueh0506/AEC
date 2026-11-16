@@ -47,19 +47,22 @@ typedef struct {
     float value;
     Where where;         /* with AEC_RESIDUAL_OFF the linear call is the closing one */
     int whole_hop;       /* 1: the whole microphone hop is +-value noise, so the hop's sum of squares overflows before the
-                          * smoothed power does; skipped with AEC_RESIDUAL_OFF, where no detector state runs */
+                          * smoothed power does */
+    int not_off;         /* 1: refused on the hop that carries it only when a residual stage runs (the hop's reference power
+                          * is not computed with AEC_RESIDUAL_OFF; the sample is refused when it reaches the filters) */
 } Poison;
 
 /* All refused on POISON_HOP itself. mic / ref 3e38: the linear stage's spectra overflow. ref 1e20 and mic 1e25: the linear view
  * stays finite; the hop is refused when it closes. mic hop 3e18 / 1e19: every sample of the hop is large; the smoothed power and
  * the linear view stay finite but the detector state (dt_indicator, the instantaneous ERLE) does not, so the closing call refuses. */
 static const Poison POISONS[] = {
-    { "mic 3e38", 0, 3.0e38f, AT_LINEAR, 0 },
-    { "ref 3e38", 1, 3.0e38f, AT_LINEAR, 0 },
-    { "ref 1e20", 1, 1.0e20f, AT_CLOSE, 0 },
-    { "mic 1e25", 0, 1.0e25f, AT_CLOSE, 0 },
-    { "mic hop 3e18", 0, 3.0e18f, AT_CLOSE, 1 },
-    { "mic hop 1e19", 0, 1.0e19f, AT_CLOSE, 1 },
+    { "mic 3e38", 0, 3.0e38f, AT_LINEAR, 0, 0 },
+    { "ref 3e38", 1, 3.0e38f, AT_LINEAR, 0, 0 },
+    { "ref 1e20", 1, 1.0e20f, AT_CLOSE, 0, 0 },
+    { "ref 2e19", 1, 2.0e19f, AT_CLOSE, 0, 1 },
+    { "mic 1e25", 0, 1.0e25f, AT_CLOSE, 0, 0 },
+    { "mic hop 3e18", 0, 3.0e18f, AT_CLOSE, 1, 0 },
+    { "mic hop 1e19", 0, 1.0e19f, AT_CLOSE, 1, 0 },
 };
 #define N_POISONS ((int)(sizeof(POISONS) / sizeof(POISONS[0])))
 
@@ -170,6 +173,7 @@ static int run_hop(Aec* a, Aec* donor, const float* donor_mic, Entry e, int mode
 
 /* One poisoned row: grid x mode x entry x poison. */
 static void run_row(const Grid* g, int mode, Entry e, const Poison* p) {
+    if (p->not_off && mode == AEC_RESIDUAL_OFF) return;
     Aec* a = make(g, mode);
     Aec* donor = e == E_SHARED ? make(g, mode) : NULL;
     Aec* fresh = NULL;
@@ -179,7 +183,6 @@ static void run_row(const Grid* g, int mode, Entry e, const Poison* p) {
     int hop, h, refused = -1, compared = 0, differ = 0, accepted_bad = 0;
     char tag[160];
     snprintf(tag, sizeof tag, "%s %s %s %s", g->name, MODE_NAME[mode], ENTRY_NAME[e], p->name);
-    if (p->whole_hop && mode == AEC_RESIDUAL_OFF) return;
     g_rows++;
     if (!a || (e == E_SHARED && !donor)) { CHECK(0, "%s: create", tag); aec_destroy(a); aec_destroy(donor); return; }
     hop = aec_hop_size(a);
