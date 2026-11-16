@@ -84,7 +84,7 @@ context API 的應用。只呼叫 `aec_process()`（`AecConfig.residual` 維持�
 |---|---|
 | `Aec x; aec_create(&x, &cfg);`、`calloc(1, sizeof(Aec))`、`sizeof(Aec)`、`x.field`／`x->field` | `Aec` 不透明：`Aec* a = aec_create(&cfg);`（`aec.h` 只剩 `typedef struct Aec Aec;`）。呼叫端不能以值持有它，也不能取大小或讀欄位 |
 | `aec_destroy(&x);` 再 `free(...)`（heap 實例） | `aec_destroy(a);` 剛好一次，它釋放那一整塊；之後指標失效，**不可再 `free`、再 destroy 或再讀**。`aec_init()` 的 pool 實例不變：`aec_destroy()` 不釋放記憶體，pool 仍由呼叫端回收 |
-| `aec_config_defaults(&cfg, sr)` 與手動填 `cfg.filter_length`、`cfg.mu`、`cfg.enable_shadow`、`cfg.enable_highpass`、`cfg.max_delay_ms`、`cfg.delay_est_period_s` 等 | `aec_config_from_level(&cfg, level, sr)`。`AecConfig` 只剩 12 個欄位（`aec.h`），其餘是函式庫內部由 `(sample_rate, fft_size, n_mics, level)` 推導的調校值，呼叫端不能設定 |
+| `aec_config_defaults(&cfg, sr)` 與手動填 `cfg.filter_length`、`cfg.mu`、`cfg.enable_shadow`、`cfg.enable_highpass`、`cfg.delay_est_period_s` 等 | `aec_config_from_level(&cfg, level, sr)`。`AecConfig` 只剩 12 個欄位（`aec.h`），其餘是函式庫內部由 `(sample_rate, fft_size, n_mics, level)` 推導的調校值，呼叫端不能設定 |
 | `cfg.min_gain_floor_far_active_db`、`cfg.min_gain_floor_dt_db`、`cfg.min_gain_split_floor_enabled` | `cfg.level`（`AecLevel`，0–3）；三個值由 level 查表帶出 |
 | `AEC_PRESET_MILD`／`_BALANCED`／`_AGGRESSIVE`／`_NO_FLOOR`、`AecPreset` | `AEC_LEVEL_*`、`AecLevel`（值相同：0、1、2、3）。名稱解析（字串轉 level）不在函式庫內；CLI 的 `--level` 只收 0–3 的數字，其他值以結束碼 2 拒絕 |
 | `aec_set_level(a, level, ramp_ms)` | `aec_set_level(a, level)`：far-active 地板的 ramp 固定 100 ms |

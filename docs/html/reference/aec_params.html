@@ -68,7 +68,7 @@ pre code{background:none;padding:0}
 <tr><td><code>filter_length</code>、<code>n_partitions</code></td><td>由取樣率與 hop 推導（8k：416、16k：832、48k：3072 sample）</td></tr>
 <tr><td><code>enable_highpass</code>、<code>highpass_cutoff_hz</code></td><td>mic 路徑高通固定開啟、80 Hz；沒有開關（<a href="#hpf">§8.2</a>）</td></tr>
 <tr><td><code>enable_shadow</code></td><td>固定開啟；關閉省 27,888 B（16k/256），只有 <code>AEC_TESTING</code> 的測試鉤子能關</td></tr>
-<tr><td><code>delay_est_period_s</code>、<code>delay_est_init_s</code>、<code>max_delay_ms</code>（已刪除）、<code>delay_buffer_ms</code>（已刪除）</td><td>內部值；MATCHED 的參考環（單聲道與陣列）由 estimator 可回報的最大延遲決定</td></tr>
+<tr><td><code>delay_est_period_s</code>、<code>delay_est_init_s</code></td><td>內部值；MATCHED 的參考環（單聲道與陣列）由 estimator 可回報的最大延遲決定</td></tr>
 <tr><td><code>min_gain_floor_far_active_db</code>、<code>min_gain_floor_dt_db</code>、<code>min_gain_split_floor_enabled</code></td><td>由 <code>level</code> 查表帶出</td></tr>
 <tr><td><code>mu</code>、<code>delta</code>、<code>warmup_frames</code>、偵測器門檻、<code>live_observer_*</code> 等</td><td>內部調校值（聯合調過）；預設值整理於<a href="aec_params_internal.html">內部參數</a></td></tr>
 </table></div>

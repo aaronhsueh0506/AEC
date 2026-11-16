@@ -254,12 +254,14 @@ typedef struct AecBeam {
  * Refused hop (AEC_ERR_DSP). A single-channel instance checks what each call hands out: aec_process_linear() the AecLinearView
  * vectors; the call that closes the hop (aec_process(), aec_process_residual(), aec_process_linear() with AEC_RESIDUAL_OFF)
  * its power trackers and the AecResidualView vectors as far as AecConfig.residual reaches. A finite sample large enough to
- * overflow one of them (measured: |mic| from about 1.9e19, |ref| from about 1.3e19, or 5.6e14 with ESTIMATE / FULL, where r2
- * squares the echo; full scale is 1.0) makes that call return AEC_ERR_DSP with the instance reset as by aec_reset():
+ * overflow one of them makes that call return AEC_ERR_DSP with the instance reset as by aec_reset(). Measured on one scene
+ * (full scale is 1.0): |mic| from about 1.9e19; |ref| about 1e19 with OFF / STATE, about 3e13 to 6e14 with ESTIMATE / FULL
+ * (r2 squares the echo). The onsets depend on the scene and are not guarantees; PCM16 input cannot reach them. A reference
+ * sample is refused when it reaches the filters through the alignment ring, hops after the call that carried it.
  *   - aec_process() has written hop_size zeros to `out`;
  *   - aec_post_reset_serial() has moved; no hop is open (aec_process_residual() after a refused aec_process_linear() is
- *     AEC_ERR_SEQUENCE); aec_get_residual(), aec_apply_gain() and aec_apply_cng() return AEC_ERR_SEQUENCE until the next hop;
- *     AecLinearView's linear_hop and spectra read zeros;
+ *     AEC_ERR_SEQUENCE); aec_get_residual() returns AEC_ERR_SEQUENCE until the next hop, and with FULL so do aec_apply_gain()
+ *     and aec_apply_cng() (with STATE or ESTIMATE they return AEC_ERR_MODE on any hop); AecLinearView reads zeros;
  *   - the caller renders this hop as silence, clears its own inverse-transform / overlap-add tail and comfort-noise state
  *     (as for any serial change), restarts a stage it fed from this instance if that stage keeps history (a denoiser, a
  *     model stream), and continues with the next hop. From that hop on the instance behaves as a fresh one.
@@ -475,11 +477,13 @@ int aec_get_linear(const Aec* a, AecLinearView* out);
  * with the instance untouched (no reset; the hop stays open and the previous views stay readable, so the caller can fix the
  * beam and call again). Refused hop: aec_process_linear() checks each lane as a single channel (its linear view, power
  * trackers and residual view; every residual mode, STATE included). A lane whose results are not finite (measured: a
- * microphone sample from about 1.9e19 on any lane, the reference from about 3.8e19 with STATE or 1.1e15 with ESTIMATE / FULL)
- * makes it return AEC_ERR_DSP with the whole instance reset, as by aec_reset(): no hop is open (aec_process_residual() is
- * AEC_ERR_SEQUENCE, AEC_ERR_MODE with STATE; aec_get_array() is AEC_ERR_SEQUENCE), AecLinearView reads zeros, and from the
- * next hop the instance behaves as a fresh one. The fusion refusing a hop after the beam check (finite weights whose
- * projections overflow, an internal consistency check) is AEC_ERR_DSP with the same reset.
+ * microphone sample from about 1.9e19 on any lane, the reference about 1.3e19 with STATE and 3e13 to 6e14 with ESTIMATE /
+ * FULL; scene-dependent, and PCM16 input cannot reach them) makes it return AEC_ERR_DSP with the whole instance reset, as by
+ * aec_reset(): no hop is open (aec_process_residual() is AEC_ERR_SEQUENCE, AEC_ERR_MODE with STATE; aec_get_array() is
+ * AEC_ERR_SEQUENCE), AecLinearView reads zeros, and from the next hop the instance behaves as a fresh one. A microphone sample
+ * is refused on the hop that carried it; a reference sample when it reaches the lanes through the alignment ring, hops later.
+ * The fusion refusing a hop after the beam check (finite weights whose projections overflow, an internal consistency check) is
+ * AEC_ERR_DSP with the same reset.
  * Call order. A second aec_process_linear() before the residual stage replaces the pending hop (the four filters have already
  * adapted on the first). A second aec_process_residual() on the same hop is AEC_ERR_SEQUENCE with AEC_RESIDUAL_FULL (the gain
  * stage advances once per hop) and allowed with ESTIMATE (a stateless re-fusion, e.g. of another weight set). aec_set_level()

@@ -48,7 +48,7 @@ pre code{background:none;padding:0}
 <tr><td><b>前端與結構</b>(4)</td><td><code>enable_highpass</code>(1)、<code>highpass_cutoff_hz</code>(80)、<code>enable_shadow</code>(1)、<code>delay_est_period_s</code>(0:每 hop 全速分析)</td><td>mic 高通與 shadow filter 固定開啟;<code>delay_est_period_s</code> 非 0 可能改變選到哪個 lag(不只是變慢),未過驗收。</td></tr>
 <tr><td><b>由 level 帶出</b>(3)</td><td><code>min_gain_floor_far_active_db</code>、<code>min_gain_floor_dt_db</code>、<code>min_gain_split_floor_enabled</code></td><td>唯一入口是 <code>AecConfig.level</code> 與 <code>aec_set_level()</code>,值見<a href="aec_params.html">外部參數</a>的 level 表。</td></tr>
 </table></div>
-<p class="small">加總 6+4+7+4+2+2+7+2+4+3 = 41,等於 <code>include/internal/aec_tuning.h</code> 的 <code>AecTuning</code> 欄位數(<code>max_delay_ms</code>、<code>delay_buffer_ms</code>、<code>kalman_q_high</code>、<code>kalman_q_low</code> 已刪除,<code>epc_mu_floor</code> 已刪除);公開的 <code>AecConfig</code> 另有 12 個欄位,見<a href="aec_params.html">外部參數</a>。</p>
+<p class="small">加總 6+4+7+4+2+2+7+2+4+3 = 41,等於 <code>include/internal/aec_tuning.h</code> 的 <code>AecTuning</code> 欄位數(<code>kalman_q_high</code>、<code>kalman_q_low</code> 已刪除,<code>epc_mu_floor</code> 已刪除);公開的 <code>AecConfig</code> 另有 12 個欄位,見<a href="aec_params.html">外部參數</a>。</p>
 
 <h2>2. 不在 <code>AecConfig</code>、編譯期固定的常數(runtime 完全改不了)</h2>
 <p>這些由 <code>aec_carve()</code>／<code>aec_build_sg_config()</code> 依 <code>(sample_rate, fft_size)</code> 查表產生,也不該提供介面。</p>

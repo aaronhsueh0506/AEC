@@ -153,7 +153,7 @@ shows their public configuration values, not necessarily the internal hop count.
 | | `warmup_frames` | 80 (preset 100) | 10 ms authored basis; preset remains approximately 1.0 s after grid retiming |
 | EPC | `epc_delta_threshold` / `epc_total_rise` / `epc_hangover` | 0.3 / 1.5 / 20 | |
 | Delay estimation | `enable_delay_est` | **ON** | deprecated mirror of `delay_mode` |
-| | `max_delay_ms` / `delay_buffer_ms` | 1024 / 2048 | Python only (both deleted in C, whose ring, single channel and array, = estimator reach + hop) |
+| | `max_delay_ms` / `delay_buffer_ms` | 1024 / 2048 | Python only |
 | | `delay_est_period_s` / `delay_est_init_s` | 0.5 / 0.3 | |
 | | `delay_par_low_threshold` / `_solid_threshold` | 5.0 / 8.0 | |
 | HPF | `enable_highpass` | **ON** | mic-path only |
@@ -166,7 +166,7 @@ shows their public configuration values, not necessarily the internal hop count.
 | | `clear_filter_history` | OFF | |
 
 Defaults above are the Python `AecConfig` dataclass values. The C library keeps them in an internal `AecTuning` (all of them except the Python-only
-`kalman_q_high` / `kalman_q_low`, `delay_buffer_ms` and `epc_mu_floor`, which C does not have) apart from the public fields
+`kalman_q_high` / `kalman_q_low`, `max_delay_ms`, `delay_buffer_ms` and `epc_mu_floor`, which C does not have) apart from the public fields
 (`c_impl/include/internal/aec_tuning.h`, built by `aec_resolve()` from the sample rate, the grid, `n_mics` and the level; the public `AecConfig` has 12 fields
 and callers cannot set the others). The C defaults differ from the Python dataclass in three values: `enable_cng` (C: 1, a public field), `warmup_frames` (C: 100) and
 `delay_est_period_s` (C: 0.0, i.e. the matched filter analyses every hop). The C `AecConfig` does not have the Python flag pair

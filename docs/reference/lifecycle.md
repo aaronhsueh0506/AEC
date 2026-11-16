@@ -135,7 +135,7 @@ estimator 只省 5,120 B。
 
 | `delay_mode` | 環形緩衝容量（sample） |
 |---|---|
-| `MATCHED` | estimator 可回報的最大延遲加 `hop_size`：`4 × ((n−1) × 384 + 501) + hop_size` sample（`n` = `delay_num_filters`；48 kHz 為三倍的第一項；n=5、16 kHz 為 8,148 + hop）。陣列實例的共用環（`aec_array.c` 的 `array_dims()`）同式。Python 孿生仍用 `max(delay_buffer_ms, max_delay_ms + 4096)`，輸出相同 |
+| `MATCHED` | estimator 可回報的最大延遲加 `hop_size`：`4 × ((n−1) × 384 + 501) + hop_size` sample（`n` = `delay_num_filters`；48 kHz 為三倍的第一項；n=5、16 kHz 為 8,148 + hop）。陣列實例的共用環（`aec_array.c` 的 `array_dims()`）同式 |
 | `FIXED` | `fixed_delay_samples + hop_size` |
 | `EXTERNAL_ALIGNED` | 0（完全不配置） |
 
@@ -283,11 +283,11 @@ aec_reset(aec);                 /* aec 是 Aec*；NULL 與已銷毀的 handle �
    **整個實例已像 `aec_reset()` 一樣重設**。單聲道：`aec_process_linear()` 檢查線性檢視的向量，結束該 hop 的呼叫
    （`aec_process()`、`aec_process_residual()`、`residual = OFF` 的 `aec_process_linear()`）檢查功率追蹤值與殘餘檢視
    （依 `residual` 所及）；`aec_process()` 的 `out` 寫成零，`aec_post_reset_serial()` 前進，沒有開著的 hop，
-   `aec_get_residual()`／`aec_apply_*` 回 `AEC_ERR_SEQUENCE`，線性檢視讀到零。呼叫端把這個 hop 當靜音、清自己的
+   `aec_get_residual()` 回 `AEC_ERR_SEQUENCE`（直到下一個 hop），`FULL` 的 `aec_apply_gain()`／`aec_apply_cng()` 同樣回 `AEC_ERR_SEQUENCE`（`STATE`／`ESTIMATE` 任何 hop 都回 `AEC_ERR_MODE`），線性檢視讀到零。呼叫端把這個 hop 當靜音、清自己的
    ISTFT／OLA 與 CNG、視需要重啟帶歷史的後級，下一個 hop 照常送；之後的輸出等於從下一個 hop 起的新實例。
    陣列實例的 `aec_process_linear()` 逐 lane 做與單聲道相同的檢查（線性檢視、功率追蹤值、殘餘檢視；`STATE` 也檢查）：
-   任一條 lane 的結果不是有限值（實測任一路 mic 約 1.9e19 起；ref 在 `STATE` 約 3.8e19 起、`ESTIMATE`／`FULL` 約 1.1e15 起）
-   就回 `AEC_ERR_DSP`，整個實例重設，沒有開著的 hop（`aec_process_residual()` 回 `AEC_ERR_SEQUENCE`，`STATE` 回 `AEC_ERR_MODE`；`aec_get_array()` 回 `AEC_ERR_SEQUENCE`），線性檢視（lane 0 的）讀到零，
+   任一條 lane 的結果不是有限值（單一場景實測：任一路 mic 約 1.9e19 起；ref 在 `STATE` 約 1.3e19 起、`ESTIMATE`／`FULL` 約 3e13 到 6e14 起；門檻隨場景而變，PCM16 輸入到不了）
+   就回 `AEC_ERR_DSP`；mic 的極大 sample 在帶它的那個 hop 被拒，ref 的則是經對齊環到達各 lane 時才被拒，晚數個 hop；整個實例重設，沒有開著的 hop（`aec_process_residual()` 回 `AEC_ERR_SEQUENCE`，`STATE` 回 `AEC_ERR_MODE`；`aec_get_array()` 回 `AEC_ERR_SEQUENCE`），線性檢視（lane 0 的）讀到零，
    之後等於從下一個 hop 起的新實例。融合在權重檢查之後拒絕（有限的極大權重使投影溢位）同樣是 `AEC_ERR_DSP`。
    陣列的 `aec_process_linear()` 因輸入含非有限值回 `AEC_ERR_ARG` 時，實例完全不動，上一個 hop 的檢視仍可讀。
    `aec_get_mem_breakdown`、`aec_resolve_signal_grid` 也回 `AecStatus`（0 = 成功），不再是 `1` = 成功。
