@@ -2671,6 +2671,61 @@ static void test_stationarity_window_flags(void) {
     printf("PASS stationarity_window_flags_u8 (1..7 rows, strides, reverb row on/off, offsets, special/NaN inputs, add-order probe, canary-guarded)\n");
 }
 
+/* sk_row_sum_f32 against its scalar twin and against the sum written out per bin: 1..7 rows, row stride >= n, the lengths of the
+ * edge sweep plus 18..49 (every 16-, 4- and 1-bin remainder), offsets 1..15, special-value and NaN-sprinkled inputs, and an
+ * add-order probe (2^24 first, then ones: the sum stays 2^24 only when added in row order). The sums are compared as bit patterns. */
+static void test_row_sum(void) {
+    enum { MAXROWS = 7, STRIDE_PAD = 5 };
+    const int stride_max = SK_TEST_MAX_N + STRIDE_PAD;
+    float *rows = (float *)edge_aligned_alloc((size_t)(MAXROWS * stride_max + EDGE_OFFSET_MAX + 8) * sizeof(float));
+    float *out_s = (float *)edge_aligned_alloc((size_t)EDGE_ARENA_LEN * sizeof(float));
+    float *out_v = (float *)edge_aligned_alloc((size_t)EDGE_ARENA_LEN * sizeof(float));
+    float ref[SK_TEST_MAX_N];
+    int ni, nr, o, fam, k, r;
+    for (ni = 0; ni < N_LIST_COUNT + 32; ++ni) {
+        int n = ni < N_LIST_COUNT ? N_LIST[ni] : 18 + (ni - N_LIST_COUNT);
+        for (nr = 1; nr <= MAXROWS; ++nr) {
+            for (o = 1; o <= EDGE_OFFSET_MAX; o += (n > 20 ? 7 : 1)) {
+                int stride = n + (o % STRIDE_PAD);
+                for (fam = 0; fam < 4; ++fam) {
+                    edge_fill_canary_f(out_s, EDGE_ARENA_LEN);
+                    edge_fill_canary_f(out_v, EDGE_ARENA_LEN);
+                    if (fam == 0) {
+                        for (r = 0; r < nr; ++r) fill_floats(rows + o + (size_t)r * stride, n);
+                    } else if (fam == 1) {
+                        for (r = 0; r < nr; ++r) fill_floats_nan_sprinkle(rows + o + (size_t)r * stride, n);
+                    } else if (fam == 2) {
+                        for (r = 0; r < nr; ++r)
+                            for (k = 0; k < n; ++k) rows[o + (size_t)r * stride + k] = (float)((k * 7 + r * 13) % 29) * 0.01f;
+                    } else {
+                        for (r = 0; r < nr; ++r)
+                            for (k = 0; k < n; ++k) rows[o + (size_t)r * stride + k] = r == 0 ? 16777216.0f : 1.0f;
+                    }
+                    sk_row_sum_f32_scalar(out_s + o, rows + o, (size_t)stride, nr, n);
+                    sk_row_sum_f32(out_v + o, rows + o, (size_t)stride, nr, n);
+                    for (k = 0; k < n; ++k) {
+                        ref[k] = rows[o + k];
+                        for (r = 1; r < nr; ++r) ref[k] = ref[k] + rows[o + (size_t)r * stride + k];
+                    }
+                    check_bits_classify("row_sum_f32", n, nr * 100 + o, out_v + o, out_s + o, n);
+                    check_bits_classify("row_sum_f32:ref", n, nr * 100 + o, out_v + o, ref, n);
+                    if (fam == 3)
+                        for (k = 0; k < n; ++k)
+                            if (out_v[o + k] != 16777216.0f) {
+                                fprintf(stderr, "MISMATCH kernel=row_sum_f32 add-order probe n=%d rows=%d k=%d\n", n, nr, k);
+                                exit(1);
+                            }
+                    g_total_checks += 2 * n;
+                    edge_check_canary_f("row_sum_f32:scalar", out_s, EDGE_ARENA_LEN, o, n);
+                    edge_check_canary_f("row_sum_f32:simd", out_v, EDGE_ARENA_LEN, o, n);
+                }
+            }
+        }
+    }
+    free(rows); free(out_s); free(out_v);
+    printf("PASS row_sum_f32 (1..7 rows, strides, 0..49 and edge-sweep lengths, offsets, special/NaN inputs, add-order probe, canary-guarded)\n");
+}
+
 /* The loops sk_stationary_mask_u8 stands for, written out. */
 static int ref_stationary_loop(const unsigned char *flags, const int32_t *hang,
                                unsigned char *mask, int n) {
@@ -3008,6 +3063,7 @@ int main(void) {
     test_raise_to();
     test_stationary_mask();
     test_stationarity_window_flags();
+    test_row_sum();
     test_stationary_mask_large();
     test_inline_aec_oracles();
     test_inline_aec_blocks();

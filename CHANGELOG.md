@@ -42,6 +42,12 @@ when verdict requires it.
 ---
 
 
+## [Unreleased] — 2026-11-16 — The partition power sums as a kernel
+
+No output change: the four baseline streams compare with 0 mismatches at `SIMD=1` and `SIMD=0`, and `aec_wav` output on four clips (16 kHz / 256, 16 kHz / 512 twice, 48 kHz / 1024; levels 0 without the residual stage, 1 with `--cng`, 2) is byte-identical to the previous build at both settings.
+
+The two per-hop sums over the partitions of `x2_cache` (shadow NLMS step size and Kalman update) go through `sk_row_sum_f32()` (`simd_aec.h`). The NEON twin keeps 16 bins of the sum in registers over the partitions, in partition order. 44 to 46 % less time per call at 129, 257 and 513 bins on this host; the change in the linear stage is below the spread of repeated runs on a loaded machine (about 1 to 5 % at most). At `SIMD=0` the scalar twin is the old loop and the time is unchanged.
+
 ## [Unreleased] — 2026-11-16 — The stationarity window sums and flags as one kernel
 
 No output change: the four baseline streams compare with 0 mismatches at `SIMD=1` and `SIMD=0`, and `aec_wav` output on the same clips is byte-identical to the previous build at both settings.

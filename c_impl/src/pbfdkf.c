@@ -443,11 +443,7 @@ void pbfdaf_process_with_far_cmag2(PBFDAF* p,
         /* x2_partition_sum = sum over partitions of |X_buf|^2, taken from x2_cache, summed in
          * partition order. */
         float *x2psum = p->scr_x2psum;
-        memcpy(x2psum, p->x2_cache, (size_t)K * sizeof(float));
-        for (int part = 1; part < N; ++part) {
-            const float* x2p = p->x2_cache + (size_t)part * K;
-            for (int k = 0; k < K; ++k) x2psum[k] += x2p[k];
-        }
+        sk_row_sum_f32(x2psum, p->x2_cache, (size_t)K, N, K);
         float mu_initial_boost = p->initial_state_active ? (0.95f / 0.7f) : 1.0f;
         float ng_thr = (float)AEC_FILTER_NOISE_GATE_POWER_FLOAT;
         float *mu_eff = p->scr_mu_eff;
@@ -787,11 +783,7 @@ static void pbfdkf_update_weights(PBFDKF* p, int curr_p,
      * partition; both read x2_cache. */
     float *X2 = p->scr_X2;
     if (b->call_counter > p->partition_sum_x2_startup_hops) {
-        memcpy(X2, b->x2_cache, (size_t)K * sizeof(float));
-        for (int part = 1; part < N; ++part) {
-            const float* x2p = b->x2_cache + (size_t)part * K;
-            for (int k = 0; k < K; ++k) X2[k] += x2p[k];
-        }
+        sk_row_sum_f32(X2, b->x2_cache, (size_t)K, N, K);
     } else {
         memcpy(X2, b->x2_cache + (size_t)curr_p * K, (size_t)K * sizeof(float));
     }
