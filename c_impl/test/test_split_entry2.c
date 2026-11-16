@@ -9,6 +9,7 @@
  *
  * Run from c_impl/:  make test-split-entry-2   (G2_VERBOSE=<file> writes every hop's unchained group hashes, G2_ONLY=<substring>) */
 #include "aec.h"
+#include "aec_view_internal.h"
 #include "aec_res_internal.h"
 #include "aec_test_tuning.h"
 #include "utility/simd_kernels.h"
@@ -48,12 +49,12 @@ static void apply_hook(const Aec* a, const void* view, int hop, const float* gx,
 #include "baseline2_mono.h"
 
 static int g2_step_ctx(Aec* a, const float* mic, const float* ref, G2View* v) {
-    AecLinearView lv; AecResidualView rv;
+    AecLinearViewFull lv; AecResidualViewFull rv;
     if (aec_process_linear(a, mic, ref) != AEC_OK) return -1;
     if (aec_process_residual(a, NULL) != AEC_OK) return -1;
     memset(&lv, 0, sizeof lv); lv.struct_size = sizeof lv;
     memset(&rv, 0, sizeof rv); rv.struct_size = sizeof rv;
-    if (aec_get_linear(a, &lv) != AEC_OK || aec_get_residual(a, &rv) != AEC_OK) return -1;
+    if (aec_get_linear_full(a, &lv) != AEC_OK || aec_get_residual_full(a, &rv) != AEC_OK) return -1;
     memset(v, 0, sizeof *v);
     v->n_freqs = rv.n_freqs; v->hop_size = rv.hop_size;
     v->linear_hop = lv.linear_hop; v->far_spec = lv.far_spec; v->lin_formed = rv.formed_hop;
@@ -95,7 +96,7 @@ static void apply_hook(const Aec* a, const void* view, int hop, const float* gx,
  * alternating stream equals that of a stream driven by aec_process alone on every hop; the finished hop of aec_process
  * differs after a split hop (its tail and its noise stream did not advance) and is compared only where nothing but the
  * preceding aec_process hops fed it: with the comfort noise off, on a hop whose predecessor was an aec_process hop. */
-static uint64_t view_hash(const Aec* a, const AecLinearView* lv, const AecResidualView* rv) {
+static uint64_t view_hash(const Aec* a, const AecLinearViewFull* lv, const AecResidualViewFull* rv) {
     uint64_t h = G2_FNV_BASIS;
     const int n = rv->n_freqs;
     h = g2_fnv_f32v(h, lv->linear_hop, lv->hop_size); h = g2_hc(h, lv->far_spec, n);
@@ -134,14 +135,14 @@ static void test_alternation(const G2MonoCase* c, int enable_cng, const char* la
         const float* r = ref + (size_t)h * hop; const float* m = mic + (size_t)h * hop;
         const int use_process = ((h / 3) % 2) == 0;
         const int prev_process = h > 0 && (((h - 1) / 3) % 2) == 0;
-        AecLinearView lp, lx; AecResidualView rp, rx;
+        AecLinearViewFull lp, lx; AecResidualViewFull rp, rx;
         CHECK(aec_process(p, m, r, out0) == AEC_OK, "alternation %s: pure process hop %d", label, h);
         if (use_process) CHECK(aec_process(x, m, r, out1) == AEC_OK, "alternation %s: process hop %d", label, h);
         else { CHECK(aec_process_linear(x, m, r) == AEC_OK && aec_process_residual(x, NULL) == AEC_OK, "alternation %s: split hop %d", label, h); }
         memset(&lp, 0, sizeof lp); lp.struct_size = sizeof lp; lx = lp;
         memset(&rp, 0, sizeof rp); rp.struct_size = sizeof rp; rx = rp;
-        CHECK(aec_get_linear(p, &lp) == AEC_OK && aec_get_residual(p, &rp) == AEC_OK, "alternation views (pure) hop %d", h);
-        CHECK(aec_get_linear(x, &lx) == AEC_OK && aec_get_residual(x, &rx) == AEC_OK, "alternation views hop %d", h);
+        CHECK(aec_get_linear_full(p, &lp) == AEC_OK && aec_get_residual_full(p, &rp) == AEC_OK, "alternation views (pure) hop %d", h);
+        CHECK(aec_get_linear_full(x, &lx) == AEC_OK && aec_get_residual_full(x, &rx) == AEC_OK, "alternation views hop %d", h);
         CHECK(view_hash(p, &lp, &rp) == view_hash(x, &lx, &rx), "alternation %s: views differ at hop %d (%s)", label, h,
               use_process ? "aec_process" : "split");
         if (use_process && prev_process && !enable_cng) {

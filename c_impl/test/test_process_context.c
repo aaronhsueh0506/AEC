@@ -32,6 +32,7 @@
  * Also wired into the Makefile: `make test-process-context`.
  */
 #include "aec.h"
+#include "aec_view_internal.h"
 #include "aec_white_box.h"
 #include "aec_test_tuning.h"
 #include "aec_pool_test_util.h"
@@ -55,10 +56,10 @@ static void split_hop(Aec* a, const float* mic, const float* ref) {
     if (st != AEC_OK) { printf("FAIL: split hop refused (%d)\n", st); g_fail++; }
 }
 
-static void both_views(const Aec* a, AecLinearView* lv, AecResidualView* rv) {
+static void both_views(const Aec* a, AecLinearViewFull* lv, AecResidualViewFull* rv) {
     memset(lv, 0, sizeof *lv); lv->struct_size = sizeof *lv;
     memset(rv, 0, sizeof *rv); rv->struct_size = sizeof *rv;
-    if (aec_get_linear(a, lv) != AEC_OK || aec_get_residual(a, rv) != AEC_OK) {
+    if (aec_get_linear_full(a, lv) != AEC_OK || aec_get_residual_full(a, rv) != AEC_OK) {
         printf("FAIL: view refused\n"); g_fail++;
     }
 }
@@ -130,8 +131,8 @@ static void test_entry_points_may_be_freely_interleaved(void) {
         } else {
             split_hop(mixed, mic, ref);
         }
-        AecLinearView la, lb;
-        AecResidualView ra, rb;
+        AecLinearViewFull la, lb;
+        AecResidualViewFull ra, rb;
         both_views(ref_inst, &la, &ra);
         both_views(mixed, &lb, &rb);
         compared++;
@@ -195,8 +196,8 @@ static void test_entry_points_interleave_below_full(AecResidualMode mode) {
         } else {
             split_hop(mixed, mic, ref);
         }
-        AecLinearView la, lb;
-        AecResidualView ra, rb;
+        AecLinearViewFull la, lb;
+        AecResidualViewFull ra, rb;
         both_views(ref_inst, &la, &ra);
         both_views(mixed, &lb, &rb);
         if (memcmp(ra.formed_hop, rb.formed_hop, (size_t)hop * sizeof(float)) != 0 ||
@@ -256,8 +257,8 @@ static void test_split_matches_full_process(
         if (aec_process(via_full, mic, ref, out) != AEC_OK) { printf("FAIL: aec_process\n"); g_fail++; }
         split_hop(via_split, mic, ref);
 
-        AecLinearView la, lb;
-        AecResidualView ca, cb;
+        AecLinearViewFull la, lb;
+        AecResidualViewFull ca, cb;
         both_views(via_full, &la, &ca);
         both_views(via_split, &lb, &cb);
 
@@ -324,7 +325,7 @@ static void test_split_matches_full_process(
 /* AEC_RESIDUAL_STATE skips the residual-echo half of the post block (R^2, comfort noise,
  * suppression gain). Nothing it skips feeds the linear filter, so against an instance configured as
  * `base_mode` (FULL or ESTIMATE) and fed identically, every linear output must be byte-identical on every hop,
- * including the AecLinearView a downstream model reads and the usable-linear verdict, while
+ * including the AecLinearViewFull a downstream model reads and the usable-linear verdict, while
  * res_gain / r2 / comfort_noise read NULL. The input carries a delayed, scaled copy of the far end
  * plus near-end bursts, so the filter converges, the alignment locks and the verdicts change during
  * the run; a skipped step that did feed back would diverge. */
@@ -366,8 +367,8 @@ static void test_state_mode_matches_full(
         split_hop(full, mic, far_now);
         split_hop(lin,  mic, far_now);
 
-        AecLinearView la, lb;
-        AecResidualView ca, cb;
+        AecLinearViewFull la, lb;
+        AecResidualViewFull ca, cb;
         both_views(full, &la, &ca);
         both_views(lin, &lb, &cb);
         int K = ca.n_freqs;
@@ -403,7 +404,7 @@ static void test_state_mode_matches_full(
     }
 
     snprintf(label, sizeof(label),
-             "state-mode sr=%d/fft=%d/shadow=%d/base=%d: every linear output and the AecLinearView "
+             "state-mode sr=%d/fft=%d/shadow=%d/base=%d: every linear output and the AecLinearViewFull "
              "are byte-identical to the base mode on all hops",
              sample_rate, cfg_full.fft_size, enable_shadow, (int)base_mode);
     CHECK(all_match && hops_checked == HOPS, label);

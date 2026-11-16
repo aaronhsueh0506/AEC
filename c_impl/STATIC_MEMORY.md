@@ -138,42 +138,49 @@ Unlike a single-channel instance, the array pool **depends on `AecConfig.residua
 
 | Grid | `STATE` | `ESTIMATE` | `FULL` (default) |
 |---|---:|---:|---:|
-| 16 kHz / 256 | 559,328 B | 654,864 B | 664,624 B |
-| 16 kHz / 512 | 844,960 B | 1,034,704 B | 1,052,656 B |
-| 48 kHz / 1024 | 1,885,728 B | 2,263,888 B | 2,301,296 B |
+| 16 kHz / 256 | 420,736 B | 514,688 B | 524,448 B |
+| 16 kHz / 512 | 615,536 B | 802,160 B | 820,112 B |
+| 48 kHz / 1024 | 1,366,976 B | 1,738,944 B | 1,776,352 B |
 
 `aec_get_mem_breakdown()` splits the `FULL` pool as follows. The `Aec` header (6,032 B here, a multiple of 16) belongs
 to none of the four sub-fields, so they sum to `total_bytes` minus the header:
 
 | Grid | `total_bytes` | `estimator_bytes` | `ring_bytes` | `lane_bytes` | `fusion_bytes` |
 |---|---:|---:|---:|---:|---:|
-| 16 kHz / 256 | 664,624 | 29,248 | 33,104 | 568,768 | 27,472 |
-| 16 kHz / 512 | 1,052,656 | 29,248 | 33,616 | 933,504 | 50,256 |
-| 48 kHz / 1024 | 2,301,296 | 30,624 | 99,824 | 2,065,920 | 98,896 |
+| 16 kHz / 256 | 524,448 | 29,248 | 33,104 | 383,232 | 72,832 |
+| 16 kHz / 512 | 820,112 | 29,248 | 33,616 | 626,176 | 125,040 |
+| 48 kHz / 1024 | 1,776,352 | 30,624 | 99,824 | 1,371,456 | 268,416 |
 
 - **Lane contract.** The flow stamps the same config on each lane: the array's grid and tunables, `delay_mode = EXTERNAL_ALIGNED`
   (the lanes take the shared aligned far), `residual = ESTIMATE` (`STATE` for a `STATE` array), `n_mics = 1`. Each lane pool is
-  142,192 / 233,376 / 516,480 B (`ESTIMATE` and `FULL`; a `STATE` lane omits the residual-echo estimator and comfort-noise arrays its early exit never reads: 119,872 / 189,040 / 428,112 B) and `lane_bytes` is four of them. A lane is built by the internal
+  95,808 / 156,544 / 342,864 B (`ESTIMATE` and `FULL`; a `STATE` lane omits the residual-echo estimator and comfort-noise arrays its early exit never reads: 74,016 / 113,248 / 256,560 B) and `lane_bytes` is four of them. A lane is built by the internal
   `aec_lane_init()`; against a stand-alone single-channel `EXTERNAL_ALIGNED` instance (176,880 / 288,224 / 643,552 B)
   it borrows the array's one FFT handle and omits what its contract never runs: the delay-shift snapshots (only the `MATCHED`
   estimator takes them), the synthesis and gain buffers (synthesis window, OLA, `eout`, the SuppressionGain arrays and the decoded ENR/SU threshold tables; only `FULL` applies a gain) and
   the FFT handle; a `STATE` lane also omits the residual-echo estimator and comfort-noise arrays (its early exit never reads them).
+  The four lanes run one after another and each finishes its linear and residual stage before the next starts, so the buffers a lane
+  writes before it reads inside one call (the main and shadow filters' transform rows, the post-chain magnitude / PSD / mask rows,
+  the FORM and filter-analyzer scratch, the tap span, the unused hop outputs, and the filters' constant window tables) are carved
+  once per array and borrowed by all four lanes: 45,360 / 74,784 / 169,520 B (`STATE`: 44,832 / 73,744 / 167,456 B), counted in
+  `fusion_bytes`. What a lane keeps from one hop to the next, what the views return, and what the donor lane hands to lanes 1-3
+  (far PSD, scaled far block, narrow-band mask) stay per lane.
   Every single-channel instance, lane or not, also omits the render-history rows (read only without the echo-generating window),
   has no `x2_past`, keeps the stationarity history at exactly the ring's length, and its shadow filter follows the main filter (same
   input, same clears, same partition steps), so it shares the main filter's far history and has no `near_spec` /
   `error_spec_windowed` / `spec_scratch` (its frontend is lightweight).
 - `fusion_bytes` is the control block, the microphone / aligned-far / fusion buffers, the one FFT handle the four lanes share
-  (7,152 / 13,552 / 26,352 B) and, in `FULL`, the gain stage (internal `aec_res_get_mem_size()` 10,000 / 18,192 / 37,648 B). It
-  does not include the lane pools. `STATE` has no fusion buffers (11,456 / 19,904 / 36,800 B); `ESTIMATE` has them but no gain
-  stage (17,712 / 32,304 / 61,488 B).
+  (7,152 / 13,552 / 26,352 B), the lanes' shared per-call buffers above and, in `FULL`, the gain stage (internal
+  `aec_res_get_mem_size()` 10,000 / 18,192 / 37,648 B). It does not include the lane pools. `STATE` has no fusion buffers
+  (56,288 / 93,648 / 204,256 B); `ESTIMATE` has them but no gain stage (63,072 / 107,088 / 231,008 B).
 - `ring_bytes`: `MATCHED` is the estimator's reach plus one hop, as for a single channel: `4 * ((n - 1) * 384 + 501) + hop_size`
   samples (three times the first term at 48 kHz; 8,276 samples at n = 5, 16 kHz / 256), `FIXED` is `fixed_delay_samples +
-  hop_size`, `EXTERNAL_ALIGNED` none. `FULL` array with `EXTERNAL_ALIGNED`: 602,272 / 989,792 / 2,170,848 B.
+  hop_size`, `EXTERNAL_ALIGNED` none. `FULL` array with `EXTERNAL_ALIGNED`: 462,096 / 757,248 / 1,645,904 B.
 
 **Not done yet.** The far-side state is still held per lane (what the lanes share is the delay estimator, the aligned far,
-the FFT handle and, within a hop, the far FFT result and the far-only per-hop analysis computed by lane 0, which changes
-no pool size: lanes 1-3 keep their own copies of that state and update them only when they stop following lane 0); the lanes are
-about 81 / 86 / 86 % of the `FULL` array pool. These sizes are host measurements; the target build's
+the FFT handle, the per-call buffers above and, within a hop, the far FFT result and the far-only per-hop analysis computed by
+lane 0: lanes 1-3 keep their own copies of that state, the far history `X_buf` / `x2_cache`, the residual-echo delay rows and the
+stationarity history, and update them only when they stop following lane 0, because a realign can give one lane a different far
+history); the lanes are about 73 / 76 / 77 % of the `FULL` array pool. These sizes are host measurements; the target build's
 `aec_get_mem_requirements()` is authoritative.
 
 ## Ownership model

@@ -10,6 +10,7 @@
  *
  * Run from c_impl/:  make test-aec-array */
 #include "aec.h"
+#include "aec_view_internal.h"
 #include "aec_internal.h"
 #include "aec_white_box.h"
 #include "aec_res_internal.h"
@@ -157,17 +158,17 @@ static int run_case(const ArrCase* c, int id, AecResidualMode residual) {
 
         {
             AecBeam beam = { W, NULL };
-            AecResidualView early; memset(&early, 0, sizeof early); early.struct_size = sizeof early;
-            CHECK(aec_get_residual(a, &early) == AEC_ERR_SEQUENCE, "residual view before the residual stage");
+            AecResidualViewFull early; memset(&early, 0, sizeof early); early.struct_size = sizeof early;
+            CHECK(aec_get_residual_full(a, &early) == AEC_ERR_SEQUENCE, "residual view before the residual stage");
             rc = aec_process_residual(a, &beam);
             CHECK(rc == AEC_OK, "%s hop %d: aec_process_residual rc %d", c->name, h, rc);
             if (rc != AEC_OK) { free(W); free(rmem); free(mem); return -1; }
         }
-        AecResidualView rv; AecLinearView lv;
+        AecResidualViewFull rv; AecLinearViewFull lv;
         memset(&rv, 0, sizeof rv); rv.struct_size = sizeof rv;
         memset(&lv, 0, sizeof lv); lv.struct_size = sizeof lv;
-        CHECK(aec_get_residual(a, &rv) == AEC_OK, "aec_get_residual");
-        CHECK(aec_get_linear(a, &lv) == AEC_OK, "aec_get_linear");
+        CHECK(aec_get_residual_full(a, &rv) == AEC_OK, "aec_get_residual");
+        CHECK(aec_get_linear_full(a, &lv) == AEC_OK, "aec_get_linear");
         if (!skip) {
             hh = SPLIT_FNV_BASIS;
             hh = ah_cxv(hh, rv.error_spec, n); hh = ah_cxv(hh, rv.base_spec, n);
@@ -279,7 +280,7 @@ static int short_stream(Aec* a, int sr, int fft, int hops, int nan_at, int bad_w
     array_weights(ARR_W_UNEQUAL, n, W);
     array_sig_init(&sig, sr, hop, 0);
     for (int h = 0; h < hops; ++h) {
-        AecArrayView av; AecResidualView rv; AecBeam beam = { W, NULL };
+        AecArrayView av; AecResidualViewFull rv; AecBeam beam = { W, NULL };
         array_sig_next(&sig, mics, ref);
         if (h == nan_at) {
             memcpy(bad, mics, sizeof bad);
@@ -290,8 +291,8 @@ static int short_stream(Aec* a, int sr, int fft, int hops, int nan_at, int bad_w
               CHECK(aec_process_linear(a, mics, rb) == AEC_ERR_ARG, "non-finite far sample must be AEC_ERR_ARG"); }
             memset(&av, 0, sizeof av); av.struct_size = sizeof av;
             CHECK(aec_get_array(a, &av) == AEC_OK, "a refused non-finite hop leaves the previous hop's views readable");
-            { AecResidualView prv; memset(&prv, 0, sizeof prv); prv.struct_size = sizeof prv;
-              CHECK(aec_get_residual(a, &prv) == AEC_OK, "a refused non-finite hop leaves the previous fusion readable"); }
+            { AecResidualViewFull prv; memset(&prv, 0, sizeof prv); prv.struct_size = sizeof prv;
+              CHECK(aec_get_residual_full(a, &prv) == AEC_OK, "a refused non-finite hop leaves the previous fusion readable"); }
         }
         CHECK(aec_process_linear(a, mics, ref) == AEC_OK, "stream linear");
         memset(&av, 0, sizeof av); av.struct_size = sizeof av;
@@ -314,11 +315,11 @@ static int short_stream(Aec* a, int sr, int fft, int hops, int nan_at, int bad_w
             CHECK(aec_process_residual(a, &nul) == AEC_ERR_ARG, "NULL weights must be AEC_ERR_ARG");
             CHECK(aec_process_residual(a, NULL) == AEC_ERR_ARG, "NULL beam on an array must be AEC_ERR_ARG");
             memset(&rv, 0, sizeof rv); rv.struct_size = sizeof rv;
-            CHECK(aec_get_residual(a, &rv) == AEC_ERR_SEQUENCE, "a refused fusion leaves the hop open");
+            CHECK(aec_get_residual_full(a, &rv) == AEC_ERR_SEQUENCE, "a refused fusion leaves the hop open");
         }
         CHECK(aec_process_residual(a, &beam) == AEC_OK, "stream residual");
         memset(&rv, 0, sizeof rv); rv.struct_size = sizeof rv;
-        CHECK(aec_get_residual(a, &rv) == AEC_OK, "stream residual view");
+        CHECK(aec_get_residual_full(a, &rv) == AEC_OK, "stream residual view");
         r = ah_cxv(r, rv.error_spec, n); r = ah_cxv(r, rv.base_spec, n); r = ah_f32v(r, rv.r2, n);
         g = ah_f32v(g, rv.res_gain, n);
     }
@@ -347,7 +348,7 @@ static void test_status_and_sequence(void) {
     array_sig_next(&sig, mics, ref);
     AecBeam beam = { W, NULL };
     AecArrayView av; memset(&av, 0, sizeof av); av.struct_size = sizeof av;
-    AecResidualView rv; memset(&rv, 0, sizeof rv); rv.struct_size = sizeof rv;
+    AecResidualViewFull rv; memset(&rv, 0, sizeof rv); rv.struct_size = sizeof rv;
     Complex spec[NB_MAX];
 
     CHECK(hop == 128 && aec_hop_size(a) == 128, "array hop size");
@@ -358,27 +359,27 @@ static void test_status_and_sequence(void) {
     CHECK(aec_process_linear(a, mics, NULL) == AEC_ERR_ARG, "linear NULL ref");
     CHECK(aec_get_array(a, &av) == AEC_ERR_SEQUENCE, "array view before any hop");
     CHECK(aec_process_residual(a, &beam) == AEC_ERR_SEQUENCE, "residual before any linear");
-    CHECK(aec_get_residual(a, &rv) == AEC_ERR_SEQUENCE, "residual view before any hop");
+    CHECK(aec_get_residual_full(a, &rv) == AEC_ERR_SEQUENCE, "residual view before any hop");
     CHECK(res_gain_of(a) == NULL, "gain before any hop");
     CHECK(aec_apply_gain(a, NULL, spec) == AEC_ERR_SEQUENCE, "apply_gain before any hop");
     CHECK(aec_apply_cng(a, NULL, spec) == AEC_ERR_SEQUENCE, "apply_cng before any hop");
     CHECK(aec_apply_external_realign(a, 10) == -1, "external realign on an array is refused");
     CHECK(aec_process_linear(a, mics, ref) == AEC_OK, "linear");
     CHECK(aec_process_linear(a, mics, ref) == AEC_OK, "a second linear stage replaces the first (no residual needed in between)");
-    CHECK(aec_get_residual(a, &rv) == AEC_ERR_SEQUENCE, "residual view while the residual stage is pending");
+    CHECK(aec_get_residual_full(a, &rv) == AEC_ERR_SEQUENCE, "residual view while the residual stage is pending");
     CHECK(aec_apply_gain(a, NULL, spec) == AEC_ERR_SEQUENCE, "apply_gain while the residual stage is pending");
     CHECK(aec_process_residual(a, &beam) == AEC_OK, "residual");
     CHECK(aec_process_residual(a, &beam) == AEC_ERR_SEQUENCE, "a second residual stage on the same hop is AEC_ERR_SEQUENCE");
-    CHECK(aec_get_residual(a, &rv) == AEC_OK && rv.res_gain != NULL, "residual view after the residual stage");
+    CHECK(aec_get_residual_full(a, &rv) == AEC_OK && rv.res_gain != NULL, "residual view after the residual stage");
     CHECK(aec_apply_gain(a, NULL, NULL) == AEC_ERR_ARG, "apply_gain NULL out");
     CHECK(aec_apply_cng(a, NULL, NULL) == AEC_ERR_ARG, "apply_cng NULL spec");
     {
-        AecResidualView v; memset(&v, 0, sizeof v); v.struct_size = sizeof v - 1;
-        CHECK(aec_get_residual(a, &v) == AEC_ERR_ARG, "short struct_size (residual)");
+        AecResidualViewFull v; memset(&v, 0, sizeof v); v.struct_size = sizeof v - 1;
+        CHECK(aec_get_residual_full(a, &v) == AEC_ERR_ARG, "short struct_size (residual)");
         AecArrayView w; memset(&w, 0, sizeof w); w.struct_size = sizeof w - 1;
         CHECK(aec_get_array(a, &w) == AEC_ERR_ARG, "short struct_size (array)");
-        AecLinearView l; memset(&l, 0, sizeof l); l.struct_size = sizeof l - 1;
-        CHECK(aec_get_linear(a, &l) == AEC_ERR_ARG, "short struct_size (linear)");
+        AecLinearViewFull l; memset(&l, 0, sizeof l); l.struct_size = sizeof l - 1;
+        CHECK(aec_get_linear_full(a, &l) == AEC_ERR_ARG, "short struct_size (linear)");
     }
     /* linear after a completed hop, then reset drops the pending fusion */
     CHECK(aec_process_linear(a, mics, ref) == AEC_OK, "linear after a completed hop");
@@ -392,8 +393,8 @@ static void test_status_and_sequence(void) {
 
     /* aggregate linear view and array view */
     {
-        AecLinearView lv; memset(&lv, 0, sizeof lv); lv.struct_size = sizeof lv;
-        CHECK(aec_get_linear(a, &lv) == AEC_OK, "aggregate linear view");
+        AecLinearViewFull lv; memset(&lv, 0, sizeof lv); lv.struct_size = sizeof lv;
+        CHECK(aec_get_linear_full(a, &lv) == AEC_OK, "aggregate linear view");
         CHECK(lv.hop_size == hop && lv.n_freqs == n && lv.delay_samples == 0 && lv.delay_state == AEC_LINEAR_DELAY_LOCKED &&
               lv.delay_confidence == 1.0f, "EXTERNAL_ALIGNED aggregate: zero offset, locked");
         memset(&av, 0, sizeof av); av.struct_size = sizeof av;
@@ -426,11 +427,11 @@ static void test_status_and_sequence(void) {
             memset(&rv, 0, sizeof rv); rv.struct_size = sizeof rv;
             if (modes[i] == AEC_RESIDUAL_STATE) {
                 CHECK(aec_process_residual(a, &beam) == AEC_ERR_MODE, "STATE: residual refused");
-                CHECK(aec_get_residual(a, &rv) == AEC_ERR_MODE, "STATE: no fused frame");
+                CHECK(aec_get_residual_full(a, &rv) == AEC_ERR_MODE, "STATE: no fused frame");
                 CHECK(aec_process_linear(a, mics, ref) == AEC_OK, "STATE: the next hop needs no residual stage");
             } else {
                 CHECK(aec_process_residual(a, &beam) == AEC_OK, "ESTIMATE: residual");
-                CHECK(aec_get_residual(a, &rv) == AEC_OK && rv.r2 && rv.comfort_noise && !rv.res_gain, "ESTIMATE: r2, cn, no gain");
+                CHECK(aec_get_residual_full(a, &rv) == AEC_OK && rv.r2 && rv.comfort_noise && !rv.res_gain, "ESTIMATE: r2, cn, no gain");
                 CHECK(aec_process_residual(a, &beam) == AEC_OK, "ESTIMATE: a second fusion of the same hop is a stateless re-fusion");
             }
             CHECK(aec_apply_gain(a, NULL, spec) == AEC_ERR_MODE, "apply_gain below FULL (mode %d)", (int)modes[i]);
@@ -503,13 +504,13 @@ static void test_dsp_error_resets_the_instance(void) {
     }
     {
         AecBeam huge = { H, NULL };
-        AecArrayView av; AecResidualView rv; memset(&av, 0, sizeof av); av.struct_size = sizeof av;
+        AecArrayView av; AecResidualViewFull rv; memset(&av, 0, sizeof av); av.struct_size = sizeof av;
         memset(&rv, 0, sizeof rv); rv.struct_size = sizeof rv;
         array_sig_next(&sig, mics, ref);
         CHECK(aec_process_linear(a, mics, ref) == AEC_OK, "dsp: linear");
         CHECK(aec_process_residual(a, &huge) == AEC_ERR_DSP, "overflowing weights are AEC_ERR_DSP");
         CHECK(aec_post_reset_serial(a) == 4u, "the DSP error reset the instance (four lane resets)");
-        CHECK(aec_get_array(a, &av) == AEC_ERR_SEQUENCE && aec_get_residual(a, &rv) == AEC_ERR_SEQUENCE,
+        CHECK(aec_get_array(a, &av) == AEC_ERR_SEQUENCE && aec_get_residual_full(a, &rv) == AEC_ERR_SEQUENCE,
               "the DSP error dropped the views");
     }
     /* after the reset the instance behaves like a fresh one whose lanes were reset once: same stream as a reset-fresh instance */
@@ -518,11 +519,11 @@ static void test_dsp_error_resets_the_instance(void) {
         ArraySig s2; array_sig_init(&s2, 16000, hop, 0);
         for (int h = 0; h < 40; ++h) {
             AecBeam beam = { W, NULL };
-            AecResidualView r1, r2; memset(&r1, 0, sizeof r1); r1.struct_size = sizeof r1; r2 = r1;
+            AecResidualViewFull r1, r2; memset(&r1, 0, sizeof r1); r1.struct_size = sizeof r1; r2 = r1;
             array_sig_next(&s2, mics, ref);
             CHECK(aec_process_linear(a, mics, ref) == AEC_OK && aec_process_residual(a, &beam) == AEC_OK, "dsp: hop after reset (a)");
             CHECK(aec_process_linear(fresh, mics, ref) == AEC_OK && aec_process_residual(fresh, &beam) == AEC_OK, "dsp: hop (fresh)");
-            CHECK(aec_get_residual(a, &r1) == AEC_OK && aec_get_residual(fresh, &r2) == AEC_OK, "dsp: views");
+            CHECK(aec_get_residual_full(a, &r1) == AEC_OK && aec_get_residual_full(fresh, &r2) == AEC_OK, "dsp: views");
             CHECK(split_hash_complex(r1.error_spec, n) == split_hash_complex(r2.error_spec, n) &&
                   split_hash_f32(r1.res_gain, n) == split_hash_f32(r2.res_gain, n) &&
                   split_hash_f32(r1.r2, n) == split_hash_f32(r2.r2, n),
@@ -533,7 +534,7 @@ static void test_dsp_error_resets_the_instance(void) {
     {
         Complex* E = (Complex*)calloc((size_t)n, sizeof(Complex));
         AecBeam bad = { W, E };
-        AecArrayView av; AecResidualView rv;
+        AecArrayView av; AecResidualViewFull rv;
         uint32_t serial;
         memset(&av, 0, sizeof av); av.struct_size = sizeof av;
         memset(&rv, 0, sizeof rv); rv.struct_size = sizeof rv;
@@ -543,7 +544,7 @@ static void test_dsp_error_resets_the_instance(void) {
         E[3].r = NAN;
         CHECK(aec_process_residual(a, &bad) == AEC_ERR_ARG, "a non-finite beamformed spectrum is AEC_ERR_ARG");
         CHECK(aec_post_reset_serial(a) == serial, "a refused beamformed spectrum resets nothing");
-        CHECK(aec_get_array(a, &av) == AEC_OK && aec_get_residual(a, &rv) == AEC_ERR_SEQUENCE,
+        CHECK(aec_get_array(a, &av) == AEC_OK && aec_get_residual_full(a, &rv) == AEC_ERR_SEQUENCE,
               "a refused beamformed spectrum leaves the hop open with the lane views readable");
         E[3].r = 0.0f;
         { AecBeam good = { W, E };
@@ -607,7 +608,7 @@ static void test_use_after_destroy_and_null(void) {
     }
     /* NULL handles */
     {
-        AecResidualView rv; AecLinearView lv; AecArrayView av; AecDebugStatus ds; AecStageTiming tm;
+        AecResidualViewFull rv; AecLinearViewFull lv; AecArrayView av; AecDebugStatus ds; AecStageTiming tm;
         AecBeam beam = { NULL, NULL };
         Complex spec[NB_MAX];
         memset(&rv, 0, sizeof rv); rv.struct_size = sizeof rv;
@@ -618,7 +619,7 @@ static void test_use_after_destroy_and_null(void) {
         aec_reset(NULL); aec_destroy(NULL);
         CHECK(aec_process(NULL, mics, ref, mics) == AEC_ERR_ARG && aec_process_linear(NULL, mics, ref) == AEC_ERR_ARG &&
               aec_process_residual(NULL, &beam) == AEC_ERR_ARG, "NULL: process calls");
-        CHECK(aec_get_residual(NULL, &rv) == AEC_ERR_ARG && aec_get_linear(NULL, &lv) == AEC_ERR_ARG &&
+        CHECK(aec_get_residual_full(NULL, &rv) == AEC_ERR_ARG && aec_get_linear_full(NULL, &lv) == AEC_ERR_ARG &&
               aec_get_array(NULL, &av) == AEC_ERR_ARG, "NULL: views");
         CHECK(res_gain_of(NULL) == NULL && aec_apply_gain(NULL, NULL, spec) == AEC_ERR_ARG &&
               aec_apply_cng(NULL, NULL, spec) == AEC_ERR_ARG, "NULL: gain calls");
@@ -656,7 +657,7 @@ static void test_apply_gain_in_place(void) {
     array_weights(ARR_W_UNEQUAL, n, W);
     array_sig_init(&sig, 16000, hop, 0);
     for (int h = 0; h < 200; ++h) {
-        AecArrayView av; AecResidualView rv; AecBeam beam = { W, E };
+        AecArrayView av; AecResidualViewFull rv; AecBeam beam = { W, E };
         const float* g = (h & 1) ? extra : NULL;
         array_sig_next(&sig, mics, ref);
         CHECK(aec_process_linear(a, mics, ref) == AEC_OK, "in-place: linear");
@@ -673,15 +674,15 @@ static void test_apply_gain_in_place(void) {
         }
         CHECK(aec_process_residual(a, &beam) == AEC_OK, "in-place: residual");
         memset(&rv, 0, sizeof rv); rv.struct_size = sizeof rv;
-        CHECK(aec_get_residual(a, &rv) == AEC_OK, "in-place: residual view");
+        CHECK(aec_get_residual_full(a, &rv) == AEC_OK, "in-place: residual view");
         CHECK(rv.error_spec == E, "the array's error_spec aliases the caller's beamformed_error");
         if (rv.base_spec != E) continue;                     /* the output guard fired: the base is an internal buffer */
         CHECK(aec_apply_gain(a, g, want) == AEC_OK, "in-place: out-of-place gain");
         CHECK(aec_apply_gain(a, g, E) == AEC_OK, "in-place: in-place gain");
         CHECK(memcmp(E, want, (size_t)n * sizeof(Complex)) == 0, "in-place gain differs from the out-of-place result (hop %d)", h);
         {
-            AecResidualView after; memset(&after, 0, sizeof after); after.struct_size = sizeof after;
-            CHECK(aec_get_residual(a, &after) == AEC_OK && after.error_spec == E && after.base_spec == E &&
+            AecResidualViewFull after; memset(&after, 0, sizeof after); after.struct_size = sizeof after;
+            CHECK(aec_get_residual_full(a, &after) == AEC_OK && after.error_spec == E && after.base_spec == E &&
                   memcmp(after.base_spec, want, (size_t)n * sizeof(Complex)) == 0,
                   "after an in-place gain the view's base_spec holds the gained data");
         }
@@ -843,12 +844,12 @@ static void test_cng_reseeds_on_serial_change(void) {
     uint32_t rng = AEC_CNG_SEED;
     for (int h = 0; h < 80; ++h) {
         AecBeam beam = { W, NULL };
-        AecResidualView rv; Complex s1[NB_MAX], s2[NB_MAX];
+        AecResidualViewFull rv; Complex s1[NB_MAX], s2[NB_MAX];
         if (h == 40) { aec_reset(a); }
         array_sig_next(&sig, mics, ref);
         if (aec_process_linear(a, mics, ref) != AEC_OK || aec_process_residual(a, &beam) != AEC_OK) { CHECK(0, "cng: hop"); break; }
         memset(&rv, 0, sizeof rv); rv.struct_size = sizeof rv;
-        aec_get_residual(a, &rv);
+        aec_get_residual_full(a, &rv);
         if (h == 40) rng = AEC_CNG_SEED;           /* the serial moved: the generator restarts */
         memset(s1, 0, sizeof s1); memset(s2, 0, sizeof s2);
         aec_apply_cng_spec(&rng, s1, rv.comfort_noise, rv.res_gain, NULL, n);
@@ -880,7 +881,7 @@ static void test_set_level(void) {
     CHECK(a->cfg.level == AEC_LEVEL_BALANCED && a->tun.min_gain_floor_far_active_db == -28.0f, "a refused level leaves the stored level");
     for (int h = 0; h < 250; ++h) {
         AecBeam beam = { W, NULL };
-        AecResidualView rv; AecResInput in;
+        AecResidualViewFull rv; AecResInput in;
         if (h == 100) {
             CHECK(aec_set_level(a, AEC_LEVEL_AGGRESSIVE) == 0, "set_level aggressive");
             CHECK(a->cfg.level == AEC_LEVEL_AGGRESSIVE && a->tun.min_gain_floor_far_active_db == -38.0f &&
@@ -894,7 +895,7 @@ static void test_set_level(void) {
         array_sig_next(&sig, mics, ref);
         CHECK(aec_process_linear(a, mics, ref) == AEC_OK && aec_process_residual(a, &beam) == AEC_OK, "level: hop");
         memset(&rv, 0, sizeof rv); rv.struct_size = sizeof rv;
-        aec_get_residual(a, &rv);
+        aec_get_residual_full(a, &rv);
         memset(&in, 0, sizeof in);
         in.error_spec = rv.error_spec; in.near_spec = rv.near_spec; in.r2 = rv.r2; in.comfort_noise = rv.comfort_noise;
         in.render_hop = rv.far_hop; in.all_converged = rv.all_converged; in.max_dt = rv.max_dt;

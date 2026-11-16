@@ -190,34 +190,37 @@ estimator 只省 5,120 B。
 
 | 格點 | `STATE` | `ESTIMATE` | `FULL`（預設） |
 |---|---:|---:|---:|
-| 16 kHz / 256 | 559,328 B | 654,864 B | 664,624 B |
-| 16 kHz / 512 | 844,960 B | 1,034,704 B | 1,052,656 B |
-| 48 kHz / 1024 | 1,885,728 B | 2,263,888 B | 2,301,296 B |
+| 16 kHz / 256 | 420,736 B | 514,688 B | 524,448 B |
+| 16 kHz / 512 | 615,536 B | 802,160 B | 820,112 B |
+| 48 kHz / 1024 | 1,366,976 B | 1,738,944 B | 1,776,352 B |
 
 `aec_get_mem_breakdown()` 的欄位（`FULL`）：
 
 | 格點 | `total_bytes` | `estimator_bytes` | `ring_bytes` | `lane_bytes` | `fusion_bytes` | `Aec` 標頭 |
 |---|---:|---:|---:|---:|---:|---:|
-| 16 kHz / 256 | 664,624 | 29,248 | 33,104 | 568,768 | 27,472 | 6,032 |
-| 16 kHz / 512 | 1,052,656 | 29,248 | 33,616 | 933,504 | 50,256 | 6,032 |
-| 48 kHz / 1024 | 2,301,296 | 30,624 | 99,824 | 2,065,920 | 98,896 | 6,032 |
+| 16 kHz / 256 | 524,448 | 29,248 | 33,104 | 383,232 | 72,832 | 6,032 |
+| 16 kHz / 512 | 820,112 | 29,248 | 33,616 | 626,176 | 125,040 | 6,032 |
+| 48 kHz / 1024 | 1,776,352 | 30,624 | 99,824 | 1,371,456 | 268,416 | 6,032 |
 
 - 陣列池 = `Aec` 標頭（對齊 16 B，上表最後一欄）+ `estimator_bytes` + `ring_bytes` + `lane_bytes` + `fusion_bytes`。
   **標頭不在任何一個拆解欄位內**，所以四個欄位加起來比 `total_bytes` 少一個標頭。
-- `lane_bytes`：四條 lane 池合計，每條 142,192／233,376／516,480 B（`ESTIMATE`、`FULL`）；`STATE` lane 不切它提早離開後不會讀的殘餘回音估計器與舒適噪音陣列，每條 119,872／189,040／428,112 B。
+- `lane_bytes`：四條 lane 池合計，每條 95,808／156,544／342,864 B（`ESTIMATE`、`FULL`）；`STATE` lane 不切它提早離開後不會讀的殘餘回音估計器與舒適噪音陣列，每條 74,016／113,248／256,560 B。
   lane 由內部的 `aec_lane_init()` 建立，比同格點單聲道 `EXTERNAL_ALIGNED` 實例（176,880／288,224／643,552 B）少：借用陣列的同一個 FFT 控制代碼；
   省去 lane 契約永遠不跑的配置——delay-shift 快照（只有 `MATCHED` 估計器會用）、合成與增益緩衝（合成窗、OLA、`eout`、SuppressionGain 陣列與解碼後的 ENR／SU 門檻表；只有 `FULL` 才套增益）。
   單聲道實例同樣沒有 render-history 列與 `x2_past`，穩態歷史列剛好是環形長度，shadow 濾波器是主濾波器的 follower（同輸入、同清除、同分區步進，
   直接共用主濾波器的遠端歷史，也沒有它不形成的 `near_spec`／`error_spec_windowed`／`spec_scratch`）。
+  四條 lane 依序執行，每條在下一條開始前做完自己的線性與殘餘 stage，所以 lane 在同一次呼叫內先寫後讀的緩衝（主／shadow 濾波器的轉換列、後級的幅度／PSD／遮罩列、
+  FORM 與 filter analyzer 的暫存、tap 區段、用不到的 hop 輸出，以及濾波器共用的常數窗表）整個陣列只切一份，四條 lane 借用：45,360／74,784／169,520 B（`STATE`：44,832／73,744／167,456 B），算在 `fusion_bytes` 裡。
+  lane 跨 hop 保留的狀態、檢視回傳的資料、以及 lane 0 交給 lane 1–3 的資料（遠端 PSD、縮放後遠端區塊、窄頻遮罩）仍是每條 lane 各一份。
 - `fusion_bytes`：控制區塊、麥克風／對齊後 far／融合緩衝、四條 lane 共用的一個 FFT 控制代碼（7,152／13,552／26,352 B），`FULL` 另含共用的抑制增益階段（內部 `aec_res_get_mem_size()`：10,000／18,192／37,648 B）；
-  **不含** lane 池。`STATE` 沒有融合緩衝（11,456／19,904／36,800 B）；`ESTIMATE` 有融合緩衝但沒有增益階段（17,712／32,304／61,488 B）。
+  上面 lane 共用的暫存緩衝，**不含** lane 池。`STATE` 沒有融合緩衝（56,288／93,648／204,256 B）；`ESTIMATE` 有融合緩衝但沒有增益階段（63,072／107,088／231,008 B）。
 - `estimator_bytes`／`ring_bytes` 與單聲道同義，環形緩衝的容量也與單聲道同式：
   `MATCHED` 為 estimator 可回報的最大延遲加 `hop_size`（n=5、16 kHz／256 為 8,276 個 sample），`FIXED` 為 `fixed_delay_samples + hop_size`，`EXTERNAL_ALIGNED` 為 0。
-- 其他 `delay_mode`（`FULL`）：`EXTERNAL_ALIGNED` 為 602,272／989,792／2,170,848 B；`FIXED`、`fixed_delay_samples = 0` 為 602,784／990,816／2,172,896 B；
-  `FIXED`、100 ms 為 609,184（1600 sample）／997,216（1600 sample）／2,192,096 B（4800 sample）。
+- 其他 `delay_mode`（`FULL`）：`EXTERNAL_ALIGNED` 為 462,096／757,248／1,645,904 B；`FIXED`、`fixed_delay_samples = 0` 為 462,608／758,272／1,647,952 B；
+  `FIXED`、100 ms 為 469,008（1600 sample）／764,672（1600 sample）／1,667,152 B（4800 sample）。
 
 **尚未做到**：遠端側狀態仍是每條 lane 各一份（共用的是 delay 估計器、對齊後 far、FFT 控制代碼，以及 hop 內由 lane 0 借給 lane 1–3 的遠端 FFT 結果）；
-lane 約占 `FULL` 陣列池的 86%／89%／90%。
+lane 約占 `FULL` 陣列池的 73%／76%／77%。
 這些是主機的實測值，**實際請以 `aec_get_mem_requirements()` 為準**。
 
 ### `aec_reset`

@@ -71,7 +71,7 @@ context API 的應用。只呼叫 `aec_process()`（`AecConfig.residual` 維持�
 | `aec_get_res_context()` → `AecResContext` | `aec_get_residual()` → `AecResidualView`（`struct_size` 要先設） |
 | `aec_get_output_base()` → `AecOutputBase`（`base_spec`、`guard_active`） | 同一個 `AecResidualView` 的 `base_spec`、`guard_active` |
 | `aec_get_linear_context()` → `AecLinearContext` | `aec_get_linear()` → `AecLinearView`（`formed_linear_hop` 改讀 `aec_get_residual().formed_hop`；未經 FORM 的線性輸出是 `AecLinearView.linear_hop`） |
-| `AecResContext` 的純量狀態（`far_power`、`erle_factor`、`dt_indicator`、`divergence`、`saturation_level`、`erl_estimate`、`shadow_dt`、`is_stationary_dt`、`filter_converged`、`filter_once_converged`、`epc_active`） | `AecLinearView` 的同名欄位；`res_floor_protect`、`usable_linear` 在 `AecResidualView` |
+| `AecResContext` 的純量狀態（`far_power`、`erle_factor`、`dt_indicator`、`divergence`、`saturation_level`、`erl_estimate`、`shadow_dt`、`is_stationary_dt`、`filter_converged`、`filter_once_converged`、`epc_active`） | `AecLinearView` 的 `far_power`、`dt_indicator`、`saturation_level`、`filter_converged`；`usable_linear` 在 `AecResidualView`；其餘（`erle_factor`、`divergence`、`erl_estimate`、`shadow_dt`、`is_stationary_dt`、`filter_once_converged`、`epc_active`、`res_floor_protect`）是函式庫內部狀態，`aec.h` 不提供，後級不能依賴它們 |
 | 舊的組合限制（`spatial_linear_context` 必須搭配 `enable_res = 0`、`return_res_context = 1`） | 取消；只剩 `residual` 必須在 `OFF`…`FULL` 範圍內 |
 | 回傳值：`aec_process()` 回 `void`，getter 回 `0`／`-1` | 回 `AecStatus`（`AEC_OK`＝0，錯誤為負值：`AEC_ERR_ARG`、`AEC_ERR_MODE`、`AEC_ERR_SEQUENCE`、`AEC_ERR_DSP`） |
 

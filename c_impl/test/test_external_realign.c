@@ -27,6 +27,7 @@
 #include <string.h>
 
 #include "aec.h"
+#include "aec_view_internal.h"
 #include "aec_white_box.h"
 #include "aec_test_tuning.h"
 #include "utility/simd_aec.h"
@@ -257,12 +258,12 @@ int main(void)
     CHECK(rc == 0, "soft instance: create");
     for (h = 0; h < HOPS; ++h) run_hop(soft, h, D, out);
     {
-        AecLinearView c0, c1;
+        AecLinearViewFull c0, c1;
         c0.struct_size = c1.struct_size = sizeof c0;
-        CHECK(aec_get_linear(soft, &c0) == AEC_OK, "linear view before the realign");
+        CHECK(aec_get_linear_full(soft, &c0) == AEC_OK, "linear view before the realign");
         CHECK(aec_apply_external_realign(soft, 64) == 0,
               "gate off falls to the reset path");
-        CHECK(aec_get_linear(soft, &c1) == AEC_OK, "linear view after the realign");
+        CHECK(aec_get_linear_full(soft, &c1) == AEC_OK, "linear view after the realign");
         /* EXTERNAL_ALIGNED owns no ring offset, so this call is the only thing
          * that can ever move the token a consumer polls to flush far caches.
          * Both outcomes must move it -- the warm instance from row 1 realigned
@@ -278,7 +279,7 @@ int main(void)
      * filter that is cancelling at ~13 dB windowed. */
     {
         Aec *gap = NULL;
-        AecLinearView g0, g1;
+        AecLinearViewFull g0, g1;
         g0.struct_size = g1.struct_size = sizeof g0;
         rc = ((gap = make_external_ctx(1, 1)) ? 0 : -1);
         CHECK(rc == 0, "silent-gap instance: create");
@@ -286,11 +287,11 @@ int main(void)
         CHECK(resid < 0.5f * echo_rms(HOPS - 1),
               "silent-gap: raw-far convergence before the silence");
         for (h = 0; h < GAP; ++h) run_silent_hop(gap, out);
-        CHECK(aec_get_linear(gap, &g0) == AEC_OK, "silent-gap: linear view before the realign");
+        CHECK(aec_get_linear_full(gap, &g0) == AEC_OK, "silent-gap: linear view before the realign");
         rc = aec_apply_external_realign(gap, D - 0);
         CHECK(rc == 1,
               "silent-gap realign still takes the warm tap-transfer path");
-        CHECK(aec_get_linear(gap, &g1) == AEC_OK, "silent-gap: linear view after the realign");
+        CHECK(aec_get_linear_full(gap, &g1) == AEC_OK, "silent-gap: linear view after the realign");
         CHECK(g1.generation != g0.generation,
               "warm outcome advances the alignment generation");
         worst = 0.0f;

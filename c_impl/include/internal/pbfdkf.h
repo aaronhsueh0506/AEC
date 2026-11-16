@@ -101,6 +101,25 @@ typedef struct PBFDAF {
     int     w_dirty;
 } PBFDAF;
 
+/* Buffers a filter writes before it reads inside one call, lent to the *_borrowed constructors when the filters run one after another.
+ * pbfdaf_scratch_layout() returns the bytes (s == NULL) or also points *s into `mem`, for a main filter (follower 0) or a follower
+ * (follower 1); 0 for an unusable geometry. */
+typedef struct PbfdafScratch {
+    float*   td_window;      /* not scratch: the constant tables (fft_size and block_size floats), filled by every init that borrows */
+    float*   sqrt_hann;      /* main only; the layout leaves both NULL for the caller to point */
+    float*   time_scratch;   /* fft_size floats */
+    Complex* spec_scratch;   /* n_freqs bins; main only */
+    float*   scr_fsq;        /* hop_size floats */
+    float*   scr_ir;         /* n_partitions * hop_size floats */
+    float*   scr_mu_local;   /* n_freqs floats each; follower only */
+    float*   scr_x2psum;
+    float*   scr_mu_eff;
+    float*   kf_mu_local;    /* n_freqs floats each; main only */
+    float*   kf_x2;
+    float*   kf_mu_aec;
+} PbfdafScratch;
+size_t pbfdaf_scratch_layout(PbfdafScratch* s, void* mem, int block_size, int n_partitions, int hop_size, int follower);
+
 /* Sizing never includes a nested FFT: pbfdaf_init_static() borrows a caller-supplied shared_fft.
  * with_process_scratch = 1 carves the pbfdaf_process()-only scratch; pass 0 for an instance driven
  * only via the frontend (the PBFDKF base). */
@@ -124,6 +143,13 @@ int    pbfdaf_init_static_follower(PBFDAF* p, void* mem, size_t mem_size,
                                    float mu, float delta, int hop_size,
                                    int sample_rate, FftHandle* shared_fft,
                                    const PBFDAF* far_owner);
+/* The same follower without its own scratch rows: they come from `scratch` (a pbfdaf_scratch_layout() with follower 1). */
+size_t pbfdaf_get_mem_size_follower_borrowed(int block_size, int n_partitions, int hop_size);
+int    pbfdaf_init_static_follower_borrowed(PBFDAF* p, void* mem, size_t mem_size,
+                                            int block_size, int n_partitions,
+                                            float mu, float delta, int hop_size,
+                                            int sample_rate, FftHandle* shared_fft,
+                                            const PBFDAF* far_owner, const PbfdafScratch* scratch);
 /* Drops the borrowed shared_fft reference only. */
 void pbfdaf_free(PBFDAF* p);
 void pbfdaf_reset(PBFDAF* p);
@@ -204,6 +230,12 @@ int    pbfdkf_init_static(PBFDKF* p, void* mem, size_t mem_size,
                            int block_size, int n_partitions,
                            float mu, float delta, int hop_size,
                            int sample_rate, FftHandle* shared_fft);
+/* The same main filter without its scratch rows: they come from `scratch` (a pbfdaf_scratch_layout() with follower 0). */
+size_t pbfdkf_get_mem_size_borrowed(int block_size, int n_partitions, int hop_size);
+int    pbfdkf_init_static_borrowed(PBFDKF* p, void* mem, size_t mem_size,
+                                   int block_size, int n_partitions,
+                                   float mu, float delta, int hop_size,
+                                   int sample_rate, FftHandle* shared_fft, const PbfdafScratch* scratch);
 void pbfdkf_free(PBFDKF* p);
 void pbfdkf_reset(PBFDKF* p);
 /* pbfdaf_reset_taps plus the error_psd re-arm. */

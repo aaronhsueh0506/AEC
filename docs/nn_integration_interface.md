@@ -35,10 +35,13 @@ Python: enable with `AecConfig.return_res_context = True`; then `aec.process(mic
 These are produced every hop by the production linear AEC with zero extra cost (already computed internally).
 
 **C names.** The C struct `AecResidualView` (`c_impl/include/aec.h`, read with `aec_get_residual()`) carries the same data under slightly
-different names: `formed_output` is `formed_hop`; `res_gain`, `r2`, `comfort_noise`, `res_floor_protect`, `usable_linear`,
+different names: `formed_output` is `formed_hop`; `res_gain`, `r2`, `comfort_noise`, `usable_linear`,
 `output_base_spec` (as `base_spec`), `guard_active` and `post_reset_serial` have the same meaning. `raw_output` is `linear_hop` of
-the separate `AecLinearView` (`aec_get_linear()`), which also carries the linear-stage status scalars (`far_power`, `erle_factor`,
-`dt_indicator`, `filter_converged`, ...). Which fields exist follows `AecConfig.residual`: `AEC_RESIDUAL_STATE` has the linear half and the
+the separate `AecLinearView` (`aec_get_linear()`), which also carries the linear-stage status scalars `far_power`, `dt_indicator`,
+`saturation_level` and `filter_converged`. The other context fields (`erle_factor`, `divergence`, `erl_estimate`, the shadow and
+stationary double-talk flags, `filter_once_converged`, the echo-path-change flag, the DT-floor decision `res_floor_protect`, the
+main filter's `echo_spec` / `near_spec` / `far_spec` and the alignment `generation`) are library-internal in C: no caller outside the
+library reads them, so `aec.h` does not carry them and the library's own tests read them through `aec_view_internal.h`. Which fields exist follows `AecConfig.residual`: `AEC_RESIDUAL_STATE` has the linear half and the
 rendering base (no `r2`, `comfort_noise`, `res_gain`), `ESTIMATE` adds `r2` and `comfort_noise`, `FULL` adds `res_gain`, `OFF` has no residual view.
 The C call sequence is `cfg.residual = AEC_RESIDUAL_FULL` (the default) at construction, then per hop
 `aec_process_linear()`, `aec_process_residual(a, NULL)`, `aec_get_residual()` and `aec_get_linear()` (pointers valid until the next process or
@@ -154,7 +157,6 @@ on both streams), `aec_get_linear()` exposes:
 | `delay_samples` | int | applied ring offset. Meaning depends on `delay_mode` — see below. |
 | `delay_confidence` | float | 0 / 0.5 / 1 under `MATCHED`; always 1.0 under `FIXED`/`EXTERNAL_ALIGNED` (an out-of-band or contractual alignment carries no estimator uncertainty to report). |
 | `delay_state` | enum | `UNLOCKED` (content is RAW far — do not treat as aligned), `LOCKED`, `CHANGED` (offset moved THIS hop — flush any far feature rings / attention history downstream). Per-mode timing below. |
-| `generation` | unsigned | bumps on every ring-offset change including the flagless soft-recovery realigns and `aec_reset()`; saturating. Poll it instead of differencing `delay_samples` (transient A→B→A shifts are invisible to differencing). |
 
 ### `delay_mode` changes the *timing* of this seam, not just its source
 `AecConfig.delay_mode` (`AEC_DELAY_MATCHED` / `AEC_DELAY_FIXED` /
@@ -188,8 +190,8 @@ belongs to the integrator. Regression coverage: `test/test_linear_context.c`
 
 The estimator's `confidence` measures histogram consistency, not match quality,
 so a `LOCKED` state is not proof that the alignment is correct, and a re-lock
-arrives as a normal `CHANGED` hop visible through `generation`: flush far
-feature rings on `generation` movement regardless. A consumer that owns its own estimator can
+arrives as a normal `CHANGED` hop visible through `delay_state`: flush far
+feature rings on every `CHANGED` hop regardless. A consumer that owns its own estimator can
 ask the engine the same "is this lane still cancelling" question the engine
 asks of itself, via the read-only `aec_linear_is_cancelling(const Aec*)` (`aec.h`);
 it returns 0 when the ERLE machinery has not run, i.e. absence of evidence,
@@ -197,6 +199,6 @@ never a claim that the filter is broken.
 
 ## Connecting a model
 
-A model that accepts a time-domain residual can consume the floating-point formed hop directly. The C field is `AecResidualView.formed_hop`. A caller using an aligned far signal can obtain its hop and alignment generation from `aec_get_linear()`. Follow the model's contract for far input: Align-ULCNet's PCM stream in Audio_ALG takes the formed error and **raw** far input.
+A model that accepts a time-domain residual can consume the floating-point formed hop directly. The C field is `AecResidualView.formed_hop`. A caller using an aligned far signal can obtain its hop and the alignment state (`delay_state`) from `aec_get_linear()`. Follow the model's contract for far input: Align-ULCNet's PCM stream in Audio_ALG takes the formed error and **raw** far input.
 
 A frequency-domain model can read `error_spec` for analysis. When rendering the guarded signal, obtain the base from `aec_get_residual().base_spec` (or apply the gains with `aec_apply_gain()`), add comfort noise once if configured (`aec_apply_cng()`), then synthesize. Keep independent OLA and model state per stream and handle changes to `aec_post_reset_serial()` before synthesizing that hop. See the [output-guard integration guide](sdk_migration_output_guard.md).

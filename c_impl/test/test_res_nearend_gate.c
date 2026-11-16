@@ -1,8 +1,9 @@
 /* test_res_nearend_gate.c -- product RES floor policy. The near-recent latch
- * is the only source of the DT floor, and AecResidualView exports that exact
+ * is the only source of the DT floor, and AecResidualViewFull exports that exact
  * decision for fused consumers. Standalone runner (make
  * test-res-nearend-gate), exit != 0 on any failure. */
 #include "aec.h"
+#include "aec_view_internal.h"
 #include "aec_white_box.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -71,10 +72,10 @@ static void run_hop(Aec *a, int dne, int latch, int usable,
 }
 
 static int nonzero_r2(Aec *a) {
-    AecResidualView ctx; int k, n = 0;
+    AecResidualViewFull ctx; int k, n = 0;
     memset(&ctx, 0, sizeof ctx);
     ctx.struct_size = sizeof ctx;
-    CHECK(aec_get_residual(a, &ctx) == AEC_OK, "aec_get_residual");
+    CHECK(aec_get_residual_full(a, &ctx) == AEC_OK, "aec_get_residual");
     if (ctx.r2) for (k = 0; k < ctx.n_freqs; k++) if (ctx.r2[k] > 0.0f) n++;
     return ctx.r2 ? n : -1;
 }
@@ -113,10 +114,10 @@ int main(void) {
     run_hop(a, 0, 1, 1, mic, ref, hop);
     CHECK(a->a3_sg.dt_protect_active == 1, "default: latch armed, usable linear: lifted");
     {
-        AecResidualView ctx;
+        AecResidualViewFull ctx;
         memset(&ctx, 0, sizeof ctx);
         ctx.struct_size = sizeof ctx;
-        CHECK(aec_get_residual(a, &ctx) == AEC_OK, "aec_get_residual");
+        CHECK(aec_get_residual_full(a, &ctx) == AEC_OK, "aec_get_residual");
         CHECK(ctx.res_floor_protect == 1,
               "context exports the lane's actual floor decision");
     }

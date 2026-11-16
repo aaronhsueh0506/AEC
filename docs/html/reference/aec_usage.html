@@ -165,7 +165,7 @@ int run_aec_seam(int sample_rate)
         if (aec_process_linear(aec, mic, ref) != AEC_OK ||        /* no out buffer */
             aec_process_residual(aec, NULL) != AEC_OK ||
             aec_get_residual(aec, &amp;rv) != AEC_OK ||               /* error_spec, r2, comfort_noise, res_gain, ... */
-            aec_get_linear(aec, &amp;lin) != AEC_OK) {                /* aligned_far_hop, delay_state, generation */
+            aec_get_linear(aec, &amp;lin) != AEC_OK) {                /* aligned_far_hop, delay_state */
             rc = -1;
             break;
         }
@@ -242,7 +242,7 @@ int app_run_hop(Aec *aec, const float *mics, const float *ref,
     return AEC_OK;
 }</code></pre>
 <div class="note"><b>陣列實例的要點</b>:權重是聲道優先的 <code>Complex[4][n_freqs]</code>,融合為 <code>Σ w · lane</code>(不取共軛),必須有限且不全為零,否則 <code>aec_process_residual()</code> 回 <code>AEC_ERR_ARG</code> 且該 hop 保持開啟;<code>beamformed_error</code> 由呼叫端持有並活到本 hop 檢視讀完,或傳 <code>NULL</code> 由權重重建;含非有限值同樣回 <code>AEC_ERR_ARG</code>(實例不重設)。<code>residual</code> 三種值(<code>OFF</code> 被拒絕)的差別:<code>STATE</code> 只有四條 lane,<code>aec_process_residual()</code> 回 <code>AEC_ERR_MODE</code>,波束後的頻譜由呼叫端自己渲染;<code>ESTIMATE</code> 融合但不算增益(<code>aec_apply_*</code> 回 <code>AEC_ERR_MODE</code>),同一 hop 可重複融合;<code>FULL</code> 另算一次 <code>G_res</code>,同一 hop 的第二次 <code>aec_process_residual()</code> 回 <code>AEC_ERR_SEQUENCE</code>。<code>aec_get_residual()</code> 在陣列上 <code>formed_hop</code> 與 <code>echo_spec</code> 為 <code>NULL</code>。<code>aec_process()</code>、<code>aec_apply_external_realign()</code> 在陣列上被拒絕。<code>aec_post_reset_serial()</code> 是四條 lane 的計數之和(<code>aec_reset()</code> 前進 4),只比較是否與自己存的不同。完整契約見 <code>AEC/docs/reference/integration.md</code> §8.8。</div>
-<div class="warn"><b>目前尚未做到</b>:遠端側狀態仍是每條 lane 各一份(共用的是 delay 估計器、對齊後 far、FFT 控制代碼,以及 hop 內由 lane 0 借給 lane 1–3 的遠端 FFT 結果)(16k/256 每條 <code>ESTIMATE</code>／<code>FULL</code> lane 142,192 B,四條共 568,768 B,約占 <code>FULL</code> 陣列池 664,624 B 的 86%;<code>STATE</code> lane 不切殘餘回音估計器與舒適噪音陣列,每條 119,872 B)。陣列的 <code>STATE</code>／<code>ESTIMATE</code>／<code>FULL</code> 池大小在 16k/256 為 559,328／654,864／664,624 B(主機實測;以 <code>aec_get_mem_requirements()</code> 為準)。</div>
+<div class="warn"><b>目前尚未做到</b>:遠端側狀態仍是每條 lane 各一份(共用的是 delay 估計器、對齊後 far、FFT 控制代碼、四條 lane 在同一次呼叫內先寫後讀的暫存緩衝,以及 hop 內由 lane 0 借給 lane 1–3 的遠端 FFT 結果)(16k/256 每條 <code>ESTIMATE</code>／<code>FULL</code> lane 95,808 B,四條共 383,232 B,約占 <code>FULL</code> 陣列池 524,448 B 的 73%;<code>STATE</code> lane 不切殘餘回音估計器與舒適噪音陣列,每條 74,016 B)。陣列的 <code>STATE</code>／<code>ESTIMATE</code>／<code>FULL</code> 池大小在 16k/256 為 420,736／514,688／524,448 B(主機實測;以 <code>aec_get_mem_requirements()</code> 為準)。</div>
 
 <h2>4. 初始化、對齊、錯誤處理、reset、destroy</h2>
 <div class="tblwrap"><table>
@@ -254,7 +254,7 @@ int app_run_hop(Aec *aec, const float *mics, const float *ref,
 <tr><td>mic／ref 前提</td><td>ref 是實際送往喇叭的訊號,與 mic 同取樣率同時鐘;延遲只能是正的(mic 落後 ref)。函式庫不補償 clock drift。</td></tr>
 <tr><td>延遲三態</td><td><code>MATCHED</code>(預設,線上估計)／<code>FIXED</code>(給量測延遲 <code>fixed_delay_samples</code>)／<code>EXTERNAL_ALIGNED</code>(呼叫端保證已對齊);非法組合在建立時被拒絕,不會被修正。表見 <a href="aec_c_api.html">AEC API</a> §4。</td></tr>
 <tr><td>執行緒</td><td>一個實例<b>不是 thread-safe</b>;<code>aec_process*</code>、<code>aec_set_level</code>、<code>aec_reset</code>、<code>aec_apply_external_realign</code>、<code>aec_destroy</code> 都要由呼叫端序列化。不同實例彼此獨立。</td></tr>
-<tr><td><code>aec_reset</code></td><td>清延遲估計、參考環、濾波器、偵測器、輸出 OLA 等執行期狀態,<b>保留設定、記憶體與 <code>aec_set_level</code> 設的目標</b>;會讓 <code>generation</code> 與 <code>aec_post_reset_serial()</code> 各 +1(<code>aec_reset</code> 是獨立的一次呼叫,不在任何處理呼叫之內,回傳時 serial 已是 +1 後的值;函式庫自己清 OLA 並把 CNG 種子設回 <code>AEC_CNG_SEED</code>;函式庫外自行合成的消費端看到 serial 改變就同步清自己的 OLA 與 CNG,不要反過來呼叫 <code>aec_reset</code>)。每個獨立串流前呼叫;只是外部對齊改變時改用 <code>aec_apply_external_realign</code>(不重啟 OLA,輸出連續)。</td></tr>
+<tr><td><code>aec_reset</code></td><td>清延遲估計、參考環、濾波器、偵測器、輸出 OLA 等執行期狀態,<b>保留設定、記憶體與 <code>aec_set_level</code> 設的目標</b>;會讓 <code>aec_post_reset_serial()</code> +1(<code>aec_reset</code> 是獨立的一次呼叫,不在任何處理呼叫之內,回傳時 serial 已是 +1 後的值;函式庫自己清 OLA 並把 CNG 種子設回 <code>AEC_CNG_SEED</code>;函式庫外自行合成的消費端看到 serial 改變就同步清自己的 OLA 與 CNG,不要反過來呼叫 <code>aec_reset</code>)。每個獨立串流前呼叫;只是外部對齊改變時改用 <code>aec_apply_external_realign</code>(不重啟 OLA,輸出連續)。</td></tr>
 <tr><td><code>aec_destroy</code></td><td>heap 實例釋放單一 arena,<b>剛好一次</b>;pool 實例不釋放任何記憶體(只清內部參考)、可重複呼叫(NULL 也安全),池由呼叫端回收。</td></tr>
 <tr><td>零 heap</td><td>pool 路徑從 init 到 destroy 不呼叫 malloc(<code>make test-zero-heap</code>:50 個 init/process/reset/destroy 週期 allocator 呼叫為 0)。heap 路徑只在 <code>aec_create</code> 做<b>一次</b> 16-byte 對齊配置(<code>aec_destroy</code> 釋放同一塊,指標隨即失效)。</td></tr>
 </table></div>

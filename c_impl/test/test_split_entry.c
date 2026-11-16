@@ -10,6 +10,7 @@
  *
  * Run from c_impl/:  make test-split-entry */
 #include "aec.h"
+#include "aec_view_internal.h"
 #include "aec_white_box.h"
 #include "aec_res_internal.h"
 #include "utility/simd_kernels.h"
@@ -61,16 +62,16 @@ static void* pool_alloc(size_t bytes) { return aec_test_pool_alloc_fill(bytes, 0
 
 static Aec* new_aec(const AecConfig* cfg, void** mem_out) { return aec_test_new_aec(cfg, mem_out, 0xA5); }
 
-static void views(const Aec* a, AecLinearView* lv, AecResidualView* rv, int* have_rv) {
+static void views(const Aec* a, AecLinearViewFull* lv, AecResidualViewFull* rv, int* have_rv) {
     memset(lv, 0, sizeof *lv); lv->struct_size = sizeof *lv;
     memset(rv, 0, sizeof *rv); rv->struct_size = sizeof *rv;
-    CHECK(aec_get_linear(a, lv) == AEC_OK, "aec_get_linear");
-    *have_rv = (aec_get_residual(a, rv) == AEC_OK);
+    CHECK(aec_get_linear_full(a, lv) == AEC_OK, "aec_get_linear");
+    *have_rv = (aec_get_residual_full(a, rv) == AEC_OK);
 }
 
 /* ---- fields common to every non-APPLY mode ---- */
-static void dump_common(const Grid* g, const char* mode, int hop, const Aec* a, const AecLinearView* lv,
-                        const AecResidualView* rv, int have_rv) {
+static void dump_common(const Grid* g, const char* mode, int hop, const Aec* a, const AecLinearViewFull* lv,
+                        const AecResidualViewFull* rv, int have_rv) {
     uint32_t ls[5];
     uint64_t h;
     int usable = have_rv ? rv->usable_linear : 0;
@@ -182,7 +183,7 @@ static int run_mode(const Grid* g, Mode m, int n_hops) {
     }
     const char* mn = MODE_NAME[m];
     for (int hop = 0; hop < n_hops; ++hop) {
-        AecLinearView lv; AecResidualView rv; int have_rv;
+        AecLinearViewFull lv; AecResidualViewFull rv; int have_rv;
         if (split_signal_fill(g->sr, hop_size, hop, ref, mic) != 0) { printf("FAIL: fill\n"); g_fail++; return -1; }
         if (m == M_APPLY) {
             CHECK(aec_process(a, mic, ref, out) == AEC_OK, "aec_process hop %d", hop);
@@ -201,8 +202,8 @@ static int run_mode(const Grid* g, Mode m, int n_hops) {
         }
         /* a view requested while the residual stage is pending is refused */
         {
-            AecResidualView early; memset(&early, 0, sizeof early); early.struct_size = sizeof early;
-            CHECK(aec_get_residual(a, &early) == AEC_ERR_SEQUENCE, "residual view before the residual stage");
+            AecResidualViewFull early; memset(&early, 0, sizeof early); early.struct_size = sizeof early;
+            CHECK(aec_get_residual_full(a, &early) == AEC_ERR_SEQUENCE, "residual view before the residual stage");
         }
         CHECK(aec_process_residual(a, NULL) == AEC_OK, "aec_process_residual %s hop %d", mn, hop);
         views(a, &lv, &rv, &have_rv);
@@ -231,8 +232,8 @@ static int run_mode(const Grid* g, Mode m, int n_hops) {
                       "a_null split hop %d", hop);
                 CHECK(aec_process(a_proc, mic, ref, out2) == AEC_OK, "a_proc aec_process hop %d", hop);
                 {
-                    AecResidualView pv; memset(&pv, 0, sizeof pv); pv.struct_size = sizeof pv;
-                    CHECK(aec_get_residual(a_proc, &pv) == AEC_OK, "a_proc view");
+                    AecResidualViewFull pv; memset(&pv, 0, sizeof pv); pv.struct_size = sizeof pv;
+                    CHECK(aec_get_residual_full(a_proc, &pv) == AEC_OK, "a_proc view");
                     CHECK(split_hash_complex(pv.error_spec, pv.n_freqs) == split_hash_complex(rv.error_spec, rv.n_freqs),
                           "aec_process vs split: error_spec hop %d", hop);
                     CHECK(split_hash_complex(pv.base_spec, pv.n_freqs) == split_hash_complex(rv.base_spec, rv.n_freqs),
@@ -275,9 +276,9 @@ static void test_sequence(void) {
     CHECK(aec_far_fft_real_compute_count(NULL) == 0, "far FFT count of NULL");
     aec_apply_gain_spec(NULL, NULL, NULL, NULL, -1);           /* refused, no access */
     {
-        Complex o[NB_MAX]; AecResidualView v; memset(&v, 0, sizeof v); v.struct_size = sizeof v;
+        Complex o[NB_MAX]; AecResidualViewFull v; memset(&v, 0, sizeof v); v.struct_size = sizeof v;
         CHECK(res_gain_of(a) == NULL && aec_apply_gain(a, NULL, o) == AEC_ERR_SEQUENCE &&
-              aec_apply_cng(a, NULL, o) == AEC_ERR_SEQUENCE && aec_get_residual(a, &v) == AEC_ERR_SEQUENCE,
+              aec_apply_cng(a, NULL, o) == AEC_ERR_SEQUENCE && aec_get_residual_full(a, &v) == AEC_ERR_SEQUENCE,
               "residual getters before the first completed hop");
     }
     {
@@ -314,9 +315,9 @@ static void test_sequence(void) {
     aec_reset(a);
     CHECK(aec_process_residual(a, NULL) == AEC_ERR_SEQUENCE, "a reset drops an open hop");
     {
-        AecResidualView v; memset(&v, 0, sizeof v);
+        AecResidualViewFull v; memset(&v, 0, sizeof v);
         v.struct_size = sizeof v - 1;
-        CHECK(aec_get_residual(a, &v) == AEC_ERR_ARG, "short struct_size");
+        CHECK(aec_get_residual_full(a, &v) == AEC_ERR_ARG, "short struct_size");
     }
     free(mem);
 }

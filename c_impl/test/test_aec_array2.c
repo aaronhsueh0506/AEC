@@ -14,6 +14,7 @@
  *
  * Run from c_impl/:  make test-aec-array-2   (G2_VERBOSE=<file> writes every hop's unchained group hashes) */
 #include "aec.h"
+#include "aec_view_internal.h"
 #include "aec_res_internal.h"
 #include "res_gain_of.h"
 #include "aec_test_tuning.h"   /* AEC_TESTING build: the admission candidate, the tuning overrides */
@@ -40,8 +41,8 @@ typedef struct NewH {
     Aec* a;
     void* mem;
     int mode;
-    AecResidualView rv;
-    AecLinearView lv;
+    AecResidualViewFull rv;
+    AecLinearViewFull lv;
     const Complex* beam_err;
     int hop, n;
 } NewH;
@@ -121,13 +122,13 @@ static int g2a_fuse(void* p, const Complex* weights, const Complex* beamformed_e
     beam.weights = weights; beam.beamformed_error = beamformed_error;
     h->beam_err = beamformed_error;
     {
-        AecResidualView early; memset(&early, 0, sizeof early); early.struct_size = sizeof early;
-        CHECK(aec_get_residual(h->a, &early) == AEC_ERR_SEQUENCE, "residual view before the residual stage");
+        AecResidualViewFull early; memset(&early, 0, sizeof early); early.struct_size = sizeof early;
+        CHECK(aec_get_residual_full(h->a, &early) == AEC_ERR_SEQUENCE, "residual view before the residual stage");
     }
     if (aec_process_residual(h->a, &beam) != AEC_OK) return -1;
     memset(&h->rv, 0, sizeof h->rv); h->rv.struct_size = sizeof h->rv;
     memset(&h->lv, 0, sizeof h->lv); h->lv.struct_size = sizeof h->lv;
-    if (aec_get_residual(h->a, &h->rv) != AEC_OK || aec_get_linear(h->a, &h->lv) != AEC_OK) return -1;
+    if (aec_get_residual_full(h->a, &h->rv) != AEC_OK || aec_get_linear_full(h->a, &h->lv) != AEC_OK) return -1;
     memset(o, 0, sizeof *o);
     o->e = h->rv.error_spec; o->b = h->rv.base_spec; o->y = h->rv.near_spec; o->x = h->rv.far_spec;
     o->r2 = h->rv.r2; o->cn = h->rv.comfort_noise; o->far_hop = h->rv.far_hop;
@@ -160,7 +161,7 @@ static void g2a_counters(void* p, uint64_t k[8]) {
 static long g_hook_hops;
 static void frame_hook(void* p, const G2ACase* c, int hop, const G2AFront* f, const G2AFrame* fr, const float* gain) {
     NewH* h = (NewH*)p;
-    const AecResidualView* rv = &h->rv;
+    const AecResidualViewFull* rv = &h->rv;
     const int n = h->n;
     float gx[G2_NB_MAX];
     Complex t[G2_NB_MAX], q[G2_NB_MAX];

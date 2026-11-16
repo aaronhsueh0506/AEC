@@ -37,17 +37,17 @@
 <!-- stats:begin -->
 | key | 數值 | 說明 |
 |---|---|---|
-| `c_src_total` | 514 | `src/` 下 `.c` 的 C 函式總數（唯一 (檔, 函式名)） |
+| `c_src_total` | 526 | `src/` 下 `.c` 的 C 函式總數（唯一 (檔, 函式名)） |
 | `c_src_mirror` | 221 | 關係為 mirror |
 | `c_src_partial` | 124 | 關係為 partial |
-| `c_src_c_only` | 169 | 關係為 C-only（含 22 個 `aec_testing_*` 測試鉤子） |
+| `c_src_c_only` | 181 | 關係為 C-only（含 22 個 `aec_testing_*` 測試鉤子） |
 | `c_src_unknown` | 0 | 關係為 未能判斷 |
 | `c_hdr_total` | 2 | `include/internal/` 下 header 內 static inline 函式總數（規則 2；共用 SIMD 核心不列入） |
 | `c_hdr_c_only` | 1 | 其中 C-only |
 | `c_hdr_mapped` | 1 | 其中 mirror 或 partial |
-| `c_total` | 516 | C 函式合計（src 加 header） |
+| `c_total` | 528 | C 函式合計（src 加 header） |
 | `c_mapped` | 346 | 已對應（mirror 加 partial）合計 |
-| `c_c_only` | 170 | C-only 合計 |
+| `c_c_only` | 182 | C-only 合計 |
 | `c_unknown` | 0 | 未能判斷 合計 |
 | `inferred` | 28 | 關係說明以「推定：」開頭的列（已含在上列 mirror／partial 內） |
 | `py_total` | 575 | Python 符號總數（規則 4） |
@@ -197,6 +197,9 @@
 | `src/aec.c:aec_init_ex` | `modules/orchestrator.py:AEC.__init__` | partial（推定：`aec_init` 加選用的 AecMemReq 核對；核對通過後同 `aec_init`） | — | `ctest:test_aec_array.c` |
 | `src/aec.c:aec_lane_get_mem_size` | — | C-only（陣列實例的 lane 池尺寸：僅接受 lane 契約的設定，省去該契約不跑的配置；Python 沒有 pool） | — | `ctest:test_memory_layout.c`<br>`ctest:test_aec_array.c` |
 | `src/aec.c:aec_lane_init` | — | C-only（在陣列池內建構一條 lane：借用陣列的 FFT 控制代碼，建構結束位置須等於 `aec_lane_get_mem_size`；Python 沒有 pool） | — | `ctest:test_aec_array.c`<br>`ctest:test_aec_array_flow.c` |
+| `src/aec.c:aec_lane_scratch_layout` | — | C-only（陣列的四條 lane 共用的「同一次 lane 呼叫內先寫後讀」緩衝的配置：只算大小，或同時把 `AecLaneScratch` 指到各欄位；Python 沒有 pool） | — | `ctest:test_memory_layout.c`<br>`ctest:test_aec_array.c` |
+| `src/aec.c:aec_lane_scratch_get_mem_size` | — | C-only（共用暫存緩衝的位元組數；只接受 lane 契約的設定，其餘回 0） | — | `ctest:test_memory_layout.c` |
+| `src/aec.c:aec_lane_scratch_bind` | — | C-only（把共用暫存緩衝歸零並指好各欄位，陣列在建 lane 之前呼叫一次） | — | `ctest:test_memory_layout.c`<br>`ctest:test_aec_array_flow.c` |
 | `src/aec.c:aec_init_single` | — | C-only（單通道建構：`aec_init_resolved`（單通道）與 `aec_lane_init`（陣列的 lane）共用，lane 模式略去其契約不跑的配置；Python 沒有 pool） | — | `ctest:test_lifecycle.c`<br>`ctest:test_memory_layout.c` |
 | `src/aec.c:aec_lane_contract_ok` | — | C-only（lane 契約檢查：單通道、EXTERNAL_ALIGNED、`residual` 為 `STATE` 或 `ESTIMATE`，其餘設定一律拒絕） | — | `ctest:test_memory_layout.c`<br>`ctest:test_aec_array.c` |
 | `src/aec.c:aec_state_lane` | — | C-only（`STATE` lane 的判斷：這種 lane 在 AecState 更新後就結束，carve 略過殘餘回音估計器與舒適噪音陣列） | — | `ctest:test_memory_layout.c`<br>`ctest:test_aec_array.c` |
@@ -230,7 +233,8 @@
 | `src/aec.c:aec_linear_finite` | — | C-only（線性 stage 交出的向量（單聲道與陣列每條 lane；`AecLinearView` 的 linear_hop 與三個頻譜）是否有限；Python 版沒有這個拒絕：只在有限輸入使結果溢位時才作用，正常輸入（含預設設定）兩邊逐位元一致不受影響，與 ULCNet 有限值檢查同屬 C 端防護） | — | `ctest:test_dsp_refusal.c` |
 | `src/aec.c:aec_closed_finite` | — | C-only（hop 收尾時的檢查（單聲道與陣列每條 lane）：近端／線性輸出功率追蹤值與 `AecResidualView` 向量（依 `residual` 所及）是否有限；Python 版沒有這個拒絕：只在有限輸入使結果溢位時才作用，正常輸入（含預設設定）兩邊逐位元一致不受影響，與 ULCNet 有限值檢查同屬 C 端防護） | — | `ctest:test_dsp_refusal.c` |
 | `src/aec.c:aec_process_residual` | `modules/orchestrator.py:AEC.process` | partial（緊接線性 stage 的後級入口，不套用增益、不合成；等同 Python 的 res-context 路徑；結果溢位的 hop 回 `AEC_ERR_DSP`（C 專屬）） | T-05 | `ctest:test_split_entry.c`<br>`ctest:test_process_context.c`<br>`ctest:test_dsp_refusal.c` |
-| `src/aec.c:aec_get_residual` | `modules/orchestrator.py:AEC._build_res_context#AecResContext`<br>`modules/orchestrator.py:AEC._post_stash_context`<br>`modules/orchestrator.py:AEC._build_res_context#output_base_spec`<br>`modules/orchestrator.py:AEC._post_stash_context#_res_output_base` | partial（後級檢視：分析 seam 與渲染底座 `base_spec`／`guard_active` 在同一個結構，帶 `struct_size` 檢查；Python 在 process 內建構兩者並放進同一個 res-context 資料類別，欄位集合兩邊不同；底座與 `formed_hop` 不配對） | D-05 | `ctest:test_split_entry.c`<br>`ctest:test_process_context.c`<br>`ctest:test_guard_unify.c`<br>`pytest:test_guard_unify.py` |
+| `src/aec.c:aec_get_residual` | — | C-only（公開的 `AecResidualView`：呼叫 `aec_get_residual_full()` 後只複製函式庫外的呼叫端讀的欄位，帶 `struct_size` 檢查） | D-05 | `ctest:test_split_entry.c`<br>`ctest:test_handle_ready.c`<br>`ctest:test_config_validation.c` |
+| `src/aec.c:aec_get_residual_full` | `modules/orchestrator.py:AEC._build_res_context#AecResContext`<br>`modules/orchestrator.py:AEC._post_stash_context`<br>`modules/orchestrator.py:AEC._build_res_context#output_base_spec`<br>`modules/orchestrator.py:AEC._post_stash_context#_res_output_base` | partial（後級檢視的完整形式 `AecResidualViewFull`：分析 seam 與渲染底座 `base_spec`／`guard_active` 在同一個結構，帶 `struct_size` 檢查；Python 在 process 內建構兩者並放進同一個 res-context 資料類別，欄位集合兩邊不同；底座與 `formed_hop` 不配對） | D-05 | `ctest:test_split_entry.c`<br>`ctest:test_process_context.c`<br>`ctest:test_guard_unify.c`<br>`pytest:test_guard_unify.py` |
 | `src/aec.c:aec_gain_ready` | — | C-only（`aec_apply_gain`／`aec_apply_cng` 的前置檢查：需 `FULL` 且該 hop 已處理完） | D-12 | `ctest:test_split_entry.c` |
 | `src/aec.c:aec_render_base` | — | C-only（增益套用的底座頻譜：輸出守衛啟動時為守衛的底座，否則為選定的誤差頻譜；`aec_get_residual`／`aec_apply_gain` 共用） | D-12 | `ctest:test_split_entry.c` |
 | `src/aec_post.c:aec_apply_gain_spec` | `modules/orchestrator.py:AEC._aec3_post#_output_base * gain` | partial（無實例形式：底座乘增益，可帶外部增益取 min；Python 在 post 內部直接套用） | — | `ctest:test_split_entry.c`<br>`ctest:test_guard_unify.c` |
@@ -242,7 +246,8 @@
 | `src/aec.c:aec_synthesis_window` | — | C-only（公開存取器：回傳函式庫自己做 OLA 前乘的合成窗與其長度，供外部合成器以 `ac_istft` 借用；Python 側的窗在 `modules/` 內部，沒有對應入口） | — | `ctest:test_synthesis_window.c` |
 | `src/aec.c:aec_delay_confidence` | — | C-only（跨 delay 模式的統一信心值；MATCHED 值來自 `delay_aec_confidence`） | D-12 | `ctest:test_duty_census.c` |
 | `src/aec.c:aec_debug_status` | — | C-only（AecDebugStatus 唯讀狀態查詢） | D-12 | `ctest:test_duty_census.c` |
-| `src/aec.c:aec_get_linear` | — | C-only（AecLinearView 線性 stage 檢視） | D-12 | `ctest:test_linear_context.c`<br>`ctest:test_process_context.c` |
+| `src/aec.c:aec_get_linear` | — | C-only（公開的 `AecLinearView`：呼叫 `aec_get_linear_full()` 後只複製函式庫外的呼叫端讀的欄位） | D-12 | `ctest:test_lifecycle.c`<br>`ctest:test_memory_layout.c` |
+| `src/aec.c:aec_get_linear_full` | — | C-only（完整的線性 stage 檢視 `AecLinearViewFull`：公開 `AecLinearView` 加上函式庫外沒人讀的欄位；陣列與函式庫自己的測試讀它） | D-12 | `ctest:test_linear_context.c`<br>`ctest:test_process_context.c`<br>`ctest:test_split_entry.c` |
 
 ### 1.2 `aec_post.c`　aec_post.c（AEC 後處理驅動：對應 Python 的 `_aec3_post`）
 
@@ -349,8 +354,11 @@
 | `src/pbfdkf.c:pbfdaf_zero_state` | `modules/filters.py:PBFDAF.__init__` | partial（推定：狀態緩衝歸零；Python 以 np.zeros 配置） | T-03 | — |
 | `src/pbfdkf.c:pbfdaf_get_mem_size` | — | C-only（靜態記憶體池尺寸查詢） | — | `ctest:test_config_validation.c` |
 | `src/pbfdkf.c:pbfdaf_get_mem_size_follower` | — | C-only（lane 內 shadow 濾波器的池尺寸：共用主濾波器的遠端歷史，且不含 lightweight 前端不形成的頻譜） | — | `ctest:test_memory_layout.c` |
+| `src/pbfdkf.c:pbfdaf_get_mem_size_follower_borrowed` | — | C-only（同上，但轉換列與暫存列不自己切，由 `PbfdafScratch` 借；陣列的 lane 用） | — | `ctest:test_memory_layout.c` |
+| `src/pbfdkf.c:pbfdaf_scratch_layout` | — | C-only（主濾波器或 follower 在一次 process／reset 呼叫內先寫後讀的緩衝的配置：只算大小，或同時填 `PbfdafScratch`；Python 沒有 pool） | — | `ctest:test_memory_layout.c`<br>`ctest:test_aec_array.c` |
 | `src/pbfdkf.c:pbfdaf_init_static` | `modules/filters.py:PBFDAF.__init__` | partial（推定：靜態記憶體池路徑） | T-03 | `ctest:test_shared_fft_handle.c`<br>`ctest:test_config_validation.c` |
 | `src/pbfdkf.c:pbfdaf_init_static_follower` | `modules/filters.py:PBFDAF.__init__` | partial（推定：同 `pbfdaf_init_static`，但 `X_buf`／`x2_cache` 指向主濾波器的；前提是兩者每 hop 同輸入、同清除、同分區步進，Python 兩個物件各自持有） | — | `ctest:test_aec_array.c` |
+| `src/pbfdkf.c:pbfdaf_init_static_follower_borrowed` | — | C-only（`pbfdaf_init_static_follower` 的借用形式：暫存列與常數窗表指向 `PbfdafScratch`，不自己切；陣列的 lane 用） | — | `ctest:test_aec_array.c`<br>`ctest:test_memory_layout.c` |
 | `src/pbfdkf.c:pbfdaf_mem_size_impl` | — | C-only（濾波器 pool 位元組數：一般與 follower 兩種配置共用；Python 沒有 pool） | — | `ctest:test_memory_layout.c` |
 | `src/pbfdkf.c:pbfdaf_init_impl` | — | C-only（濾波器在 pool 內的建構：`pbfdaf_init_static` 與 `pbfdaf_init_static_follower` 共用；Python 沒有 pool） | — | `ctest:test_memory_layout.c`<br>`ctest:test_shared_fft_handle.c` |
 | `src/pbfdkf.c:pbfdaf_free` | — | C-only（只放掉借用的共用 FFT 參考；池與 FFT 都屬於呼叫端） | — | `ctest:test_config_validation.c` |
@@ -365,7 +373,11 @@
 | `src/pbfdkf.c:pbfdaf_warm_shift_ir` | `modules/filters.py:PBFDAF.warm_shift_ir` | mirror | T-03 | `pytest:test_external_realign.py` |
 | `src/pbfdkf.c:pbfdkf_init_scalars` | `modules/filters.py:PBFDKF.__init__` | partial（Kalman 純量欄位初值，含逐 block 速率換算） | T-03 | `ctest:test_process_context.c` |
 | `src/pbfdkf.c:pbfdkf_get_mem_size` | — | C-only（靜態記憶體池尺寸查詢） | — | `ctest:test_config_validation.c` |
+| `src/pbfdkf.c:pbfdkf_mem_size_impl` | — | C-only（`pbfdkf_get_mem_size` 與借用形式共用的尺寸計算；Python 沒有 pool） | — | `ctest:test_memory_layout.c` |
+| `src/pbfdkf.c:pbfdkf_get_mem_size_borrowed` | — | C-only（借用暫存列與常數窗表的主濾波器池尺寸；陣列的 lane 用） | — | `ctest:test_memory_layout.c` |
 | `src/pbfdkf.c:pbfdkf_init_static` | `modules/filters.py:PBFDKF.__init__` | partial（推定：靜態記憶體池路徑） | T-03 | `ctest:test_shared_fft_handle.c`<br>`ctest:test_config_validation.c` |
+| `src/pbfdkf.c:pbfdkf_init_impl` | — | C-only（`pbfdkf_init_static` 與借用形式共用的建構；Python 沒有 pool） | — | `ctest:test_memory_layout.c`<br>`ctest:test_config_validation.c` |
+| `src/pbfdkf.c:pbfdkf_init_static_borrowed` | — | C-only（`pbfdkf_init_static` 的借用形式：暫存列與常數窗表指向 `PbfdafScratch`；陣列的 lane 用） | — | `ctest:test_aec_array.c`<br>`ctest:test_memory_layout.c` |
 | `src/pbfdkf.c:pbfdkf_free` | — | C-only（只放掉借用的共用 FFT 參考；池與 FFT 都屬於呼叫端） | — | `ctest:test_config_validation.c` |
 | `src/pbfdkf.c:pbfdkf_rearm_kalman` | `modules/filters.py:PBFDKF._rearm_kalman` | partial（C 只重設 error_psd；Python 另重設 R、Q） | T-03 | — |
 | `src/pbfdkf.c:pbfdkf_reset` | `modules/filters.py:PBFDKF.reset` | mirror | T-03 | — |

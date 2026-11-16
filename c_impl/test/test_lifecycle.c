@@ -21,6 +21,7 @@
  */
 #include "aec.h"
 #include "aec_internal.h"
+#include "aec_view_internal.h"
 #include "aec_pool_test_util.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -191,6 +192,94 @@ static void test_double_destroy_static(void) {
     free(pool);
 }
 
+static float view_noise(uint32_t* s) {
+    *s = *s * 1664525u + 1013904223u;
+    return ((float)(*s >> 8) / 16777216.0f - 0.5f) * 0.4f;
+}
+
+/* The public views carry the fields a caller outside the library reads, the complete ones (aec_view_internal.h) the rest: after the
+ * same hop both getters agree on every public field, the complete linear view has the main filter's spectra, and a short struct_size
+ * is refused with the record untouched. */
+static int public_views_match(const Aec* a, int expect_residual) {
+    AecLinearView lv;
+    AecLinearViewFull lf;
+    AecResidualView rv;
+    AecResidualViewFull rf;
+    int ok = 1;
+    memset(&lv, 0, sizeof lv); lv.struct_size = sizeof lv;
+    memset(&lf, 0, sizeof lf); lf.struct_size = sizeof lf;
+    if (aec_get_linear(a, &lv) != AEC_OK || aec_get_linear_full(a, &lf) != AEC_OK) return 0;
+    ok = ok && lv.hop_size == lf.hop_size && lv.linear_hop == lf.linear_hop && lv.aligned_far_hop == lf.aligned_far_hop &&
+         lv.delay_samples == lf.delay_samples && lv.delay_confidence == lf.delay_confidence && lv.delay_state == lf.delay_state &&
+         lv.far_power == lf.far_power && lv.dt_indicator == lf.dt_indicator && lv.saturation_level == lf.saturation_level &&
+         lv.filter_converged == lf.filter_converged;
+    ok = ok && lf.n_freqs == lf.hop_size + 1 && lf.echo_spec && lf.near_spec && lf.far_spec;
+    if (expect_residual) {
+        memset(&rv, 0, sizeof rv); rv.struct_size = sizeof rv;
+        memset(&rf, 0, sizeof rf); rf.struct_size = sizeof rf;
+        if (aec_get_residual(a, &rv) != AEC_OK || aec_get_residual_full(a, &rf) != AEC_OK) return 0;
+        ok = ok && rv.n_freqs == rf.n_freqs && rv.hop_size == rf.hop_size && rv.formed_hop == rf.formed_hop &&
+             rv.error_spec == rf.error_spec && rv.echo_spec == rf.echo_spec && rv.near_spec == rf.near_spec &&
+             rv.far_spec == rf.far_spec && rv.base_spec == rf.base_spec && rv.guard_active == rf.guard_active &&
+             rv.res_gain == rf.res_gain && rv.r2 == rf.r2 && rv.comfort_noise == rf.comfort_noise &&
+             rv.usable_linear == rf.usable_linear && rv.post_reset_serial == rf.post_reset_serial &&
+             rv.all_converged == rf.all_converged && rv.max_dt == rf.max_dt && rv.max_saturation == rf.max_saturation &&
+             rv.clock_drift == rf.clock_drift && rv.guard_lanes == rf.guard_lanes && rv.far_hop == rf.far_hop;
+    }
+    memset(&lv, 0x5A, sizeof lv);
+    lv.struct_size = sizeof lv - 1;
+    ok = ok && aec_get_linear(a, &lv) == AEC_ERR_ARG && lv.struct_size == sizeof lv - 1 && ((unsigned char*)&lv)[sizeof lv - 1] == 0x5A;
+    return ok;
+}
+
+static void test_public_views(void) {
+    static float mic[512], ref[512], out[512];
+    AecConfig cfg;
+    Aec* a;
+    uint32_t rng = 7u;
+    int h, i, hop, ok = 1;
+    aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, 16000);
+    a = aec_create(&cfg);
+    CHECK(a != NULL, "public views: single-channel instance");
+    if (!a) return;
+    hop = aec_hop_size(a);
+    for (h = 0; h < 40; ++h) {
+        for (i = 0; i < hop; ++i) { ref[i] = view_noise(&rng); mic[i] = 0.5f * ref[i] + 0.1f * view_noise(&rng); }
+        if (aec_process(a, mic, ref, out) != AEC_OK) ok = 0;
+    }
+    CHECK(ok && public_views_match(a, 1), "public views: single channel, public fields equal the complete views'");
+    aec_destroy(a);
+#ifndef AEC_NO_ARRAY
+    {
+        static float mics[512 * 4];
+        static Complex w[4 * 257];
+        AecBeam beam;
+        int k;
+        aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, 16000);
+        cfg.n_mics = AEC_ARRAY_MICS;
+        cfg.residual = AEC_RESIDUAL_ESTIMATE;
+        a = aec_create(&cfg);
+        CHECK(a != NULL, "public views: array instance");
+        if (!a) return;
+        hop = aec_hop_size(a);
+        for (k = 0; k < 4 * (hop + 1); ++k) { w[k].r = 0.25f; w[k].i = 0.0f; }
+        beam.weights = w;
+        beam.beamformed_error = NULL;
+        ok = 1;
+        for (h = 0; h < 40; ++h) {
+            for (i = 0; i < hop; ++i) {
+                int c;
+                ref[i] = view_noise(&rng);
+                for (c = 0; c < 4; ++c) mics[i * 4 + c] = 0.5f * ref[i] + 0.1f * view_noise(&rng);
+            }
+            if (aec_process_linear(a, mics, ref) != AEC_OK || aec_process_residual(a, &beam) != AEC_OK) ok = 0;
+        }
+        CHECK(ok && public_views_match(a, 1), "public views: array, public fields equal the complete views'");
+        aec_destroy(a);
+    }
+#endif
+}
+
 int main(void) {
     int iters[] = { 1, 10, 1000 };
     for (size_t i = 0; i < sizeof(iters) / sizeof(iters[0]); ++i) {
@@ -201,6 +290,7 @@ int main(void) {
     test_array_cycles(100);
 #endif
 
+    test_public_views();
     test_destroy_null();
     test_destroy_heap();
     test_double_destroy_static();

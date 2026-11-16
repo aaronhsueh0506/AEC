@@ -80,7 +80,7 @@ static void pbfdaf_zero_state(PBFDAF* p) {
 /* follower = 1: a lightweight shadow of a main filter at the same geometry. It has no sqrt_hann / near_spec /
  * error_spec_windowed / spec_scratch (the frontend skips them when lightweight) and shares the main filter's X_buf and x2_cache. */
 static size_t pbfdaf_mem_size_impl(int block_size, int n_partitions, int hop_size,
-                                   int with_process_scratch, int follower) {
+                                   int with_process_scratch, int follower, int borrow) {
     int hop = (hop_size > 0) ? hop_size : block_size / 2;
     int blk, fft, K;
     pbfdaf_compute_sizes(hop, NULL, &blk, &fft, &K);
@@ -90,8 +90,10 @@ static size_t pbfdaf_mem_size_impl(int block_size, int n_partitions, int hop_siz
     /* Checked size arithmetic (saturating ck_* helpers); the carve order in pbfdaf_init_static must
      * match this one. */
     size_t total = 0;
-    total = ck_field_size(total, (size_t)fft, sizeof(float));
-    if (!follower) total = ck_field_size(total, (size_t)blk, sizeof(float));   /* sqrt_hann */
+    if (!borrow) {
+        total = ck_field_size(total, (size_t)fft, sizeof(float));   /* td_window */
+        if (!follower) total = ck_field_size(total, (size_t)blk, sizeof(float));   /* sqrt_hann */
+    }
     total = ck_field_size(total, Wsz, sizeof(Complex));                  /* W */
     if (!follower) total = ck_field_size(total, Wsz, sizeof(Complex));   /* X_buf */
     total = ck_field_size(total, (size_t)blk, sizeof(float));
@@ -101,16 +103,18 @@ static size_t pbfdaf_mem_size_impl(int block_size, int n_partitions, int hop_siz
     total = ck_field_size(total, (size_t)K,   sizeof(Complex));
     total = ck_field_size(total, (size_t)K,   sizeof(Complex));
     if (!follower) total = ck_field_size(total, (size_t)K, sizeof(Complex));   /* error_spec_windowed */
-    total = ck_field_size(total, (size_t)fft, sizeof(float));
-    if (!follower) total = ck_field_size(total, (size_t)K, sizeof(Complex));   /* spec_scratch */
-    total = ck_field_size(total, (size_t)hop, sizeof(float));
-    if (with_process_scratch) {
-        total = ck_field_size(total, (size_t)K, sizeof(float));
-        total = ck_field_size(total, (size_t)K, sizeof(float));
-        total = ck_field_size(total, (size_t)K, sizeof(float));
+    if (!borrow) {   /* a borrowing filter takes these from a PbfdafScratch */
+        total = ck_field_size(total, (size_t)fft, sizeof(float));   /* time_scratch */
+        if (!follower) total = ck_field_size(total, (size_t)K, sizeof(Complex));   /* spec_scratch */
+        total = ck_field_size(total, (size_t)hop, sizeof(float));   /* scr_fsq */
+        if (with_process_scratch) {
+            total = ck_field_size(total, (size_t)K, sizeof(float));
+            total = ck_field_size(total, (size_t)K, sizeof(float));
+            total = ck_field_size(total, (size_t)K, sizeof(float));
+        }
+        total = ck_field_size(total, ck_mul_size((size_t)n_partitions, (size_t)hop),
+                             sizeof(float));   /* scr_ir */
     }
-    total = ck_field_size(total, ck_mul_size((size_t)n_partitions, (size_t)hop),
-                         sizeof(float));
     if (!follower) total = ck_field_size(total, Wsz, sizeof(float));   /* x2_cache */
     total = ck_field_size(total, (size_t)K,   sizeof(float));
 
@@ -120,18 +124,42 @@ static size_t pbfdaf_mem_size_impl(int block_size, int n_partitions, int hop_siz
 
 size_t pbfdaf_get_mem_size(int block_size, int n_partitions, int hop_size,
                            int with_process_scratch) {
-    return pbfdaf_mem_size_impl(block_size, n_partitions, hop_size, with_process_scratch, 0);
+    return pbfdaf_mem_size_impl(block_size, n_partitions, hop_size, with_process_scratch, 0, 0);
 }
 
 size_t pbfdaf_get_mem_size_follower(int block_size, int n_partitions, int hop_size) {
-    return pbfdaf_mem_size_impl(block_size, n_partitions, hop_size, 1, 1);
+    return pbfdaf_mem_size_impl(block_size, n_partitions, hop_size, 1, 1, 0);
+}
+
+size_t pbfdaf_get_mem_size_follower_borrowed(int block_size, int n_partitions, int hop_size) {
+    return pbfdaf_mem_size_impl(block_size, n_partitions, hop_size, 1, 1, 1);
+}
+
+size_t pbfdaf_scratch_layout(PbfdafScratch* s, void* mem, int block_size, int n_partitions, int hop_size, int follower) {
+    int hop = (hop_size > 0) ? hop_size : block_size / 2;
+    int blk, fft, K;
+    uint8_t* base = (uint8_t*)mem;
+    size_t t = 0;
+    pbfdaf_compute_sizes(hop, NULL, &blk, &fft, &K);
+    if (n_partitions <= 0 || K <= 0) return 0;
+    if (s) memset(s, 0, sizeof(*s));
+#define PS_TAKE(m, type, n) do { if (s) s->m = (type*)(base + t); t = ck_field_size(t, (size_t)(n), sizeof(type)); } while (0)
+    PS_TAKE(time_scratch, float, fft);
+    if (!follower) PS_TAKE(spec_scratch, Complex, K);
+    PS_TAKE(scr_fsq, float, hop);
+    PS_TAKE(scr_ir, float, ck_mul_size((size_t)n_partitions, (size_t)hop));
+    if (follower) { PS_TAKE(scr_mu_local, float, K); PS_TAKE(scr_x2psum, float, K); PS_TAKE(scr_mu_eff, float, K); }
+    else { PS_TAKE(kf_mu_local, float, K); PS_TAKE(kf_x2, float, K); PS_TAKE(kf_mu_aec, float, K); }
+#undef PS_TAKE
+    return MEM_SIZE_INVALID(t) ? 0 : t;
 }
 
 static int pbfdaf_init_impl(PBFDAF* p, void* mem, size_t mem_size,
                             int block_size, int n_partitions,
                             float mu, float delta, int hop_size,
                             int with_process_scratch, int sample_rate,
-                            FftHandle* shared_fft, const PBFDAF* far_owner) {
+                            FftHandle* shared_fft, const PBFDAF* far_owner,
+                            const PbfdafScratch* borrowed) {
     int hop;
     const int follower = far_owner != NULL;
     if (!p || !mem || !shared_fft || sample_rate <= 0) return -1;
@@ -140,7 +168,7 @@ static int pbfdaf_init_impl(PBFDAF* p, void* mem, size_t mem_size,
     if (!MEM_IS_ALIGNED16(mem)) return -1;
     {
         size_t need = pbfdaf_mem_size_impl(block_size, n_partitions, hop_size,
-                                           with_process_scratch, follower);
+                                           with_process_scratch, follower, borrowed != NULL);
         if (need == 0 || mem_size < need) return -1;
     }
     if (follower && (far_owner->n_partitions != n_partitions || far_owner->hop_size != hop ||
@@ -154,8 +182,14 @@ static int pbfdaf_init_impl(PBFDAF* p, void* mem, size_t mem_size,
     int blk = p->block_size, fft = p->fft_size, K = p->n_freqs;
     int Wsz = n_partitions * K;
 
-    p->td_window  = (float*)ptr;   ptr += ALIGN16((size_t)fft * sizeof(float));
-    if (!follower) { p->sqrt_hann = (float*)ptr; ptr += ALIGN16((size_t)blk * sizeof(float)); }
+    if (borrowed) {
+        p->td_window = borrowed->td_window;
+        p->sqrt_hann = follower ? NULL : borrowed->sqrt_hann;
+        if (!p->td_window || (!follower && !p->sqrt_hann)) return -1;
+    } else {
+        p->td_window  = (float*)ptr;   ptr += ALIGN16((size_t)fft * sizeof(float));
+        if (!follower) { p->sqrt_hann = (float*)ptr; ptr += ALIGN16((size_t)blk * sizeof(float)); }
+    }
     p->W          = (Complex*)ptr; ptr += ALIGN16((size_t)Wsz * sizeof(Complex));
     if (follower) {
         p->X_buf = far_owner->X_buf;
@@ -171,18 +205,30 @@ static int pbfdaf_init_impl(PBFDAF* p, void* mem, size_t mem_size,
     if (!follower) { p->error_spec_windowed = (Complex*)ptr; ptr += ALIGN16((size_t)K * sizeof(Complex)); }
     /* Borrow the caller's shared_fft: fft_init()'d at this fft_size, used strictly sequentially. */
     p->fft          = shared_fft;
-    p->time_scratch = (float*)ptr; ptr += ALIGN16((size_t)fft * sizeof(float));
-    if (!follower) { p->spec_scratch = (Complex*)ptr; ptr += ALIGN16((size_t)K * sizeof(Complex)); }
-
-    p->scr_fsq      = (float*)ptr; ptr += ALIGN16((size_t)hop * sizeof(float));
-    if (with_process_scratch) {
-        p->scr_mu_local = (float*)ptr; ptr += ALIGN16((size_t)K * sizeof(float));
-        p->scr_x2psum   = (float*)ptr; ptr += ALIGN16((size_t)K * sizeof(float));
-        p->scr_mu_eff   = (float*)ptr; ptr += ALIGN16((size_t)K * sizeof(float));
+    if (borrowed) {
+        p->time_scratch = borrowed->time_scratch;
+        p->spec_scratch = follower ? NULL : borrowed->spec_scratch;
+        p->scr_fsq      = borrowed->scr_fsq;
+        p->scr_mu_local = with_process_scratch ? borrowed->scr_mu_local : NULL;
+        p->scr_x2psum   = with_process_scratch ? borrowed->scr_x2psum : NULL;
+        p->scr_mu_eff   = with_process_scratch ? borrowed->scr_mu_eff : NULL;
+        p->scr_ir       = borrowed->scr_ir;
+        if (!p->time_scratch || !p->scr_fsq || !p->scr_ir || (!follower && !p->spec_scratch) ||
+            (with_process_scratch && (!p->scr_mu_local || !p->scr_x2psum || !p->scr_mu_eff))) return -1;
     } else {
-        p->scr_mu_local = NULL; p->scr_x2psum = NULL; p->scr_mu_eff = NULL;
+        p->time_scratch = (float*)ptr; ptr += ALIGN16((size_t)fft * sizeof(float));
+        if (!follower) { p->spec_scratch = (Complex*)ptr; ptr += ALIGN16((size_t)K * sizeof(Complex)); }
+
+        p->scr_fsq      = (float*)ptr; ptr += ALIGN16((size_t)hop * sizeof(float));
+        if (with_process_scratch) {
+            p->scr_mu_local = (float*)ptr; ptr += ALIGN16((size_t)K * sizeof(float));
+            p->scr_x2psum   = (float*)ptr; ptr += ALIGN16((size_t)K * sizeof(float));
+            p->scr_mu_eff   = (float*)ptr; ptr += ALIGN16((size_t)K * sizeof(float));
+        } else {
+            p->scr_mu_local = NULL; p->scr_x2psum = NULL; p->scr_mu_eff = NULL;
+        }
+        p->scr_ir       = (float*)ptr; ptr += ALIGN16((size_t)n_partitions * (size_t)hop * sizeof(float));
     }
-    p->scr_ir       = (float*)ptr; ptr += ALIGN16((size_t)n_partitions * (size_t)hop * sizeof(float));
     if (follower) {
         p->x2_cache = far_owner->x2_cache;
     } else {
@@ -205,7 +251,7 @@ int pbfdaf_init_static(PBFDAF* p, void* mem, size_t mem_size,
                          int with_process_scratch, int sample_rate,
                          FftHandle* shared_fft) {
     return pbfdaf_init_impl(p, mem, mem_size, block_size, n_partitions, mu, delta, hop_size,
-                            with_process_scratch, sample_rate, shared_fft, NULL);
+                            with_process_scratch, sample_rate, shared_fft, NULL, NULL);
 }
 
 int pbfdaf_init_static_follower(PBFDAF* p, void* mem, size_t mem_size,
@@ -215,7 +261,17 @@ int pbfdaf_init_static_follower(PBFDAF* p, void* mem, size_t mem_size,
                                 const PBFDAF* far_owner) {
     if (!far_owner) return -1;
     return pbfdaf_init_impl(p, mem, mem_size, block_size, n_partitions, mu, delta, hop_size,
-                            1, sample_rate, shared_fft, far_owner);
+                            1, sample_rate, shared_fft, far_owner, NULL);
+}
+
+int pbfdaf_init_static_follower_borrowed(PBFDAF* p, void* mem, size_t mem_size,
+                                         int block_size, int n_partitions,
+                                         float mu, float delta, int hop_size,
+                                         int sample_rate, FftHandle* shared_fft,
+                                         const PBFDAF* far_owner, const PbfdafScratch* scratch) {
+    if (!far_owner || !scratch) return -1;
+    return pbfdaf_init_impl(p, mem, mem_size, block_size, n_partitions, mu, delta, hop_size,
+                            1, sample_rate, shared_fft, far_owner, scratch);
 }
 
 void pbfdaf_free(PBFDAF* p) {
@@ -506,40 +562,48 @@ static void pbfdkf_init_scalars(PBFDKF* p) {
     p->base.poor_excitation_counter = 400;
 }
 
-size_t pbfdkf_get_mem_size(int block_size, int n_partitions, int hop_size) {
+static size_t pbfdkf_mem_size_impl(int block_size, int n_partitions, int hop_size, int borrow) {
     int hop = (hop_size > 0) ? hop_size : block_size / 2;
     int blk, fft, K;
     pbfdaf_compute_sizes(hop, NULL, &blk, &fft, &K);
     (void)blk; (void)fft;
     if (n_partitions <= 0 || K <= 0) return 0;
-    size_t total = pbfdaf_get_mem_size(block_size, n_partitions, hop_size, 0);
+    size_t total = pbfdaf_mem_size_impl(block_size, n_partitions, hop_size, 0, 0, borrow);
     if (total == 0) return 0;
-    /* Checked size arithmetic: 8 equally sized K-length float fields, each ALIGN16'd by
-     * pbfdkf_init_static. */
-    total = ck_field_size_reps(total, (size_t)K, sizeof(float), 8);
+    /* Checked size arithmetic: equally sized K-length float fields, each ALIGN16'd by pbfdkf_init_impl: the per-bin state and, unless
+     * the scratch is borrowed, the three scratch rows. */
+    total = ck_field_size_reps(total, (size_t)K, sizeof(float), borrow ? 5 : 8);
 
     if (MEM_SIZE_INVALID(total)) return 0;
     return total;
 }
 
-int pbfdkf_init_static(PBFDKF* p, void* mem, size_t mem_size,
-                         int block_size, int n_partitions,
-                         float mu, float delta, int hop_size,
-                         int sample_rate, FftHandle* shared_fft) {
+size_t pbfdkf_get_mem_size(int block_size, int n_partitions, int hop_size) {
+    return pbfdkf_mem_size_impl(block_size, n_partitions, hop_size, 0);
+}
+
+size_t pbfdkf_get_mem_size_borrowed(int block_size, int n_partitions, int hop_size) {
+    return pbfdkf_mem_size_impl(block_size, n_partitions, hop_size, 1);
+}
+
+static int pbfdkf_init_impl(PBFDKF* p, void* mem, size_t mem_size,
+                            int block_size, int n_partitions,
+                            float mu, float delta, int hop_size,
+                            int sample_rate, FftHandle* shared_fft, const PbfdafScratch* borrowed) {
     int hop;
     if (!p || !mem || !shared_fft || sample_rate <= 0) return -1;
     hop = (hop_size > 0) ? hop_size : block_size / 2;
     if (hop <= 0) return -1;
     if (!MEM_IS_ALIGNED16(mem)) return -1;
     {
-        size_t need = pbfdkf_get_mem_size(block_size, n_partitions, hop_size);
+        size_t need = pbfdkf_mem_size_impl(block_size, n_partitions, hop_size, borrowed != NULL);
         if (need == 0 || mem_size < need) return -1;
     }
-    size_t base_sz = pbfdaf_get_mem_size(block_size, n_partitions, hop_size, 0);
+    size_t base_sz = pbfdaf_mem_size_impl(block_size, n_partitions, hop_size, 0, 0, borrowed != NULL);
     memset(p, 0, sizeof(*p));
-    if (pbfdaf_init_static(&p->base, mem, base_sz,
-                       block_size, n_partitions, mu, delta, hop_size, 0,
-                       sample_rate, shared_fft) != 0)
+    if (pbfdaf_init_impl(&p->base, mem, base_sz,
+                         block_size, n_partitions, mu, delta, hop_size, 0,
+                         sample_rate, shared_fft, NULL, borrowed) != 0)
         return -1;
     uint8_t* ptr = (uint8_t*)mem + base_sz;
     int K = p->base.n_freqs;
@@ -548,12 +612,36 @@ int pbfdkf_init_static(PBFDKF* p, void* mem, size_t mem_size,
     p->erl_per_bin = (float*)ptr; ptr += ALIGN16((size_t)K * sizeof(float));
     p->e2_coarse_per_bin = (float*)ptr; ptr += ALIGN16((size_t)K * sizeof(float));
     p->e2_ref_scratch = (float*)ptr; ptr += ALIGN16((size_t)K * sizeof(float));
-    p->scr_mu_local = (float*)ptr; ptr += ALIGN16((size_t)K * sizeof(float));
-    p->scr_X2       = (float*)ptr; ptr += ALIGN16((size_t)K * sizeof(float));
-    p->scr_mu_aec   = (float*)ptr; ptr += ALIGN16((size_t)p->base.n_freqs * sizeof(float));
+    if (borrowed) {
+        p->scr_mu_local = borrowed->kf_mu_local;
+        p->scr_X2       = borrowed->kf_x2;
+        p->scr_mu_aec   = borrowed->kf_mu_aec;
+        if (!p->scr_mu_local || !p->scr_X2 || !p->scr_mu_aec) return -1;
+    } else {
+        p->scr_mu_local = (float*)ptr; ptr += ALIGN16((size_t)K * sizeof(float));
+        p->scr_X2       = (float*)ptr; ptr += ALIGN16((size_t)K * sizeof(float));
+        p->scr_mu_aec   = (float*)ptr; ptr += ALIGN16((size_t)p->base.n_freqs * sizeof(float));
+    }
     (void)ptr;
     pbfdkf_init_scalars(p);
     return 0;
+}
+
+int pbfdkf_init_static(PBFDKF* p, void* mem, size_t mem_size,
+                         int block_size, int n_partitions,
+                         float mu, float delta, int hop_size,
+                         int sample_rate, FftHandle* shared_fft) {
+    return pbfdkf_init_impl(p, mem, mem_size, block_size, n_partitions, mu, delta, hop_size,
+                            sample_rate, shared_fft, NULL);
+}
+
+int pbfdkf_init_static_borrowed(PBFDKF* p, void* mem, size_t mem_size,
+                                int block_size, int n_partitions,
+                                float mu, float delta, int hop_size,
+                                int sample_rate, FftHandle* shared_fft, const PbfdafScratch* scratch) {
+    if (!scratch) return -1;
+    return pbfdkf_init_impl(p, mem, mem_size, block_size, n_partitions, mu, delta, hop_size,
+                            sample_rate, shared_fft, scratch);
 }
 
 void pbfdkf_free(PBFDKF* p) {

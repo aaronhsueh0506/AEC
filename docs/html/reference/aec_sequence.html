@@ -94,7 +94,7 @@ pre code{background:none;padding:0}
  |- aec_post_reset_serial() -----------------------&gt;|                                       |                             |
  |&lt; serial (與自己存的不同 -&gt; ac_istft_reset;實例內的 CNG 產生器由函式庫自己重設;在本 hop 的 CNG 抽樣與 ac_istft_push 之前,不可呼叫 aec_reset)
  |- aec_get_linear(&amp;lin) ------------------------&gt;|                                       |                             |
- |&lt; aligned_far_hop / delay_state / generation ---|                                       |                             |
+ |&lt; aligned_far_hop / delay_state ---------------|                                       |                             |
  | (以上指標借自 AEC 的 per-hop buffer,下一次 process/reset 前有效)
  |- E, R2, CN, g_res --------------------------------------------------------------------&gt;|                             |
  |                                                |                                       | NR 增益 g_nr(r2 / 32768^2 併入噪音底)
@@ -133,14 +133,14 @@ pre code{background:none;padding:0}
  |                                                            |
  | stream A 的最後一個 hop 已處理完
  |- aec_reset(aec) ------------------------------------------&gt;|
- |                                                            | 清延遲估計 / ref ring / 濾波器 / 偵測器 / OLA / CNG 種子;generation +1
+ |                                                            | 清延遲估計 / ref ring / 濾波器 / 偵測器 / OLA / CNG 種子
  |                                                            | residual = FULL 的 aec_process:reset 後第一個輸出 hop 全是 0(1 hop 延遲),與剛建立時相同
  |                                                            | 保留 cfg、記憶體與 aec_set_level 設的目標
  |- aec_process(... stream B ...) ---------------------------&gt;|
   ==== EXTERNAL_ALIGNED:呼叫端把 far 的對齊量改了 delta 個樣本 ====
  |- aec_apply_external_realign(aec, delta) ------------------&gt;|
  |                                                            | aec_linear_is_cancelling() 且 |delta| 在 tap 範圍內 -&gt; 平移 IR;否則只重置濾波器
- |&lt; 1 (warm shift) / 0 (filter reset) ------------------------| generation +1;不重啟 OLA,輸出連續
+ |&lt; 1 (warm shift) / 0 (filter reset) ------------------------| 不重啟 OLA,輸出連續
   ==== 使用者轉強度旋鈕(hop 之間) ====
  |- aec_set_level(aec, AGGRESSIVE) -----------------&gt;|
  |                                                            | far-active 地板 100 ms 內以 dB 線性走到目標;DT 地板與 split-floor 旗標立即階躍

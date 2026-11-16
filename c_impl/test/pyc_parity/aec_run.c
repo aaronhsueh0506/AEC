@@ -23,8 +23,8 @@
  *
  *   <pre>.base.bin  only with --base (needs a residual stage: --ctx or no --no-res): per hop
  *                    [int32 guard_active][uint32 post_reset_serial][rendering base re/im, n_freqs complex float32]
- *                    (aec_get_residual().base_spec, aec_post_reset_serial); the analysis seam above is never guarded
- *   <pre>.formed.f32 only with --base: per hop the formed hop under error_spec (AecResidualView.formed_hop,
+ *                    (aec_get_residual_full().base_spec, aec_post_reset_serial); the analysis seam above is never guarded
+ *   <pre>.formed.f32 only with --base: per hop the formed hop under error_spec (AecResidualViewFull.formed_hop,
  *                    hop floats, zero-filled when NULL)
  *   <pre>.dly.txt   only with --base: per hop "current_delay delay_reject_count" (the delay events, including the
  *                    bad-relock reverts, which grow the reject count)
@@ -37,6 +37,7 @@
  * No algorithm lives here: it is a thin driver over aec.h. The hop loop matches the Python runner
  * (`for i in range(0, n - hop, hop)`), i.e. the same number of hops from the same samples. */
 #include "aec.h"
+#include "aec_view_internal.h"
 #include "../aec_white_box.h"
 #include "../aec_test_tuning.h"
 #include "cli_level.h"
@@ -144,11 +145,11 @@ int main(int argc, char **argv) {
         fwrite(a->raw_output, 4, (size_t)hop, fr);
         int ctx_conv = -1;
         if (want_ctx) {
-            AecLinearView lv;
-            AecResidualView c;
+            AecLinearViewFull lv;
+            AecResidualViewFull c;
             memset(&lv, 0, sizeof lv); lv.struct_size = sizeof lv;
             memset(&c, 0, sizeof c);   c.struct_size = sizeof c;
-            if (aec_get_linear(a, &lv) != AEC_OK || aec_get_residual(a, &c) != AEC_OK) {
+            if (aec_get_linear_full(a, &lv) != AEC_OK || aec_get_residual_full(a, &c) != AEC_OK) {
                 fprintf(stderr, "aec_run: --ctx view refused at hop %ld\n", h); return 2;
             }
             ctx_conv = lv.filter_converged;
@@ -164,10 +165,10 @@ int main(int argc, char **argv) {
             fwrite(c.comfort_noise ? c.comfort_noise : zeros, 4, (size_t)K, fc);
         }
         if (want_base) {
-            AecResidualView ob;
+            AecResidualViewFull ob;
             memset(&ob, 0, sizeof ob);
             ob.struct_size = sizeof ob;
-            if (aec_get_residual(a, &ob) != AEC_OK) { fprintf(stderr, "aec_run: --base needs a residual stage (not --no-res without --ctx)\n"); return 2; }
+            if (aec_get_residual_full(a, &ob) != AEC_OK) { fprintf(stderr, "aec_run: --base needs a residual stage (not --no-res without --ctx)\n"); return 2; }
             const int32_t g = ob.guard_active;
             const uint32_t sn = aec_post_reset_serial(a);
             fwrite(&g, 4, 1, fb); fwrite(&sn, 4, 1, fb);

@@ -83,7 +83,7 @@ pre code{background:none;padding:0}
 <p>一次 <code>aec_init()</code>／<code>aec_create()</code> 建出四條 lane、共用 delay 估計器與對齊後 far、融合緩衝；beamformer 與合成由呼叫端提供。呼叫序列見 <a href="aec_usage.html">aec_usage</a> 範例 E。</p>
 <div class="tblwrap"><table>
 <tr><th>項目</th><th>規則</th></tr>
-<tr><td><code>residual</code></td><td>必須是 <code>STATE</code>／<code>ESTIMATE</code>／<code>FULL</code>（<code>OFF</code> 被拒絕），<b>並改變 pool 大小</b>（16k/256：559,328／654,864／664,624 B，主機實測）</td></tr>
+<tr><td><code>residual</code></td><td>必須是 <code>STATE</code>／<code>ESTIMATE</code>／<code>FULL</code>（<code>OFF</code> 被拒絕），<b>並改變 pool 大小</b>（16k/256：420,736／514,688／524,448 B，主機實測）</td></tr>
 <tr><td>格點</td><td>只有 16k/256、16k/512、48k/1024；8 kHz 被拒絕</td></tr>
 <tr><td><code>delay_mode</code>／<code>delay_num_filters</code>／<code>fixed_delay_samples</code></td><td>描述<b>共用</b>的對齊；每條 lane 以 <code>EXTERNAL_ALIGNED</code> 吃對齊後 far；共用環的容量與單聲道同式（estimator 可回報的最大延遲加 hop），duty-cycle 保持時間固定 0.3 s</td></tr>
 <tr><td><code>capture_proxy_channel</code></td><td>0–3；共用 delay 估計器只吃這一路，該路失效則陣列鎖不到 delay</td></tr>

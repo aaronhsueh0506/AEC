@@ -134,15 +134,17 @@ AEC magnitude² 必須來自同一個 AEC kernel，不能任意以其他 power �
 | `r2` | 殘留回音功率譜。**int16² 尺度**：要換成 audio 功率尺度須除以 32768²。`STATE` 時為 `NULL`。 |
 | `comfort_noise` | 舒適噪音功率譜。同樣是 int16² 尺度。`STATE` 時為 `NULL`。 |
 | `formed_hop` | 時域 formed 線性殘差，與 `error_spec` 配對。 |
-| `res_floor_protect` | 本 hop 是否啟用 double-talk RES floor 保護。它就是近端最近有聲音 latch 的實際決定；自己做後級的消費端應讀這個欄位，不要用 `dt_indicator` 另外推導一套規則（陣列實例：`max_dt > 0.2`，`max_dt` 只取權重非零的 lane；單聲道：近端最近有聲音的 latch）。 |
 | `usable_linear` | 本 hop 的可用線性估計判定。`0` 時 `r2` 是保守的非線性估計（遠端功率乘上預設 echo-path 增益），並非由線性回音估計推導，可能遠高於根本不存在的殘留回音。 |
 | `post_reset_serial` | 與 `aec_post_reset_serial()` 相同的計數（見下）。 |
 | `all_converged`、`max_dt`、`max_saturation`、`clock_drift`、`guard_lanes`、`far_hop` | 後級增益階段本 hop 的輸入摘要（單聲道：來自自己的線性 stage），給自己做後級的消費端使用。對齊狀態不在這裡：單聲道讀 `AecLinearView.delay_state`（`UNLOCKED`／`LOCKED`／`CHANGED`），陣列讀 `AecArrayView.delay`（`changed`、`solid`）。 |
 
 `aec_get_linear(a, &lin)`（`AecLinearView`）：線性 stage 的檢視，`residual == OFF` 時就是整個 hop 的結果。
-含 `linear_hop`（refined PBFDKF 輸出，FORM 選擇之前）、主 filter 的回音／近端／遠端頻譜、`aligned_far_hop`、delay 狀態（§8.6），
-以及線性 stage 的純量狀態：`far_power`、`erle_factor`、`dt_indicator`、`divergence`、`saturation_level`、`erl_estimate`、
-`shadow_dt`、`is_stationary_dt`、`filter_converged`、`filter_once_converged`、`epc_active`（供外部判斷／診斷用）。
+含 `linear_hop`（refined PBFDKF 輸出，FORM 選擇之前）、`aligned_far_hop`、delay 狀態（§8.6），
+以及線性 stage 的純量狀態：`far_power`、`dt_indicator`、`saturation_level`、`filter_converged`。
+`AecLinearView` 與 `AecResidualView` 只放函式庫外面的呼叫端讀得到、需要讀的欄位：主 filter 的回音／近端／遠端頻譜、
+`erle_factor`、`divergence`、`erl_estimate`、`shadow_dt`、`is_stationary_dt`、`filter_once_converged`、`epc_active`、
+對齊世代 `generation` 與 `res_floor_protect`（本 hop 的 double-talk RES floor 決定）是函式庫內部狀態，不在 `aec.h`；
+函式庫自己的測試經 `include/internal/aec_view_internal.h`（`aec_get_linear_full()`／`aec_get_residual_full()`）讀它們。
 
 **增益輔助函式與 reset serial**
 
@@ -168,7 +170,7 @@ uint32_t serial = aec_post_reset_serial(aec);        /* 不消耗、可重複讀
      該 hop 的處理內部、該 hop 的合成**之前**。
   每次計數時函式庫都會清自己的 OLA 尾巴並把 CNG 種子設回 `AEC_CNG_SEED`（42）。
   **不**算的有：bad-relock 還原（soft 還原到 shift 前的 delay 與 tap 快照，OLA 與 CNG 照常延續）、warm-transfer 與
-  soft（DT-aware）取得／realign、`aec_apply_external_realign()`、只有 `AecLinearView.generation` 變動。
+  soft（DT-aware）取得／realign、`aec_apply_external_realign()`、只有內部對齊世代變動。
 - **外部合成的協定**：消費端自己保存「上次處理過的 serial」。每次處理呼叫後讀到的值若與它不同，必須在
   **本 hop 的第一次 CNG 抽樣之前、也在本 hop 的反轉換／OLA push 之前**（`aec_reset()` 之後則是之後處理的第一個 hop），清掉自己的 OLA 尾巴（例如
   `ac_istft_reset`）並把自己的 CNG 狀態設成 `AEC_CNG_SEED`，然後存下新值。**不可**因此呼叫
@@ -245,18 +247,17 @@ aec_get_linear(aec, &lin);    /* 在該 hop 的處理呼叫之後、下一次處
 
 | 欄位 | 說明 |
 |---|---|
-| `hop_size`／`n_freqs` | `linear_hop`、`aligned_far_hop` 與頻譜陣列的長度 |
+| `hop_size` | `linear_hop` 與 `aligned_far_hop` 的長度 |
 | `linear_hop` | refined 的 PBFDKF 線性輸出（FORM 選擇之前）；formed 線性殘差在 `aec_get_residual().formed_hop`（`residual` 不是 `OFF` 時） |
 | `aligned_far_hop` | 本 hop 線性 filter 實際讀的參考訊號，**指向實例內部緩衝區**，不是複本，下一次處理或 reset 呼叫後失效 |
 | `delay_samples`／`delay_confidence` | 目前套用的環形緩衝偏移（尚未取得對齊為 `-1`）與估計器的 0.0／0.5／1.0 信心 |
-| `delay_state` | `AEC_LINEAR_DELAY_UNLOCKED`（`aligned_far_hop` 是**未補償**的原始參考訊號）、`LOCKED`、`CHANGED`（偏移在**這個 hop** 內改變，應清掉依賴舊對齊的快取） |
-| `generation` | 每次環形偏移改變（首次取得、確認的位移、reset）加 1，飽和不回繞；用來判斷跨 hop 的快取是否失效，只比較 `delay_samples` 會漏掉兩次輪詢之間的 A→B→A |
+| `delay_state` | `AEC_LINEAR_DELAY_UNLOCKED`（`aligned_far_hop` 是**未補償**的原始參考訊號）、`LOCKED`、`CHANGED`（偏移在**這個 hop** 內改變，應清掉依賴舊對齊的快取；每個 hop 都讀它，A→B→A 的位移也各自標一次 `CHANGED`） |
 
 `delay_mode` 對這些欄位的語意：`MATCHED` 如上；`FIXED` 的 `delay_samples` 恆等於
-`fixed_delay_samples`、信心恆為 1.0、`generation` 只在 `aec_reset()` 變動，且前
+`fixed_delay_samples`、信心恆為 1.0、內部對齊世代只在 `aec_reset()` 變動，且前
 `ceil(fixed_delay_samples / hop)` 個 hop 因為環形緩衝尚未填滿而回 `UNLOCKED`；
 `EXTERNAL_ALIGNED` 的 `aligned_far_hop` 就是呼叫端自己的參考訊號，
-`delay_samples` 為 0、恆為 `LOCKED`，`generation` 只被 `aec_apply_external_realign()` 與 reset 推進。
+`delay_samples` 為 0、恆為 `LOCKED`；對齊只會被呼叫端自己的 `aec_apply_external_realign()` 與 reset 改變。
 
 另一個唯讀查詢 `aec_linear_is_cancelling(a)` 回 `1` 代表線性 filter 此刻**有證據**正在
 消除回音（上一個 hop 的 windowed ERLE 超過 2.5 dB，或近期 inst-ERLE 峰值超過
@@ -456,7 +457,7 @@ int app_run_hop(Aec *aec, const float *mics, const float *ref,
 
 - `aec_get_residual()`：`formed_hop` 與 `echo_spec` 為 **`NULL`**（每條 lane 的 formed hop 在 `AecArrayView.lane_formed_hop`）。`error_spec` 是波束後的 E（`beamformed_error` 或由權重重建），`near_spec` 是 `Σ w · lane near`，`far_spec` 是 lane 0 的遠端頻譜，`base_spec` 在沒有貢獻 lane 的守衛觸發時是 E、否則是 `Σ w · lane base`；`r2` 是各 lane 殘留回音向量以權重**相干**相加後的功率，`comfort_noise` 是 `Σ |w|² · lane comfort noise` 的功率和；`guard_lanes` 的第 ch 位元是貢獻 lane ch 的守衛觸發，`guard_active = (guard_lanes != 0)`；`post_reset_serial` 是四條 lane 的 reset 計數之和。
 - `aec_get_array()`：`AecArrayView` 的 `lane_error_spec[4]`（分析頻譜，beamformer 的輸入）、`lane_base_spec[4]`（渲染底座）、`lane_formed_hop[4]`、`lane_guard_active[4]`、`aligned_ref`（餵給每條 lane 的 far）與 `delay`（`AecDelayState`：`delay_samples`、`confidence`、`solid`、`changed`、`estimator_calls`、`estimator_updates`）。單聲道實例也可呼叫，回 lane 0 一路（後級跑完之後）。
-- `aec_get_linear()`：回 lane 0 的線性狀態，對齊欄位（`aligned_far_hop`、`delay_samples`、`delay_confidence`、`delay_state`、`generation`）換成共用的那一份。
+- `aec_get_linear()`：回 lane 0 的線性狀態，對齊欄位（`aligned_far_hop`、`delay_samples`、`delay_confidence`、`delay_state`）換成共用的那一份。
 - 所有指標有效到下一次處理或 reset 呼叫。`aec_reset()` 不清 lane 的緩衝：reset 前取得的指標仍可讀（過期的值，不是錯誤），但已不再對應任何 hop，要重新取檢視。
 
 **reset serial 與 OLA**：陣列的 `aec_post_reset_serial()` 是**四條 lane 計數之和**（模 2³²），所以 `aec_reset()` 讓它前進 **4**（單聲道是 1），處理中某條 lane 的硬 reset 也使它移動。只比較「是否與自己存的不同」，不要假設步長。函式庫自己持有的舒適噪音產生器在每次後級呼叫時依 serial 自動重設為 `AEC_CNG_SEED`；呼叫端仍要在本 hop 的 OLA push 之前清自己的 OLA 尾巴（§8.3）。
@@ -489,7 +490,7 @@ if (rc < 0) {
 規則：
 
 - 與 `aec_process*()` 一樣不是 thread-safe，必須在 hop 之間呼叫；
-- `delta != 0` 時一定推進 `AecLinearView.generation`（§8.6），依賴舊對齊的快取要清掉；`delta == 0` 回 0、什麼都不動；
+- `delta != 0` 時一定推進函式庫內部的對齊世代，依賴舊對齊的快取要清掉（這是呼叫端自己下的呼叫，不必輪詢）；`delta == 0` 回 0、什麼都不動；
 - `delta` 為負時，最多約 `ceil((|delta| + tap 偏移) / hop) + 1` 個 hop 會露出回音；
 - 是否已在消除可先查 `aec_linear_is_cancelling()`（§8.6），但函式本身已依此在 warm transfer 與重置之間選擇，不必由呼叫端判斷。
 

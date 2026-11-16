@@ -11,6 +11,7 @@
 #include "utility/simd_kernel_nn.h"  /* skn_all_finite_f32, skn_all_finite_cf32 */
 #include "utility/fast_math.h"
 #include "aec_array_internal.h"      /* array dispatch */
+#include "aec_view_internal.h"       /* the complete views */
 #include "aec_res_internal.h"
 #include <assert.h>
 #include <stdint.h>
@@ -494,11 +495,12 @@ static void aec_derive_dims(const AecResolved* rs,
                             int* o_hop, int* o_blk, int* o_fft, int* o_K,
                             int* o_nparts, int* o_buf_samp);
 /* Carve options. lane = 1 builds a lane of the array flow (EXTERNAL_ALIGNED, residual below FULL): the pool omits what that
- * contract never runs and the lane borrows shared_fft. Both aec_lane_get_mem_size() and aec_lane_init() set it; the
- * single-channel Aec uses the zero value. */
+ * contract never runs, the lane borrows shared_fft and the per-call buffers of `scratch`. Both aec_lane_get_mem_size() and
+ * aec_lane_init() set it; the single-channel Aec uses the zero value. */
 typedef struct AecCarveOpt {
-    int        lane;
-    FftHandle* shared_fft;
+    int                   lane;
+    FftHandle*            shared_fft;
+    const AecLaneScratch* scratch;   /* lane: the array's shared per-call buffers (see aec_array_internal.h) */
 } AecCarveOpt;
 
 static int aec_carve(Aec* a, uint8_t* ptr, const AecResolved* rs,
@@ -601,6 +603,55 @@ size_t aec_lane_get_mem_size(const AecResolved* lane) {
     if (!lane || !aec_resolved_valid(lane) || !aec_lane_contract_ok(&lane->cfg)) return 0;
     return aec_mem_size_impl(lane, 1);
 }
+
+/* Bytes of the lanes' shared per-call buffers; with `s` and `base` it also points *s at them. */
+static size_t aec_lane_scratch_layout(const AecResolved* lane, AecLaneScratch* s, uint8_t* base) {
+    int hop, blk, fft, K, np, buf;
+    size_t t = 0;
+    aec_derive_dims(lane, &hop, &blk, &fft, &K, &np, &buf);
+#define LS_TAKE(m, type, n) do { if (s) s->m = (type*)(base + t); t = ck_field_size(t, (size_t)(n), sizeof(type)); } while (0)
+    LS_TAKE(e2_echo, float, K); LS_TAKE(e2_near, float, K); LS_TAKE(mu_buf_pre, float, K);
+    LS_TAKE(mu_buf, float, K); LS_TAKE(e2ref, float, K);
+    if (aec_state_lane(&lane->cfg, 1)) { if (s) s->ree = NULL; } else LS_TAKE(ree, float, K);
+    LS_TAKE(abs_near, float, K); LS_TAKE(abs_far, float, K); LS_TAKE(abs_sel_echo, float, K);
+    LS_TAKE(abs_error, float, K); LS_TAKE(abs_echo_coh, float, K); LS_TAKE(abs_nsw_e1, float, K);
+    LS_TAKE(abs_ybase, float, K); LS_TAKE(x2_at_delay, float, K);
+    LS_TAKE(r2_unb, float, K); LS_TAKE(nearend_pwr, float, K);
+    LS_TAKE(psd_near, float, K); LS_TAKE(psd_echo, float, K); LS_TAKE(psd_error, float, K);
+    LS_TAKE(psd_capture_win, float, K); LS_TAKE(x2_reverb, float, K); LS_TAKE(nf, float, K);
+    LS_TAKE(shadow_out, float, hop); LS_TAKE(final_out, float, hop);
+    LS_TAKE(lfs_sq, float, hop); LS_TAKE(lfs_sref, float, hop); LS_TAKE(lfs_scoa, float, hop);
+    LS_TAKE(fa_render_sq, float, hop);
+    LS_TAKE(lfs_tin, float, fft);
+    LS_TAKE(fa_abs, float, ck_mul_size((size_t)np, (size_t)hop));
+    LS_TAKE(taps, float, ck_mul_size((size_t)np, (size_t)hop));
+    LS_TAKE(w_mag2, float, ck_mul_size((size_t)np, (size_t)K));
+    LS_TAKE(nsw_e1, Complex, K); LS_TAKE(lfs_sel_esw, Complex, K);
+    t = ck_add_size(t, pbfdaf_scratch_layout(s ? &s->main_kf : NULL, base ? base + t : NULL, blk, np, hop, 0));
+    if (lane->tun.enable_shadow) t = ck_add_size(t, pbfdaf_scratch_layout(s ? &s->shadow : NULL, base ? base + t : NULL, blk, np, hop, 1));
+    LS_TAKE(td_window, float, fft); LS_TAKE(sqrt_hann, float, blk);
+    if (s) {
+        s->main_kf.td_window = s->td_window; s->main_kf.sqrt_hann = s->sqrt_hann;
+        s->shadow.td_window = s->td_window;
+    }
+    LS_TAKE(stat_mask, unsigned char, K);
+    LS_TAKE(coh_gate_mask, unsigned char, K);
+#undef LS_TAKE
+    return t;
+}
+
+size_t aec_lane_scratch_get_mem_size(const AecResolved* lane) {
+    if (!lane || !aec_resolved_valid(lane) || !aec_lane_contract_ok(&lane->cfg)) return 0;
+    return aec_lane_scratch_layout(lane, NULL, NULL);
+}
+
+void aec_lane_scratch_bind(AecLaneScratch* out, void* mem, const AecResolved* lane) {
+    size_t bytes = aec_lane_scratch_get_mem_size(lane);
+    memset(out, 0, sizeof(*out));
+    if (bytes == 0) return;
+    memset(mem, 0, bytes);
+    (void)aec_lane_scratch_layout(lane, out, (uint8_t*)mem);
+}
 #endif
 
 /* Pool bytes of a validated, resolved single-channel cfg; lane selects the lean lane carve. Field order must match
@@ -638,12 +689,12 @@ static size_t aec_mem_size_impl(const AecResolved* rs, int lane) {
     t = ck_field_size(t, (size_t)(K - 2 > 0 ? K - 2 : 1), sizeof(int64_t));
     if (!lane) t = ck_add_size(t, fft_get_mem_size(fft));   /* a lane borrows the array's handle */
     {
-        size_t kf_sz = pbfdkf_get_mem_size(blk, np, hop);
+        size_t kf_sz = lane ? pbfdkf_get_mem_size_borrowed(blk, np, hop) : pbfdkf_get_mem_size(blk, np, hop);
         if (kf_sz == 0) return 0;
         t = ck_add_size(t, kf_sz);
     }
     if (tn->enable_shadow) {
-        size_t af_sz = pbfdaf_get_mem_size_follower(blk, np, hop);
+        size_t af_sz = lane ? pbfdaf_get_mem_size_follower_borrowed(blk, np, hop) : pbfdaf_get_mem_size_follower(blk, np, hop);
         if (af_sz == 0) return 0;
         t = ck_add_size(t, af_sz);
     }
@@ -669,8 +720,8 @@ static size_t aec_mem_size_impl(const AecResolved* rs, int lane) {
     t = ck_field_size_reps(t, Kz, sizeof(float), 2);   /* syy see */
     if (!lane) t = ck_field_size(t, (size_t)blk, sizeof(float));  /* swin: the synthesis window, built by aec_init */
     if (!lane) t = ck_field_size(t, (size_t)blk, sizeof(float));  /* ola: only aec_post_apply_output() (FULL) uses it */
-    t = ck_field_size_reps(t, Kz, sizeof(float), state_lane ? 7 : 8);   /* np_ fp_ ep_ erp_ cpe x2r nf; cn */
-    t = ck_field_size(t, Kz, sizeof(unsigned char));   /* cgm */
+    t = ck_field_size_reps(t, Kz, sizeof(float), lane ? (state_lane ? 1 : 2) : (state_lane ? 7 : 8));   /* np_ fp_ ep_ erp_ cpe x2r nf (a lane borrows all but fp_); cn */
+    if (!lane) t = ck_field_size(t, Kz, sizeof(unsigned char));   /* cgm */
     if (!lane) {
         t = ck_field_size(t, Kz, sizeof(Complex));         /* eout */
         t = ck_field_size(t, (size_t)fft, sizeof(float));  /* eout_full */
@@ -684,8 +735,10 @@ static size_t aec_mem_size_impl(const AecResolved* rs, int lane) {
     t = ck_field_size(t, (size_t)(K - 2), sizeof(int)); /* erl_hold */
     t = ck_field_size(t, (size_t)ncc, sizeof(int));    /* filter_delays_blocks */
     t = ck_field_size(t, ck_mul_size((size_t)np, (size_t)hop), sizeof(float)); /* fa_h_highpass */
-    t = ck_field_size(t, ck_mul_size((size_t)np, (size_t)hop), sizeof(float)); /* fa_abs_scratch */
-    t = ck_field_size(t, (size_t)hop, sizeof(float));  /* fa_render_sq_scratch */
+    if (!lane) {   /* a lane borrows the array's scratch for these two */
+        t = ck_field_size(t, ck_mul_size((size_t)np, (size_t)hop), sizeof(float)); /* fa_abs_scratch */
+        t = ck_field_size(t, (size_t)hop, sizeof(float));  /* fa_render_sq_scratch */
+    }
     if (!state_lane) {   /* the residual-echo estimator's arrays */
         t = ck_field_size(t, Kz, sizeof(float));           /* x2_nf */
         t = ck_field_size(t, Kz, sizeof(int));             /* x2_nf_c */
@@ -694,7 +747,7 @@ static size_t aec_mem_size_impl(const AecResolved* rs, int lane) {
             t = ck_field_size(t, ck_mul_size((size_t)rh, Kz), sizeof(float));
         t = ck_field_size_reps(t, ck_mul_size((size_t)REE_DELAY_BUF_SIZE, Kz),
                                sizeof(float), 2);          /* drd rrd */
-        t = ck_field_size_reps(t, Kz, sizeof(float), 3);   /* ld_st lr_st scr_st */
+        t = ck_field_size_reps(t, Kz, sizeof(float), lane ? 2 : 3);   /* ld_st lr_st; scr_st (a lane borrows it) */
     }
     if (!lane) {   /* the gain arrays: only suppression_gain_get_gain() (FULL) reads them */
         t = ck_add_size(t, aec_sg_tables_bytes(K));        /* the four decoded ENR/SU tables */
@@ -711,19 +764,23 @@ static size_t aec_mem_size_impl(const AecResolved* rs, int lane) {
         t = ck_field_size(t, ck_mul_size((size_t)rows, Kz), sizeof(float)); /* stat_hist */
     }
     t = ck_field_size_reps(t, (size_t)hop, sizeof(float), 2); /* prev_output_time e_form */
-    t = ck_field_size(t, Kz, sizeof(Complex));         /* lfs sel_esw */
-    t = ck_field_size_reps(t, (size_t)hop, sizeof(float), 3); /* scr_sq scr_sref scr_scoa */
-    t = ck_field_size(t, (size_t)fft, sizeof(float));  /* scr_tin */
-    t = ck_field_size_reps(t, Kz, sizeof(Complex), 5); /* sel_esw sel_echo nsw_e1 ybase output_base */
-    t = ck_field_size_reps(t, Kz, sizeof(float), 8);   /* abs_near .. x2_at_delay */
-    t = ck_field_size(t, ck_mul_size((size_t)np, Kz), sizeof(float)); /* w_mag2 */
-    t = ck_field_size(t, (size_t)hop, sizeof(float));  /* render_block_scaled */
-    t = ck_field_size_reps(t, Kz, sizeof(float), 3);   /* r2 r2_unb nearend_pwr */
-    t = ck_field_size(t, Kz, sizeof(unsigned char));   /* stat_mask */
+    if (!lane) {
+        t = ck_field_size(t, Kz, sizeof(Complex));         /* lfs sel_esw */
+        t = ck_field_size_reps(t, (size_t)hop, sizeof(float), 3); /* scr_sq scr_sref scr_scoa */
+        t = ck_field_size(t, (size_t)fft, sizeof(float));  /* scr_tin */
+    }
+    t = ck_field_size_reps(t, Kz, sizeof(Complex), lane ? 4 : 5); /* sel_esw sel_echo ybase output_base; nsw_e1 */
+    if (!lane) {
+        t = ck_field_size_reps(t, Kz, sizeof(float), 8);   /* abs_near .. x2_at_delay */
+        t = ck_field_size(t, ck_mul_size((size_t)np, Kz), sizeof(float)); /* w_mag2 */
+    }
+    t = ck_field_size(t, (size_t)hop, sizeof(float));   /* render_block_scaled: lanes 1-3 read the donor lane's, so it stays per lane */
+    t = ck_field_size_reps(t, Kz, sizeof(float), lane ? 1 : 3);   /* r2; r2_unb nearend_pwr */
+    if (!lane) t = ck_field_size(t, Kz, sizeof(unsigned char));   /* stat_mask */
     t = ck_field_size(t, Kz, sizeof(float));           /* per_bin_mu_scale */
-    t = ck_field_size_reps(t, (size_t)hop, sizeof(float), 5); /* near_hop far_hop raw shadow final */
-    t = ck_field_size(t, ck_mul_size((size_t)np, (size_t)hop), sizeof(float)); /* filter_taps_full */
-    t = ck_field_size_reps(t, Kz, sizeof(float), 6);   /* scr_e2_echo .. scr_e2ref_arr */
+    t = ck_field_size_reps(t, (size_t)hop, sizeof(float), lane ? 3 : 5); /* near_hop far_hop raw; shadow final */
+    if (!lane) t = ck_field_size(t, ck_mul_size((size_t)np, (size_t)hop), sizeof(float)); /* filter_taps_full */
+    t = ck_field_size_reps(t, Kz, sizeof(float), lane ? 1 : 6);   /* scr_rsa_mask; scr_e2_echo scr_e2_near scr_mu_buf_pre scr_mu_buf scr_e2ref_arr */
     if (tn->enable_highpass) t = ck_field_size(t, 1, hpf_get_mem_size()); /* mic-path HPF */
 
     if (MEM_SIZE_INVALID(t)) return 0;
@@ -860,8 +917,11 @@ static uint8_t* aec_carve_filters(Aec* a, uint8_t* ptr, const AecResolved* rs,
         ptr += fft_sz;
     }
 
-    size_t kf_sz = pbfdkf_get_mem_size(blk, np, hop);
-    if (pbfdkf_init_static(&a->main_filter, ptr, kf_sz, blk, np, tn->mu, tn->delta, hop, cfg->sample_rate, a->post_fft) != 0) {
+    size_t kf_sz = opt->lane ? pbfdkf_get_mem_size_borrowed(blk, np, hop) : pbfdkf_get_mem_size(blk, np, hop);
+    if ((opt->lane ? pbfdkf_init_static_borrowed(&a->main_filter, ptr, kf_sz, blk, np, tn->mu, tn->delta, hop, cfg->sample_rate,
+                                                 a->post_fft, &opt->scratch->main_kf)
+                   : pbfdkf_init_static(&a->main_filter, ptr, kf_sz, blk, np, tn->mu, tn->delta, hop, cfg->sample_rate,
+                                        a->post_fft)) != 0) {
         fft_destroy(a->post_fft); a->post_fft = NULL;
         return NULL;
     }
@@ -872,9 +932,12 @@ static uint8_t* aec_carve_filters(Aec* a, uint8_t* ptr, const AecResolved* rs,
     if (tn->enable_shadow) {
         /* The shadow follows the main filter: same far input, same clears and partition steps, so it shares the main
          * filter's far history and skips the spectra its lightweight frontend never forms. */
-        size_t af_sz = pbfdaf_get_mem_size_follower(blk, np, hop);
-        if (pbfdaf_init_static_follower(&a->shadow_filter, ptr, af_sz, blk, np, tn->shadow_mu_nlms, tn->delta, hop,
-                                        cfg->sample_rate, a->post_fft, &a->main_filter.base) != 0) {
+        size_t af_sz = opt->lane ? pbfdaf_get_mem_size_follower_borrowed(blk, np, hop) : pbfdaf_get_mem_size_follower(blk, np, hop);
+        if ((opt->lane ? pbfdaf_init_static_follower_borrowed(&a->shadow_filter, ptr, af_sz, blk, np, tn->shadow_mu_nlms, tn->delta,
+                                                              hop, cfg->sample_rate, a->post_fft, &a->main_filter.base,
+                                                              &opt->scratch->shadow)
+                       : pbfdaf_init_static_follower(&a->shadow_filter, ptr, af_sz, blk, np, tn->shadow_mu_nlms, tn->delta, hop,
+                                                     cfg->sample_rate, a->post_fft, &a->main_filter.base)) != 0) {
             pbfdkf_free(&a->main_filter);
             fft_destroy(a->post_fft); a->post_fft = NULL;
             return NULL;
@@ -957,7 +1020,7 @@ static uint8_t* aec_carve_detectors(Aec* a, uint8_t* ptr, const AecResolved* rs,
 
 static uint8_t* aec_carve_post_backing(Aec* a, uint8_t* ptr, const AecResolved* rs,
                                        const AecBalancedRateDims* rd,
-                                       int hop, int blk, int fft, int K, int lane) {
+                                       int hop, int blk, int fft, int K, int lane, const AecLaneScratch* ls) {
     const AecConfig* cfg = &rs->cfg;
     const AecTuning* tn = &rs->tun;
     const int state_lane = aec_state_lane(cfg, lane);
@@ -1015,13 +1078,20 @@ static uint8_t* aec_carve_post_backing(Aec* a, uint8_t* ptr, const AecResolved* 
             aec_synth_window_build(swin, blk);
             ola = (float*)ptr; ptr += ALIGN16((size_t)blk * sizeof(float));
         }
-        float        *np_      = P_FSLICE(); float *fp_    = P_FSLICE();
-        float        *ep_      = P_FSLICE(); float *erp_   = P_FSLICE();
-        float        *cpe      = P_FSLICE(); float *x2r    = P_FSLICE();
+        float        *np_, *fp_, *ep_, *erp_, *cpe, *x2r, *nf_;
+        unsigned char *cgm;
         float        *cn = NULL;
+        if (ls) {   /* written before read inside one lane call: the array's shared buffers */
+            np_ = ls->psd_near; ep_ = ls->psd_echo; erp_ = ls->psd_error;
+            cpe = ls->psd_capture_win; x2r = ls->x2_reverb; nf_ = ls->nf; cgm = ls->coh_gate_mask;
+            fp_ = P_FSLICE();   /* lanes 1-3 read the donor lane's far PSD and scaled far block, so those stay per lane */
+        } else {
+            np_ = P_FSLICE(); fp_ = P_FSLICE(); ep_ = P_FSLICE(); erp_ = P_FSLICE();
+            cpe = P_FSLICE(); x2r = P_FSLICE();
+            nf_ = NULL; cgm = NULL;
+        }
         if (!state_lane) { cn = P_FSLICE(); }
-        float        *nf_      = P_FSLICE();
-        unsigned char *cgm     = P_BSLICE();
+        if (!ls) { nf_ = P_FSLICE(); cgm = P_BSLICE(); }
         Complex      *eout     = NULL;
         float        *eout_full = NULL;
         if (!lane) {
@@ -1040,7 +1110,7 @@ static uint8_t* aec_carve_post_backing(Aec* a, uint8_t* ptr, const AecResolved* 
 }
 
 static uint8_t* aec_carve_state(Aec* a, uint8_t* ptr, const AecResolved* rs,
-                                int hop, int K, int np) {
+                                int hop, int K, int np, const AecLaneScratch* ls) {
     const AecConfig* cfg = &rs->cfg;
     AecStateStorage* s = &a->a3_state_st;
     s->erle_max           = P_FSLICE(); s->erle            = P_FSLICE();
@@ -1054,15 +1124,21 @@ static uint8_t* aec_carve_state(Aec* a, uint8_t* ptr, const AecResolved* rs,
     s->erl_hold           = (int*)ptr; ptr += ALIGN16((size_t)(K - 2) * sizeof(int));
     s->filter_delays_blocks = (int*)ptr; ptr += ALIGN16((size_t)AECB_ST_NUM_CAPTURE_CHANNELS * sizeof(int));
     s->fa_h_highpass      = (float*)ptr; ptr += ALIGN16(ck_mul_size((size_t)np, (size_t)hop) * sizeof(float));
-    s->fa_abs_scratch       = (float*)ptr; ptr += ALIGN16(ck_mul_size((size_t)np, (size_t)hop) * sizeof(float));
-    s->fa_render_sq_scratch = (float*)ptr; ptr += ALIGN16((size_t)hop * sizeof(float));
+    if (ls) {
+        s->fa_abs_scratch       = ls->fa_abs;
+        s->fa_render_sq_scratch = ls->fa_render_sq;
+    } else {
+        s->fa_abs_scratch       = (float*)ptr; ptr += ALIGN16(ck_mul_size((size_t)np, (size_t)hop) * sizeof(float));
+        s->fa_render_sq_scratch = (float*)ptr; ptr += ALIGN16((size_t)hop * sizeof(float));
+    }
     aec_state_bind(a, K, hop, cfg->sample_rate, np);
 
     return ptr;
 }
 
 static uint8_t* aec_carve_residual(Aec* a, uint8_t* ptr, const AecResolved* rs,
-                                   const AecBalancedRateDims* rd, int hop, int K, int lane) {
+                                   const AecBalancedRateDims* rd, int hop, int K, int lane,
+                                   const AecLaneScratch* ls) {
     const AecConfig* cfg = &rs->cfg;
     int rh = (AECB_REE_USE_AEC_ECHO_GEN_WINDOW ? 1 : 0) + 2;
     float *x2_nf = NULL, *rm_st = NULL, *rt_st = NULL, *rh_st = NULL, *drd_st = NULL, *rrd_st = NULL;
@@ -1075,7 +1151,9 @@ static uint8_t* aec_carve_residual(Aec* a, uint8_t* ptr, const AecResolved* rs,
         if (!AECB_REE_USE_AEC_ECHO_GEN_WINDOW) { rh_st = (float*)ptr; ptr += ALIGN16((size_t)rh * K * sizeof(float)); }   /* read only without the echo-generating window (see ree_estimate()) */
         drd_st = (float*)ptr; ptr += ALIGN16((size_t)REE_DELAY_BUF_SIZE * K * sizeof(float));
         rrd_st = (float*)ptr; ptr += ALIGN16((size_t)REE_DELAY_BUF_SIZE * K * sizeof(float));
-        ld_st  = P_FSLICE(); lr_st = P_FSLICE(); scr_st = P_FSLICE();
+        ld_st  = P_FSLICE(); lr_st = P_FSLICE();
+        if (ls) scr_st = ls->ree;
+        else { scr_st = P_FSLICE(); }
     }
     aec_ree_bind(a, rd, K, hop, cfg->sample_rate, x2_nf, x2_nfc, rm_st,
                  rt_st, rh_st, drd_st, rrd_st, ld_st, lr_st, scr_st);
@@ -1120,7 +1198,8 @@ static uint8_t* aec_carve_stationarity(Aec* a, uint8_t* ptr, const AecResolved* 
     return ptr;
 }
 
-static uint8_t* aec_carve_linear_select(Aec* a, uint8_t* ptr, int hop, int blk, int fft, int K) {
+static uint8_t* aec_carve_linear_select(Aec* a, uint8_t* ptr, int hop, int blk, int fft, int K,
+                                        const AecLaneScratch* ls) {
     {
         memset(&a->a3_lfs, 0, sizeof(a->a3_lfs));
         a->a3_lfs.hop        = hop;
@@ -1129,11 +1208,17 @@ static uint8_t* aec_carve_linear_select(Aec* a, uint8_t* ptr, int hop, int blk, 
         a->a3_lfs.n_freqs    = K;
         a->a3_lfs.prev_output_time = (float*)ptr; ptr += ALIGN16((size_t)hop * sizeof(float));
         a->a3_lfs.e_form           = (float*)ptr; ptr += ALIGN16((size_t)hop * sizeof(float));
-        a->a3_lfs.sel_esw          = (Complex*)ptr; ptr += ALIGN16(K * sizeof(Complex));
-        a->a3_lfs.scr_sq   = (float*)ptr; ptr += ALIGN16((size_t)hop * sizeof(float));
-        a->a3_lfs.scr_sref = (float*)ptr; ptr += ALIGN16((size_t)hop * sizeof(float));
-        a->a3_lfs.scr_scoa = (float*)ptr; ptr += ALIGN16((size_t)hop * sizeof(float));
-        a->a3_lfs.scr_tin  = (float*)ptr; ptr += ALIGN16((size_t)fft * sizeof(float));
+        if (ls) a->a3_lfs.sel_esw = ls->lfs_sel_esw;
+        else { a->a3_lfs.sel_esw = (Complex*)ptr; ptr += ALIGN16(K * sizeof(Complex)); }
+        if (ls) {
+            a->a3_lfs.scr_sq = ls->lfs_sq; a->a3_lfs.scr_sref = ls->lfs_sref;
+            a->a3_lfs.scr_scoa = ls->lfs_scoa; a->a3_lfs.scr_tin = ls->lfs_tin;
+        } else {
+            a->a3_lfs.scr_sq   = (float*)ptr; ptr += ALIGN16((size_t)hop * sizeof(float));
+            a->a3_lfs.scr_sref = (float*)ptr; ptr += ALIGN16((size_t)hop * sizeof(float));
+            a->a3_lfs.scr_scoa = (float*)ptr; ptr += ALIGN16((size_t)hop * sizeof(float));
+            a->a3_lfs.scr_tin  = (float*)ptr; ptr += ALIGN16((size_t)fft * sizeof(float));
+        }
         linear_filter_select_reset(&a->a3_lfs);
     }
 
@@ -1141,21 +1226,38 @@ static uint8_t* aec_carve_linear_select(Aec* a, uint8_t* ptr, int hop, int blk, 
 }
 
 static uint8_t* aec_carve_post_scratch(Aec* a, uint8_t* ptr, const AecResolved* rs,
-                                       int hop, int K, int np) {
+                                       int hop, int K, int np, const AecLaneScratch* ls) {
     const AecTuning* tn = &rs->tun;
     AecPostRunScratch* sc = &a->a3_sc;
+    /* A lane borrows the buffers it writes before it reads inside one call (aec_array_internal.h); lanes 1-3 read the donor lane's
+     * scaled far block, so that one stays per lane. */
     sc->sel_esw  = P_CSLICE(); sc->sel_echo = P_CSLICE();
-    sc->nsw_e1   = P_CSLICE(); sc->ybase    = P_CSLICE();
+    if (ls) sc->nsw_e1 = ls->nsw_e1; else { sc->nsw_e1 = P_CSLICE(); }
+    sc->ybase    = P_CSLICE();
     sc->output_base = P_CSLICE();
-    sc->abs_near     = P_FSLICE(); sc->abs_far      = P_FSLICE();
-    sc->abs_sel_echo = P_FSLICE(); sc->abs_error    = P_FSLICE();
-    sc->abs_echo_coh = P_FSLICE(); sc->abs_nsw_e1   = P_FSLICE();
-    sc->abs_ybase    = P_FSLICE(); sc->x2_at_delay  = P_FSLICE();
-    sc->w_mag2 = (float*)ptr; ptr += ALIGN16((size_t)np * K * sizeof(float));
+    if (ls) {
+        sc->abs_near = ls->abs_near; sc->abs_far = ls->abs_far;
+        sc->abs_sel_echo = ls->abs_sel_echo; sc->abs_error = ls->abs_error;
+        sc->abs_echo_coh = ls->abs_echo_coh; sc->abs_nsw_e1 = ls->abs_nsw_e1;
+        sc->abs_ybase = ls->abs_ybase; sc->x2_at_delay = ls->x2_at_delay;
+        sc->w_mag2 = ls->w_mag2;
+    } else {
+        sc->abs_near     = P_FSLICE(); sc->abs_far      = P_FSLICE();
+        sc->abs_sel_echo = P_FSLICE(); sc->abs_error    = P_FSLICE();
+        sc->abs_echo_coh = P_FSLICE(); sc->abs_nsw_e1   = P_FSLICE();
+        sc->abs_ybase    = P_FSLICE(); sc->x2_at_delay  = P_FSLICE();
+        sc->w_mag2 = (float*)ptr; ptr += ALIGN16((size_t)np * K * sizeof(float));
+    }
     sc->render_block_scaled = (float*)ptr; ptr += ALIGN16((size_t)hop * sizeof(float));
-    sc->r2          = P_FSLICE(); sc->r2_unb   = P_FSLICE();
-    sc->nearend_pwr = P_FSLICE();
-    sc->stat_mask   = P_BSLICE();
+    sc->r2          = P_FSLICE();
+    if (ls) {
+        sc->r2_unb = ls->r2_unb; sc->nearend_pwr = ls->nearend_pwr;
+        sc->stat_mask = ls->stat_mask;
+    } else {
+        sc->r2_unb   = P_FSLICE();
+        sc->nearend_pwr = P_FSLICE();
+        sc->stat_mask   = P_BSLICE();
+    }
     sc->observer_out = NULL; sc->observer_diff_spec = NULL;
     sc->observer_diff_mag2 = NULL; sc->observer_cap_mag2 = NULL;
     if (tn->live_observer_enabled) {
@@ -1172,26 +1274,44 @@ static uint8_t* aec_carve_post_scratch(Aec* a, uint8_t* ptr, const AecResolved* 
 }
 
 static uint8_t* aec_carve_hop_scratch(Aec* a, uint8_t* ptr, const AecResolved* rs,
-                                  int hop, int K, int np) {
+                                  int hop, int K, int np, const AecLaneScratch* ls) {
     const AecConfig* cfg = &rs->cfg;
     const AecTuning* tn = &rs->tun;
     a->per_bin_mu_scale = (float*)ptr; ptr += ALIGN16(K * sizeof(float));
     a->near_hop   = (float*)ptr; ptr += ALIGN16((size_t)hop * sizeof(float));
     a->far_hop    = (float*)ptr; ptr += ALIGN16((size_t)hop * sizeof(float));
     a->raw_output = (float*)ptr; ptr += ALIGN16((size_t)hop * sizeof(float));
-    a->shadow_out = (float*)ptr; ptr += ALIGN16((size_t)hop * sizeof(float));
-    a->final_out  = (float*)ptr; ptr += ALIGN16((size_t)hop * sizeof(float));
-    a->filter_taps_full = (float*)ptr; ptr += ALIGN16((size_t)np * hop * sizeof(float));
+    if (ls) {
+        a->shadow_out = ls->shadow_out;
+        a->final_out  = ls->final_out;
+    } else {
+        a->shadow_out = (float*)ptr; ptr += ALIGN16((size_t)hop * sizeof(float));
+        a->final_out  = (float*)ptr; ptr += ALIGN16((size_t)hop * sizeof(float));
+    }
+    if (ls) {
+        a->filter_taps_full = ls->taps;
+    } else {
+        a->filter_taps_full = (float*)ptr; ptr += ALIGN16((size_t)np * hop * sizeof(float));
+    }
     /* The two buffers AecLinearView exposes read zeros until the first hop writes them. */
     memset(a->far_hop, 0, (size_t)hop * sizeof(float));
     memset(a->raw_output, 0, (size_t)hop * sizeof(float));
 
-    a->scr_e2_echo   = (float*)ptr; ptr += ALIGN16((size_t)K   * sizeof(float));
-    a->scr_e2_near   = (float*)ptr; ptr += ALIGN16((size_t)K   * sizeof(float));
+    /* scr_rsa_mask is read by lanes 1-3 from the donor lane, so it stays per lane; the other five are lane-call scratch. */
+    if (ls) {
+        a->scr_e2_echo = ls->e2_echo; a->scr_e2_near = ls->e2_near;
+    } else {
+        a->scr_e2_echo   = (float*)ptr; ptr += ALIGN16((size_t)K   * sizeof(float));
+        a->scr_e2_near   = (float*)ptr; ptr += ALIGN16((size_t)K   * sizeof(float));
+    }
     a->scr_rsa_mask  = (float*)ptr; ptr += ALIGN16((size_t)K   * sizeof(float));
-    a->scr_mu_buf_pre= (float*)ptr; ptr += ALIGN16((size_t)K   * sizeof(float));
-    a->scr_mu_buf    = (float*)ptr; ptr += ALIGN16((size_t)K   * sizeof(float));
-    a->scr_e2ref_arr = (float*)ptr; ptr += ALIGN16((size_t)K   * sizeof(float));
+    if (ls) {
+        a->scr_mu_buf_pre = ls->mu_buf_pre; a->scr_mu_buf = ls->mu_buf; a->scr_e2ref_arr = ls->e2ref;
+    } else {
+        a->scr_mu_buf_pre= (float*)ptr; ptr += ALIGN16((size_t)K   * sizeof(float));
+        a->scr_mu_buf    = (float*)ptr; ptr += ALIGN16((size_t)K   * sizeof(float));
+        a->scr_e2ref_arr = (float*)ptr; ptr += ALIGN16((size_t)K   * sizeof(float));
+    }
     /* Mic-path HPF; hpf_init() failure unwinds the earlier allocations. */
     if (tn->enable_highpass) {
         a->hp_mic = hpf_init(ptr, hpf_get_mem_size(),
@@ -1274,14 +1394,14 @@ static int aec_carve(Aec* a, uint8_t* ptr, const AecResolved* rs,
     ptr = aec_carve_filters(a, ptr, rs, hop, blk, fft, K, np, opt);
     if (!ptr) return -1;
     ptr = aec_carve_detectors(a, ptr, rs, hop, K, np);
-    ptr = aec_carve_post_backing(a, ptr, rs, rd, hop, blk, fft, K, opt->lane);
-    ptr = aec_carve_state(a, ptr, rs, hop, K, np);
-    ptr = aec_carve_residual(a, ptr, rs, rd, hop, K, opt->lane);
+    ptr = aec_carve_post_backing(a, ptr, rs, rd, hop, blk, fft, K, opt->lane, opt->scratch);
+    ptr = aec_carve_state(a, ptr, rs, hop, K, np, opt->scratch);
+    ptr = aec_carve_residual(a, ptr, rs, rd, hop, K, opt->lane, opt->scratch);
     ptr = aec_carve_suppression(a, ptr, rd, &scfg, &stun, K, opt->lane);
     ptr = aec_carve_stationarity(a, ptr, rs, hop, K);
-    ptr = aec_carve_linear_select(a, ptr, hop, blk, fft, K);
-    ptr = aec_carve_post_scratch(a, ptr, rs, hop, K, np);
-    ptr = aec_carve_hop_scratch(a, ptr, rs, hop, K, np);
+    ptr = aec_carve_linear_select(a, ptr, hop, blk, fft, K, opt->scratch);
+    ptr = aec_carve_post_scratch(a, ptr, rs, hop, K, np, opt->scratch);
+    ptr = aec_carve_hop_scratch(a, ptr, rs, hop, K, np, opt->scratch);
     if (!ptr) return -1;
     /* The carve must end exactly where aec_mem_size_impl() said (a lane sits back to back with its neighbours; a single-channel
      * pool would otherwise be overrun, or over-sized, without a sign). */
@@ -1296,7 +1416,7 @@ static uint32_t aec_build_flags_hash(void) {
     static const char* const parts[] = {
         "ne10",
         "|carve:aec(cfg-v2),single(aec,delay?,ring?,filters(shadow-follows-main),detectors,post(swin,ola),state,residual,suppression(tables),stationarity(window-rows),lfs,scratch,hpf?)",
-        "|array(aec,ctl,swin,mic,aligned,fuse?(complex5,float2),ring?,delay?,res?(tables),fft,lane4(shared-fft,lean,state-lane-no-ree-cng))",
+        "|array(aec,ctl,swin,mic,aligned,fuse?(complex5,float2),ring?,delay?,res?(tables),fft,lane-scratch,lane4(shared-fft,shared-scratch,lean,state-lane-no-ree-cng))",
         "|align16"
     };
     uint32_t hash = AC_FNV1A_SEED;
@@ -1349,19 +1469,20 @@ static Aec* aec_init_single(void* mem, size_t mem_size, const AecResolved* rs, c
 }
 
 static Aec* aec_init_resolved(void* mem, size_t mem_size, const AecResolved* rs) {
-    static const AecCarveOpt plain = { 0, NULL };
+    static const AecCarveOpt plain = { 0, NULL, NULL };
     if (!mem || !MEM_IS_ALIGNED16(mem)) return NULL;
     if (AEC_CFG_IS_ARRAY(&rs->cfg)) return aec_array_impl_init(mem, mem_size, rs);
     return aec_init_single(mem, mem_size, rs, &plain);
 }
 
 #ifndef AEC_NO_ARRAY
-Aec* aec_lane_init(void* mem, size_t mem_size, const AecResolved* lane, FftHandle* shared_fft) {
+Aec* aec_lane_init(void* mem, size_t mem_size, const AecResolved* lane, FftHandle* shared_fft, const AecLaneScratch* scratch) {
     AecCarveOpt opt;
-    if (!mem || !lane || !shared_fft || !MEM_IS_ALIGNED16(mem)) return NULL;
+    if (!mem || !lane || !shared_fft || !scratch || !MEM_IS_ALIGNED16(mem)) return NULL;
     if (!aec_resolved_valid(lane) || !aec_lane_contract_ok(&lane->cfg)) return NULL;
     opt.lane = 1;
     opt.shared_fft = shared_fft;
+    opt.scratch = scratch;
     return aec_init_single(mem, mem_size, lane, &opt);
 }
 #endif
@@ -2706,9 +2827,7 @@ static const Complex* aec_render_base(const Aec* a) {
     return aec_post_render_base(&a->post, &a->a3_sc);
 }
 
-int aec_get_residual(const Aec* a, AecResidualView* out) {
-    /* The caller's declared size is validated before anything is written: a short struct is left untouched, a
-     * larger one gets only the known prefix. */
+int aec_get_residual_full(const Aec* a, AecResidualViewFull* out) {
     if (!out || out->struct_size < sizeof(*out)) return AEC_ERR_ARG;
     memset(out, 0, sizeof(*out));
     out->struct_size = sizeof(*out);
@@ -2740,6 +2859,28 @@ int aec_get_residual(const Aec* a, AecResidualView* out) {
     out->clock_drift = (a->cfg.delay_mode == AEC_DELAY_MATCHED && a->has_delay) ? delay_aec_has_clockdrift(&a->delay) : 0;
     out->guard_lanes = out->guard_active ? 1u : 0u;
     out->far_hop = a->far_hop;
+    return AEC_OK;
+}
+
+int aec_get_residual(const Aec* a, AecResidualView* out) {
+    AecResidualViewFull f;
+    int rc;
+    /* The caller's declared size is validated before anything is written: a short struct is left untouched, a
+     * larger one gets only the known prefix. */
+    if (!out || out->struct_size < sizeof(*out)) return AEC_ERR_ARG;
+    memset(&f, 0, sizeof f);
+    f.struct_size = sizeof f;
+    rc = aec_get_residual_full(a, &f);
+    memset(out, 0, sizeof(*out));
+    out->struct_size = sizeof(*out);
+    if (rc != AEC_OK) return rc;
+    out->n_freqs = f.n_freqs; out->hop_size = f.hop_size; out->formed_hop = f.formed_hop;
+    out->error_spec = f.error_spec; out->echo_spec = f.echo_spec; out->near_spec = f.near_spec;
+    out->far_spec = f.far_spec; out->base_spec = f.base_spec; out->guard_active = f.guard_active;
+    out->res_gain = f.res_gain; out->r2 = f.r2; out->comfort_noise = f.comfort_noise;
+    out->usable_linear = f.usable_linear; out->post_reset_serial = f.post_reset_serial;
+    out->all_converged = f.all_converged; out->max_dt = f.max_dt; out->max_saturation = f.max_saturation;
+    out->clock_drift = f.clock_drift; out->guard_lanes = f.guard_lanes; out->far_hop = f.far_hop;
     return AEC_OK;
 }
 
@@ -2821,9 +2962,9 @@ void aec_debug_status(const Aec* a, AecDebugStatus* out) {
     out->delay_period_hops  = a->duty.period_hops;
 }
 
-/* Read-only AecLinearView; pointers alias per-hop buffers, valid
+/* Read-only linear-stage view (the public AecLinearView and the complete one); pointers alias per-hop buffers, valid
  * until the next process/reset. */
-int aec_get_linear(const Aec* a, AecLinearView* out) {
+int aec_get_linear_full(const Aec* a, AecLinearViewFull* out) {
     if (!out || out->struct_size < sizeof(*out)) return AEC_ERR_ARG;
     if (!aec_unusable(a) && AEC_IS_ARRAY(a)) return aec_array_impl_get_linear(a, out);
     memset(out, 0, sizeof(*out));
@@ -2870,6 +3011,23 @@ int aec_get_linear(const Aec* a, AecLinearView* out) {
         out->delay_state = AEC_LINEAR_DELAY_CHANGED;
     else
         out->delay_state = AEC_LINEAR_DELAY_LOCKED;
+    return AEC_OK;
+}
+
+int aec_get_linear(const Aec* a, AecLinearView* out) {
+    AecLinearViewFull f;
+    int rc;
+    if (!out || out->struct_size < sizeof(*out)) return AEC_ERR_ARG;
+    memset(&f, 0, sizeof f);
+    f.struct_size = sizeof f;
+    rc = aec_get_linear_full(a, &f);
+    memset(out, 0, sizeof(*out));
+    out->struct_size = sizeof(*out);
+    if (rc != AEC_OK) return rc;
+    out->hop_size = f.hop_size; out->linear_hop = f.linear_hop; out->aligned_far_hop = f.aligned_far_hop;
+    out->delay_samples = f.delay_samples; out->delay_confidence = f.delay_confidence; out->delay_state = f.delay_state;
+    out->far_power = f.far_power; out->dt_indicator = f.dt_indicator; out->saturation_level = f.saturation_level;
+    out->filter_converged = f.filter_converged;
     return AEC_OK;
 }
 

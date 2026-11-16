@@ -5,6 +5,7 @@
 #define AEC_ARRAY_INTERNAL_H
 
 #include "aec_impl.h"
+#include "aec_view_internal.h"
 #include "utility/simd_kernels.h"
 
 #include <float.h>
@@ -34,8 +35,8 @@ int    aec_array_impl_set_level(Aec* a, AecLevel level);
 
 int    aec_array_impl_process_linear(Aec* a, const float* mics, const float* ref);
 int    aec_array_impl_process_residual(Aec* a, const AecBeam* beam);
-int    aec_array_impl_get_residual(const Aec* a, AecResidualView* out);
-int    aec_array_impl_get_linear(const Aec* a, AecLinearView* out);
+int    aec_array_impl_get_residual(const Aec* a, AecResidualViewFull* out);
+int    aec_array_impl_get_linear(const Aec* a, AecLinearViewFull* out);
 int    aec_array_impl_apply_gain(const Aec* a, const float* extra_gain, Complex* out_spec);
 int    aec_array_impl_apply_cng(Aec* a, const float* extra_gain, Complex* spec);
 uint32_t aec_array_impl_post_reset_serial(const Aec* a);
@@ -72,9 +73,57 @@ Aec*   aec_array_impl_linear_lane(Aec* a);                                     /
  * A lane is a single-channel Aec of the array flow: n_mics 1, EXTERNAL_ALIGNED, residual STATE or ESTIMATE (any other configuration is
  * refused). Its pool omits what that contract never runs and it borrows the array's FFT handle (same fft_size, calls strictly
  * sequential across lanes). aec_lane_init() takes the mem at least aec_lane_get_mem_size() bytes, 16-byte aligned. */
+/* Buffers a lane writes before it reads inside one lane call, and the constant window tables its filters read: one set per array,
+ * borrowed by all four lanes (aec_lane_scratch_bind() zeroes it). Nothing kept across hops, returned by a view or handed from lane 0
+ * to lanes 1-3 (far PSD, scaled far block, narrow-band mask) lives here. */
+typedef struct AecLaneScratch {
+    float*         e2_echo;        /* each of these n_freqs floats */
+    float*         e2_near;
+    float*         mu_buf_pre;
+    float*         mu_buf;
+    float*         e2ref;
+    float*         ree;            /* NULL for a STATE lane (it has no residual-echo estimator) */
+    float*         abs_near;
+    float*         abs_far;
+    float*         abs_sel_echo;
+    float*         abs_error;
+    float*         abs_echo_coh;
+    float*         abs_nsw_e1;
+    float*         abs_ybase;
+    float*         x2_at_delay;
+    float*         r2_unb;
+    float*         nearend_pwr;
+    float*         psd_near;       /* the AecPost power spectra of this hop */
+    float*         psd_echo;
+    float*         psd_error;
+    float*         psd_capture_win;
+    float*         x2_reverb;
+    float*         nf;
+    float*         shadow_out;     /* each of these hop_size floats */
+    float*         final_out;
+    float*         lfs_sq;
+    float*         lfs_sref;
+    float*         lfs_scoa;
+    float*         fa_render_sq;
+    float*         lfs_tin;        /* fft_size floats */
+    float*         fa_abs;         /* n_partitions * hop_size floats */
+    float*         taps;           /* n_partitions * hop_size floats: the tap span the filter analyzer asks for */
+    float*         w_mag2;         /* n_partitions * n_freqs floats */
+    Complex*       nsw_e1;         /* n_freqs bins each */
+    Complex*       lfs_sel_esw;
+    unsigned char* stat_mask;      /* n_freqs bytes each */
+    unsigned char* coh_gate_mask;
+    float*         td_window;      /* constants every lane's filters read: fft_size and block_size floats */
+    float*         sqrt_hann;
+    PbfdafScratch  main_kf;        /* the main filter's scratch rows */
+    PbfdafScratch  shadow;         /* the shadow follower's (unused without a shadow) */
+} AecLaneScratch;
+
 #ifndef AEC_NO_ARRAY
+size_t aec_lane_scratch_get_mem_size(const AecResolved* lane);
+void   aec_lane_scratch_bind(AecLaneScratch* out, void* mem, const AecResolved* lane);
 size_t aec_lane_get_mem_size(const AecResolved* lane);
-Aec*   aec_lane_init(void* mem, size_t mem_size, const AecResolved* lane, FftHandle* shared_fft);
+Aec*   aec_lane_init(void* mem, size_t mem_size, const AecResolved* lane, FftHandle* shared_fft, const AecLaneScratch* scratch);
 #endif
 
 #ifndef AEC_NO_ARRAY

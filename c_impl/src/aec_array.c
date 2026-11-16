@@ -151,7 +151,7 @@ typedef struct ArrayDims {
     AecResolved lane;
     int hop, fft, n, ring;
     int post, full, matched;
-    size_t ctl_bytes, buf_bytes, delay_bytes, res_bytes, fft_bytes, lane_each_bytes, total;   /* total: beyond the Aec header */
+    size_t ctl_bytes, buf_bytes, delay_bytes, res_bytes, fft_bytes, scratch_bytes, lane_each_bytes, total;   /* total: beyond the Aec header */
 } ArrayDims;
 
 /* The flow's contract stamped on a lane config: this grid, the shared aligned far (EXTERNAL_ALIGNED), the lane's residual
@@ -211,14 +211,16 @@ static int array_dims(const AecResolved* rs, ArrayDims* d) {
     }
     d->fft_bytes = fft_get_mem_size(d->fft);
     if (d->fft_bytes == 0) return 0;
+    d->scratch_bytes = aec_lane_scratch_get_mem_size(&d->lane);
     d->lane_each_bytes = aec_lane_get_mem_size(&d->lane);
-    if (d->lane_each_bytes == 0) return 0;
+    if (d->scratch_bytes == 0 || d->lane_each_bytes == 0) return 0;
 
     total = d->ctl_bytes;
     total = ck_add_size(total, d->buf_bytes);
     if (d->matched) total = ck_add_size(total, ck_align16_size(d->delay_bytes));
     if (d->full) total = ck_add_size(total, ck_align16_size(d->res_bytes));
     total = ck_add_size(total, ck_align16_size(d->fft_bytes));
+    total = ck_add_size(total, ck_align16_size(d->scratch_bytes));
     total = ck_add_size(total, ck_mul_size((size_t)AEC_ARRAY_MICS, ck_align16_size(d->lane_each_bytes)));
     if (MEM_SIZE_INVALID(total)) return 0;
     d->total = total;
@@ -287,6 +289,7 @@ static int array_setup(Aec* a, uint8_t* base, size_t avail, const AecResolved* r
     AcPoolCursor cursor;
     int ch, q_hops;
     void* region;
+    AecLaneScratch scratch;
 
     if (!array_dims(rs, &d) || avail < d.total) return -1;
     memset(base, 0, d.ctl_bytes + d.buf_bytes);           /* control block and the flow buffers; lane pools are built by aec_init */
@@ -336,9 +339,12 @@ static int array_setup(Aec* a, uint8_t* base, size_t avail, const AecResolved* r
     region = ac_pool_carve(&cursor, d.fft_bytes, 1);
     p->fft = region ? fft_init(region, d.fft_bytes, d.fft) : NULL;
     if (!p->fft) return -1;
+    region = ac_pool_carve(&cursor, d.scratch_bytes, 1);
+    if (!region) return -1;
+    aec_lane_scratch_bind(&scratch, region, &d.lane);
     for (ch = 0; ch < AEC_ARRAY_MICS; ++ch) {
         region = ac_pool_carve(&cursor, d.lane_each_bytes, 1);
-        p->lanes[ch] = region ? aec_lane_init(region, d.lane_each_bytes, &d.lane, p->fft) : NULL;
+        p->lanes[ch] = region ? aec_lane_init(region, d.lane_each_bytes, &d.lane, p->fft, &scratch) : NULL;
         if (!p->lanes[ch]) return -1;      /* every lane lives in the caller's pool: a failed build holds nothing to release */
     }
     if (cursor.remaining != 0) return -1;
@@ -544,11 +550,11 @@ void aec_array_impl_reset(Aec* a) {
  * after a reset, and the array's views are valid until then. A reset does not clear that memory; the fusion refuses a stale
  * view. */
 static int bind_lane_view(ArraySnapshot* dst, const Aec* lane, int n_freqs, int residual_half) {
-    AecLinearView lv;
-    AecResidualView rv;
+    AecLinearViewFull lv;
+    AecResidualViewFull rv;
     memset(&lv, 0, sizeof(lv)); lv.struct_size = sizeof(lv);
     memset(&rv, 0, sizeof(rv)); rv.struct_size = sizeof(rv);
-    if (aec_get_linear(lane, &lv) != AEC_OK || aec_get_residual(lane, &rv) != AEC_OK) return 0;
+    if (aec_get_linear_full(lane, &lv) != AEC_OK || aec_get_residual_full(lane, &rv) != AEC_OK) return 0;
     if (rv.n_freqs != n_freqs || lv.n_freqs != n_freqs || !rv.error_spec || !rv.echo_spec || !rv.far_spec ||
         !rv.near_spec || !rv.base_spec || !rv.formed_hop) return 0;
     if (residual_half && (!rv.r2 || !rv.comfort_noise)) return 0;
@@ -862,7 +868,7 @@ int aec_array_impl_process_residual(Aec* a, const AecBeam* beam) {
 
 /* ---- views and getters ------------------------------------------------------------------------------------------------ */
 
-int aec_array_impl_get_residual(const Aec* a, AecResidualView* out) {
+int aec_array_impl_get_residual(const Aec* a, AecResidualViewFull* out) {
     const AecArray* p = a->array;
     const ArrayFrame* f;
     if (!p->post) return AEC_ERR_MODE;
@@ -974,11 +980,11 @@ Aec* aec_array_impl_linear_lane(Aec* a) {
 
 /* The aggregate linear view of an array: lane 0 stands for the four lanes (they share one far end, so far_power and the
  * lane-independent status agree; the fusion checks it); the alignment fields are the shared ones. */
-int aec_array_impl_get_linear(const Aec* a, AecLinearView* out) {
+int aec_array_impl_get_linear(const Aec* a, AecLinearViewFull* out) {
     const AecArray* p = a->array;
     const AecDelayState* d = &p->last_delay;
     int rc;
-    rc = aec_get_linear(p->lanes[0], out);
+    rc = aec_get_linear_full(p->lanes[0], out);
     if (rc != AEC_OK) return rc;
     out->aligned_far_hop = p->aligned_ref;
     out->generation = p->generation;
@@ -1024,15 +1030,15 @@ int aec_get_array(const Aec* a, AecArrayView* out) {
     }
     {
         /* A single-channel instance: lane 0 only, available once its residual stage ran. */
-        AecResidualView rv;
-        AecLinearView lv;
+        AecResidualViewFull rv;
+        AecLinearViewFull lv;
         AecDebugStatus ds;
         int rc;
         memset(&rv, 0, sizeof(rv)); rv.struct_size = sizeof(rv);
         memset(&lv, 0, sizeof(lv)); lv.struct_size = sizeof(lv);
-        rc = aec_get_residual(a, &rv);
+        rc = aec_get_residual_full(a, &rv);
         if (rc != AEC_OK) return rc;
-        if (aec_get_linear(a, &lv) != AEC_OK) return AEC_ERR_ARG;
+        if (aec_get_linear_full(a, &lv) != AEC_OK) return AEC_ERR_ARG;
         aec_debug_status(a, &ds);
         out->n_freqs = rv.n_freqs;
         out->lane_error_spec[0] = rv.error_spec;

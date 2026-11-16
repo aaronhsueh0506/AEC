@@ -21,6 +21,7 @@
 #define AEC_TEST_GOLDEN2_MONO_H
 
 #include "baseline2_common.h"
+#include "aec_view_internal.h"
 #include "aec_white_box.h"
 #include "aec_test_tuning.h"
 

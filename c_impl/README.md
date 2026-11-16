@@ -257,8 +257,8 @@ The beamformer and the synthesis stay with the caller. Per hop: `aec_process_lin
 `aec_apply_gain()` / `aec_apply_cng()`. Query the pool with `aec_get_mem_requirements()` and build with
 `aec_init_ex()`; the pool size depends on `residual` (see `STATIC_MEMORY.md`). Not done yet: the far-side state is
 still per lane (only the delay estimator, the aligned far and the far FFT result are shared). A lane omits what its
-contract never runs: at 16 kHz / 256 a lane pool is 142,192 B against 176,880 B for a stand-alone
-`EXTERNAL_ALIGNED` instance. Contract and example:
+contract never runs and borrows the buffers the array shares between its lanes: at 16 kHz / 256 a lane pool is 95,808 B
+against 176,880 B for a stand-alone `EXTERNAL_ALIGNED` instance. Contract and example:
 [../docs/reference/integration.md](../docs/reference/integration.md) §8.8.
 
 Full CLI options, C API reference, integration rules, runtime resource

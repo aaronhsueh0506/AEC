@@ -180,7 +180,7 @@ The **DT-aware recovery group** has two halves:
 `dt_aware_recovery_soft` softens the delay/EPC recovery ([§2.3](reference/linear_frontend.md#23-delay-estimator-aec3-aligned)), gated on the
 `ne_recent_*` near-recent latch, and `dt_aware_res_floor_enabled` lifts the RES
 floor ([§3.4](reference/postfilter.md#34-suppressiongain)), gated on the same `ne_recent_*` latch. The exact per-hop floor
-decision is exported to fused consumers as `res_floor_protect`.
+decision is kept as the library-internal `res_floor_protect` (not in `aec.h`; the array's gain stage derives its own copy from `max_dt`).
 
 ---
 

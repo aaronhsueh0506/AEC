@@ -63,6 +63,12 @@ static int check_header_facts(void) {
     LAYOUT_EXPECT(AEC_DELAY_FILTER_SIZE == DA_FILTER_SIZE, "AEC_DELAY_FILTER_SIZE (aec.h) must equal DA_FILTER_SIZE, the matched filter length");
     LAYOUT_EXPECT(AEC_DELAY_FILTER_INTRA_SHIFT == DA_FILTER_INTRA_SHIFT, "AEC_DELAY_FILTER_INTRA_SHIFT (aec.h) must equal DA_FILTER_INTRA_SHIFT, the filter spacing");
     LAYOUT_EXPECT(AEC_DELAY_DOWN_SAMPLING_FACTOR == DA_DOWN_SAMPLING_FACTOR, "AEC_DELAY_DOWN_SAMPLING_FACTOR (aec.h) must equal DA_DOWN_SAMPLING_FACTOR, the estimator decimation");
+    if (sizeof(void*) == 8 && sizeof(size_t) == 8) {   /* the public views hold what callers outside the library read (LP64 pins) */
+        LAYOUT_EXPECT(sizeof(AecLinearView) == 64 && offsetof(AecLinearView, linear_hop) == 16 && offsetof(AecLinearView, filter_converged) == 56,
+                      "AecLinearView must be the 64-byte public shape (struct_size, hop_size, linear_hop, aligned_far_hop, delay fields, far_power, dt_indicator, saturation_level, filter_converged)");
+        LAYOUT_EXPECT(sizeof(AecResidualView) == 136 && offsetof(AecResidualView, usable_linear) == 96,
+                      "AecResidualView must be the 136-byte public shape without the DT-floor decision field");
+    }
     if (!bad)
         printf("test_memory_layout: sizeof(AecMemReq) %zu; struct Aec alignment <= 16; AEC_DELAY_* equal DA_*\n", sizeof(AecMemReq));
     return bad;
@@ -71,7 +77,7 @@ static int check_header_facts(void) {
 /* The pool descriptor: layout_version is a literal (bump it, and the pin, when a carved layout changes size or order) and, on LP64
  * (where the ABI hash is the identity), so is the FNV-1a-32 of the carve text, which every edit of that text moves. */
 #define AEC_LAYOUT_VERSION_PIN 5u
-#define AEC_CARVE_HASH_PIN_LP64 3368782680u
+#define AEC_CARVE_HASH_PIN_LP64 72260157u
 static int check_descriptor_pin(void) {
     AecConfig cfg;
     AecMemReq req;
@@ -92,16 +98,16 @@ static int check_descriptor_pin(void) {
 }
 
 #ifndef AEC_NO_ARRAY
-/* Absolute pins of the four-microphone array pool (n_mics 4, balanced level, default delay mode, shadow filter on), LP64:
- * the flow buffers (with the array's one synthesis window), the alignment ring and estimator, the gain stage (with its decoded
- * ENR/SU tables), one shared FFT handle, and four lanes. A lane (aec_lane_get_mem_size) is the EXTERNAL_ALIGNED
- * single-channel pool minus what that contract never runs: the delay-shift snapshots, the synthesis window and output
- * buffers, the gain buffers and decoded tables, and the FFT handle; a STATE lane also omits the residual-echo estimator and
- * comfort-noise arrays. */
+/* Absolute pins of the four-microphone array pool (n_mics 4, balanced level, default delay mode, shadow filter on), LP64: the flow
+ * buffers, ring, estimator, gain stage, one FFT handle, the per-call buffers the four lanes borrow (in fusion_bytes) and four lanes,
+ * each the EXTERNAL_ALIGNED single-channel pool minus what a lane never runs or borrows (a STATE lane also has no estimator). */
 static int check_array_pins(void) {
     static const struct { int sr, fft; size_t state, estimate, full; } pin[3] = {
-        {16000, 256, 559328u, 654864u, 664624u}, {16000, 512, 844960u, 1034704u, 1052656u},
-        {48000, 1024, 1885728u, 2263888u, 2301296u} };
+        {16000, 256, 420736u, 514688u, 524448u}, {16000, 512, 615536u, 802160u, 820112u},
+        {48000, 1024, 1366976u, 1738944u, 1776352u} };
+    /* aec_get_mem_breakdown() of the FULL pool: estimator, ring, lanes, fusion (with the shared per-call buffers). */
+    static const size_t full_split[3][4] = {
+        {29248u, 33104u, 383232u, 72832u}, {29248u, 33616u, 626176u, 125040u}, {30624u, 99824u, 1371456u, 268416u} };
     int i, bad = 0;
     if (sizeof(void*) != 8 || sizeof(size_t) != 8) {
         printf("test_memory_layout: array pool pins are LP64 values; skipped on this %zu-byte-pointer ABI\n", sizeof(void*));
@@ -119,6 +125,33 @@ static int check_array_pins(void) {
         if (now_s != pin[i].state || now_e != pin[i].estimate || now_f != pin[i].full) {
             fprintf(stderr, "array %d/%d pool %zu / %zu / %zu (STATE / ESTIMATE / FULL), pinned %zu / %zu / %zu\n", pin[i].sr,
                     pin[i].fft, now_s, now_e, now_f, pin[i].state, pin[i].estimate, pin[i].full);
+            bad = 1;
+        }
+    }
+    for (i = 0; i < 3; ++i) {
+        AecConfig cfg, lane_cfg;
+        AecMemBreakdown mb;
+        size_t standalone;
+        aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, pin[i].sr);
+        cfg.fft_size = pin[i].fft;
+        cfg.n_mics = AEC_ARRAY_MICS;
+        if (aec_get_mem_breakdown(&cfg, &mb) != AEC_OK || mb.total_bytes != pin[i].full ||
+            mb.estimator_bytes != full_split[i][0] || mb.ring_bytes != full_split[i][1] || mb.lane_bytes != full_split[i][2] ||
+            mb.fusion_bytes != full_split[i][3] ||
+            mb.total_bytes - mb.estimator_bytes - mb.ring_bytes - mb.lane_bytes - mb.fusion_bytes != ((sizeof(Aec) + 15u) & ~(size_t)15u)) {
+            fprintf(stderr, "array %d/%d FULL breakdown total %zu est %zu ring %zu lanes %zu fusion %zu differs from the pins\n", pin[i].sr,
+                    pin[i].fft, mb.total_bytes, mb.estimator_bytes, mb.ring_bytes, mb.lane_bytes, mb.fusion_bytes);
+            bad = 1;
+        }
+        /* A lane is leaner than a stand-alone EXTERNAL_ALIGNED instance by at least the buffers the array shares. */
+        lane_cfg = cfg;
+        lane_cfg.n_mics = 1;
+        lane_cfg.delay_mode = AEC_DELAY_EXTERNAL_ALIGNED;
+        lane_cfg.fixed_delay_samples = -1;
+        standalone = aec_get_mem_size(&lane_cfg);
+        if (standalone == 0 || mb.lane_bytes / AEC_ARRAY_MICS + 16u >= standalone) {
+            fprintf(stderr, "array %d/%d lane %zu B is not leaner than a stand-alone EXTERNAL_ALIGNED pool %zu B\n", pin[i].sr, pin[i].fft,
+                    mb.lane_bytes / AEC_ARRAY_MICS, standalone);
             bad = 1;
         }
     }

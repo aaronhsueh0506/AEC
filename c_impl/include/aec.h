@@ -276,7 +276,6 @@ typedef struct AecResidualView {
     const float*   res_gain;         /* G_res(f) in [0,1] */
     const float*   r2;               /* residual-echo PSD R^2(f), int16^2 */
     const float*   comfort_noise;    /* CNG N^2(f), int16^2 */
-    int            res_floor_protect;  /* this hop's near-recent DT-floor decision */
     int            usable_linear;      /* usable-linear-estimate verdict; 0: r2 is the conservative nonlinear estimate */
     uint32_t       post_reset_serial;  /* see aec_post_reset_serial() */
     /* What the residual gain stage was fed this hop (a single-channel instance: from its own linear stage; an array
@@ -339,33 +338,21 @@ typedef enum AecLinearDelayState {
 
 /* Read-only view of the linear stage after aec_process_linear() (and, with residual == OFF, the whole hop). Pointers
  * alias per-hop buffers, valid until the next process or reset call. struct_size as for AecResidualView. Returns AEC_OK
- * or AEC_ERR_ARG. */
+ * or AEC_ERR_ARG. The two views carry what callers outside the library read; the library's own state is not exposed. */
 typedef struct AecLinearView {
     size_t       struct_size;
     int          hop_size;
-    int          n_freqs;
     const float* linear_hop;         /* refined linear-filter hop, before FORM selection */
-    const Complex* echo_spec;        /* main filter echo / near / far spectra (pre-FORM; the far one is rectangular-block) */
-    const Complex* near_spec;
-    const Complex* far_spec;
     const float* aligned_far_hop;    /* aliases the aligned far hop */
     int          delay_samples;      /* applied ring offset; -1 = none */
     float        delay_confidence;   /* 0.0 / 0.5 / 1.0 */
     AecLinearDelayState delay_state;
-    unsigned int generation;
     /* Status of the last COMPLETED hop (the previous one while the residual stage is still pending), kept by the
      * linear stage whatever AecConfig.residual is. */
     float        far_power;
-    float        erle_factor;
     float        dt_indicator;       /* double-talk indicator */
-    float        divergence;
     float        saturation_level;
-    float        erl_estimate;
-    float        shadow_dt;
-    int          is_stationary_dt;
     int          filter_converged;       /* convergence latch */
-    int          filter_once_converged;
-    int          epc_active;             /* echo-path-change regime */
 } AecLinearView;
 
 int aec_get_linear(const Aec* a, AecLinearView* out);
@@ -468,8 +455,8 @@ typedef struct AecMemBreakdown {
     size_t ring_bytes;        /* array: the shared aligned-far ring (MATCHED, FIXED) */
     size_t lane_bytes;        /* array: the four lanes' pools together; 0 for a single-channel instance */
     size_t fusion_bytes;      /* array: the rest of the array pool beyond the Aec header, the estimator and the ring (control
-                               * block, mic/aligned-far/fusion buffers, the residual gain stage, the lanes' shared FFT handle;
-                               * the lanes' pools are NOT included); 0 for a single-channel instance */
+                               * block, mic/aligned-far/fusion buffers, the residual gain stage, the lanes' shared FFT handle
+                               * and per-call buffers; the lanes' pools are NOT included); 0 for a single-channel instance */
 } AecMemBreakdown;
 
 int aec_get_mem_breakdown(const AecConfig* cfg, AecMemBreakdown* out);
