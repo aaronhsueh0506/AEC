@@ -162,7 +162,7 @@ EXPECTED_RED_INFO = {
             'FAILs unless the hard seam gates (guard_active outside the tie band, post_reset_serial, delay events / reverts) are '
             'green as run AND Python re-run with exactly the registered decision(s) forced the way C takes them (driver '
             '--force-leak / --force-gate) matches C on every Layer-1, context and guard-seam gate; it also FAILs once the '
-            'unforced cell is green (remove the marker). Cells, decisions and margins: CHANGELOG.md, 2026-10-28, C-versus-Python parity contract',
+            'unforced cell is green (remove the marker). Cells, decisions and margins: CHANGELOG.md, 2026-10-28, C-versus-Python parity contract, and 2026-11-16, pyc-parity: hard_reset.48k1024 lean and full register a T-01 tie',
     'N-02': 'INFO only (not an audit S-id, never gates): preecho.48k1024.bal.obs_noguard LAYER 1 (std-math C vs Python) has a ~2.9e-3 '
             'max_abs residual at hop ~1790, 9.8x TOL_L1 -- the shipping SIMD=1 build does not hit it and tracks Python to <=1.4e-5 '
             'over this entire scene, so the same residual also shows up as a ship-vs-std Layer 2 reading (hence INCONCLUSIVE_CHAOTIC '
@@ -433,7 +433,7 @@ def build_scenarios():
         add(Scn(sid, clip, g, ctx=True, res=res, base=True))
     # bad-relock soft revert (C aec_apply_delay_shift_soft_revert = Python _apply_delay_shift_soft_revert): full mode (RES on, so
     # the post-revert render reaches the audio gates), every clip must revert at least once in BOTH languages at the same hop.
-    # Seven guard cells carry a registered float32 tie (T-01; CHANGELOG.md, 2026-10-28, C-versus-Python parity contract).
+    # Seven guard cells carry a registered float32 tie (T-01; CHANGELOG.md, 2026-10-28, C-versus-Python parity contract; 2026-11-16, pyc-parity: hard_reset.48k1024).
     # rOza.16k512: 74 hops after the revert (hop 543) bin 148's partition-summed render power X2 = 0.01869662292 (Python) / 0.0186966192 (C) straddles the filter noise
     # gate 0.018696621 (margins +-1.0e-7), so the strict 'X2 >= gate' updates that bin in Python and not in C; with that decision
     # forced, the next one is the leakage compare at hop 2099 bin 122 (margins +2.0e-7 / -2.0e-6), and with both forced C and
@@ -444,11 +444,8 @@ def build_scenarios():
                         ('waxU019BVEacr7vK6v00mQ_doubletalk', 'waxU')):
         for g in ('16k256', '16k512'):
             add(Scn('guard.revert.%s.%s.full' % (short, g), stem, g, ctx=True, res=True, base=True, reverts=1))
-    # hard_reset.48k1024 (lean and full, std-math build only; the shipping build tracks Python to 1.7e-7): at hop 1387 the leakage
-    # compare of bin 222 reads e2_refined/e2_coarse - 1 = -1.6e-6 in C and +1.8e-6 in Python (the coarse operands differ by 3.7e-6 relative),
-    # so C takes 'converged' and Python 'diverged'; the shadow-copy streak (counter, main_paused, baseline), the FORM selection and the
-    # guard and delay events agree on every hop up to there. With that decision forced the output max_abs falls from 8.3e-4 to 1.6e-7; two
-    # more ties follow on the forced trajectory (hop 1388 bin 302, margins -2.9e-5 / +2.9e-5; hop 2146 bin 287, -2.2e-6 / +1.0e-5).
+    # hard_reset.48k1024 (lean and full, std-math build only): the leakage compare at hop 1387 bin 222 and two later ones tie
+    # (CHANGELOG.md, 2026-11-16, pyc-parity: hard_reset.48k1024 lean and full register a T-01 tie).
     # T-01 ties, as (driver flags) per cell: each is the FIRST decision C and Python take differently, then the next one on the
     # forced trajectory, until none is left (found with C and Python per-hop decision traces)
     ties = {

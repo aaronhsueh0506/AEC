@@ -87,8 +87,8 @@ class HandlerActionTests(unittest.TestCase):
             self.assertLess(h.copy_err_baseline, 1.0)
 
     def test_boost_q_fires_after_hysteresis_streak(self):
-        """Shadow << main for shadow_copy_hysteresis + HYS_STREAK_MIN frames
-        in a row triggers boost_q + pause_main."""
+        """Shadow << main for shadow_copy_hysteresis frames plus the 80 ms streak
+        minimum in a row triggers boost_q + pause_main."""
         h = _stable_baseline(_mk(shadow_copy_hysteresis=5))
         fired = False
         boost_frame = None
