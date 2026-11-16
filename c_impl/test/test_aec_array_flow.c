@@ -2723,11 +2723,8 @@ static void test_stage_timing(void) {
      * a microsecond, so a zero anywhere here means that window never ran.
      * frontend_us and lane_res_us come from aec_get_last_timing(); they read
      * zero if the AEC-side windows are ever dropped. */
-    /* One flag, AEC_STAGE_TIMING, governs the wrapper's stages and the three
-     * summed off the lanes. It is on by default; the zero branches are what
-     * proves -DAEC_STAGE_TIMING=0 removes the measurement rather than merely
-     * hiding it, and that a compiled-out build reports zeros instead of stale
-     * values. */
+    /* AEC_STAGE_TIMING (on by default) governs the wrapper's and the lanes' stages; the zero branches prove that
+     * -DAEC_STAGE_TIMING=0 removes the measurement and reports zeros, not stale values. */
 #if AEC_STAGE_TIMING
     CHECK(t.delay_us > 0, "timing: the delay estimator reports a real cost");
 #else
