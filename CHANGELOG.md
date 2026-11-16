@@ -42,6 +42,10 @@ when verdict requires it.
 ---
 
 
+## [Unreleased] — 2026-11-16 — aec.c: scaffolding left from the function split removed
+
+**No output change; the compiled code is identical.** `aec.c` after the stage split carried a blank line before nine closing braces, whole-body bare blocks (`aec_run_post_chain`, `aec_finish_hop`), whole-body `if (a->has_shadow) {` wrappers (now `if (!a->has_shadow) return;`), two empty `if` branches in `aec_update_echo_path` (now one condition each), `_sn` / `_ei` / `_h` locals with leading underscores, and an unused `(n)` argument on the three carve slice macros. Cleaned; no statement changed. `cc -S -O2` of `aec.c`, `aec_post.c`, `aec_array.c`, `aec_res.c` and `aec_config_build.c` (`SIMD=1`, `SIMD=0`, `AEC_NO_ARRAY=1`) is byte-identical before and after (14 assembly files); the baseline streams are unchanged.
+
 ## [Unreleased] — 2026-11-16 — Test and example helpers shared instead of repeated
 
 **No behaviour change.** `example/cli_level.h`: `aec_cli_parse_level()` calls `aec_cli_parse_int()` instead of repeating its `strtol` body (identical result on 24 inputs including NULL, padded, trailing-character and out-of-range strings). `test/baseline2_signal.h` takes the LCG step, the syllabic modulation and the FNV-1a hash from `split_signal.h` (the `g2_*` names stay as aliases) instead of a second copy; the four baseline streams, whose lines are hashes, are byte-identical. `test/bench_rtf.c`: the `--live-observer` help text no longer carries an internal round label.

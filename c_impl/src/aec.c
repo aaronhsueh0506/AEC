@@ -796,11 +796,11 @@ static void aec_init_config_state(Aec* a, const AecResolved* rs, int hop, int bl
         (float)tn->filter_misadjustment_hangover_frames * 10.0f, hop, cfg->sample_rate);
 
     {
-        int _sn = (int)(0.5f * (float)cfg->sample_rate / (float)(hop > 0 ? hop : 1));
-        if (_sn < 2) _sn = 2;
-        if (_sn > (int)(sizeof(a->erle_slope_buf) / sizeof(a->erle_slope_buf[0])))
-            _sn = (int)(sizeof(a->erle_slope_buf) / sizeof(a->erle_slope_buf[0]));
-        a->erle_slope_cap = _sn;
+        const int slope_max = (int)(sizeof(a->erle_slope_buf) / sizeof(a->erle_slope_buf[0]));
+        int slope_cap = (int)(0.5f * (float)cfg->sample_rate / (float)(hop > 0 ? hop : 1));
+        if (slope_cap < 2) slope_cap = 2;
+        if (slope_cap > slope_max) slope_cap = slope_max;
+        a->erle_slope_cap = slope_cap;
         a->erle_slope_len = 0;
         a->erle_slope_head = 0;
     }
@@ -1004,14 +1004,14 @@ static uint8_t* aec_carve_post_backing(Aec* a, uint8_t* ptr, const AecResolved* 
                 aec_db_to_linear((double)tn->live_observer_corrob_margin_db);
         }
 
-#define P_FSLICE(n) ((float*)(ptr));    ptr += ALIGN16(K * sizeof(float));    (void)(n)
-#define P_CSLICE(n) ((Complex*)(ptr));  ptr += ALIGN16(K * sizeof(Complex));  (void)(n)
-#define P_BSLICE(n) ((unsigned char*)(ptr)); ptr += ALIGN16(K * sizeof(unsigned char)); (void)(n)
-        float        *avg_rev  = P_FSLICE(0);
+#define P_FSLICE() ((float*)(ptr));    ptr += ALIGN16(K * sizeof(float))
+#define P_CSLICE() ((Complex*)(ptr));  ptr += ALIGN16(K * sizeof(Complex))
+#define P_BSLICE() ((unsigned char*)(ptr)); ptr += ALIGN16(K * sizeof(unsigned char))
+        float        *avg_rev  = P_FSLICE();
         float        *y2s = NULL, *n2 = NULL, *n2i = NULL;   /* the comfort-noise tracker */
-        if (!state_lane) { y2s = P_FSLICE(0); n2 = P_FSLICE(0); n2i = P_FSLICE(0); }
-        float        *sye_re   = P_FSLICE(0); float *sye_im = P_FSLICE(0);
-        float        *syy      = P_FSLICE(0); float *see    = P_FSLICE(0);
+        if (!state_lane) { y2s = P_FSLICE(); n2 = P_FSLICE(); n2i = P_FSLICE(); }
+        float        *sye_re   = P_FSLICE(); float *sye_im = P_FSLICE();
+        float        *syy      = P_FSLICE(); float *see    = P_FSLICE();
         /* ola, eout and eout_full serve aec_post_apply_output() only (FULL); a lane never synthesizes. */
         float        *swin     = NULL;   /* the synthesis window, rebuilt from the half table; a lane never synthesizes */
         float        *ola      = NULL;
@@ -1020,17 +1020,17 @@ static uint8_t* aec_carve_post_backing(Aec* a, uint8_t* ptr, const AecResolved* 
             aec_synth_window_build(swin, blk);
             ola = (float*)ptr; ptr += ALIGN16((size_t)blk * sizeof(float));
         }
-        float        *np_      = P_FSLICE(0); float *fp_    = P_FSLICE(0);
-        float        *ep_      = P_FSLICE(0); float *erp_   = P_FSLICE(0);
-        float        *cpe      = P_FSLICE(0); float *x2r    = P_FSLICE(0);
+        float        *np_      = P_FSLICE(); float *fp_    = P_FSLICE();
+        float        *ep_      = P_FSLICE(); float *erp_   = P_FSLICE();
+        float        *cpe      = P_FSLICE(); float *x2r    = P_FSLICE();
         float        *cn = NULL;
-        if (!state_lane) { cn = P_FSLICE(0); }
-        float        *nf_      = P_FSLICE(0);
-        unsigned char *cgm     = P_BSLICE(0);
+        if (!state_lane) { cn = P_FSLICE(); }
+        float        *nf_      = P_FSLICE();
+        unsigned char *cgm     = P_BSLICE();
         Complex      *eout     = NULL;
         float        *eout_full = NULL;
         if (!lane) {
-            eout = P_CSLICE(0);
+            eout = P_CSLICE();
             eout_full = (float*)ptr; ptr += ALIGN16((size_t)fft * sizeof(float));
         }
         memset(syy, 0, K * sizeof(float)); memset(see, 0, K * sizeof(float));
@@ -1049,14 +1049,14 @@ static uint8_t* aec_carve_state(Aec* a, uint8_t* ptr, const AecResolved* rs,
     const AecConfig* cfg = &rs->cfg;
     {
         AecStateStorage* s = &a->a3_state_st;
-        s->erle_max           = P_FSLICE(0); s->erle            = P_FSLICE(0);
-        s->erle_oc            = P_FSLICE(0); s->erle_unb        = P_FSLICE(0);
-        s->erle_during        = P_FSLICE(0);
-        s->erle_coming_onset  = P_BSLICE(0);
+        s->erle_max           = P_FSLICE(); s->erle            = P_FSLICE();
+        s->erle_oc            = P_FSLICE(); s->erle_unb        = P_FSLICE();
+        s->erle_during        = P_FSLICE();
+        s->erle_coming_onset  = P_BSLICE();
         s->erle_hold          = (int32_t*)ptr; ptr += ALIGN16(K * sizeof(int32_t));
-        s->erle_y2_acc        = P_FSLICE(0); s->erle_e2_acc     = P_FSLICE(0);
-        s->erle_low_render    = P_BSLICE(0);
-        s->erl                = P_FSLICE(0);
+        s->erle_y2_acc        = P_FSLICE(); s->erle_e2_acc     = P_FSLICE();
+        s->erle_low_render    = P_BSLICE();
+        s->erl                = P_FSLICE();
         s->erl_hold           = (int*)ptr; ptr += ALIGN16((size_t)(K - 2) * sizeof(int));
         s->filter_delays_blocks = (int*)ptr; ptr += ALIGN16((size_t)AECB_ST_NUM_CAPTURE_CHANNELS * sizeof(int));
         s->fa_h_highpass      = (float*)ptr; ptr += ALIGN16(ck_mul_size((size_t)np, (size_t)hop) * sizeof(float));
@@ -1077,13 +1077,13 @@ static uint8_t* aec_carve_residual(Aec* a, uint8_t* ptr, const AecResolved* rs,
         float *ld_st = NULL, *lr_st = NULL, *scr_st = NULL;
         int   *x2_nfc = NULL;
         if (!aec_state_lane(cfg, lane)) {   /* a STATE lane never runs the estimator: ree_init() takes NULL storage */
-            x2_nf  = P_FSLICE(0);
+            x2_nf  = P_FSLICE();
             x2_nfc = (int*)ptr;   ptr += ALIGN16(K * sizeof(int));
-            rm_st  = P_FSLICE(0); rt_st = P_FSLICE(0);
+            rm_st  = P_FSLICE(); rt_st = P_FSLICE();
             if (!AECB_REE_USE_AEC_ECHO_GEN_WINDOW) { rh_st = (float*)ptr; ptr += ALIGN16((size_t)rh * K * sizeof(float)); }   /* read only without the echo-generating window (see ree_estimate()) */
             drd_st = (float*)ptr; ptr += ALIGN16((size_t)REE_DELAY_BUF_SIZE * K * sizeof(float));
             rrd_st = (float*)ptr; ptr += ALIGN16((size_t)REE_DELAY_BUF_SIZE * K * sizeof(float));
-            ld_st  = P_FSLICE(0); lr_st = P_FSLICE(0); scr_st = P_FSLICE(0);
+            ld_st  = P_FSLICE(); lr_st = P_FSLICE(); scr_st = P_FSLICE();
         }
         aec_ree_bind(a, rd, K, hop, cfg->sample_rate, x2_nf, x2_nfc, rm_st,
                      rt_st, rh_st, drd_st, rrd_st, ld_st, lr_st, scr_st);
@@ -1105,11 +1105,11 @@ static uint8_t* aec_carve_suppression(Aec* a, uint8_t* ptr, const AecBalancedRat
         if (!lane) {
             aec_sg_tables_expand(rd, ptr, &stun);
             ptr += aec_sg_tables_bytes(K);
-            last_gain = P_FSLICE(0); last_ne = P_FSLICE(0); last_echo = P_FSLICE(0);
+            last_gain = P_FSLICE(); last_ne = P_FSLICE(); last_echo = P_FSLICE();
             ma   = (float*)ptr; ptr += ALIGN16((size_t)rd->sg_nearend_smoother_n * K * sizeof(float));
-            ne_s = P_FSLICE(0); wr_s = P_FSLICE(0);
-            ming = P_FSLICE(0); maxg = P_FSLICE(0);
-            graw = P_FSLICE(0); gout = P_FSLICE(0); gsum = P_FSLICE(0);
+            ne_s = P_FSLICE(); wr_s = P_FSLICE();
+            ming = P_FSLICE(); maxg = P_FSLICE();
+            graw = P_FSLICE(); gout = P_FSLICE(); gsum = P_FSLICE();
         }
         suppression_gain_init(sg, scfg, &stun, last_gain, last_ne, last_echo,
                               ma, ne_s, wr_s, ming, maxg, graw, gout, gsum);
@@ -1121,9 +1121,9 @@ static uint8_t* aec_carve_suppression(Aec* a, uint8_t* ptr, const AecBalancedRat
 static uint8_t* aec_carve_stationarity(Aec* a, uint8_t* ptr, const AecResolved* rs, int hop, int K) {
     const AecConfig* cfg = &rs->cfg;
     {
-        float        *st_noise = P_FSLICE(0);
+        float        *st_noise = P_FSLICE();
         int32_t      *st_hang  = (int32_t*)ptr; ptr += ALIGN16(K * sizeof(int32_t));
-        unsigned char *st_flg  = P_BSLICE(0);
+        unsigned char *st_flg  = P_BSLICE();
         const int    rows = stationarity_estimator_window_hops(hop, cfg->sample_rate);
         float        *st_hist  = (float*)ptr;   ptr += ALIGN16((size_t)rows * K * sizeof(float));
         stationarity_estimator_init(&a->a3_stat, K, hop, cfg->sample_rate,
@@ -1158,25 +1158,25 @@ static uint8_t* aec_carve_post_scratch(Aec* a, uint8_t* ptr, const AecResolved* 
     const AecTuning* tn = &rs->tun;
     {
         AecPostRunScratch* sc = &a->a3_sc;
-        sc->sel_esw  = P_CSLICE(0); sc->sel_echo = P_CSLICE(0);
-        sc->nsw_e1   = P_CSLICE(0); sc->ybase    = P_CSLICE(0);
-        sc->output_base = P_CSLICE(0);
-        sc->abs_near     = P_FSLICE(0); sc->abs_far      = P_FSLICE(0);
-        sc->abs_sel_echo = P_FSLICE(0); sc->abs_error    = P_FSLICE(0);
-        sc->abs_echo_coh = P_FSLICE(0); sc->abs_nsw_e1   = P_FSLICE(0);
-        sc->abs_ybase    = P_FSLICE(0); sc->x2_at_delay  = P_FSLICE(0);
+        sc->sel_esw  = P_CSLICE(); sc->sel_echo = P_CSLICE();
+        sc->nsw_e1   = P_CSLICE(); sc->ybase    = P_CSLICE();
+        sc->output_base = P_CSLICE();
+        sc->abs_near     = P_FSLICE(); sc->abs_far      = P_FSLICE();
+        sc->abs_sel_echo = P_FSLICE(); sc->abs_error    = P_FSLICE();
+        sc->abs_echo_coh = P_FSLICE(); sc->abs_nsw_e1   = P_FSLICE();
+        sc->abs_ybase    = P_FSLICE(); sc->x2_at_delay  = P_FSLICE();
         sc->w_mag2 = (float*)ptr; ptr += ALIGN16((size_t)np * K * sizeof(float));
         sc->render_block_scaled = (float*)ptr; ptr += ALIGN16((size_t)hop * sizeof(float));
-        sc->r2          = P_FSLICE(0); sc->r2_unb   = P_FSLICE(0);
-        sc->nearend_pwr = P_FSLICE(0);
-        sc->stat_mask   = P_BSLICE(0);
+        sc->r2          = P_FSLICE(); sc->r2_unb   = P_FSLICE();
+        sc->nearend_pwr = P_FSLICE();
+        sc->stat_mask   = P_BSLICE();
         sc->observer_out = NULL; sc->observer_diff_spec = NULL;
         sc->observer_diff_mag2 = NULL; sc->observer_cap_mag2 = NULL;
         if (tn->live_observer_enabled) {
             sc->observer_out = (float*)ptr; ptr += ALIGN16((size_t)hop * sizeof(float));
-            sc->observer_diff_spec = P_CSLICE(0);
-            sc->observer_diff_mag2 = P_FSLICE(0);
-            sc->observer_cap_mag2  = P_FSLICE(0);
+            sc->observer_diff_spec = P_CSLICE();
+            sc->observer_diff_mag2 = P_FSLICE();
+            sc->observer_cap_mag2  = P_FSLICE();
         }
     }
 #undef P_FSLICE
@@ -1698,7 +1698,6 @@ static void aec_judge_delay_shift(Aec* a) {
             a->delay_shift_judgment_active = 0;
         }
     }
-
 }
 
 static void aec_acquire_delay(Aec* a, int new_delay, int eligible) {
@@ -1739,7 +1738,6 @@ static void aec_acquire_delay(Aec* a, int new_delay, int eligible) {
             a->pending_delay_change = AEC_DA_NEW_DETECTED;
         }
     }
-
 }
 
 static void aec_track_delay_shift(Aec* a, int new_delay, int eligible) {
@@ -1855,7 +1853,6 @@ static void aec_align_reference(Aec* a) {
         /* EXTERNAL_ALIGNED: ref is aligned by contract. */
         a->far_hop_aligned = 1;
     }
-
 }
 
 /* `ana` (non-NULL): reuse the donor's results of the stages that read the far hop alone; `out`: publish this lane's. */
@@ -1902,7 +1899,6 @@ static void aec_prepare_capture_hop(Aec* a, const float* mic_in, const float* re
             else saturation_soft_clip(a->far_hop, a->far_hop, hop, 0.8);
         }
     }
-
 }
 
 static float aec_prepare_mu(Aec* a, int* is_array) {
@@ -2045,7 +2041,6 @@ static int aec_run_main_filter(Aec* a, float mu_scalar, int mu_is_array,
             use_array ? mu_buf : NULL, use_array ? 0.0f : main_mu_scalar,
             a->raw_output, far_cmag2);
     }
-
 }
 
 static int aec_refresh_stationarity(Aec* a, const AecFarShare* hop_in, const AecFarShare* ana, AecFarShare* out) {
@@ -2094,85 +2089,81 @@ static int aec_refresh_stationarity(Aec* a, const AecFarShare* hop_in, const Aec
 
 static void aec_update_shadow_quality(Aec* a, int main_error_cmag2_valid) {
     const int K = a->n_freqs, N = a->n_partitions;
-    if (a->has_shadow) {
-        float *e2ref_arr = a->scr_e2ref_arr;
-        /* PBFDKF fills its cache only on far-active hops; otherwise compute it here. */
-        if (main_error_cmag2_valid)
-            memcpy(e2ref_arr, a->main_filter.e2_ref_scratch, (size_t)K * sizeof(float));
-        else
-            sk_cmag2_np_f32(a->main_filter.base.error_spec, e2ref_arr, K);
-        float e2_ref = sk_pairwise_sum_f32(e2ref_arr, (size_t)K);
-        float e2_coa = a->main_filter.e2_coarse_for_refresh;
-        /* erl[k] = sum_p |W_p[k]|^2, recomputed only when w_dirty (its only
-         * consumer). */
-        if (a->main_filter.base.w_dirty) {
-            for (int k = 0; k < K; ++k) a->main_filter.erl_per_bin[k] = 0.0f;
-            for (int part = 0; part < N; ++part) {
-                const Complex* Wp = a->main_filter.base.W + (size_t)part * K;
-                sk_cmag2_np_acc_f32(Wp, a->main_filter.erl_per_bin, K);
-            }
-            a->main_filter.base.w_dirty = 0;
+    if (!a->has_shadow) return;
+    float *e2ref_arr = a->scr_e2ref_arr;
+    /* PBFDKF fills its cache only on far-active hops; otherwise compute it here. */
+    if (main_error_cmag2_valid)
+        memcpy(e2ref_arr, a->main_filter.e2_ref_scratch, (size_t)K * sizeof(float));
+    else
+        sk_cmag2_np_f32(a->main_filter.base.error_spec, e2ref_arr, K);
+    float e2_ref = sk_pairwise_sum_f32(e2ref_arr, (size_t)K);
+    float e2_coa = a->main_filter.e2_coarse_for_refresh;
+    /* erl[k] = sum_p |W_p[k]|^2, recomputed only when w_dirty (its only
+     * consumer). */
+    if (a->main_filter.base.w_dirty) {
+        for (int k = 0; k < K; ++k) a->main_filter.erl_per_bin[k] = 0.0f;
+        for (int part = 0; part < N; ++part) {
+            const Complex* Wp = a->main_filter.base.W + (size_t)part * K;
+            sk_cmag2_np_acc_f32(Wp, a->main_filter.erl_per_bin, K);
         }
-
-        /* Rescue: fires when e2_ref < 0.5 * e2_coa for poor_coarse_threshold_hops. */
-        int cond_fire = (e2_ref < 0.5f * e2_coa);
-        int threshold_hops = a->poor_coarse_threshold_hops;
-        if (cond_fire) a->poor_coarse_counter += 1; else a->poor_coarse_counter = 0;
-        if (a->poor_coarse_counter >= threshold_hops) {
-            pbfdaf_copy_weights_from(&a->shadow_filter, &a->main_filter.base);
-            a->coarse_reset_hangover = a->coarse_reset_hangover_hops;
-            a->poor_coarse_counter = 0;
-            ree_reset(&a->a3_ree);
-        }
-        /* Sustained leakage_div gate: > 50% of bins diverged for
-         * leakage_div_sustain_hops (~50 ms). */
-        float ld_frac = a->main_filter.last_leakage_div_frac;
-        int ld_sustain_hops = a->leakage_div_sustain_hops;
-        if (ld_frac > 0.5f) {
-            if (a->leakage_div_sustained_counter < 2 * ld_sustain_hops)
-                a->leakage_div_sustained_counter++;
-        } else {
-            if (a->leakage_div_sustained_counter > 0)
-                a->leakage_div_sustained_counter--;
-        }
-        int dt_leakage_gate = (a->leakage_div_sustained_counter >= ld_sustain_hops);
-        if (a->coarse_reset_hangover > 0) {
-            a->coarse_reset_hangover--;
-            a->main_filter.disallow_leakage_diverged = 1;
-        } else if (dt_leakage_gate) {
-            a->main_filter.disallow_leakage_diverged = 1;
-        } else {
-            a->main_filter.disallow_leakage_diverged = 0;
-        }
+        a->main_filter.base.w_dirty = 0;
     }
 
+    /* Rescue: fires when e2_ref < 0.5 * e2_coa for poor_coarse_threshold_hops. */
+    int cond_fire = (e2_ref < 0.5f * e2_coa);
+    int threshold_hops = a->poor_coarse_threshold_hops;
+    if (cond_fire) a->poor_coarse_counter += 1; else a->poor_coarse_counter = 0;
+    if (a->poor_coarse_counter >= threshold_hops) {
+        pbfdaf_copy_weights_from(&a->shadow_filter, &a->main_filter.base);
+        a->coarse_reset_hangover = a->coarse_reset_hangover_hops;
+        a->poor_coarse_counter = 0;
+        ree_reset(&a->a3_ree);
+    }
+    /* Sustained leakage_div gate: > 50% of bins diverged for
+     * leakage_div_sustain_hops (~50 ms). */
+    float ld_frac = a->main_filter.last_leakage_div_frac;
+    int ld_sustain_hops = a->leakage_div_sustain_hops;
+    if (ld_frac > 0.5f) {
+        if (a->leakage_div_sustained_counter < 2 * ld_sustain_hops)
+            a->leakage_div_sustained_counter++;
+    } else {
+        if (a->leakage_div_sustained_counter > 0)
+            a->leakage_div_sustained_counter--;
+    }
+    int dt_leakage_gate = (a->leakage_div_sustained_counter >= ld_sustain_hops);
+    if (a->coarse_reset_hangover > 0) {
+        a->coarse_reset_hangover--;
+        a->main_filter.disallow_leakage_diverged = 1;
+    } else if (dt_leakage_gate) {
+        a->main_filter.disallow_leakage_diverged = 1;
+    } else {
+        a->main_filter.disallow_leakage_diverged = 0;
+    }
 }
 
 static void aec_update_shadow_dt(Aec* a, float far_hop_mean_sq, int far_excited) {
     const int hop = a->hop_size, K = a->n_freqs;
-    if (a->has_shadow) {
-        /* Both |error_spec|^2 arrays already exist (scr_e2ref_arr,
-         * e2_coarse_per_bin). Only the arrays are shared: error energy uses a
-         * tail-fold sum that rounds differently from the pairwise sums. */
-        float main_err   = sk_pairwise_sum_tailfold_f32(a->scr_e2ref_arr, (size_t)K);
-        float shadow_err = sk_pairwise_sum_tailfold_f32(a->main_filter.e2_coarse_per_bin, (size_t)K);
-        float as = a->tun.shadow_err_alpha, oas = 1.0f - as;
-        a->main_err_smooth   = as * a->main_err_smooth   + oas * main_err;
-        a->shadow_err_smooth = as * a->shadow_err_smooth + oas * shadow_err;
-        doubletalk_update_shadow_dt(&a->dt_analyzer, aec_count_as_int(a->shadow_frame_count),
-                                    far_excited, a->main_err_smooth, a->shadow_err_smooth);
-        int delay_reliable = a->has_delay && (delay_aec_confidence(&a->delay) >= 0.5f);
-        /* Shadow-copy warm-up is a 500 ms wall-clock guard, converted per grid. */
-        int shadow_warmup_hops =
-            aec_ms_to_hops(500.0f, hop, a->cfg.sample_rate);
-        shadow_copy_update(
-            &a->regime, aec_count_as_int(a->shadow_frame_count), shadow_warmup_hops,
-            far_hop_mean_sq,
-            a->main_err_smooth, a->shadow_err_smooth,
-            a->epc.active, a->saturation_level,
-            a->dt_analyzer.dt_from_energy, 0.0, delay_reliable);
-    }
-
+    if (!a->has_shadow) return;
+    /* Both |error_spec|^2 arrays already exist (scr_e2ref_arr,
+     * e2_coarse_per_bin). Only the arrays are shared: error energy uses a
+     * tail-fold sum that rounds differently from the pairwise sums. */
+    float main_err   = sk_pairwise_sum_tailfold_f32(a->scr_e2ref_arr, (size_t)K);
+    float shadow_err = sk_pairwise_sum_tailfold_f32(a->main_filter.e2_coarse_per_bin, (size_t)K);
+    float as = a->tun.shadow_err_alpha, oas = 1.0f - as;
+    a->main_err_smooth   = as * a->main_err_smooth   + oas * main_err;
+    a->shadow_err_smooth = as * a->shadow_err_smooth + oas * shadow_err;
+    doubletalk_update_shadow_dt(&a->dt_analyzer, aec_count_as_int(a->shadow_frame_count),
+                                far_excited, a->main_err_smooth, a->shadow_err_smooth);
+    int delay_reliable = a->has_delay && (delay_aec_confidence(&a->delay) >= 0.5f);
+    /* Shadow-copy warm-up is a 500 ms wall-clock guard, converted per grid. */
+    int shadow_warmup_hops =
+        aec_ms_to_hops(500.0f, hop, a->cfg.sample_rate);
+    shadow_copy_update(
+        &a->regime, aec_count_as_int(a->shadow_frame_count), shadow_warmup_hops,
+        far_hop_mean_sq,
+        a->main_err_smooth, a->shadow_err_smooth,
+        a->epc.active, a->saturation_level,
+        a->dt_analyzer.dt_from_energy, 0.0, delay_reliable);
 }
 
 /* Echo-path-change recovery shared by the EPV and shadow_rise triggers:
@@ -2189,29 +2180,20 @@ static void aec_update_echo_path(Aec* a, float far_pwr_global) {
     /* EPV trigger. */
     EpcEvent epv = epc_update_epv(&a->epc, far_pwr_global,
                                   a->convergence.converged, a->regime.main_paused);
-    if (epv.fired && a->tun.dt_aware_recovery_soft && a->ne_recent_frames > 0) {
-        /* Soft: EPV recovery is double-talk-blind; while near-end is recently
-         * present the aggressive re-adapt, mark_diverged and ERLE reset are
-         * skipped. */
-    } else if (epv.fired) {
-        aec_epc_gain_change_recovery(a);
-    }
+    /* Soft: EPV recovery is double-talk-blind; while near-end is recently present the aggressive re-adapt, mark_diverged and
+     * ERLE reset are skipped. */
+    if (epv.fired && !(a->tun.dt_aware_recovery_soft && a->ne_recent_frames > 0)) aec_epc_gain_change_recovery(a);
 
     if (a->has_shadow && a->convergence.converged) {
         EpcEvent rise = epc_update_shadow_rise(&a->epc, a->main_err_smooth,
                                                a->shadow_err_smooth,
                                                a->render_activity.is_stationary);
-        if (rise.fired && a->tun.dt_aware_recovery_soft && a->ne_recent_frames > 0) {
-        } else if (rise.fired) {
-            aec_epc_gain_change_recovery(a);
-        } else {
-            epc_tick_hangover(&a->epc);
-        }
+        if (!rise.fired) epc_tick_hangover(&a->epc);
+        else if (!(a->tun.dt_aware_recovery_soft && a->ne_recent_frames > 0)) aec_epc_gain_change_recovery(a);
     }
 
     /* EPC render-forced countdown, decremented every hop (diagnostic). */
     if (a->epc_render_forced_remaining > 0) a->epc_render_forced_remaining--;
-
 }
 
 static float aec_update_misadjustment_erle(Aec* a) {
@@ -2227,17 +2209,17 @@ static float aec_update_misadjustment_erle(Aec* a) {
     /* inst-ERLE slope ring: appended every freq-path hop outside the
      * residual stage (the warm-transfer gate needs it with the residual stage off); uses
      * the prior hop's EMAs. */
-    float _ei;
-    if (a->near_power < 1e-10f && a->raw_error_power < 1e-10f) _ei = 0.0f;
-    else _ei = 10.0f * log10f((a->near_power + 1e-10f) / (a->raw_error_power + 1e-10f));
+    float erle_inst;
+    if (a->near_power < 1e-10f && a->raw_error_power < 1e-10f) erle_inst = 0.0f;
+    else erle_inst = 10.0f * log10f((a->near_power + 1e-10f) / (a->raw_error_power + 1e-10f));
     {
-        int _h = a->erle_slope_head;
-        a->erle_slope_buf[_h] = _ei;
-        a->erle_slope_head = (_h + 1) % a->erle_slope_cap;
+        int head = a->erle_slope_head;
+        a->erle_slope_buf[head] = erle_inst;
+        a->erle_slope_head = (head + 1) % a->erle_slope_cap;
         if (a->erle_slope_len < a->erle_slope_cap) a->erle_slope_len++;
     }
 
-    return _ei;
+    return erle_inst;
 }
 
 static float aec_update_windowed_erle(Aec* a) {
@@ -2257,78 +2239,75 @@ static float aec_update_windowed_erle(Aec* a) {
 static void aec_run_post_chain(Aec* a, int stationarity_block_for_post, int render_active, float far_hop_mean_sq,
                                int apply, const AecFarShare* share) {
     const int hop = a->hop_size, N = a->n_partitions;
-    {
-        /* filter_taps_full is filled on demand by aec_fill_filter_taps(). */
+    /* filter_taps_full is filled on demand by aec_fill_filter_taps(). */
 
-        AecPostRunIn in;
-        memset(&in, 0, sizeof(in));
-        in.near_spec = a->main_filter.base.near_spec;
-        in.far_spec  = a->main_filter.base.far_spec;
-        in.echo_spec = a->main_filter.base.echo_spec;
-        in.error_spec_windowed = a->main_filter.base.error_spec_windowed;
-        in.W_all = a->main_filter.base.W;
-        in.x2_cache = a->main_filter.base.x2_cache;
-        in.sqrt_hann = a->main_filter.base.sqrt_hann;
-        in.partition_idx = a->main_filter.base.partition_idx;
-        in.n_partitions = N;
-        in.filter_taps_full = a->filter_taps_full;
-        in.filter_taps_full_len = N * hop;
-        in.shadow_present = a->has_shadow;
-        in.shadow_error_spec = a->has_shadow ? a->shadow_filter.error_spec : NULL;
-        in.last_shadow_output_time = a->has_shadow ? a->shadow_out : NULL;
-        in.s_ref_max = a->main_filter.base.last_s_max_abs * 32768.0f;
-        in.s_coa_max = a->has_shadow ? a->shadow_filter.last_s_max_abs * 32768.0f : 0.0f;
-        in.raw_output = a->raw_output;
-        in.near_end = a->near_hop;
-        in.far_end = a->far_hop;
-        in.current_delay = a->current_delay;
-        /* delay_active means a reference ring exists (MATCHED, FIXED), not an estimator. */
-        in.delay_active = aec_ring_active(&a->cfg);
-        in.saturation_level = a->saturation_level;
-        in.pending_gain_change = a->pending_gain_change;
-        in.pending_delay_change = a->pending_delay_change;
-        in.stationarity_active_hops = a->stationarity_active_hops;
-        in.stationarity_converge_hops = a->stationarity_converge_hops;
-        in.stationary_block = stationarity_block_for_post;
-        in.erle_coh_gate_enabled = AECB_ERLE_COH_GATE_ENABLED;
-        in.use_stationarity_properties = AECB_USE_STATIONARITY_PROPERTIES;
-        /* Without `apply` the caller consumes comfort noise, R^2 and the gain (aec_get_residual()); only final
-         * synthesis is skipped. Below FULL the gain is never computed (apply is 0 there). */
-        in.context_only = !apply;
-        in.hold_state_only = (a->cfg.residual == AEC_RESIDUAL_STATE ||
-                                     a->cfg.residual == AEC_RESIDUAL_ESTIMATE);
-        in.linear_context_only = (a->cfg.residual == AEC_RESIDUAL_STATE);
-        in.active_render_threshold = AECB_ACTIVE_RENDER_THRESHOLD;
-        in.far_mean_sq = far_hop_mean_sq;
+    AecPostRunIn in;
+    memset(&in, 0, sizeof(in));
+    in.near_spec = a->main_filter.base.near_spec;
+    in.far_spec  = a->main_filter.base.far_spec;
+    in.echo_spec = a->main_filter.base.echo_spec;
+    in.error_spec_windowed = a->main_filter.base.error_spec_windowed;
+    in.W_all = a->main_filter.base.W;
+    in.x2_cache = a->main_filter.base.x2_cache;
+    in.sqrt_hann = a->main_filter.base.sqrt_hann;
+    in.partition_idx = a->main_filter.base.partition_idx;
+    in.n_partitions = N;
+    in.filter_taps_full = a->filter_taps_full;
+    in.filter_taps_full_len = N * hop;
+    in.shadow_present = a->has_shadow;
+    in.shadow_error_spec = a->has_shadow ? a->shadow_filter.error_spec : NULL;
+    in.last_shadow_output_time = a->has_shadow ? a->shadow_out : NULL;
+    in.s_ref_max = a->main_filter.base.last_s_max_abs * 32768.0f;
+    in.s_coa_max = a->has_shadow ? a->shadow_filter.last_s_max_abs * 32768.0f : 0.0f;
+    in.raw_output = a->raw_output;
+    in.near_end = a->near_hop;
+    in.far_end = a->far_hop;
+    in.current_delay = a->current_delay;
+    /* delay_active means a reference ring exists (MATCHED, FIXED), not an estimator. */
+    in.delay_active = aec_ring_active(&a->cfg);
+    in.saturation_level = a->saturation_level;
+    in.pending_gain_change = a->pending_gain_change;
+    in.pending_delay_change = a->pending_delay_change;
+    in.stationarity_active_hops = a->stationarity_active_hops;
+    in.stationarity_converge_hops = a->stationarity_converge_hops;
+    in.stationary_block = stationarity_block_for_post;
+    in.erle_coh_gate_enabled = AECB_ERLE_COH_GATE_ENABLED;
+    in.use_stationarity_properties = AECB_USE_STATIONARITY_PROPERTIES;
+    /* Without `apply` the caller consumes comfort noise, R^2 and the gain (aec_get_residual()); only final
+     * synthesis is skipped. Below FULL the gain is never computed (apply is 0 there). */
+    in.context_only = !apply;
+    in.hold_state_only = (a->cfg.residual == AEC_RESIDUAL_STATE ||
+                                 a->cfg.residual == AEC_RESIDUAL_ESTIMATE);
+    in.linear_context_only = (a->cfg.residual == AEC_RESIDUAL_STATE);
+    in.active_render_threshold = AECB_ACTIVE_RENDER_THRESHOLD;
+    in.far_mean_sq = far_hop_mean_sq;
 
-        AecPostRunObj obj;
-        obj.state = &a->a3_state; obj.ree = &a->a3_ree; obj.sg = &a->a3_sg;
-        obj.stationarity = &a->a3_stat; obj.lfs = &a->a3_lfs; obj.fft = a->post_fft;
+    AecPostRunObj obj;
+    obj.state = &a->a3_state; obj.ree = &a->a3_ree; obj.sg = &a->a3_sg;
+    obj.stationarity = &a->a3_stat; obj.lfs = &a->a3_lfs; obj.fft = a->post_fft;
 
-        /* DT-gated min-gain floor lift: aec_post_run owns the final decision. */
-        in.dt_floor_enabled = a->tun.dt_aware_res_floor_enabled;
-        in.nearend_recent = a->ne_recent_frames > 0;
+    /* DT-gated min-gain floor lift: aec_post_run owns the final decision. */
+    in.dt_floor_enabled = a->tun.dt_aware_res_floor_enabled;
+    in.nearend_recent = a->ne_recent_frames > 0;
 
-        /* Live observer: obj.observer_filter runs inside aec_post_run, which
-         * knows this hop's dominant_ne / usable_linear verdicts. */
-        in.render_activity_is_active = render_active;
-        if (share && share->post) {
-            /* Same far spectrum and far hop as the donor's, so its PSD and scaled block are this lane's. */
-            in.shared_far_psd = share->donor->post.far_psd;
-            in.shared_render_block = share->donor->a3_sc.render_block_scaled;
-        }
-        in.observer_far_end = (a->has_observer && a->observer_far_hop_valid)
-                               ? a->observer_far_hop : NULL;
-        obj.observer_filter = a->has_observer ? &a->observer_filter : NULL;
-
-        int pgc = a->pending_gain_change, pdc = a->pending_delay_change;
-        aec_post_run(&a->post, &in, &obj, &a->a3_sc, a->final_out, &pgc, &pdc);
-        a->pending_gain_change = pgc;
-        a->pending_delay_change = pdc;
-
-        /* In context-only mode aec_post_run emits raw_output. */
+    /* Live observer: obj.observer_filter runs inside aec_post_run, which
+     * knows this hop's dominant_ne / usable_linear verdicts. */
+    in.render_activity_is_active = render_active;
+    if (share && share->post) {
+        /* Same far spectrum and far hop as the donor's, so its PSD and scaled block are this lane's. */
+        in.shared_far_psd = share->donor->post.far_psd;
+        in.shared_render_block = share->donor->a3_sc.render_block_scaled;
     }
+    in.observer_far_end = (a->has_observer && a->observer_far_hop_valid)
+                           ? a->observer_far_hop : NULL;
+    obj.observer_filter = a->has_observer ? &a->observer_filter : NULL;
 
+    int pgc = a->pending_gain_change, pdc = a->pending_delay_change;
+    aec_post_run(&a->post, &in, &obj, &a->a3_sc, a->final_out, &pgc, &pdc);
+    a->pending_gain_change = pgc;
+    a->pending_delay_change = pdc;
+
+    /* In context-only mode aec_post_run emits raw_output. */
 }
 
 /* This hop's mean squares, each + 1e-10f: the reference, the microphone and the linear residual. */
@@ -2448,21 +2427,17 @@ static void aec_update_linear_only_steering(Aec* a, float far_hop_mean_sq, int r
 
 static void aec_finish_hop(Aec* a, float far_hop_mean_sq) {
     const int hop = a->hop_size;
-    {
-        const float ap = a->alpha_pow, oap = 1.0f - a->alpha_pow;
-        for (int i = 0; i < hop; ++i) {
-            float n = a->near_hop[i], r = a->raw_output[i];
-            a->near_power      = ap * a->near_power      + oap * (n * n);
-            a->raw_error_power = ap * a->raw_error_power + oap * (r * r);
-        }
+    const float ap = a->alpha_pow, oap = 1.0f - a->alpha_pow;
+    for (int i = 0; i < hop; ++i) {
+        float n = a->near_hop[i], r = a->raw_output[i];
+        a->near_power      = ap * a->near_power      + oap * (n * n);
+        a->raw_error_power = ap * a->raw_error_power + oap * (r * r);
     }
 
-    {
-        int far_active = (far_hop_mean_sq > 1e-4f);
-        (void)filter_convergence_update_convergence(
-            &a->convergence, a->near_power, a->raw_error_power,
-            far_active, a->warmup_frames_remaining <= 0);
-    }
+    const int far_active = (far_hop_mean_sq > 1e-4f);
+    (void)filter_convergence_update_convergence(
+        &a->convergence, a->near_power, a->raw_error_power,
+        far_active, a->warmup_frames_remaining <= 0);
 
     aec_counter_bump(&a->frame_count);
 }
@@ -2547,7 +2522,7 @@ static void aec_stage_linear(Aec* a, const float* mic_in, const float* ref_in,
 
     aec_update_echo_path(a, far_pwr_global);
 
-    float _ei = aec_update_misadjustment_erle(a);
+    float erle_inst = aec_update_misadjustment_erle(a);
 
     /* The steering window closes here; the residual stage's window opens at the same stamp when it follows at once. */
     t_stage = aec_now_us();
@@ -2555,7 +2530,7 @@ static void aec_stage_linear(Aec* a, const float* mic_in, const float* ref_in,
     float erle_windowed = aec_update_windowed_erle(a);
 
     a->hop_carry.far_hop_mean_sq = far_hop_mean_sq;
-    a->hop_carry.erle_inst = _ei;
+    a->hop_carry.erle_inst = erle_inst;
     a->hop_carry.erle_windowed = erle_windowed;
     a->hop_carry.render_active = ra.is_active;
     a->hop_carry.stationarity_block_for_post = stationarity_block_for_post;
