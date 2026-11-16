@@ -42,6 +42,10 @@ when verdict requires it.
 ---
 
 
+## [Unreleased] — 2026-11-16 — The render base is chosen in one place
+
+**No output change.** The rule "the guard's base while it is active, else the selected error" was written in `aec_render_base()` (`aec_get_residual()`, `aec_apply_gain()`) and spelled out again in `aec_post_run()`. It is now one inline function, `aec_post_render_base()` in `aec_post.h`, called by both. The four baseline streams (`SIMD=1` / `0`) are unchanged; returning the selected error alone from the helper turns all four red (61 / 2388 / 74 / 7198 mismatches).
+
 ## [Unreleased] — 2026-11-16 — Refusal timing, the whole-hop threshold, the output below FULL and the array reset serial documented
 
 Comment and documentation text only; the compiled code is unchanged (`cc -E -P` of `aec.h` differs only in comments).

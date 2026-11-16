@@ -2728,9 +2728,8 @@ int aec_process_residual(Aec* a, const AecBeam* beam) {
     return aec_closed_finite(a) ? AEC_OK : aec_refuse_hop(a);
 }
 
-/* The spectrum the gain is applied to: the output guard's base while it is active, else the selected error. */
 static const Complex* aec_render_base(const Aec* a) {
-    return a->post.output_guard_active ? a->a3_sc.output_base : a->a3_sc.sel_esw;
+    return aec_post_render_base(&a->post, &a->a3_sc);
 }
 
 int aec_get_residual(const Aec* a, AecResidualView* out) {

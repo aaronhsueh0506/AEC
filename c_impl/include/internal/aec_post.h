@@ -284,6 +284,11 @@ typedef struct {
  * this hop. Exposed for the threshold fixture test; callers outside aec_post_run need not call it. */
 void aec_post_eval_output_guard(AecPost *p, AecPostRunScratch *sc, int usable);
 
+/* The spectrum a gain is multiplied on: the output guard's base while it is active, else the selected error. */
+static inline const Complex *aec_post_render_base(const AecPost *p, const AecPostRunScratch *sc) {
+    return p->output_guard_active ? sc->output_base : sc->sel_esw;
+}
+
 /* Process one hop. out[hop] is always written: the synthesized output, or in->raw_output when
  * context_only. *out_pending_gain_change / *out_pending_delay_change receive the post-call state of
  * the pending EPV flags (0 / -1 when an event fired). */

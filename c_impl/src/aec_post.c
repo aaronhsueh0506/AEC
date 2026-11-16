@@ -612,10 +612,7 @@ void aec_post_run(AecPost *p,
                                     memcpy(out, in->raw_output,
                                            (size_t)hop * sizeof(float));
                                 } else {
-                                    aec_post_apply_output(p,
-                                        p->output_guard_active ? sc->output_base
-                                                               : sc->sel_esw,
-                                        gain, out);
+                                    aec_post_apply_output(p, aec_post_render_base(p, sc), gain, out);
                                 }
                             }
                         }
