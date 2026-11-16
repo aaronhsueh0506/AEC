@@ -44,7 +44,7 @@ when verdict requires it.
 
 ## [Unreleased] — 2026-11-16 — The shadow-copy rescue streak is 80 ms on every grid
 
-The streak minimum (`SC_HYS_STREAK_MIN`, `PathChangeRegimeHandler.HYS_STREAK_MIN`) is `ceil(sample_rate * 80 / (1000 * hop_size))` hops, computed in integers by both ports: 10 at 16 kHz hop 128, 5 at 16 kHz hop 256 and 8 kHz hop 128, 8 at 48 kHz hop 512 (it was 10 on every grid). Output changes on the other grids (16 kHz hop 256, 48 kHz hop 512); 16 kHz hop 128 is bit-identical; `docs/timing_constant_inventory.md` moves the entry to "Already retimed".
+The shadow-copy streak minimum (`sc_hys_streak_min()` in `epc_shadow.c`, `PathChangeRegimeHandler._streak_min_hops()`) is `ceil(sample_rate * 80 / (1000 * hop_size))` hops, computed in integers by both ports: 10 at 16 kHz hop 128, 5 at 16 kHz hop 256 and 8 kHz hop 128, 8 at 48 kHz hop 512 (it was 10 on every grid). Output changes on the other grids (16 kHz hop 256, 48 kHz hop 512); 16 kHz hop 128 is bit-identical; `docs/timing_constant_inventory.md` moves the entry to "Already retimed".
 
 ## [Unreleased] — 2026-11-16 — The fixed eval manifest keeps official clips only (61 cases)
 
