@@ -42,6 +42,10 @@ when verdict requires it.
 ---
 
 
+## [Unreleased] — 2026-11-16 — Whole-body bare blocks and odd indentation left from the function split removed
+
+**No output change; the compiled code is identical.** `aec_carve_state()`, `aec_carve_residual()`, `aec_carve_suppression()`, `aec_carve_stationarity()` and `aec_carve_post_scratch()` wrapped their whole body in a bare block that only scoped locals, and `aec_align_reference()` opened its `has_delay` block at six spaces with the body at eight. The blocks are gone and the indentation is regular. `cc -S -O2` of the seven library sources is byte-identical on `SIMD=1`, `SIMD=0` and `AEC_NO_ARRAY=1`.
+
 ## [Unreleased] — 2026-11-16 — The post chain reuses the hop's sums of squares
 
 **No output change.** `aec_hop_powers()` formed the microphone and linear-residual mean squares through a scratch store plus pairwise sum, and `aec_post_run()` then summed the same two hops again. `HopPowers` now carries the two raw sums (`sk_sum_sq_pairwise_f32`, the same reduction; the mean is the sum divided by `hop_size`, as before) and `AecPostRunIn` takes them as `mic_sum_sq` / `err_sum_sq`; the second pair of passes is gone. The four baseline streams (`SIMD=1` / `0`) and `test_memory_layout` are unchanged; scaling either sum turns the streams red (236 to 5540 mismatches per test).

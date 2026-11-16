@@ -1047,23 +1047,21 @@ static uint8_t* aec_carve_post_backing(Aec* a, uint8_t* ptr, const AecResolved* 
 static uint8_t* aec_carve_state(Aec* a, uint8_t* ptr, const AecResolved* rs,
                                 int hop, int K, int np) {
     const AecConfig* cfg = &rs->cfg;
-    {
-        AecStateStorage* s = &a->a3_state_st;
-        s->erle_max           = P_FSLICE(); s->erle            = P_FSLICE();
-        s->erle_oc            = P_FSLICE(); s->erle_unb        = P_FSLICE();
-        s->erle_during        = P_FSLICE();
-        s->erle_coming_onset  = P_BSLICE();
-        s->erle_hold          = (int32_t*)ptr; ptr += ALIGN16(K * sizeof(int32_t));
-        s->erle_y2_acc        = P_FSLICE(); s->erle_e2_acc     = P_FSLICE();
-        s->erle_low_render    = P_BSLICE();
-        s->erl                = P_FSLICE();
-        s->erl_hold           = (int*)ptr; ptr += ALIGN16((size_t)(K - 2) * sizeof(int));
-        s->filter_delays_blocks = (int*)ptr; ptr += ALIGN16((size_t)AECB_ST_NUM_CAPTURE_CHANNELS * sizeof(int));
-        s->fa_h_highpass      = (float*)ptr; ptr += ALIGN16(ck_mul_size((size_t)np, (size_t)hop) * sizeof(float));
-        s->fa_abs_scratch       = (float*)ptr; ptr += ALIGN16(ck_mul_size((size_t)np, (size_t)hop) * sizeof(float));
-        s->fa_render_sq_scratch = (float*)ptr; ptr += ALIGN16((size_t)hop * sizeof(float));
-        aec_state_bind(a, K, hop, cfg->sample_rate, np);
-    }
+    AecStateStorage* s = &a->a3_state_st;
+    s->erle_max           = P_FSLICE(); s->erle            = P_FSLICE();
+    s->erle_oc            = P_FSLICE(); s->erle_unb        = P_FSLICE();
+    s->erle_during        = P_FSLICE();
+    s->erle_coming_onset  = P_BSLICE();
+    s->erle_hold          = (int32_t*)ptr; ptr += ALIGN16(K * sizeof(int32_t));
+    s->erle_y2_acc        = P_FSLICE(); s->erle_e2_acc     = P_FSLICE();
+    s->erle_low_render    = P_BSLICE();
+    s->erl                = P_FSLICE();
+    s->erl_hold           = (int*)ptr; ptr += ALIGN16((size_t)(K - 2) * sizeof(int));
+    s->filter_delays_blocks = (int*)ptr; ptr += ALIGN16((size_t)AECB_ST_NUM_CAPTURE_CHANNELS * sizeof(int));
+    s->fa_h_highpass      = (float*)ptr; ptr += ALIGN16(ck_mul_size((size_t)np, (size_t)hop) * sizeof(float));
+    s->fa_abs_scratch       = (float*)ptr; ptr += ALIGN16(ck_mul_size((size_t)np, (size_t)hop) * sizeof(float));
+    s->fa_render_sq_scratch = (float*)ptr; ptr += ALIGN16((size_t)hop * sizeof(float));
+    aec_state_bind(a, K, hop, cfg->sample_rate, np);
 
     return ptr;
 }
@@ -1071,23 +1069,21 @@ static uint8_t* aec_carve_state(Aec* a, uint8_t* ptr, const AecResolved* rs,
 static uint8_t* aec_carve_residual(Aec* a, uint8_t* ptr, const AecResolved* rs,
                                    const AecBalancedRateDims* rd, int hop, int K, int lane) {
     const AecConfig* cfg = &rs->cfg;
-    {
-        int rh = (AECB_REE_USE_AEC_ECHO_GEN_WINDOW ? 1 : 0) + 2;
-        float *x2_nf = NULL, *rm_st = NULL, *rt_st = NULL, *rh_st = NULL, *drd_st = NULL, *rrd_st = NULL;
-        float *ld_st = NULL, *lr_st = NULL, *scr_st = NULL;
-        int   *x2_nfc = NULL;
-        if (!aec_state_lane(cfg, lane)) {   /* a STATE lane never runs the estimator: ree_init() takes NULL storage */
-            x2_nf  = P_FSLICE();
-            x2_nfc = (int*)ptr;   ptr += ALIGN16(K * sizeof(int));
-            rm_st  = P_FSLICE(); rt_st = P_FSLICE();
-            if (!AECB_REE_USE_AEC_ECHO_GEN_WINDOW) { rh_st = (float*)ptr; ptr += ALIGN16((size_t)rh * K * sizeof(float)); }   /* read only without the echo-generating window (see ree_estimate()) */
-            drd_st = (float*)ptr; ptr += ALIGN16((size_t)REE_DELAY_BUF_SIZE * K * sizeof(float));
-            rrd_st = (float*)ptr; ptr += ALIGN16((size_t)REE_DELAY_BUF_SIZE * K * sizeof(float));
-            ld_st  = P_FSLICE(); lr_st = P_FSLICE(); scr_st = P_FSLICE();
-        }
-        aec_ree_bind(a, rd, K, hop, cfg->sample_rate, x2_nf, x2_nfc, rm_st,
-                     rt_st, rh_st, drd_st, rrd_st, ld_st, lr_st, scr_st);
+    int rh = (AECB_REE_USE_AEC_ECHO_GEN_WINDOW ? 1 : 0) + 2;
+    float *x2_nf = NULL, *rm_st = NULL, *rt_st = NULL, *rh_st = NULL, *drd_st = NULL, *rrd_st = NULL;
+    float *ld_st = NULL, *lr_st = NULL, *scr_st = NULL;
+    int   *x2_nfc = NULL;
+    if (!aec_state_lane(cfg, lane)) {   /* a STATE lane never runs the estimator: ree_init() takes NULL storage */
+        x2_nf  = P_FSLICE();
+        x2_nfc = (int*)ptr;   ptr += ALIGN16(K * sizeof(int));
+        rm_st  = P_FSLICE(); rt_st = P_FSLICE();
+        if (!AECB_REE_USE_AEC_ECHO_GEN_WINDOW) { rh_st = (float*)ptr; ptr += ALIGN16((size_t)rh * K * sizeof(float)); }   /* read only without the echo-generating window (see ree_estimate()) */
+        drd_st = (float*)ptr; ptr += ALIGN16((size_t)REE_DELAY_BUF_SIZE * K * sizeof(float));
+        rrd_st = (float*)ptr; ptr += ALIGN16((size_t)REE_DELAY_BUF_SIZE * K * sizeof(float));
+        ld_st  = P_FSLICE(); lr_st = P_FSLICE(); scr_st = P_FSLICE();
     }
+    aec_ree_bind(a, rd, K, hop, cfg->sample_rate, x2_nf, x2_nfc, rm_st,
+                 rt_st, rh_st, drd_st, rrd_st, ld_st, lr_st, scr_st);
 
     return ptr;
 }
@@ -1095,40 +1091,36 @@ static uint8_t* aec_carve_residual(Aec* a, uint8_t* ptr, const AecResolved* rs,
 static uint8_t* aec_carve_suppression(Aec* a, uint8_t* ptr, const AecBalancedRateDims* rd,
                                       const SuppressionGainConfig* scfg,
                                       const SuppressionGainTuning* stun_in, int K, int lane) {
-    {
-        SuppressionGain* sg = &a->a3_sg;
-        SuppressionGainTuning stun = *stun_in;
-        /* A lane never computes a gain (residual below FULL): only the DominantNearend state of sg runs, so the arrays stay
-         * NULL (suppression_gain_init() accepts that). */
-        float *last_gain = NULL, *last_ne = NULL, *last_echo = NULL, *ma = NULL, *ne_s = NULL, *wr_s = NULL;
-        float *ming = NULL, *maxg = NULL, *graw = NULL, *gout = NULL, *gsum = NULL;
-        if (!lane) {
-            aec_sg_tables_expand(rd, ptr, &stun);
-            ptr += aec_sg_tables_bytes(K);
-            last_gain = P_FSLICE(); last_ne = P_FSLICE(); last_echo = P_FSLICE();
-            ma   = (float*)ptr; ptr += ALIGN16((size_t)rd->sg_nearend_smoother_n * K * sizeof(float));
-            ne_s = P_FSLICE(); wr_s = P_FSLICE();
-            ming = P_FSLICE(); maxg = P_FSLICE();
-            graw = P_FSLICE(); gout = P_FSLICE(); gsum = P_FSLICE();
-        }
-        suppression_gain_init(sg, scfg, &stun, last_gain, last_ne, last_echo,
-                              ma, ne_s, wr_s, ming, maxg, graw, gout, gsum);
+    SuppressionGain* sg = &a->a3_sg;
+    SuppressionGainTuning stun = *stun_in;
+    /* A lane never computes a gain (residual below FULL): only the DominantNearend state of sg runs, so the arrays stay
+     * NULL (suppression_gain_init() accepts that). */
+    float *last_gain = NULL, *last_ne = NULL, *last_echo = NULL, *ma = NULL, *ne_s = NULL, *wr_s = NULL;
+    float *ming = NULL, *maxg = NULL, *graw = NULL, *gout = NULL, *gsum = NULL;
+    if (!lane) {
+        aec_sg_tables_expand(rd, ptr, &stun);
+        ptr += aec_sg_tables_bytes(K);
+        last_gain = P_FSLICE(); last_ne = P_FSLICE(); last_echo = P_FSLICE();
+        ma   = (float*)ptr; ptr += ALIGN16((size_t)rd->sg_nearend_smoother_n * K * sizeof(float));
+        ne_s = P_FSLICE(); wr_s = P_FSLICE();
+        ming = P_FSLICE(); maxg = P_FSLICE();
+        graw = P_FSLICE(); gout = P_FSLICE(); gsum = P_FSLICE();
     }
+    suppression_gain_init(sg, scfg, &stun, last_gain, last_ne, last_echo,
+                          ma, ne_s, wr_s, ming, maxg, graw, gout, gsum);
 
     return ptr;
 }
 
 static uint8_t* aec_carve_stationarity(Aec* a, uint8_t* ptr, const AecResolved* rs, int hop, int K) {
     const AecConfig* cfg = &rs->cfg;
-    {
-        float        *st_noise = P_FSLICE();
-        int32_t      *st_hang  = (int32_t*)ptr; ptr += ALIGN16(K * sizeof(int32_t));
-        unsigned char *st_flg  = P_BSLICE();
-        const int    rows = stationarity_estimator_window_hops(hop, cfg->sample_rate);
-        float        *st_hist  = (float*)ptr;   ptr += ALIGN16((size_t)rows * K * sizeof(float));
-        stationarity_estimator_init(&a->a3_stat, K, hop, cfg->sample_rate,
-                                    st_noise, st_hang, st_flg, st_hist);
-    }
+    float        *st_noise = P_FSLICE();
+    int32_t      *st_hang  = (int32_t*)ptr; ptr += ALIGN16(K * sizeof(int32_t));
+    unsigned char *st_flg  = P_BSLICE();
+    const int    rows = stationarity_estimator_window_hops(hop, cfg->sample_rate);
+    float        *st_hist  = (float*)ptr;   ptr += ALIGN16((size_t)rows * K * sizeof(float));
+    stationarity_estimator_init(&a->a3_stat, K, hop, cfg->sample_rate,
+                                st_noise, st_hang, st_flg, st_hist);
 
     return ptr;
 }
@@ -1156,28 +1148,26 @@ static uint8_t* aec_carve_linear_select(Aec* a, uint8_t* ptr, int hop, int blk, 
 static uint8_t* aec_carve_post_scratch(Aec* a, uint8_t* ptr, const AecResolved* rs,
                                        int hop, int K, int np) {
     const AecTuning* tn = &rs->tun;
-    {
-        AecPostRunScratch* sc = &a->a3_sc;
-        sc->sel_esw  = P_CSLICE(); sc->sel_echo = P_CSLICE();
-        sc->nsw_e1   = P_CSLICE(); sc->ybase    = P_CSLICE();
-        sc->output_base = P_CSLICE();
-        sc->abs_near     = P_FSLICE(); sc->abs_far      = P_FSLICE();
-        sc->abs_sel_echo = P_FSLICE(); sc->abs_error    = P_FSLICE();
-        sc->abs_echo_coh = P_FSLICE(); sc->abs_nsw_e1   = P_FSLICE();
-        sc->abs_ybase    = P_FSLICE(); sc->x2_at_delay  = P_FSLICE();
-        sc->w_mag2 = (float*)ptr; ptr += ALIGN16((size_t)np * K * sizeof(float));
-        sc->render_block_scaled = (float*)ptr; ptr += ALIGN16((size_t)hop * sizeof(float));
-        sc->r2          = P_FSLICE(); sc->r2_unb   = P_FSLICE();
-        sc->nearend_pwr = P_FSLICE();
-        sc->stat_mask   = P_BSLICE();
-        sc->observer_out = NULL; sc->observer_diff_spec = NULL;
-        sc->observer_diff_mag2 = NULL; sc->observer_cap_mag2 = NULL;
-        if (tn->live_observer_enabled) {
-            sc->observer_out = (float*)ptr; ptr += ALIGN16((size_t)hop * sizeof(float));
-            sc->observer_diff_spec = P_CSLICE();
-            sc->observer_diff_mag2 = P_FSLICE();
-            sc->observer_cap_mag2  = P_FSLICE();
-        }
+    AecPostRunScratch* sc = &a->a3_sc;
+    sc->sel_esw  = P_CSLICE(); sc->sel_echo = P_CSLICE();
+    sc->nsw_e1   = P_CSLICE(); sc->ybase    = P_CSLICE();
+    sc->output_base = P_CSLICE();
+    sc->abs_near     = P_FSLICE(); sc->abs_far      = P_FSLICE();
+    sc->abs_sel_echo = P_FSLICE(); sc->abs_error    = P_FSLICE();
+    sc->abs_echo_coh = P_FSLICE(); sc->abs_nsw_e1   = P_FSLICE();
+    sc->abs_ybase    = P_FSLICE(); sc->x2_at_delay  = P_FSLICE();
+    sc->w_mag2 = (float*)ptr; ptr += ALIGN16((size_t)np * K * sizeof(float));
+    sc->render_block_scaled = (float*)ptr; ptr += ALIGN16((size_t)hop * sizeof(float));
+    sc->r2          = P_FSLICE(); sc->r2_unb   = P_FSLICE();
+    sc->nearend_pwr = P_FSLICE();
+    sc->stat_mask   = P_BSLICE();
+    sc->observer_out = NULL; sc->observer_diff_spec = NULL;
+    sc->observer_diff_mag2 = NULL; sc->observer_cap_mag2 = NULL;
+    if (tn->live_observer_enabled) {
+        sc->observer_out = (float*)ptr; ptr += ALIGN16((size_t)hop * sizeof(float));
+        sc->observer_diff_spec = P_CSLICE();
+        sc->observer_diff_mag2 = P_FSLICE();
+        sc->observer_cap_mag2  = P_FSLICE();
     }
 #undef P_FSLICE
 #undef P_CSLICE
@@ -1802,18 +1792,18 @@ static void aec_align_reference(Aec* a) {
      * hop; its analysis can be decimated 1-in-K (delay_est_period_s, 0 = full
      * rate). Ring gate: MATCHED or FIXED; estimator gate: MATCHED only. */
     if (aec_ring_active(&a->cfg)) {
-      if (a->has_delay) {
-        aec_update_delay_estimator(a);
-        int new_delay = delay_aec_estimated_delay(&a->delay);
-        int eligible = (new_delay >= 0 && delay_aec_n_updates(&a->delay) >= 3
-                        && new_delay <= a->ref_ring_size - hop);
+        if (a->has_delay) {
+            aec_update_delay_estimator(a);
+            int new_delay = delay_aec_estimated_delay(&a->delay);
+            int eligible = (new_delay >= 0 && delay_aec_n_updates(&a->delay) >= 3
+                            && new_delay <= a->ref_ring_size - hop);
 
-        aec_judge_delay_shift(a);
+            aec_judge_delay_shift(a);
 
-        aec_acquire_delay(a, new_delay, eligible);
+            aec_acquire_delay(a, new_delay, eligible);
 
-        aec_track_delay_shift(a, new_delay, eligible);
-      }
+            aec_track_delay_shift(a, new_delay, eligible);
+        }
 
         /* Live observer far slice: invalid unless set in the current_delay >
          * 0 branch below. */
