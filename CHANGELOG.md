@@ -44,100 +44,84 @@ when verdict requires it.
 
 ## [Unreleased] — 2026-11-16 — aec.h declaration comments cut to three lines
 
-Comments only; `cc -E -P` of every source, header, test and example file is identical before and after. Nine declaration comments in `aec.h` (the refused-hop block, the array-instance block, `aec_post_reset_serial()`, `aec_synthesis_window()`, `AecResidualView`, the linear-view seam, `aec_create()` / `aec_destroy()` / `aec_reset()`, `aec_apply_external_realign()`, the array diagnostics) were 9 to 56 lines each and repeated what `docs/reference/lifecycle.md` and `integration.md` state. Each is now three lines that keep the contract (the reset and what the caller does after a refused hop, ownership, error codes, units) and point to the docs for the rest. `aec.h` goes from 643 to 503 lines.
+Comments only. Nine long declaration comments in `aec.h` (refused hop, array instance, reset serial, synthesis window, residual view, linear-view seam, create / destroy / reset, external realign, array diagnostics) are three lines each; the detail is in `docs/reference/lifecycle.md` and `integration.md`.
 
 ## [Unreleased] — 2026-11-16 — bench_rtf and parity_aec_e2e check the aec_process return
 
-Test drivers only. `bench_rtf` counts `AEC_ERR_DSP` hops, prints a warning with the stage and the count, and stops with exit code 5 on any other non-`AEC_OK` return; `parity_aec_e2e` stops with exit code 2 on any non-`AEC_OK` return instead of comparing a reset instance's zeroed output against the golden. `test-parity-e2e` still passes (the 8 kHz row stays the documented expected-red one).
+Test drivers only. `bench_rtf` warns with the count of refused hops and stops on any other error; `parity_aec_e2e` stops on any non-`AEC_OK` return.
 
 ## [Unreleased] — 2026-11-16 — Test helpers: one all-zero check and an explicit n_mics table
 
-Test only. `all_zero()` (`test_dsp_refusal.c`) and `all_zero_f()` (`test_linear_context.c`) were the same function; `aec_pool_test_util.h` now has `aec_test_all_zero_f32()`. In `test_linear_context.c` the comment of `scenario_fresh_view_reads_zeros()` sits above the scenario (it sat above the helper) and the `n_mics` loop `for (n = 1; n <= N_MICS_MAX; n += 3)` is an explicit `{1, AEC_ARRAY_MICS}` table (`{1}` with `AEC_NO_ARRAY`). The 36 fresh-view rows still run and still fail without the memsets (18 fail with the `far_hop` memset removed).
+Test only. `aec_pool_test_util.h` has one `aec_test_all_zero_f32()` for the refusal and linear-context tests, and the fresh-view scenario iterates an explicit `n_mics` table.
 
 ## [Unreleased] — 2026-11-16 — test_dsp_refusal: the whole-hop poison sample exists once
 
-Test only. `test/test_dsp_refusal.c` wrote the whole-hop poison expression twice (single channel and array); it is now `whole_hop_sample()`, and the array poison table carries a `whole_hop` flag like the single-channel one instead of a `poison < 3` index test. The row count is unchanged (1037); marking the array poisons as single samples turns 72 assertions red.
+Test only. One `whole_hop_sample()` helper serves the single-channel and array rows, and the array poison table has a whole-hop flag.
 
 ## [Unreleased] — 2026-11-16 — The residual stage's two exclusive branches are an if / else
 
-**No output change.** `aec_stage_residual()` ran its residual block under `residual != OFF` and then called `aec_update_linear_only_steering()`, whose first line returned unless `residual == OFF`: two exclusive branches written in sequence. They are now `if` / `else`. `aec_steer_mu()` lost its `clear_per_bin` flag (the residual path clears `has_per_bin_mu` itself before the call; the converged branch sets it again) and `is_stationary_dt` lives in the block that uses it. The four baseline streams (`SIMD=1` / `0`) are unchanged; dropping the clear turns three of them red (2190 / 1967 / 7045 mismatches).
+No output change. `aec_stage_residual()` chooses between the residual block and the linear-only steering with `if` / `else`, and `aec_steer_mu()` no longer takes a `clear_per_bin` flag.
 
 ## [Unreleased] — 2026-11-16 — A redundant alias and two misplaced comments in the hop functions removed
 
-**No output change; the compiled code is identical** (`cc -S -O2` of `aec.c` is byte-identical on `SIMD=1`, `SIMD=0` and `AEC_NO_ARRAY=1`). `aec_prepare_post_dt()` held the reference power under a third name (`const float far_power`), and `aec_run_post_chain()` began with a stray comment and blank line and ended with a comment that described a call already made. The alias is gone and the two comments sit beside what they describe.
+No output change. Cleanup in `aec_prepare_post_dt()` and `aec_run_post_chain()`.
 
 ## [Unreleased] — 2026-11-16 — Whole-body bare blocks and odd indentation left from the function split removed
 
-**No output change; the compiled code is identical.** `aec_carve_state()`, `aec_carve_residual()`, `aec_carve_suppression()`, `aec_carve_stationarity()` and `aec_carve_post_scratch()` wrapped their whole body in a bare block that only scoped locals, and `aec_align_reference()` opened its `has_delay` block at six spaces with the body at eight. The blocks are gone and the indentation is regular. `cc -S -O2` of the seven library sources is byte-identical on `SIMD=1`, `SIMD=0` and `AEC_NO_ARRAY=1`.
+No output change. The five carve functions lose their whole-body bare blocks and `aec_align_reference()` its odd indentation.
 
 ## [Unreleased] — 2026-11-16 — The post chain reuses the hop's sums of squares
 
-**No output change.** `aec_hop_powers()` formed the microphone and linear-residual mean squares through a scratch store plus pairwise sum, and `aec_post_run()` then summed the same two hops again. `HopPowers` now carries the two raw sums (`sk_sum_sq_pairwise_f32`, the same reduction; the mean is the sum divided by `hop_size`, as before) and `AecPostRunIn` takes them as `mic_sum_sq` / `err_sum_sq`; the second pair of passes is gone. The four baseline streams (`SIMD=1` / `0`) and `test_memory_layout` are unchanged; scaling either sum turns the streams red (236 to 5540 mismatches per test).
+No output change. `HopPowers` carries the hop's raw sums of squares of the microphone and the linear residual into `aec_post_run()` (`AecPostRunIn.mic_sum_sq`, `err_sum_sq`), which no longer sums the same two hops again.
 
 ## [Unreleased] — 2026-11-16 — The render base is chosen in one place
 
-**No output change.** The rule "the guard's base while it is active, else the selected error" was written in `aec_render_base()` (`aec_get_residual()`, `aec_apply_gain()`) and spelled out again in `aec_post_run()`. It is now one inline function, `aec_post_render_base()` in `aec_post.h`, called by both. The four baseline streams (`SIMD=1` / `0`) are unchanged; returning the selected error alone from the helper turns all four red (61 / 2388 / 74 / 7198 mismatches).
+No output change. `aec_post_render_base()` (inline, `aec_post.h`) holds the rule "the output guard's base while it is active, else the selected error" that `aec_render_base()` and `aec_post_run()` each spelled out.
 
 ## [Unreleased] — 2026-11-16 — Refusal timing, the whole-hop threshold, the output below FULL and the array reset serial documented
 
-Comment and documentation text only; the compiled code is unchanged (`cc -E -P` of `aec.h` differs only in comments).
+Text only (`aec.h`, `lifecycle.md`, `integration.md`, `c_user_manual_zh_TW.md`, `aec_c_api.html`).
 
-- A reference sample is refused on the hop that carries it when it reaches the filters at once (`EXTERNAL_ALIGNED`, a delay not yet locked, or a delay shorter than the sample's offset in the hop), otherwise when the ring delay brings it there, up to `ceil(delay / hop)` hops later. The old text said "hops later" for every case.
-- A whole microphone hop is refused once `hop_size * rms^2` exceeds 3.4e38 (rms 1.6e18 at hop 128, 1.2e18 at 256, 8.2e17 at 512) in every residual mode (measured by bisection on `aec_process()`, `EXTERNAL_ALIGNED`, three grids).
+- A reference sample is refused on the hop whose aligned reference contains it: the hop that carried it when it reaches the filters at once (`EXTERNAL_ALIGNED`, a delay not yet locked, or a delay plus the sample's offset in the hop below `hop_size`), otherwise `floor((delay + offset) / hop_size)` hops later. With residual `OFF`, which computes no reference power, a sample near 2e19 is refused two to three hops after that, and one of 1e20 or more at once.
+- A whole microphone hop is refused once `hop_size * rms^2` exceeds 3.4e38 (rms 1.6e18 at hop 128, 1.2e18 at 256, 8.2e17 at 512), in every residual mode.
 - Below `FULL`, `aec_process()`'s `out` is `AecLinearView.linear_hop` (before FORM selection), not `formed_hop`.
-- `aec_post_reset_serial()`: compare for inequality only; an array instance moves it by four per reset event.
-- Files: `aec.h`, `lifecycle.md`, `integration.md`, `c_user_manual_zh_TW.md`, `aec_c_api.html`.
+- `aec_post_reset_serial()` is for inequality comparison only; an array instance moves it by four per reset event.
 
 ## [Unreleased] — 2026-11-16 — A hop whose energy detector or reference power overflows is refused in every mode
 
-**Behaviour change (integrators read this).** `aec_closed_finite()` did not look at `dt_from_energy` or the hop's reference power. A whole microphone hop with `hop_size * rms^2` above 3.4e38 was accepted by residual `OFF` although it left `dt_from_energy` at NaN until the next reset (no output difference measured; the state was only latent). One reference sample near 2e19 (the hop's sum of squares overflows) was accepted by `STATE` with `far_power` inf and refused hops later; it is now refused on the hop that carries it, as `ESTIMATE` and `FULL` already did. Residual `OFF` still computes no reference power, so a poisoned reference sample is refused there when it reaches the filters.
-
-- `test/test_dsp_refusal.c`: the whole-hop rows now run with residual `OFF`, and a new `ref 2e19` row covers `STATE` / `ESTIMATE` / `FULL`; 29 assertions fail without the checks, all 1037 rows pass with them.
+**Behaviour change (integrators read this).** The closed-hop check now also requires `dt_from_energy` finite in every residual mode and the hop's reference power finite when a residual stage runs. A whole microphone hop whose sum of squares overflows is refused by residual `OFF` too (before: accepted, leaving `dt_from_energy` NaN until the next reset), and one reference sample near 2e19 is refused on the hop that carries it in `STATE` (before: accepted with `far_power` inf and refused hops later). Residual `OFF` computes no reference power, so a reference sample near 2e19 is refused there two to three hops after it reaches the filters.
 
 ## [Unreleased] — 2026-11-16 — A refused single-channel hop zeroes aligned_far_hop as well
 
-After `AEC_ERR_DSP` a single channel's `aec_get_linear()` returned zeros in `linear_hop` and the spectra but the refused hop's reference in `aligned_far_hop`, although the documented view reads zeros. `aec_refuse_hop()` now zeroes that buffer as well (an array's was already zero). `test/test_dsp_refusal.c` checks `aligned_far_hop` on every single-channel row; 146 rows fail without the memset.
+After `AEC_ERR_DSP` a single channel's `aec_get_linear()` returned the refused hop's reference in `aligned_far_hop`, although the documented view reads zeros. `aec_refuse_hop()` now zeroes it (an array's was already zero).
 
 ## [Unreleased] — 2026-11-16 — aec.c: scaffolding left from the function split removed
 
-**No output change; the compiled code is identical.** `aec.c` after the stage split carried a blank line before nine closing braces, whole-body bare blocks (`aec_run_post_chain`, `aec_finish_hop`), whole-body `if (a->has_shadow) {` wrappers (now `if (!a->has_shadow) return;`), two empty `if` branches in `aec_update_echo_path` (now one condition each), `_sn` / `_ei` / `_h` locals with leading underscores, and an unused `(n)` argument on the three carve slice macros. Cleaned; no statement changed. `cc -S -O2` of `aec.c`, `aec_post.c`, `aec_array.c`, `aec_res.c` and `aec_config_build.c` (`SIMD=1`, `SIMD=0`, `AEC_NO_ARRAY=1`) is byte-identical before and after (14 assembly files); the baseline streams are unchanged.
+No output change. Leftovers of the stage split in `aec.c` removed: blank lines before closing braces, whole-body bare blocks and `if` wrappers, two empty `if` branches, underscore-prefixed locals and an unused `(n)` argument of the carve slice macros.
 
 ## [Unreleased] — 2026-11-16 — Test and example helpers shared instead of repeated
 
-**No behaviour change.** `example/cli_level.h`: `aec_cli_parse_level()` calls `aec_cli_parse_int()` instead of repeating its `strtol` body (identical result on 24 inputs including NULL, padded, trailing-character and out-of-range strings). `test/baseline2_signal.h` takes the LCG step, the syllabic modulation and the FNV-1a hash from `split_signal.h` (the `g2_*` names stay as aliases) instead of a second copy; the four baseline streams, whose lines are hashes, are byte-identical. `test/bench_rtf.c`: the `--live-observer` help text no longer carries an internal round label.
+No behaviour change. `aec_cli_parse_level()` calls `aec_cli_parse_int()`, `test/baseline2_signal.h` shares the LCG step, modulation and hash with `split_signal.h`.
 
 ## [Unreleased] — 2026-11-16 — The array shares the single channel's reference-ring sizing; smaller view and counter helpers
 
-**No output change.** `aec_array.c`'s `array_dims()` repeated the reference-ring sizing of `aec_ref_ring_samples()` (MATCHED: the estimator's reach + hop; FIXED: fixed delay + hop) in two arms, without the single channel's overflow guard; it now calls `aec_ref_ring_samples()` (declared in `aec_array_internal.h`), so the two cannot drift. `aec_far_fft_real_compute_count()` uses `aec_array_count_add_sat()` instead of two hand-written saturating adds. `aec_get_residual()` reads `convergence.converged`, `last_dt_indicator` and `saturation_level` directly instead of filling a whole `AecLinearView` for three fields, and `aec_render_base()` names the guard-or-selected base the residual view and `aec_apply_gain()` both pick.
-
-- The four baseline streams (`SIMD=1` / `0`) and `test_memory_layout` (every pool size and pin) are unchanged. `test_linear_context.c`: `scenario_residual_scalars_match_linear()` pins the residual view's three scalars to the linear view's, bit for bit, over a run that converges, has double talk and clips; each of the three direct reads, replaced by a constant, turns it red (the baseline streams do not exercise them). Dropping the shadow term of the saturating count turns `test_aec_array` red (69 mismatches).
-- Docs: the function map (new C-only row `aec_render_base`; `c_src_total` 515, `c_src_c_only` 168, `c_total` 517, `c_c_only` 169).
+No output change. The array sizes its reference ring through `aec_ref_ring_samples()` like the single channel (the array gains its overflow guard), `aec_far_fft_real_compute_count()` uses the saturating-add helper, and `aec_get_residual()` reads its three scalars directly instead of filling a linear view. Docs: the function map (new C-only row `aec_render_base`).
 
 ## [Unreleased] — 2026-11-16 — The hop's mean squares are computed once
 
-**No output change.** A hop with a residual stage computed the mean square of `raw_output` twice (`aec_prepare_post_dt()`, then `update_simple_mu_ratio()`), of the reference three times (`aec_stage_linear()`, `update_simple_mu_ratio()`, and `aec_post_run()` for the active-render test), and the residual `OFF` path repeated the same pairs; each is now computed once and passed on. `update_simple_mu_ratio()` takes the two powers; `aec_hop_powers()` returns the reference / microphone / residual triple; `aec_steer_mu()` is the one converged-mu-freeze-or-simple-ratio rule that `aec_update_post_mu()` and the `OFF` branch of `aec_update_linear_only_steering()` each spelled out. `AecPostRunIn.shared_far_active` and `AecPost::far_active` (whose only reader was the donor-lane copy) are replaced by `AecPostRunIn.far_mean_sq`; `aec_post.c`'s one-line `sum_sq_f32_pairwise()` wrapper is gone.
-
-- The four baseline streams (`SIMD=1` / `0`) are byte-identical to the previous commit's, `test_memory_layout` pins are unchanged (`sizeof(Aec)` and every pool size). Mutations that go red: the `OFF` branch's reference power times 100 (1105 stream mismatches), `far_mean_sq` times 0.001 (11699), the post path's `clear_per_bin` flag dropped (2190).
-- Docs: the function map (`aec_update_post_mu` becomes `aec_steer_mu`, new `aec_hop_powers`, `sum_sq_f32_pairwise` removed; the totals are unchanged), the two HTML sequence pages.
+No output change. A hop's mean squares are computed once and passed on (`aec_hop_powers()`), and the converged-mu-freeze-or-simple-ratio rule exists once (`aec_steer_mu()`, formerly `aec_update_post_mu()`). `AecPostRunIn.shared_far_active` and `AecPost::far_active` are replaced by `AecPostRunIn.far_mean_sq`. Docs: the function map and the two HTML sequence pages.
 
 ## [Unreleased] — 2026-11-16 — A fresh instance's linear view reads zeros
 
-`aec_get_linear()` before the first hop returned `AEC_OK` with `linear_hop` and `aligned_far_hop` pointing at two pool buffers the carve never cleared, so a caller read whatever the pool (or `aec_create()`'s heap block) held: 128 of 128 samples of a `0xAB` pool, stale heap bytes after a freed block. The same for an array through lane 0. `aec_carve_hop_scratch()` now zeroes `raw_output` and `far_hop` (once, at init; both `aec_init()` and `aec_create()`, every lane). Processing is unchanged: the four baseline streams (`SIMD=1` / `0`) are byte-identical to the previous commit's. `aec_reset()` still leaves the last hop's views readable until the next hop (only a refused hop zeroes them).
-
-- `test/test_linear_context.c`: `scenario_fresh_view_reads_zeros()` initialises dirty (`0xAB`, `0xFF`) caller pools on three grids, three delay modes, `n_mics` 1 and 4, and requires `linear_hop`, `aligned_far_hop` and the three spectra to read zeros; all 36 rows fail without the memsets.
+`aec_get_linear()` before the first hop returned pointers to pool or heap bytes the carve never cleared. `aec_carve_hop_scratch()` now zeroes `raw_output` and `far_hop` at init (single channel and array lane 0). Processing is unchanged. `aec_reset()` still leaves the last hop's views readable until the next hop; only a refused hop zeroes them.
 
 ## [Unreleased] — 2026-11-16 — aec_build_sg_config() zeroes the tuning it hands out
 
-`aec_build_sg_config()` assigned three fields of a local `SuppressionGainTuning` and copied the struct out, so the four ENR/SU table pointers its comment promises to be NULL carried whatever the stack held (the lane carve stores the struct without decoding the tables, so the values reached `sg->tun`; no code reads them there, hence no behaviour change, but a valgrind / MSan run saw undefined values). The local is now zeroed first. No output changes.
-
-- `test/test_config_validation.c`: `test_sg_tuning_tables_null()` pre-fills the caller's struct with `0xCD` on three grids and requires the four pointers to be NULL; it fails 3 of 3 without the memset.
+`aec_build_sg_config()` zeroes its `SuppressionGainTuning` before filling it, so the four ENR/SU table pointers its comment promises to be NULL are NULL. No output change.
 
 ## [Unreleased] — 2026-11-16 — A hop whose detector state overflows is refused
 
-**Behaviour change (integrators read this).** A hop of large finite microphone samples whose sum of squares overflows `float` (`hop_size * rms^2` above 3.4e38: about 1.6e18 rms at `hop_size` 128, 1.15e18 at 256, 8e17 at 512) was accepted with `AEC_OK` although the detector state it produced was not finite: `aec_get_linear().dt_indicator` read NaN on every later hop and the instantaneous ERLE stayed NaN until `aec_reset()`, so the double-talk gate and, in an array, the lane-maximum DT never fired. `aec_closed_finite()` now also requires `inst_erle_smooth` and `last_dt_indicator` to be finite (with `AEC_RESIDUAL_OFF` neither runs): such a hop is `AEC_ERR_DSP` with the instance reset, a single channel and an array lane alike. Normal input is unchanged: the four baseline streams (`SIMD=1` / `0`) are byte-identical to the previous commit's.
-
-- `test/test_dsp_refusal.c`: two whole-hop poisons (`mic hop 3e18`, `mic hop 1e19`; single channel, STATE / ESTIMATE / FULL, the three entries, three grids) and the same two on every lane of the array rows; `hop_results_finite()` also requires `dt_indicator` finite. Without the check 84 single-channel and 72 array assertions fail; with it all 1005 rows pass.
-- The measured whole-hop threshold is exactly `sqrt(3.4e38 / hop_size)` rms (bisection on `aec_process()`, and on lane 0 of an `n_mics = 4` array through `aec_process_linear()`, `STATE` / `ESTIMATE` / `FULL`, three grids); the threshold sentences in `aec.h`, `lifecycle.md` and the user manual are not changed here.
+**Behaviour change (integrators read this).** A hop of large finite microphone samples whose sum of squares overflows `float` (`hop_size * rms^2` above 3.4e38) was accepted although `dt_indicator` and the instantaneous ERLE stayed NaN until `aec_reset()`. `aec_closed_finite()` now also requires `inst_erle_smooth` and `last_dt_indicator` to be finite: such a hop is `AEC_ERR_DSP` with the instance reset, for a single channel and for an array lane. Normal input is unchanged.
 
 ## [Unreleased] — 2026-11-16 — A refused array hop leaves the linear view reading zeros, as a single channel
 
