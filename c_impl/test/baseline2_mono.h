@@ -240,9 +240,9 @@ static void g2_force_bad_relock(Aec* a, int back16, int sr) {
 static uint64_t g2_hash_state(const Aec* a) {
     uint64_t h = G2_FNV_BASIS;
     h = g2_fnv_u32(h, (uint32_t)a->current_delay);
-    h = g2_fnv_u32(h, (uint32_t)a->has_pending);
-    h = g2_fnv_u32(h, (uint32_t)a->pending_delay);
-    h = g2_fnv_u32(h, (uint32_t)a->pending_delay_ttl);
+    h = g2_fnv_u32(h, (uint32_t)(a->delay_admission.ttl > 0));   /* a candidate is held */
+    h = g2_fnv_u32(h, (uint32_t)a->delay_admission.candidate);
+    h = g2_fnv_u32(h, (uint32_t)a->delay_admission.ttl);
     h = g2_fnv_u32(h, (uint32_t)a->delay_shift_judgment_active);
     h = g2_fnv_u32(h, (uint32_t)a->delay_shift_judgment_pre_delay);
     h = g2_fnv_u32(h, (uint32_t)a->delay_shift_judgment_hops_left);

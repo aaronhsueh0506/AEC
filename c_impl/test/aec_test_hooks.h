@@ -58,6 +58,14 @@ void aec_testing_reset_filter_latches(Aec* a);
 float aec_testing_legacy10ms_rate(float legacy_per_hop, int hop,
                                   int sample_rate);
 
+/* Offers one delay estimate to the single-channel Path B (the two-step admission of a shifted delay), exactly as the hop does
+ * once the estimator has produced it; `eligible` is the estimator's per-hop eligibility.
+ *
+ * Why the public API will not do: the estimator decides when it reports a new delay, so a stream cannot be made to offer a chosen
+ * value at a chosen hop; the admission's boundaries (the 32-sample band, the 16-sample confirmation window, the 3-hop life) are
+ * only reachable by choosing the offers. */
+void aec_testing_track_delay_shift(Aec* a, int new_delay, int eligible);
+
 /* Array instance (src/aec_array.c) -- the shared estimator's duty-cycle machine and the lane far-spectrum borrow chain.
  *
  * Why the public API will not do: the duty cycle decimates the matched-filter ANALYSIS (one hop in K); the census

@@ -106,16 +106,15 @@ static void test_config(void) {
             CHECK(pool_lane != NULL, "%s: aec_init", id);
             if (!r || !pool_lane) continue;
 
-            CHECK(memcmp(&heap_lane->a3_sg.cfg, &r->sg_cfg, sizeof r->sg_cfg) == 0,
+            CHECK(memcmp(&heap_lane->a3_sg.cfg, &r->sg.cfg, sizeof r->sg.cfg) == 0,
                   "%s: config bytes equal the heap lane's", id);
-            CHECK(memcmp(&pool_lane->a3_sg.cfg, &r->sg_cfg, sizeof r->sg_cfg) == 0,
+            CHECK(memcmp(&pool_lane->a3_sg.cfg, &r->sg.cfg, sizeof r->sg.cfg) == 0,
                   "%s: config bytes equal the pool lane's", id);
-            CHECK(tun_equal(&heap_lane->a3_sg.tun, &r->sg_tun), "%s: tuning tables equal the lane's", id);
-            CHECK(tun_matches_ref(&r->sg_tun, GRIDS[g][0], GRIDS[g][1]) && tun_matches_ref(&r->sg.tun, GRIDS[g][0], GRIDS[g][1]) &&
+            CHECK(tun_equal(&heap_lane->a3_sg.tun, &r->sg.tun), "%s: tuning tables equal the lane's", id);
+            CHECK(tun_matches_ref(&r->sg.tun, GRIDS[g][0], GRIDS[g][1]) &&
                   tun_matches_ref(&heap_lane->a3_sg.tun, GRIDS[g][0], GRIDS[g][1]) &&
                   tun_matches_ref(&pool_lane->a3_sg.tun, GRIDS[g][0], GRIDS[g][1]),
                   "%s: decoded ENR/SU tables equal the reference tables (AecRes, heap and pool Aec)", id);
-            CHECK(memcmp(&r->sg.cfg, &r->sg_cfg, sizeof r->sg_cfg) == 0, "%s: live config equals stored", id);
             CHECK(r->n_bins == heap_lane->n_freqs && r->hop_size == heap_lane->hop_size,
                   "%s: dimensions equal the lane's", id);
 
@@ -136,7 +135,7 @@ static void test_config(void) {
 /* The far-end-active floor as a power ratio: `live` is the value in force now, `target` the one it is heading to. */
 static void split_floor(const AecRes* r, float* live, float* target) {
     *live = r->sg.split_floor_far_active_live;
-    *target = r->sg_cfg.split_floor_far_active;
+    *target = r->sg.cfg.split_floor_far_active;
 }
 
 static void test_contract(void) {
@@ -220,19 +219,14 @@ static void test_contract(void) {
     CHECK(target == floor_mild && live == floor_mild, "reset keeps the retargeted floor");
     aec_res_reset(NULL);
 
-    /* NO_FLOOR: the gate steps immediately (no ramp) and survives aec_res_reset(). rebuild()
-     * re-inits suppression_gain_init(&r->sg, &r->sg_cfg, ...) from r->sg_cfg, so a setter that
-     * updated r->sg.cfg.split_floor_enabled but not the r->sg_cfg mirror (which
-     * split_floor_far_active/_dt already keep) would pass every check up to the reset and fail only
-     * here. */
+    /* NO_FLOOR: the gate steps immediately (no ramp) and survives aec_res_reset(), which rebuilds
+     * the suppressor from r->sg.cfg. */
     CHECK(r->sg.cfg.split_floor_enabled == 1,
           "no_floor: mild left the gate enabled");
     CHECK(aec_res_set_level(r, AEC_LEVEL_NO_FLOOR) == 0,
           "no_floor: retarget to NO_FLOOR accepted");
     CHECK(r->sg.cfg.split_floor_enabled == 0,
           "no_floor: gate off immediately, before any reset");
-    CHECK(r->sg_cfg.split_floor_enabled == 0,
-          "no_floor: the stored sg_cfg mirror is also off");
     aec_res_reset(r);
     CHECK(r->sg.cfg.split_floor_enabled == 0,
           "no_floor: aec_res_reset() preserves the gate OFF across reset");
@@ -245,8 +239,7 @@ static void test_contract(void) {
           "no_floor: the far-active floor is a real positive value again, "
           "not left at NO_FLOOR's inert reading");
     aec_res_reset(r);
-    CHECK(r->sg.cfg.split_floor_enabled == 1 &&
-              r->sg_cfg.split_floor_enabled == 1,
+    CHECK(r->sg.cfg.split_floor_enabled == 1,
           "no_floor: aec_res_reset() preserves the gate ON across reset too");
 
     /* reset: a reset instance reproduces a fresh one */
@@ -401,12 +394,12 @@ static void test_render_scale(void) {
             in.error_spec = err; in.near_spec = near; in.r2 = r2; in.comfort_noise = cn;
             in.render_hop = rend; in.all_converged = 0; in.max_dt = 0.0f;
             in.max_saturation = 0.0f; in.clock_drift = 0;
-            CHECK(r->sg_cfg.split_floor_latch_power > 1.0f &&
-                  r->sg_cfg.split_floor_latch_power < 32768.0f * 32768.0f,
+            CHECK(r->sg.cfg.split_floor_latch_power > 1.0f &&
+                  r->sg.cfg.split_floor_latch_power < 32768.0f * 32768.0f,
                   "%s: the latch power is reachable by a render block", id);
             for (side = 0; side < 2; ++side) {
                 /* scaled sample level s with s*s = latch * (1 -/+ 3e-5); v = s / 32768 is exact */
-                float s = (float)sqrt((double)r->sg_cfg.split_floor_latch_power *
+                float s = (float)sqrt((double)r->sg.cfg.split_floor_latch_power *
                                       (side ? 1.0 + 3e-5 : 1.0 - 3e-5));
                 float v = s / 32768.0f;
                 const float* out;
@@ -464,8 +457,8 @@ static void test_initial_phase(void) {
         ref.error_power = (float*)calloc((size_t)n, sizeof(float));
         ref.render_i16 = (float*)calloc((size_t)hop, sizeof(float));
         ref_sg_init(&ref);
-        r->sg_cfg.dne_use_during_initial_phase = 0;
-        r->sg_cfg.lf_smoothing_during_initial_phase = 0;
+        r->sg.cfg.dne_use_during_initial_phase = 0;
+        r->sg.cfg.lf_smoothing_during_initial_phase = 0;
         aec_res_reset(r);
         CHECK(r->sg.initial_state == 1 && r_on->sg.initial_state == 1,
               "%s: instances start in the initial state", id);
@@ -534,7 +527,7 @@ static void test_saturated_recovery(void) {
         snprintf(id, sizeof id, "%d/%d", GRIDS[g][0], GRIDS[g][1]);
         if (!r) { CHECK(0, "%s: init", id); free(mem); continue; }
         n = r->n_bins; hop = r->hop_size;
-        ffi = r->sg_cfg.floor_first_increase;
+        ffi = r->sg.cfg.floor_first_increase;
         sk_fast_sqrt_f32(&ffi, &ffi_amp, 1);
         err = (Complex*)calloc((size_t)n, sizeof(Complex));
         near = (Complex*)calloc((size_t)n, sizeof(Complex));

@@ -506,9 +506,8 @@ static void run_no_floor_round_trip(void) {
     aec_destroy(a);
 }
 
-/* AecRes-side NO_FLOOR + aec_res_reset() coverage (the r->sg_cfg mirror that aec_res_reset()'s
- * rebuild() re-inits split_floor_enabled from) lives in test_aec_res.c: AecRes is opaque in
- * aec_res_internal.h, and that test includes src/aec_res.c for internal-state assertions. */
+/* AecRes-side NO_FLOOR + aec_res_reset() coverage lives in test_aec_res.c: AecRes is opaque in aec_res_internal.h, and that
+ * test includes src/aec_res.c for internal-state assertions. */
 
 /* ── mutation: the exact-landing branch must be load-bearing ─────────────── */
 
@@ -544,14 +543,13 @@ static void run_level_numbering_and_lookups(void) {
 
     CHECK(AEC_LEVEL_MILD == 0 && AEC_LEVEL_BALANCED == 1 && AEC_LEVEL_AGGRESSIVE == 2 && AEC_LEVEL_NO_FLOOR == 3,
           "levels: mild 0, balanced 1, aggressive 2, no_floor 3");
+    CHECK(aec_level_floors(AEC_LEVEL_BALANCED, NULL) == -1, "aec_level_floors rejects a NULL out");
 
     for (l = 0; l < 4; ++l) {
-        float db = 123.0f, dt = 123.0f;
-        int en = 77;
-        CHECK(aec_level_floor_db((AecLevel)l, &db) == 0 && db == far_db[l], "aec_level_floor_db table row");
-        CHECK(aec_level_dt_floor_db((AecLevel)l, &dt) == 0 && dt == dt_db[l], "aec_level_dt_floor_db table row");
-        CHECK(aec_level_split_floor_enabled((AecLevel)l, &en) == 0 && en == split[l],
-              "aec_level_split_floor_enabled table row");
+        AecLevelFloors fl = { 123.0f, 123.0f, 77 };
+        CHECK(aec_level_floors((AecLevel)l, &fl) == 0 && fl.far_active_db == far_db[l] && fl.dt_db == dt_db[l] &&
+                  fl.split_floor_enabled == split[l],
+              "aec_level_floors table row");
         aec_config_from_level(&cfg, (AecLevel)l, 16000);
         aec_tuning_defaults(&tn, &cfg);
         CHECK(cfg.level == (AecLevel)l && tn.min_gain_floor_far_active_db == far_db[l] && tn.min_gain_floor_dt_db == dt_db[l] &&
@@ -559,12 +557,10 @@ static void run_level_numbering_and_lookups(void) {
               "aec_config_from_level stores the level and the tuning applies the table row");
     }
     for (l = -1; l <= 9; l += 10) {
-        float db = 123.0f, dt = 123.0f;
-        int en = 77;
-        CHECK(aec_level_floor_db((AecLevel)l, &db) == -1 && db == 123.0f &&
-                  aec_level_dt_floor_db((AecLevel)l, &dt) == -1 && dt == 123.0f &&
-                  aec_level_split_floor_enabled((AecLevel)l, &en) == -1 && en == 77,
-              "getters reject an out-of-enum level and write nothing");
+        AecLevelFloors fl = { 123.0f, 123.0f, 77 };
+        CHECK(aec_level_floors((AecLevel)l, &fl) == -1 && fl.far_active_db == 123.0f && fl.dt_db == 123.0f &&
+                  fl.split_floor_enabled == 77,
+              "aec_level_floors rejects an out-of-enum level and writes nothing");
         aec_config_from_level(&cfg, (AecLevel)l, 16000);
         aec_tuning_defaults(&tn, &cfg);
         CHECK(cfg.level == AEC_LEVEL_BALANCED && tn.min_gain_floor_far_active_db == -28.0f && tn.min_gain_floor_dt_db == -20.0f &&

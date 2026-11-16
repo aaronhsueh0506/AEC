@@ -59,7 +59,7 @@ shadow filter 佔 27,888 B（16 kHz/256，見 [§4](lifecycle.md#4-生命週期)
 
 `AecConfig.level`（`AecLevel`，0 – 3）是**唯一**的抑制強度設定，只收數字：0＝`AEC_LEVEL_MILD`、1＝`AEC_LEVEL_BALANCED`（預設）、
 2＝`AEC_LEVEL_AGGRESSIVE`、3＝`AEC_LEVEL_NO_FLOOR`；範圍外的值被驗證拒絕。選擇方式與取捨見 [§7](levels.md#7-level-選擇)。
-函式庫由 level 查表帶出三個內部值（`aec_level_floor_db()`、`aec_level_dt_floor_db()`、`aec_level_split_floor_enabled()` 可讀）：
+函式庫由 level 查表帶出三個內部值（`aec_level_floors()` 可讀）：
 
 | level | far-active 最低增益 | double-talk 最低增益 | split floor |
 |---|---:|---:|---|

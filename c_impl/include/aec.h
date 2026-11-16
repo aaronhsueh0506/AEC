@@ -410,7 +410,7 @@ int aec_get_array(const Aec* a, AecArrayView* out);
  * bytes. aec_init(mem, size, cfg) is aec_init_ex(..., NULL). Query a fresh descriptor for every build; never persist or
  * synthesize one. */
 #define AEC_DESCRIPTOR_VERSION 1u
-#define AEC_LAYOUT_VERSION     4u
+#define AEC_LAYOUT_VERSION     5u
 #define AEC_BACKEND_NE10       2u   /* backend_id 1 is never returned */
 typedef struct AecMemReq {
     uint32_t descriptor_version;

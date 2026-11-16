@@ -69,12 +69,12 @@ static unsigned long long af_duty_hops_run(const Aec* a) { AecDebugStatus ds; ae
 #define af_pin_duty_full_rate        aec_testing_array_pin_duty_full_rate
 #define af_far_spec_provenance       aec_testing_array_far_spec_provenance
 #define af_duty_leak_db_for_grid     aec_duty_leak_db
-#define AfDelayAdmission             AecArrayAdmission
-#define af_admission_age             aec_array_admission_age
-#define af_admission_offer           aec_array_admission_offer
+#define AfDelayAdmission             AecDelayAdmission
+#define af_admission_age             aec_delay_admission_age
+#define af_admission_offer           aec_delay_admission_offer
 #define af_far_spec_agrees           aec_array_far_spec_agrees
-#define AF_DELAY_CHANGE_MIN_SAMPLES      AEC_ARRAY_DELAY_CHANGE_MIN_SAMPLES
-#define AF_DELAY_CHANGE_CANDIDATE_TTL    AEC_ARRAY_DELAY_CHANGE_CANDIDATE_TTL
+#define AF_DELAY_CHANGE_MIN_SAMPLES      AEC_DELAY_CHANGE_MIN_SAMPLES
+#define AF_DELAY_CHANGE_CANDIDATE_TTL    AEC_DELAY_CHANGE_CANDIDATE_TTL
 #define af_projection_cmac_scalar    sk_cmac_f32_scalar
 #define af_projection_cmac           sk_cmac_f32
 #define af_complex_mag2_scalar(o, i, n) sk_cmag_f32_scalar((o), (i), (n), 0.0f)
@@ -1405,7 +1405,7 @@ static void test_delay_change_candidate_ttl(void) {
              AF_DELAY_CHANGE_CANDIDATE_TTL - 1, a.ttl);
     CHECK(a.ttl > 0 && a.candidate == moved, label);
     admission_hop(&a, applied, 0, 0);
-    CHECK(a.ttl == 0 && a.candidate == 0,
+    CHECK(a.ttl == 0 && a.candidate == -1,
           "one hop later it has expired, holding nothing");
     CHECK(admission_hop(&a, applied, moved, 1) == 0 &&
           a.ttl == AF_DELAY_CHANGE_CANDIDATE_TTL,

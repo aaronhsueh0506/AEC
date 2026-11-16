@@ -87,10 +87,10 @@ host (the same for every `AecConfig.residual`, for `SIMD=0/1` and for `AEC_NO_AR
 
 | Sample rate / FFT / hop | Pool size | `EXTERNAL_ALIGNED` |
 |---|---:|---:|
-| 16 kHz / 256 / 128 | 239,760 B | 177,408 B |
-| 16 kHz / 512 / 256 | 352,128 B | 289,264 B |
-| 48 kHz / 1024 / 512 | 776,064 B | 645,616 B |
-| 8 kHz / 256 / 128 (legacy) | 211,392 B | 149,040 B |
+| 16 kHz / 256 / 128 | 239,232 B | 176,880 B |
+| 16 kHz / 512 / 256 | 351,088 B | 288,224 B |
+| 48 kHz / 1024 / 512 | 774,000 B | 643,552 B |
+| 8 kHz / 256 / 128 (legacy) | 210,864 B | 148,512 B |
 
 These figures depend on the struct sizes of the library's internals; re-run
 `aec_get_mem_size()` (or `aec_wav --print-mem-size`) rather than carrying
@@ -134,27 +134,27 @@ if (!aec) { /* pool too small / unaligned, or descriptor from a different build 
 ```
 
 Unlike a single-channel instance, the array pool **depends on `AecConfig.residual`** (`OFF` is refused). Measured with
-`aec_get_mem_requirements()` on the 64-bit host (balanced, `MATCHED`, `delay_num_filters = 5`, NE10, `Aec` header 6,048 B):
+`aec_get_mem_requirements()` on the 64-bit host (balanced, `MATCHED`, `delay_num_filters = 5`, NE10, `Aec` header 6,032 B):
 
 | Grid | `STATE` | `ESTIMATE` | `FULL` (default) |
 |---|---:|---:|---:|
-| 16 kHz / 256 | 561,456 B | 656,992 B | 666,992 B |
-| 16 kHz / 512 | 849,136 B | 1,038,880 B | 1,057,072 B |
-| 48 kHz / 1024 | 1,894,000 B | 2,272,160 B | 2,309,808 B |
+| 16 kHz / 256 | 559,328 B | 654,864 B | 664,624 B |
+| 16 kHz / 512 | 844,960 B | 1,034,704 B | 1,052,656 B |
+| 48 kHz / 1024 | 1,885,728 B | 2,263,888 B | 2,301,296 B |
 
-`aec_get_mem_breakdown()` splits the `FULL` pool as follows. The `Aec` header (6,048 B here, a multiple of 16) belongs
+`aec_get_mem_breakdown()` splits the `FULL` pool as follows. The `Aec` header (6,032 B here, a multiple of 16) belongs
 to none of the four sub-fields, so they sum to `total_bytes` minus the header:
 
 | Grid | `total_bytes` | `estimator_bytes` | `ring_bytes` | `lane_bytes` | `fusion_bytes` |
 |---|---:|---:|---:|---:|---:|
-| 16 kHz / 256 | 666,992 | 29,248 | 33,104 | 570,880 | 27,712 |
-| 16 kHz / 512 | 1,057,072 | 29,248 | 33,616 | 937,664 | 50,496 |
-| 48 kHz / 1024 | 2,309,808 | 30,624 | 99,824 | 2,074,176 | 99,136 |
+| 16 kHz / 256 | 664,624 | 29,248 | 33,104 | 568,768 | 27,472 |
+| 16 kHz / 512 | 1,052,656 | 29,248 | 33,616 | 933,504 | 50,256 |
+| 48 kHz / 1024 | 2,301,296 | 30,624 | 99,824 | 2,065,920 | 98,896 |
 
 - **Lane contract.** The flow stamps the same config on each lane: the array's grid and tunables, `delay_mode = EXTERNAL_ALIGNED`
   (the lanes take the shared aligned far), `residual = ESTIMATE` (`STATE` for a `STATE` array), `n_mics = 1`. Each lane pool is
-  142,720 / 234,416 / 518,544 B (`ESTIMATE` and `FULL`; a `STATE` lane omits the residual-echo estimator and comfort-noise arrays its early exit never reads: 120,400 / 190,080 / 430,176 B) and `lane_bytes` is four of them. A lane is built by the internal
-  `aec_lane_init()`; against a stand-alone single-channel `EXTERNAL_ALIGNED` instance (177,408 / 289,264 / 645,616 B)
+  142,192 / 233,376 / 516,480 B (`ESTIMATE` and `FULL`; a `STATE` lane omits the residual-echo estimator and comfort-noise arrays its early exit never reads: 119,872 / 189,040 / 428,112 B) and `lane_bytes` is four of them. A lane is built by the internal
+  `aec_lane_init()`; against a stand-alone single-channel `EXTERNAL_ALIGNED` instance (176,880 / 288,224 / 643,552 B)
   it borrows the array's one FFT handle and omits what its contract never runs: the delay-shift snapshots (only the `MATCHED`
   estimator takes them), the synthesis and gain buffers (synthesis window, OLA, `eout`, the SuppressionGain arrays and the decoded ENR/SU threshold tables; only `FULL` applies a gain) and
   the FFT handle; a `STATE` lane also omits the residual-echo estimator and comfort-noise arrays (its early exit never reads them).
@@ -168,7 +168,7 @@ to none of the four sub-fields, so they sum to `total_bytes` minus the header:
   stage (17,712 / 32,304 / 61,488 B).
 - `ring_bytes`: `MATCHED` is the estimator's reach plus one hop, as for a single channel: `4 * ((n - 1) * 384 + 501) + hop_size`
   samples (three times the first term at 48 kHz; 8,276 samples at n = 5, 16 kHz / 256), `FIXED` is `fixed_delay_samples +
-  hop_size`, `EXTERNAL_ALIGNED` none. `FULL` array with `EXTERNAL_ALIGNED`: 604,640 / 994,208 / 2,179,360 B.
+  hop_size`, `EXTERNAL_ALIGNED` none. `FULL` array with `EXTERNAL_ALIGNED`: 602,272 / 989,792 / 2,170,848 B.
 
 **Not done yet.** The far-side state is still held per lane (what the lanes share is the delay estimator, the aligned far,
 the FFT handle and, within a hop, the far FFT result and the far-only per-hop analysis computed by lane 0, which changes

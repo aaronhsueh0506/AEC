@@ -127,13 +127,11 @@ int aec_build_sg_config(const AecResolved* rs, SuppressionGainConfig* out_cfg,
 }
 
 int aec_sg_apply_level(SuppressionGain* sg, AecLevel level) {
-    float db, dt_db;
-    int en;
-    if (aec_level_floor_db(level, &db) != 0 || aec_level_dt_floor_db(level, &dt_db) != 0 ||
-        aec_level_split_floor_enabled(level, &en) != 0) return -1;
+    AecLevelFloors fl;
+    if (aec_level_floors(level, &fl) != 0) return -1;
     /* The suppressor validates and applies first and writes nothing on refusal. The ramp governs the far-active floor only; the
      * DT floor and the split-floor gate step immediately. */
-    if (suppression_gain_set_split_floor_far_active_db(sg, db, AEC_LEVEL_RAMP_MS) != 0) return -1;
-    if (suppression_gain_set_split_floor_dt_db(sg, dt_db) != 0) return -1;
-    return suppression_gain_set_split_floor_enabled(sg, en) != 0 ? -1 : 0;
+    if (suppression_gain_set_split_floor_far_active_db(sg, fl.far_active_db, AEC_LEVEL_RAMP_MS) != 0) return -1;
+    if (suppression_gain_set_split_floor_dt_db(sg, fl.dt_db) != 0) return -1;
+    return suppression_gain_set_split_floor_enabled(sg, fl.split_floor_enabled) != 0 ? -1 : 0;
 }

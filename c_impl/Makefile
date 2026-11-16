@@ -114,7 +114,7 @@ endif
 # library: naming one of them as a goal sets AEC_TESTING=1 (a command-line AEC_TESTING wins), so the dispatch and the
 # aggregators need no per-goal recursion. test-rate-structural and the three test-aec-array* goals re-invoke make themselves.
 AEC_HOOK_GOALS := \
-  test-split-entry-2 test-config-validation test-process-context test-duty-census \
+  test-split-entry-2 test-config-validation test-process-context test-duty-census test-delay-admission \
   test-external-realign test-guard-unify test-handle-ready test-linear-context test-memory-layout test-shared-far-spec \
   test-shared-fft-handle test-spectral-reuse test-synthesis-window test-parity-e2e pyc-parity-driver
 AEC_TESTING ?= 0
@@ -225,7 +225,7 @@ AEC_COMMON_GOALS := \
   all bench test test-full test-counter-saturation test-rate-structural test-config-validation test-process-context \
   test-split-entry test-split-entry-2 test-dsp-refusal test-aec-array test-aec-array-2 test-aec-array-flow \
   test-avg-reverb-slots test-linear-context test-guard-unify test-res-nearend-gate test-runtime-preset \
-  test-delay-num-filters test-duty-census test-external-realign test-cli-delay-flags test-shared-far-spec \
+  test-delay-num-filters test-delay-admission test-duty-census test-external-realign test-cli-delay-flags test-shared-far-spec \
   test-spectral-reuse test-heap-alignment test-lifecycle test-shared-fft-handle test-synthesis-window test-static-aec \
   test-memory-layout test-handle-ready test-reset-parity test-zero-heap test-aec-res test-detectors-parity \
   test-detectors-parity-all test-parity-e2e pyc-parity-driver
@@ -334,6 +334,11 @@ TEST_DNF_TARGET = $(BIN_DIR)/test_delay_num_filters
 TEST_DUC_SRCS   = $(TEST_DIR)/test_duty_census.c
 TEST_DUC_OBJS   = $(patsubst $(TEST_DIR)/%.c,$(OBJ_DIR)/%.o,$(TEST_DUC_SRCS))
 TEST_DUC_TARGET = $(BIN_DIR)/test_duty_census
+
+# The single-channel Path B admission of a shifted delay, driven with chosen offers (test hook, so a testing build).
+TEST_DAD_SRCS   = $(TEST_DIR)/test_delay_admission.c
+TEST_DAD_OBJS   = $(patsubst $(TEST_DIR)/%.c,$(OBJ_DIR)/%.o,$(TEST_DAD_SRCS))
+TEST_DAD_TARGET = $(BIN_DIR)/test_delay_admission
 
 TEST_XRA_SRCS   = $(TEST_DIR)/test_external_realign.c
 TEST_XRA_OBJS   = $(patsubst $(TEST_DIR)/%.c,$(OBJ_DIR)/%.o,$(TEST_XRA_SRCS))
@@ -821,6 +826,10 @@ test-duty-census: $(TEST_DUC_TARGET)
 test-external-realign: $(TEST_XRA_TARGET)
 	"$(abspath $(TEST_XRA_TARGET))"
 
+.PHONY: test-delay-admission
+test-delay-admission: $(TEST_DAD_TARGET)
+	"$(abspath $(TEST_DAD_TARGET))"
+
 # CLI plumbing for --delay-mode / --delay-num-filters / --fixed-delay /
 # --print-mem-size. Depends on the CLI binary itself (not a test_*.c), so it
 # hangs off $(TARGET); the script re-derives the same bin dir via
@@ -905,7 +914,7 @@ test-zero-heap: $(TEST_ZH_TARGET)
 #   gate, the full pyc matrix instead of the lean one, the UBSan --use-standard-math variants, the Makefile flag-policy
 #   script and the signal-handling script that tests the UBSan wrappers' traps.
 TEST_SIMD_DEP   = selftest test-process-context test-split-entry test-split-entry-2 test-dsp-refusal test-aec-array test-aec-array-2 test-aec-array-flow test-linear-context test-guard-unify test-aec-res test-res-nearend-gate test-runtime-preset \
-                  test-delay-num-filters test-duty-census test-external-realign test-reset-parity test-delay-reset \
+                  test-delay-num-filters test-delay-admission test-duty-census test-external-realign test-reset-parity test-delay-reset \
                   test-delay-dominant-selection test-delay-kernels test-delay-matched-neon test-neon-twins \
                   test-rate-structural test-counter-saturation
 TEST_SIMD_INDEP = test-heap-alignment test-lifecycle test-memory-layout test-handle-ready test-config-validation test-avg-reverb-slots \
@@ -1027,6 +1036,10 @@ $(TEST_DNF_TARGET): $(OBJS) $(TEST_DNF_OBJS) $(COMMON_LIB) | _cfg_guard
 $(TEST_DUC_TARGET): $(OBJS) $(TEST_DUC_OBJS) $(COMMON_LIB) | _cfg_guard
 	$(LINK) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 	@echo "test_duty_census [$(BACKEND)] -> $@"
+
+$(TEST_DAD_TARGET): $(OBJS) $(TEST_DAD_OBJS) $(COMMON_LIB) | _cfg_guard
+	$(LINK) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+	@echo "test_delay_admission [$(BACKEND)] -> $@"
 
 $(TEST_XRA_TARGET): $(OBJS) $(TEST_XRA_OBJS) $(COMMON_LIB) | _cfg_guard
 	$(LINK) $(CFLAGS) -o $@ $^ $(LDFLAGS)
@@ -1506,6 +1519,7 @@ help:
 	@echo "  test-config-validation  Build + run the invalid-AecConfig rejection test (aec_get_mem_size, aec_init, aec_create)"
 	@echo "  test-delay-dominant-selection  Build + run the dominant-peak delay selection test"
 	@echo "                  (test_delay_dominant_selection) -- run from c_impl/"
+	@echo "  test-delay-admission  Build + run the single-channel shifted-delay admission test (confirm window, band, expiry)"
 	@echo "  test-external-realign  Build + run the aec_apply_external_realign() warm-transfer regression test"
 	@echo "  test-guard-unify  Build + run the one-algorithm-behind-every-entry-point test (test_guard_unify)"
 	@echo "  test-linear-context  Build + run the linear-stage view regression test (aec_get_linear, test_linear_context)"

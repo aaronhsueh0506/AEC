@@ -9,7 +9,7 @@ aec_config_from_level(&cfg, AEC_LEVEL_BALANCED, 16000);   /* 存進 cfg.level */
 ```
 
 `AecConfig.level` 是唯一的強度設定，只收數字（0..3，範圍外被拒絕）。函式庫由它查表帶出三個內部值（庫內部 `AecTuning`，
-`aec_level_floor_db()`、`aec_level_dt_floor_db()`、`aec_level_split_floor_enabled()` 可讀），呼叫端不能單獨設定：
+`aec_level_floors()` 可讀），呼叫端不能單獨設定：
 mild / balanced 兩個 level **只差一個值**：`min_gain_floor_far_active_db`。
 aggressive 則**再加一個值**：`min_gain_floor_dt_db`（double-talk 時改用的
 地板）——否則 double-talk 偵測觸發時（遠端單講時也會誤觸發）三個
@@ -120,9 +120,8 @@ int suppression_gain_set_split_floor_enabled(SuppressionGain* sg, int enabled);
 前兩者回 `0` 或 `-1`（NULL 或引數超出範圍），`-1` 時什麼都不寫：所有值都
 先算完、驗完，才寫第一個 store。
 
-level 查表函式有三個（函式庫內部，宣告在 `aec_internal.h`）：`aec_level_floor_db()`、`aec_level_dt_floor_db()` 與
-`aec_level_split_floor_enabled(AecLevel, int*)`，契約相同（in-enum 寫 `*enabled_out` 並回 `0`；out-of-enum 什麼都不寫並回 `-1`）（`aec_level_floor_db()`／`aec_level_dt_floor_db()` 對 `AEC_LEVEL_NO_FLOOR` 回的 `-28.0`／`-20.0` 只是惰性佔位值，不是該 level 的地板）——
-四麥克風產品的共用 post 級抑制器可以只讀這個 gate，不必連帶查兩個 dB 值。
+level 查表函式是 `aec_level_floors(AecLevel, AecLevelFloors*)`（函式庫內部，宣告在 `aec_internal.h`）：in-enum 的 level 寫入 `far_active_db`、`dt_db`、`split_floor_enabled` 三個欄位並回 `0`；out-of-enum 或 `out == NULL` 什麼都不寫並回 `-1`
+（`AEC_LEVEL_NO_FLOOR` 的 `far_active_db = -28.0`、`dt_db = -20.0` 只是惰性佔位值，不是該 level 的地板）。
 
 **陣列實例的 lane**。四條 lane 的 `AecConfig.residual` 都低於 `AEC_RESIDUAL_FULL`（`STATE`／`ESTIMATE`），
 根本不會走到 `suppression_gain_get_gain()`，所以 lane 自己的強度**依建構方式即為無效操作**——塑形輸出的 gain 來自

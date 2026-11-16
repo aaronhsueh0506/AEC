@@ -108,7 +108,7 @@ struct AecArray {
     int delay_quarantine_left;
     int delay_quarantine_hops;
     /* Two-step admission of a shared-delay change; cleared by acceptance, expiry and reset. */
-    AecArrayAdmission delay_admission;
+    AecDelayAdmission delay_admission;
     long realign_warm_lanes;
     long realign_soft_lanes;
     uint64_t delay_calls;
@@ -391,8 +391,7 @@ static void array_clear_state(AecArray* p) {
     p->delay_samples_seen = 0;
     p->accepted_delay = p->delay_mode == (int)AEC_DELAY_FIXED ? p->fixed_delay : 0;
     p->delay_quarantine_left = -1;
-    p->delay_admission.candidate = 0;
-    p->delay_admission.ttl = 0;
+    aec_delay_admission_clear(&p->delay_admission);
     p->realign_warm_lanes = 0;
     p->realign_soft_lanes = 0;
     p->delay_calls = 0;
@@ -455,7 +454,7 @@ static AecDelayState update_shared_delay(AecArray* p, const float* capture, cons
                delay_aec_n_updates(&p->delay) >= 3;
 
     /* Aged ahead of the quarantine and admission, as the single-channel AEC ages its pending delay. */
-    aec_array_admission_age(&p->delay_admission);
+    aec_delay_admission_age(&p->delay_admission);
 
     /* Backward-jump quarantine: judged on the capture-proxy lane's cancellation read before this hop's lanes run; armed once
      * per backward episode, adopted at 0. */
@@ -480,10 +479,9 @@ static AecDelayState update_shared_delay(AecArray* p, const float* capture, cons
     if (eligible) {
         if (!was_usable) {
             accepted = 1;
-            p->delay_admission.candidate = 0;
-            p->delay_admission.ttl = 0;
+            aec_delay_admission_clear(&p->delay_admission);
         } else {
-            accepted = aec_array_admission_offer(&p->delay_admission, p->accepted_delay, estimated);
+            accepted = aec_delay_admission_offer(&p->delay_admission, p->accepted_delay, estimated);
         }
     }
     state.changed = accepted;

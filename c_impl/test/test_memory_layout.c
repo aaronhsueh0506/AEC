@@ -14,10 +14,10 @@ static size_t align16(size_t n) { return (n + 15u) & ~(size_t)15u; }
 
 /* Absolute pins, LP64 only: sizeof(Aec) and the single-channel pool sizes at the balanced level, default delay mode, with and
  * without the shadow filter. They are literals, not recomputed from the build under test. */
-#define AEC_SIZEOF_PIN 6048u
+#define AEC_SIZEOF_PIN 6032u
 static int check_pinned_sizes(void) {
     static const struct { int sr, fft; size_t with_shadow, without_shadow; } pin[3] = {
-        {16000, 256, 239760u, 211872u}, {16000, 512, 352128u, 312016u}, {48000, 1024, 776064u, 675504u} };
+        {16000, 256, 239232u, 211344u}, {16000, 512, 351088u, 310976u}, {48000, 1024, 774000u, 673440u} };
     int i, bad = 0;
     if (sizeof(void*) != 8 || sizeof(size_t) != 8) {
         printf("test_memory_layout: absolute size pins are LP64 values; skipped on this %zu-byte-pointer ABI\n",
@@ -70,7 +70,7 @@ static int check_header_facts(void) {
 
 /* The pool descriptor: layout_version is a literal (bump it, and the pin, when a carved layout changes size or order) and, on LP64
  * (where the ABI hash is the identity), so is the FNV-1a-32 of the carve text, which every edit of that text moves. */
-#define AEC_LAYOUT_VERSION_PIN 4u
+#define AEC_LAYOUT_VERSION_PIN 5u
 #define AEC_CARVE_HASH_PIN_LP64 3368782680u
 static int check_descriptor_pin(void) {
     AecConfig cfg;
@@ -100,8 +100,8 @@ static int check_descriptor_pin(void) {
  * comfort-noise arrays. */
 static int check_array_pins(void) {
     static const struct { int sr, fft; size_t state, estimate, full; } pin[3] = {
-        {16000, 256, 561456u, 656992u, 666992u}, {16000, 512, 849136u, 1038880u, 1057072u},
-        {48000, 1024, 1894000u, 2272160u, 2309808u} };
+        {16000, 256, 559328u, 654864u, 664624u}, {16000, 512, 844960u, 1034704u, 1052656u},
+        {48000, 1024, 1885728u, 2263888u, 2301296u} };
     int i, bad = 0;
     if (sizeof(void*) != 8 || sizeof(size_t) != 8) {
         printf("test_memory_layout: array pool pins are LP64 values; skipped on this %zu-byte-pointer ABI\n", sizeof(void*));

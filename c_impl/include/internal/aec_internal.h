@@ -1,5 +1,5 @@
 /* aec_internal.h -- declarations that are not part of the AEC API (library-internal; tests and the C/Python parity driver may
- * include it): the level lookup tables, the comfort-noise fill with a caller-chosen floor, and the shared-far linear entry. */
+ * include it): the level lookup table, the comfort-noise fill with a caller-chosen floor, and the shared-far linear entry. */
 #ifndef AEC_AEC_INTERNAL_H
 #define AEC_AEC_INTERNAL_H
 
@@ -9,17 +9,18 @@
 extern "C" {
 #endif
 
-/* Far-active min-gain floor (dB) for a level: mild -20, balanced -28, aggressive -38 (no_floor: -28, an inert placeholder).
- * Returns 0 and writes *db_out for an in-enum level, -1 otherwise; aec_config_from_level instead falls back to balanced. */
-int aec_level_floor_db(AecLevel level, float* db_out);
+/* What a level sets: the far-active min-gain floor (dB; mild -20, balanced -28, aggressive -38), the DT-lifted floor
+ * (min_gain_floor_dt_db; only aggressive differs from the shared -20) and min_gain_split_floor_enabled. no_floor repeats
+ * balanced's two floors as inert placeholders and switches the split floor off. */
+typedef struct AecLevelFloors {
+    float far_active_db;
+    float dt_db;
+    int   split_floor_enabled;
+} AecLevelFloors;
 
-/* DT-lifted floor (min_gain_floor_dt_db) for a level; only aggressive differs from the shared -20 dB (no_floor: inert -20).
- * Returns 0 and writes *db_out for an in-enum level, -1 (nothing written) otherwise. */
-int aec_level_dt_floor_db(AecLevel level, float* db_out);
-
-/* min_gain_split_floor_enabled for a level. Returns 0 and writes *enabled_out for an in-enum level, -1 (nothing written)
- * otherwise. */
-int aec_level_split_floor_enabled(AecLevel level, int* enabled_out);
+/* Returns 0 and fills *out for an in-enum level; -1 and writes nothing for an out-of-enum level or NULL out
+ * (aec_config_from_level instead falls back to balanced). */
+int aec_level_floors(AecLevel level, AecLevelFloors* out);
 
 /* Adds comfort noise to the bins 1 .. n-2 the suppressor cut (amplitude from cn, g_res and, if non-NULL, max(g_nr, nr_floor); one LCG
  * step per bin on *rng, seeded AEC_CNG_SEED at a fresh instance and every hard post-chain reset). With g_nr == NULL it is

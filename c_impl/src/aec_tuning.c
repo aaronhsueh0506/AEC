@@ -7,8 +7,7 @@
 #include <string.h>
 
 void aec_tuning_defaults(AecTuning* tun, const AecConfig* cfg) {
-    float far_db, dt_db;
-    int split;
+    AecLevelFloors fl;
     memset(tun, 0, sizeof(*tun));
     /* 64 ms at sr >= 44100, 52 ms otherwise; 0 for an unsupported rate (rejected by the validator), so the millisecond product
      * is never formed from an arbitrary int. */
@@ -49,9 +48,10 @@ void aec_tuning_defaults(AecTuning* tun, const AecConfig* cfg) {
     tun->filter_misadjustment_scale_min = 0.5f;
     tun->filter_misadjustment_scale_max = 2.0f;
     /* An out-of-enum level reads as balanced. */
-    tun->min_gain_floor_far_active_db = (aec_level_floor_db(cfg->level, &far_db) == 0) ? far_db : -28.0f;
-    tun->min_gain_floor_dt_db = (aec_level_dt_floor_db(cfg->level, &dt_db) == 0) ? dt_db : -20.0f;
-    tun->min_gain_split_floor_enabled = (aec_level_split_floor_enabled(cfg->level, &split) == 0) ? split : 1;
+    if (aec_level_floors(cfg->level, &fl) != 0) aec_level_floors(AEC_LEVEL_BALANCED, &fl);
+    tun->min_gain_floor_far_active_db = fl.far_active_db;
+    tun->min_gain_floor_dt_db = fl.dt_db;
+    tun->min_gain_split_floor_enabled = fl.split_floor_enabled;
     tun->live_observer_shift_ms = 24.0f;
     tun->live_observer_max_hz = 1000.0f;
     tun->live_observer_mu = 0.3f;
@@ -60,14 +60,12 @@ void aec_tuning_defaults(AecTuning* tun, const AecConfig* cfg) {
 }
 
 int aec_apply_level(AecConfig* cfg, AecTuning* tun, AecLevel level) {
-    float far_db, dt_db;
-    int split;
-    if (aec_level_floor_db(level, &far_db) != 0 || aec_level_dt_floor_db(level, &dt_db) != 0 ||
-        aec_level_split_floor_enabled(level, &split) != 0) return -1;
+    AecLevelFloors fl;
+    if (aec_level_floors(level, &fl) != 0) return -1;
     cfg->level = level;
-    tun->min_gain_floor_far_active_db = far_db;
-    tun->min_gain_floor_dt_db = dt_db;
-    tun->min_gain_split_floor_enabled = split;
+    tun->min_gain_floor_far_active_db = fl.far_active_db;
+    tun->min_gain_floor_dt_db = fl.dt_db;
+    tun->min_gain_split_floor_enabled = fl.split_floor_enabled;
     return 0;
 }
 
@@ -137,9 +135,7 @@ int aec_tuning_valid(const AecTuning* tun, const AecConfig* cfg) {
     return 1;
 }
 
-/* Level strength table in AecLevel order; NO_FLOOR repeats balanced's
- * (unused) values. */
-typedef struct { float far_active_db, dt_db; int split_floor_enabled; } AecLevelFloors;
+/* Level strength table in AecLevel order; NO_FLOOR repeats balanced's (unused) values. */
 static const AecLevelFloors AEC_LEVEL_FLOORS[] = {
     [AEC_LEVEL_MILD]       = { -20.0f, -20.0f, 1 },
     [AEC_LEVEL_BALANCED]   = { -28.0f, -20.0f, 1 },
@@ -163,24 +159,10 @@ const char* aec_level_name(AecLevel p) {
     return aec_level_row(p) ? names[p] : "balanced";
 }
 
-int aec_level_floor_db(AecLevel p, float* db_out) {
+int aec_level_floors(AecLevel p, AecLevelFloors* out) {
     const AecLevelFloors* r = aec_level_row(p);
-    if (db_out == NULL || r == NULL) return -1;
-    *db_out = r->far_active_db;
-    return 0;
-}
-
-int aec_level_dt_floor_db(AecLevel p, float* db_out) {
-    const AecLevelFloors* r = aec_level_row(p);
-    if (db_out == NULL || r == NULL) return -1;
-    *db_out = r->dt_db;
-    return 0;
-}
-
-int aec_level_split_floor_enabled(AecLevel p, int* enabled_out) {
-    const AecLevelFloors* r = aec_level_row(p);
-    if (enabled_out == NULL || r == NULL) return -1;
-    *enabled_out = r->split_floor_enabled;
+    if (out == NULL || r == NULL) return -1;
+    *out = *r;
     return 0;
 }
 

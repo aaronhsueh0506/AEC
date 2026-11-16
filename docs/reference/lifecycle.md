@@ -62,7 +62,7 @@ free(pool);                                 /* 記憶池由呼叫端自行回收
 `aec_get_mem_size()`，另有描述子／佈局版本、backend、建置旗標雜湊與對齊）；設定無效回 -1 並把 `req` 清零。
 `aec_init_ex(mem, size, &cfg, &req)` 帶非 NULL 的描述子時，要求它與目前建置的描述子完全一致（`reserved` 為 0、`req.bytes` 與
 `size` 都不小於目前需要的 byte 數），用來擋掉「舊建置查到的記憶池配給新函式庫」。`aec_init(mem, size, &cfg)` 就是描述子為 `NULL` 的 `aec_init_ex()`。
-描述子不可存檔或自行拼湊，每次建置重新查。`layout_version`（`AEC_LAYOUT_VERSION` = 4）在記憶池的配置大小或順序改變時遞增；
+描述子不可存檔或自行拼湊，每次建置重新查。`layout_version`（`AEC_LAYOUT_VERSION` = 5）在記憶池的配置大小或順序改變時遞增；
 `build_flags_hash` 是配置文字（不是可調數值）的 FNV-1a-32。
 
 `AecConfig.n_mics = AEC_ARRAY_MICS`（4）建出陣列實例：四條 lane、共用的 delay 估計器與對齊後 far、融合緩衝都在**同一塊**記憶池，
@@ -94,13 +94,13 @@ filter bank、降取樣 render ring 與兩個 lag histogram 都是依 init 設�
 
 | 格點 | n=1 | n=2 | n=3 | n=4 | n=5（預設） |
 |---|---:|---:|---:|---:|---:|
-| 8 kHz / 256（legacy） | 166,336 B | 177,600 B | 188,864 B | 200,128 B | 211,392 B |
-| 16 kHz / 256 | 194,704 B | 205,968 B | 217,232 B | 228,496 B | 239,760 B |
-| 16 kHz / 512 | 307,072 B | 318,336 B | 329,600 B | 340,864 B | 352,128 B |
-| 48 kHz / 1024 | 681,856 B | 705,408 B | 728,960 B | 752,512 B | 776,064 B |
+| 8 kHz / 256（legacy） | 165,808 B | 177,072 B | 188,336 B | 199,600 B | 210,864 B |
+| 16 kHz / 256 | 194,176 B | 205,440 B | 216,704 B | 227,968 B | 239,232 B |
+| 16 kHz / 512 | 306,032 B | 317,296 B | 328,560 B | 339,824 B | 351,088 B |
+| 48 kHz / 1024 | 679,792 B | 703,344 B | 726,896 B | 750,448 B | 774,000 B |
 
 > **這些絕對值會隨 `Aec` 內部結構與 `AecConfig` 的大小整批移動（`Aec` 是不透明型別，
-> 池內標頭目前是 6,048 B；`sizeof(AecConfig)` 目前是 48 B），而所有 delta 不變**（單通道每個 filter 11,264 B、
+> 池內標頭目前是 6,032 B；`sizeof(AecConfig)` 目前是 48 B），而所有 delta 不變**（單通道每個 filter 11,264 B、
 > 48 kHz 23,552 B，`FIXED` 的 byte/ms 公式、mode 之間的差值）。所以不能沿用記下的常數，**必須重新查詢
 > `aec_get_mem_size()` 並重新 init**。
 >
@@ -118,13 +118,13 @@ estimator 只省 5,120 B。
 
 | `delay_mode` | 記憶池 | 相對 `MATCHED n=5` |
 |---|---:|---:|
-| `MATCHED` n=5（預設） | 239,760 B | — |
-| `MATCHED` n=1 | 194,704 B | −45,056 B |
-| `FIXED`，`fixed_delay_samples = 0` | 177,920 B | −61,840 B |
-| `FIXED`，`fixed_delay_samples = 400`（25 ms） | 179,520 B | −60,240 B |
-| `FIXED`，`fixed_delay_samples = 1600`（100 ms） | 184,320 B | −55,440 B |
-| `FIXED`，`fixed_delay_samples = 8000`（500 ms） | 209,920 B | −29,840 B |
-| `EXTERNAL_ALIGNED` | 177,408 B | −62,352 B |
+| `MATCHED` n=5（預設） | 239,232 B | — |
+| `MATCHED` n=1 | 194,176 B | −45,056 B |
+| `FIXED`，`fixed_delay_samples = 0` | 177,392 B | −61,840 B |
+| `FIXED`，`fixed_delay_samples = 400`（25 ms） | 178,992 B | −60,240 B |
+| `FIXED`，`fixed_delay_samples = 1600`（100 ms） | 183,792 B | −55,440 B |
+| `FIXED`，`fixed_delay_samples = 8000`（500 ms） | 209,392 B | −29,840 B |
+| `EXTERNAL_ALIGNED` | 176,880 B | −62,352 B |
 
 #### 環形緩衝大小公式
 
@@ -160,20 +160,20 @@ estimator 只省 5,120 B。
 
 | 格點 | fixed=0 | 25 ms | 100 ms | 500 ms |
 |---|---:|---:|---:|---:|
-| 16 kHz / 256 | 177,920 B | 179,520 B | 184,320 B | 209,920 B |
-| 16 kHz / 512 | 290,288 B | 291,888 B | 296,688 B | 322,288 B |
-| 48 kHz / 1024 | 647,664 B | 652,464 B | 666,864 B | 743,664 B |
+| 16 kHz / 256 | 177,392 B | 178,992 B | 183,792 B | 209,392 B |
+| 16 kHz / 512 | 289,248 B | 290,848 B | 295,648 B | 321,248 B |
+| 48 kHz / 1024 | 645,600 B | 650,400 B | 664,800 B | 741,600 B |
 
 > **注意**：`fixed_delay_samples` 很大時 `FIXED` 也可能比 `MATCHED n=5` 更
-> 耗記憶體（48 kHz/1024、2500 ms 為 1,127,664 B，高於 `MATCHED n=5` 的
-> 776,064 B）——環形緩衝終究要放得下那個延遲。要用大 fixed delay 又要省
+> 耗記憶體（48 kHz/1024、2500 ms 為 1,125,600 B，高於 `MATCHED n=5` 的
+> 774,000 B）——環形緩衝終究要放得下那個延遲。要用大 fixed delay 又要省
 > 記憶體，正確作法是讓呼叫端自己補償掉大延遲後改用 `EXTERNAL_ALIGNED`。
 
-另外一個內部結構開關（呼叫端不能設定，只有 `AEC_TESTING` 的測試鉤子能關；16 kHz/256，相對 239,760 B）：
+另外一個內部結構開關（呼叫端不能設定，只有 `AEC_TESTING` 的測試鉤子能關；16 kHz/256，相對 239,232 B）：
 
 | 設定 | 記憶池 | 差異 |
 |---|---:|---:|
-| 沒有 shadow filter（內部 `enable_shadow = 0`） | 211,872 B | −27,888 B |
+| 沒有 shadow filter（內部 `enable_shadow = 0`） | 211,344 B | −27,888 B |
 
 單聲道實例的記憶池**不隨** `AecConfig.residual` 與 `enable_cng` 改變（相關緩衝區一律配置）；
 **陣列實例會隨 `residual` 改變**（見下節）。
@@ -186,26 +186,26 @@ estimator 只省 5,120 B。
 ### 陣列實例的記憶池
 
 `n_mics = 4`，balanced level，其餘為預設值（`MATCHED`、`delay_num_filters = 5`），NE10 backend、64-bit 主機實測
-（`aec_get_mem_size()` 與 `aec_get_mem_breakdown()`；`Aec` 標頭 6,048 B、`sizeof(AecConfig)` 48 B）：
+（`aec_get_mem_size()` 與 `aec_get_mem_breakdown()`；`Aec` 標頭 6,032 B、`sizeof(AecConfig)` 48 B）：
 
 | 格點 | `STATE` | `ESTIMATE` | `FULL`（預設） |
 |---|---:|---:|---:|
-| 16 kHz / 256 | 561,456 B | 656,992 B | 666,992 B |
-| 16 kHz / 512 | 849,136 B | 1,038,880 B | 1,057,072 B |
-| 48 kHz / 1024 | 1,894,000 B | 2,272,160 B | 2,309,808 B |
+| 16 kHz / 256 | 559,328 B | 654,864 B | 664,624 B |
+| 16 kHz / 512 | 844,960 B | 1,034,704 B | 1,052,656 B |
+| 48 kHz / 1024 | 1,885,728 B | 2,263,888 B | 2,301,296 B |
 
 `aec_get_mem_breakdown()` 的欄位（`FULL`）：
 
 | 格點 | `total_bytes` | `estimator_bytes` | `ring_bytes` | `lane_bytes` | `fusion_bytes` | `Aec` 標頭 |
 |---|---:|---:|---:|---:|---:|---:|
-| 16 kHz / 256 | 666,992 | 29,248 | 33,104 | 570,880 | 27,712 | 6,048 |
-| 16 kHz / 512 | 1,057,072 | 29,248 | 33,616 | 937,664 | 50,496 | 6,048 |
-| 48 kHz / 1024 | 2,309,808 | 30,624 | 99,824 | 2,074,176 | 99,136 | 6,048 |
+| 16 kHz / 256 | 664,624 | 29,248 | 33,104 | 568,768 | 27,472 | 6,032 |
+| 16 kHz / 512 | 1,052,656 | 29,248 | 33,616 | 933,504 | 50,256 | 6,032 |
+| 48 kHz / 1024 | 2,301,296 | 30,624 | 99,824 | 2,065,920 | 98,896 | 6,032 |
 
 - 陣列池 = `Aec` 標頭（對齊 16 B，上表最後一欄）+ `estimator_bytes` + `ring_bytes` + `lane_bytes` + `fusion_bytes`。
   **標頭不在任何一個拆解欄位內**，所以四個欄位加起來比 `total_bytes` 少一個標頭。
-- `lane_bytes`：四條 lane 池合計，每條 142,720／234,416／518,544 B（`ESTIMATE`、`FULL`）；`STATE` lane 不切它提早離開後不會讀的殘餘回音估計器與舒適噪音陣列，每條 120,400／190,080／430,176 B。
-  lane 由內部的 `aec_lane_init()` 建立，比同格點單聲道 `EXTERNAL_ALIGNED` 實例（177,408／289,264／645,616 B）少：借用陣列的同一個 FFT 控制代碼；
+- `lane_bytes`：四條 lane 池合計，每條 142,192／233,376／516,480 B（`ESTIMATE`、`FULL`）；`STATE` lane 不切它提早離開後不會讀的殘餘回音估計器與舒適噪音陣列，每條 119,872／189,040／428,112 B。
+  lane 由內部的 `aec_lane_init()` 建立，比同格點單聲道 `EXTERNAL_ALIGNED` 實例（176,880／288,224／643,552 B）少：借用陣列的同一個 FFT 控制代碼；
   省去 lane 契約永遠不跑的配置——delay-shift 快照（只有 `MATCHED` 估計器會用）、合成與增益緩衝（合成窗、OLA、`eout`、SuppressionGain 陣列與解碼後的 ENR／SU 門檻表；只有 `FULL` 才套增益）。
   單聲道實例同樣沒有 render-history 列與 `x2_past`，穩態歷史列剛好是環形長度，shadow 濾波器是主濾波器的 follower（同輸入、同清除、同分區步進，
   直接共用主濾波器的遠端歷史，也沒有它不形成的 `near_spec`／`error_spec_windowed`／`spec_scratch`）。
@@ -213,8 +213,8 @@ estimator 只省 5,120 B。
   **不含** lane 池。`STATE` 沒有融合緩衝（11,456／19,904／36,800 B）；`ESTIMATE` 有融合緩衝但沒有增益階段（17,712／32,304／61,488 B）。
 - `estimator_bytes`／`ring_bytes` 與單聲道同義，環形緩衝的容量也與單聲道同式：
   `MATCHED` 為 estimator 可回報的最大延遲加 `hop_size`（n=5、16 kHz／256 為 8,276 個 sample），`FIXED` 為 `fixed_delay_samples + hop_size`，`EXTERNAL_ALIGNED` 為 0。
-- 其他 `delay_mode`（`FULL`）：`EXTERNAL_ALIGNED` 為 604,640／994,208／2,179,360 B；`FIXED`、`fixed_delay_samples = 0` 為 605,152／995,232／2,181,408 B；
-  `FIXED`、100 ms 為 611,552（1600 sample）／1,001,632（1600 sample）／2,200,608 B（4800 sample）。
+- 其他 `delay_mode`（`FULL`）：`EXTERNAL_ALIGNED` 為 602,272／989,792／2,170,848 B；`FIXED`、`fixed_delay_samples = 0` 為 602,784／990,816／2,172,896 B；
+  `FIXED`、100 ms 為 609,184（1600 sample）／997,216（1600 sample）／2,192,096 B（4800 sample）。
 
 **尚未做到**：遠端側狀態仍是每條 lane 各一份（共用的是 delay 估計器、對齊後 far、FFT 控制代碼，以及 hop 內由 lane 0 借給 lane 1–3 的遠端 FFT 結果）；
 lane 約占 `FULL` 陣列池的 86%／89%／90%。

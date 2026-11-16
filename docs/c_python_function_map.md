@@ -37,17 +37,17 @@
 <!-- stats:begin -->
 | key | 數值 | 說明 |
 |---|---|---|
-| `c_src_total` | 515 | `src/` 下 `.c` 的 C 函式總數（唯一 (檔, 函式名)） |
+| `c_src_total` | 514 | `src/` 下 `.c` 的 C 函式總數（唯一 (檔, 函式名)） |
 | `c_src_mirror` | 221 | 關係為 mirror |
-| `c_src_partial` | 126 | 關係為 partial |
-| `c_src_c_only` | 168 | 關係為 C-only（含 21 個 `aec_testing_*` 測試鉤子） |
+| `c_src_partial` | 124 | 關係為 partial |
+| `c_src_c_only` | 169 | 關係為 C-only（含 22 個 `aec_testing_*` 測試鉤子） |
 | `c_src_unknown` | 0 | 關係為 未能判斷 |
 | `c_hdr_total` | 2 | `include/internal/` 下 header 內 static inline 函式總數（規則 2；共用 SIMD 核心不列入） |
 | `c_hdr_c_only` | 1 | 其中 C-only |
 | `c_hdr_mapped` | 1 | 其中 mirror 或 partial |
-| `c_total` | 517 | C 函式合計（src 加 header） |
-| `c_mapped` | 348 | 已對應（mirror 加 partial）合計 |
-| `c_c_only` | 169 | C-only 合計 |
+| `c_total` | 516 | C 函式合計（src 加 header） |
+| `c_mapped` | 346 | 已對應（mirror 加 partial）合計 |
+| `c_c_only` | 170 | C-only 合計 |
 | `c_unknown` | 0 | 未能判斷 合計 |
 | `inferred` | 28 | 關係說明以「推定：」開頭的列（已含在上列 mirror／partial 內） |
 | `py_total` | 575 | Python 符號總數（規則 4） |
@@ -88,11 +88,9 @@
 | `src/aec.c:aec_legacy10ms_hops` | — | C-only（Python 在呼叫處直接用 `ms_to_hops` 重新取整，沒有獨立函式） | — | `ctest:test_rate_structural.c` |
 | `src/aec.c:aec_legacy10ms_alpha` | — | C-only（Python 在呼叫處直接用 `growth_rehop`） | — | `ctest:test_rate_structural.c` |
 | `src/aec.c:aec_legacy10ms_rate` | — | C-only（加法型逐 hop 速率的線性換算；C 註解載明 Python 側尚無對應的共用 helper） | — | `ctest:test_rate_structural.c` |
-| `src/aec_tuning.c:aec_level_row` | — | C-only（三個 level 查表共用的列查找；Python 以 `AecConfig.from_preset` 內的分支取得同樣數值） | — | `ctest:test_runtime_preset.c` |
+| `src/aec_tuning.c:aec_level_row` | — | C-only（`aec_level_floors` 與 `aec_level_name` 共用的列查找；Python 以 `AecConfig.from_preset` 內的分支取得同樣數值） | — | `ctest:test_runtime_preset.c` |
 | `src/aec_tuning.c:aec_level_name` | — | C-only（等級名稱字串，供 CLI 與 log 顯示；列舉之外回 "balanced"，與 `aec_config_from_level` 的處理相同） | — | `ctest:test_runtime_preset.c` |
-| `src/aec_tuning.c:aec_level_floor_db` | `modules/config.py:AecConfig.from_preset` | partial（只回 far-active 地板 dB） | D-04 | `ctest:test_runtime_preset.c` |
-| `src/aec_tuning.c:aec_level_dt_floor_db` | `modules/config.py:AecConfig.from_preset` | partial（只回 DT 地板 dB） | D-04 | `ctest:test_runtime_preset.c` |
-| `src/aec_tuning.c:aec_level_split_floor_enabled` | `modules/config.py:AecConfig.from_preset` | partial（只回 split-floor 閂的布林值） | D-04 | `ctest:test_runtime_preset.c` |
+| `src/aec_tuning.c:aec_level_floors` | `modules/config.py:AecConfig.from_preset` | partial（一次回 far-active 地板 dB、DT 地板 dB 與 split-floor 閂；Python 以 `from_preset` 內的分支取得同樣數值） | D-04 | `ctest:test_runtime_preset.c` |
 | `src/aec_tuning.c:aec_config_from_level` | `modules/config.py:AecConfig.from_preset` | mirror（C 只存 `level` 數字，三個 floor 值由 `aec_tuning_defaults` 查表帶出，缺 Python-only 旋鈕；NO_FLOOR 雙邊建構期都有；不支援的取樣率 C 回 `fft_size`＝0、派生的 `filter_length`＝0 並由建立入口拒絕，Python 在 `__post_init__` 直接 `ValueError`） | S-02；S-22；D-02；D-04；D-06；D-07 | `ctest:test_runtime_preset.c`<br>`ctest:test_config_validation.c` |
 | `src/aec_tuning.c:aec_find_grid` | — | C-only（格點表查找：取樣率加 fft_size，fft_size 不大於 0 時任一列；`aec_resolve_signal_grid`、`aec_is_valid_sample_rate`、`aec_default_fft_size` 共用） | — | `ctest:test_config_validation.c` |
 | `src/aec_tuning.c:aec_resolve_signal_grid` | `modules/config.py:resolve_signal_grid` | mirror | — | `pytest:test_signal_grid.py`<br>`ctest:test_config_validation.c` |
@@ -117,6 +115,7 @@
 | `src/aec.c:aec_testing_update_simple_mu_ratio` | — | C-only（測試專用鉤子，只在 `AEC_TESTING` 建置存在） | — | `ctest:test_rate_structural.c` |
 | `src/aec.c:aec_testing_reset_filter_latches` | — | C-only（測試專用鉤子，只在 `AEC_TESTING` 建置存在） | — | `ctest:test_rate_structural.c` |
 | `src/aec.c:aec_testing_legacy10ms_rate` | — | C-only（測試專用鉤子，只在 `AEC_TESTING` 建置存在） | — | `ctest:test_rate_structural.c` |
+| `src/aec.c:aec_testing_track_delay_shift` | — | C-only（測試專用鉤子，只在 `AEC_TESTING` 建置存在：對單聲道 Path B 提交一個指定的 delay 估計，以測兩段式確認的帶寬、確認窗與候選壽命） | — | `ctest:test_delay_admission.c` |
 | `src/aec.c:aec_testing_tuning_defaults` | — | C-only（測試專用鉤子，只在 `AEC_TESTING` 建置存在：填入函式庫為該 `AecConfig` 帶出的內部 `AecTuning`） | — | `ctest:test_config_validation.c` |
 | `src/aec.c:aec_testing_tuning_valid` | — | C-only（測試專用鉤子，只在 `AEC_TESTING` 建置存在：內部調校值的範圍檢查） | — | `ctest:test_config_validation.c` |
 | `src/aec.c:aec_testing_get_mem_size` | — | C-only（測試專用鉤子，只在 `AEC_TESTING` 建置存在：以測試自備的 `AecTuning` 查記憶池大小） | — | `ctest:test_memory_layout.c` |

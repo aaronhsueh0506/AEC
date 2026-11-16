@@ -5,6 +5,8 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
 
 #include "aec.h"
 #include "aec_tuning.h"
@@ -23,8 +25,7 @@
 #define AEC_DELAY_REJECT_CAP 8
 
 /* Matched-filter duty-cycle gate: full-rate analysis until the estimate has been solid and unchanged for hold_hops, then one
- * hop in period_hops, back to full rate on a windowed-ERLE collapse. Internal; shared by the single-channel instance and the
- * array flow (aec_duty_* in aec_array_internal.h). */
+ * hop in period_hops, back to full rate on a windowed-ERLE collapse. Shared by the single-channel instance and the array flow. */
 typedef struct AecDutyGate {
     int    active;
     int    stable_hops;
@@ -36,6 +37,113 @@ typedef struct AecDutyGate {
     int    period_hops;
     unsigned long long hops_run;
 } AecDutyGate;
+
+/* The analysis period is the configured period divided by AEC_DUTY_PERIOD_DIVISOR; a windowed-ERLE drop of
+ * AEC_DUTY_ERLE_COLLAPSE_DB below the leaky peak resumes full rate. The caller configures the gate once and keeps its own census. */
+#define AEC_DUTY_PERIOD_DIVISOR    5
+#define AEC_DUTY_ERLE_COLLAPSE_DB  6.0f
+
+/* Per-hop leak of the duty watchdog the grid implies: 0.001 dB at the 10 ms reference hop, scaled with the hop duration. */
+float aec_duty_leak_db(int hop_size, int sample_rate);
+/* Seconds -> hops (round, floor 1) against the grid: hold_hops from hold_s, period_hops from period_s / AEC_DUTY_PERIOD_DIVISOR,
+ * and the grid's erle_leak_db. */
+void  aec_duty_configure(AecDutyGate* g, float hold_s, float period_s, int hop_size, int sample_rate);
+/* Clears the gate's state (not its hold / period / leak). */
+void  aec_duty_reset(AecDutyGate* g);
+/* Before the estimator is fed: advances the decimation phase and returns 1 when this hop's analysis runs (counts it). */
+int   aec_duty_begin(AecDutyGate* g);
+/* After the estimator is fed: the estimate (cur_delay, solid) and the windowed ERLE read at this hop arm, hold or drop the gate. */
+void  aec_duty_end(AecDutyGate* g, int cur_delay, int solid, float erle);
+
+/* Shared-delay change admission (Path B of the single channel and the array's shared alignment): a change to the alignment in
+ * force is admitted only when the movement exceeds AEC_DELAY_CHANGE_MIN_SAMPLES and is offered again, within
+ * AEC_DELAY_CHANGE_CONFIRM_SAMPLES, before the held candidate ages out (TTL in hops). */
+#define AEC_DELAY_CHANGE_MIN_SAMPLES      32
+#define AEC_DELAY_CHANGE_CONFIRM_SAMPLES  16
+#define AEC_DELAY_CHANGE_CANDIDATE_TTL     3
+
+typedef struct AecDelayAdmission {
+    int candidate;
+    int ttl;
+} AecDelayAdmission;
+
+/* One hop of life spent, whether or not this hop had a usable estimate. Call once per hop, before offer(). */
+static inline void aec_delay_admission_age(AecDelayAdmission* admission) {
+    if (!admission || admission->ttl <= 0) return;
+    admission->ttl -= 1;
+    if (admission->ttl <= 0) {
+        admission->ttl = 0;
+        admission->candidate = -1;
+    }
+}
+
+/* Offers this hop's eligible estimate against the alignment in force. 1: the movement is admitted (the caller applies it and
+ * realigns); 0: absorbed as too small, or held / replaced as a candidate. */
+static inline int aec_delay_admission_offer(AecDelayAdmission* admission, int accepted_delay, int estimated) {
+    if (!admission) return 0;
+    /* Too small to be worth four IR shifts: absorbed and left to age. */
+    if (abs(estimated - accepted_delay) <= AEC_DELAY_CHANGE_MIN_SAMPLES) return 0;
+    if (admission->ttl > 0 &&
+        abs(estimated - admission->candidate) < AEC_DELAY_CHANGE_CONFIRM_SAMPLES) {
+        admission->candidate = -1;
+        admission->ttl = 0;
+        return 1;
+    }
+    admission->candidate = estimated;
+    admission->ttl = AEC_DELAY_CHANGE_CANDIDATE_TTL;
+    return 0;
+}
+
+/* Drops the held candidate (-1 holds none; only candidate with ttl > 0 is live). */
+static inline void aec_delay_admission_clear(AecDelayAdmission* admission) {
+    admission->candidate = -1;
+    admission->ttl = 0;
+}
+
+/* Reference-ring copies of n <= ring_size samples at index `at`: at most one wrap, so one or two bounded runs. */
+static inline void aec_ring_write(float* ring, int ring_size, int at, const float* src, int n) {
+    int first = ring_size - at;
+    if (first > n) first = n;
+    memcpy(ring + at, src, (size_t)first * sizeof(float));
+    if (first < n) memcpy(ring, src + first, (size_t)(n - first) * sizeof(float));
+}
+static inline void aec_ring_read(const float* ring, int ring_size, int at, float* dst, int n) {
+    int first = ring_size - at;
+    if (first > n) first = n;
+    memcpy(dst, ring + at, (size_t)first * sizeof(float));
+    if (first < n) memcpy(dst + first, ring, (size_t)(n - first) * sizeof(float));
+}
+
+/* Stage timing is off by default (stamps fold to 0); build with -DAEC_STAGE_TIMING=1. A 32-bit microsecond monotonic stamp; a
+ * target without CLOCK_MONOTONIC defines -DAEC_NOW_US=<fn> (no-argument function returning monotonic uint32_t microseconds). */
+#if AEC_STAGE_TIMING
+#ifndef AEC_NOW_US
+#include <time.h>
+static inline uint32_t aec_now_us(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint32_t)((uint64_t)ts.tv_sec * 1000000ull + (uint64_t)ts.tv_nsec / 1000ull);
+}
+#else
+static inline uint32_t aec_now_us(void) { return AEC_NOW_US(); }
+#endif
+#else
+#define aec_now_us() 0u
+#endif
+
+/* Far-only analysis shared across array lanes: lane 0 publishes its far-only results each hop and lanes 1-3 reuse them. hop
+ * (stages that read the far hop alone), fft (the donor's far spectrum and what derives from it), analysis (tonal counters, noise
+ * floor; valid while the far history has equalled the donor's since the last reset), post (the donor's far PSD). */
+typedef struct AecFarShare {
+    const Aec* donor;
+    int hop, fft, analysis, post;
+    float sat_ref;
+    RenderActivityResult ra;
+    float far_mean_sq;
+    int far_floor_hit;
+    int rsa_poor;
+    int rsa_mask_active;
+} AecFarShare;
 
 /* Instance state: library-internal (aec.c, aec_array.c and white-box tests); the public API is aec.h. */
 struct Aec {
@@ -52,7 +160,7 @@ struct Aec {
     DelayAec delay;       int has_delay;
     float* ref_ring;       int ref_ring_size, ref_ring_write, ref_ring_filled;
     int    current_delay;
-    int    pending_delay;  int has_pending; int pending_delay_ttl;
+    AecDelayAdmission delay_admission;   /* Path B: a shifted delay is admitted when offered twice (aec_delay_admission_offer()) */
     int    delay_shift_judgment_active;
     int    delay_shift_judgment_pre_delay;
     float  delay_shift_judgment_pre_erle;
@@ -151,7 +259,6 @@ struct Aec {
     int    observer_shift_hops;
     float* filter_taps_full;
 
-    float* scr_sq;
     float* scr_e2_echo;
     float* scr_e2_near;
     float* scr_rsa_mask;
@@ -183,5 +290,17 @@ struct Aec {
 
     AecStageTiming last_timing;
 };
+
+/* A NULL, never-built, failed-create or destroyed handle: every entry point refuses it. */
+static inline int aec_unusable(const Aec* a) { return !a || !a->ready; }
+
+/* A hop whose results are not finite, either instance kind (aec.c). aec_cvec_finite: 1 when `count` bins are finite, 0 for
+ * NULL or count < 0. aec_refuse_hop: resets the instance as aec_reset() (the linear view then reads zeros; an array's is lane 0's) and
+ * returns AEC_ERR_DSP. */
+int aec_cvec_finite(const Complex* v, int count);
+int aec_refuse_hop(Aec* a);
+/* Reference ring capacity in samples for a resolved configuration: 0 for EXTERNAL_ALIGNED, an estimator that cannot be sized or an
+ * int overflow (aec.c; the single channel and the array size the ring through it). */
+int aec_ref_ring_samples(const AecResolved* rs, int hop);
 
 #endif /* AEC_AEC_IMPL_H */

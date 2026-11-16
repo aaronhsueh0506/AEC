@@ -17,10 +17,7 @@
 struct AecRes {
     int n_bins;
     int hop_size;
-    /* Configuration as built; reset re-applies it and a level change updates it. */
-    SuppressionGainConfig sg_cfg;
-    SuppressionGainTuning sg_tun;
-    SuppressionGain sg;
+    SuppressionGain sg;    /* its cfg / tun are what reset re-applies; a level change updates them */
     float* sg_storage;      /* (10 + nearend_smoother_n) * n_bins floats */
     float* near_power;      /* n_bins */
     float* render_scaled;   /* hop_size */
@@ -54,10 +51,12 @@ size_t aec_res_get_mem_size(const AecConfig* cfg) {
     return aec_resolve(cfg, &resolved) ? aec_res_get_mem_size_resolved(&resolved) : 0;
 }
 
-/* Re-creates the suppressor from the stored configuration over zeroed state. */
+/* Re-creates the suppressor from its own configuration over zeroed state. */
 static void rebuild(AecRes* r) {
+    const SuppressionGainConfig cfg = r->sg.cfg;   /* copies: suppression_gain_init() clears *sg first */
+    const SuppressionGainTuning tun = r->sg.tun;
     const int n = r->n_bins;
-    const int ma_n = r->sg_cfg.nearend_smoother_n;
+    const int ma_n = cfg.nearend_smoother_n;
     float* c = r->sg_storage;
     float *last_gain = c, *last_near, *last_echo, *ma_buf, *near_s, *weighted;
     float *min_gain, *max_gain, *raw_gain, *gain, *sum;
@@ -72,7 +71,7 @@ static void rebuild(AecRes* r) {
     c += n; gain = c;
     c += n; sum = c;
     memset(r->sg_storage, 0, sg_float_count(n, ma_n) * sizeof(float));
-    suppression_gain_init(&r->sg, &r->sg_cfg, &r->sg_tun, last_gain, last_near,
+    suppression_gain_init(&r->sg, &cfg, &tun, last_gain, last_near,
                           last_echo, ma_buf, near_s, weighted, min_gain, max_gain,
                           raw_gain, gain, sum);
 }
@@ -94,8 +93,8 @@ AecRes* aec_res_init_resolved(void* mem, size_t bytes, const AecResolved* resolv
     memset(r, 0, sizeof *r);
     r->n_bins = grid.n_freqs;
     r->hop_size = grid.hop_size;
-    r->sg_cfg = sg_cfg;
-    r->sg_tun = sg_tun;
+    r->sg.cfg = sg_cfg;   /* rebuild() starts from these */
+    r->sg.tun = sg_tun;
     p = (uint8_t*)mem + ck_align16_size(sizeof *r);
     r->sg_storage = (float*)p;
     p += ck_align16_size(sg_float_count(r->n_bins, sg_cfg.nearend_smoother_n) * sizeof(float));
@@ -104,7 +103,7 @@ AecRes* aec_res_init_resolved(void* mem, size_t bytes, const AecResolved* resolv
     r->render_scaled = (float*)p;
     p += ck_align16_size((size_t)r->hop_size * sizeof(float));
     /* The decoded ENR/SU tables sit outside sg_storage, which rebuild() clears; the tuning keeps pointing at them. */
-    if (aec_sg_tables_decode(resolved, p, &r->sg_tun) != 0) return NULL;
+    if (aec_sg_tables_decode(resolved, p, &r->sg.tun) != 0) return NULL;
     rebuild(r);
     return r;
 }
@@ -154,11 +153,7 @@ const float* aec_res_process(AecRes* r, const AecResInput* in) {
 
 int aec_res_set_level(AecRes* r, AecLevel level) {
     if (!r) return -1;
-    if (aec_sg_apply_level(&r->sg, level) != 0) return -1;
-    r->sg_cfg.split_floor_far_active = r->sg.cfg.split_floor_far_active;
-    r->sg_cfg.split_floor_dt = r->sg.cfg.split_floor_dt;
-    r->sg_cfg.split_floor_enabled = r->sg.cfg.split_floor_enabled;
-    return 0;
+    return aec_sg_apply_level(&r->sg, level) != 0 ? -1 : 0;
 }
 
 /* ---- test-only hooks (aec_test_hooks.h; compiled only under -DAEC_TESTING) ------------------------------------------------ */

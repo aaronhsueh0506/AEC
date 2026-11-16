@@ -111,11 +111,9 @@ int aec_resolved_valid(const AecResolved* r) {
 
 /* ───────────────────────── helpers ─────────────────────────────────────── */
 
-/* Mean of x^2 in float32. scratch holds >= n floats. */
-static float mean_sq(const float* x, int n, float* scratch) {
-    sk_sq_scale_f32(x, 1.0f, scratch, n);
-    float s = sk_pairwise_sum_f32(scratch, (size_t)n);
-    return s / (float)n;
+/* Mean of x^2 in float32 (the pairwise tree over the squares). */
+static float mean_sq(const float* x, int n) {
+    return sk_sum_sq_pairwise_f32(x, (size_t)n) / (float)n;
 }
 
 /* Counters saturate at LONG_MAX (32-bit long on some targets). */
@@ -189,9 +187,7 @@ static void aec_reset_filter_derived_state(Aec* a) {
 
     aec_post_chain_reset(a);
 
-    a->pending_delay = -1;
-    a->has_pending = 0;
-    a->pending_delay_ttl = 0;
+    aec_delay_admission_clear(&a->delay_admission);
 }
 
 static int aec_delay_value_rejected(const Aec* a, int candidate) {
@@ -245,7 +241,7 @@ static void aec_apply_delay_shift_soft_revert(Aec* a, int target_delay,
     a->erle_window_err = 1e-10f;
     a->main_err_smooth = 0.0f;
     a->shadow_err_smooth = 0.0f;
-    a->has_pending = 0; a->pending_delay = -1; a->pending_delay_ttl = 0;
+    aec_delay_admission_clear(&a->delay_admission);
 }
 
 /* Filter-only restart for a far realign (aec_apply_external_realign): clears
@@ -374,7 +370,7 @@ static void update_simple_mu_ratio(Aec* a, float error_power, float far_power) {
 #ifdef AEC_TESTING
 void aec_testing_update_simple_mu_ratio(Aec* a, const float* output,
                                         const float* far_end, int n) {
-    update_simple_mu_ratio(a, mean_sq(output, n, a->scr_sq) + 1e-10f, mean_sq(far_end, n, a->scr_sq) + 1e-10f);
+    update_simple_mu_ratio(a, mean_sq(output, n) + 1e-10f, mean_sq(far_end, n) + 1e-10f);
 }
 
 void aec_testing_reset_filter_latches(Aec* a) {
@@ -727,7 +723,6 @@ static size_t aec_mem_size_impl(const AecResolved* rs, int lane) {
     t = ck_field_size(t, Kz, sizeof(float));           /* per_bin_mu_scale */
     t = ck_field_size_reps(t, (size_t)hop, sizeof(float), 5); /* near_hop far_hop raw shadow final */
     t = ck_field_size(t, ck_mul_size((size_t)np, (size_t)hop), sizeof(float)); /* filter_taps_full */
-    t = ck_field_size(t, (size_t)hop, sizeof(float));  /* scr_sq */
     t = ck_field_size_reps(t, Kz, sizeof(float), 6);   /* scr_e2_echo .. scr_e2ref_arr */
     if (tn->enable_highpass) t = ck_field_size(t, 1, hpf_get_mem_size()); /* mic-path HPF */
 
@@ -836,7 +831,7 @@ static uint8_t* aec_carve_delay_ring(Aec* a, uint8_t* ptr, const AecResolved* rs
         memset(a->ref_ring, 0, (size_t)buf_samp * sizeof(float));
         a->current_delay = (cfg->delay_mode == AEC_DELAY_MATCHED)
                            ? -1 : cfg->fixed_delay_samples;
-        a->pending_delay = -1; a->has_pending = 0; a->pending_delay_ttl = 0;
+        aec_delay_admission_clear(&a->delay_admission);
     } else {
         a->current_delay = 0;
     }
@@ -1191,7 +1186,6 @@ static uint8_t* aec_carve_hop_scratch(Aec* a, uint8_t* ptr, const AecResolved* r
     memset(a->far_hop, 0, (size_t)hop * sizeof(float));
     memset(a->raw_output, 0, (size_t)hop * sizeof(float));
 
-    a->scr_sq       = (float*)ptr; ptr += ALIGN16((size_t)hop * sizeof(float));
     a->scr_e2_echo   = (float*)ptr; ptr += ALIGN16((size_t)K   * sizeof(float));
     a->scr_e2_near   = (float*)ptr; ptr += ALIGN16((size_t)K   * sizeof(float));
     a->scr_rsa_mask  = (float*)ptr; ptr += ALIGN16((size_t)K   * sizeof(float));
@@ -1481,8 +1475,7 @@ void aec_reset(Aec* a) {
         memset(a->ref_ring, 0, (size_t)a->ref_ring_size * sizeof(float));
         a->ref_ring_write = 0; a->ref_ring_filled = 0;
         a->current_delay = a->has_delay ? -1 : a->cfg.fixed_delay_samples;
-        a->pending_delay = -1; a->has_pending = 0;
-        a->pending_delay_ttl = 0;
+        aec_delay_admission_clear(&a->delay_admission);
         a->delay_shift_judgment_active = 0;
         a->delay_reject_count = 0;
     }
@@ -1731,58 +1724,49 @@ static void aec_acquire_delay(Aec* a, int new_delay, int eligible) {
 }
 
 static void aec_track_delay_shift(Aec* a, int new_delay, int eligible) {
-    if (a->pending_delay_ttl > 0) {
-        a->pending_delay_ttl--;
-        if (a->pending_delay_ttl <= 0) { a->has_pending = 0; a->pending_delay = -1; }
-    }
+    aec_delay_admission_age(&a->delay_admission);
 
     float conf = delay_aec_confidence(&a->delay);
 
     /* Path B: delay shift with a reject-list veto. */
-    if (eligible && a->current_delay >= 0 && conf >= 0.5f
-            && abs(new_delay - a->current_delay) > AEC_ARRAY_DELAY_CHANGE_MIN_SAMPLES
-            && !aec_delay_value_rejected(a, new_delay)) {
-        if (a->has_pending && abs(new_delay - a->pending_delay) < AEC_ARRAY_DELAY_CHANGE_CONFIRM_SAMPLES) {
-            int old_current_delay = a->current_delay;
-            /* Snapshot the taps and the main H_error (a statistic of the taps)
-             * so a confirmed-bad relock can restore them; pre_erle is the
-             * reading just before the shift. */
-            float pre_shift_erle = a->last_erle_windowed;
-            size_t w_elems = (size_t)a->n_partitions * (size_t)a->n_freqs;
-            memcpy(a->delay_shift_judgment_pre_W, a->main_filter.base.W,
-                   w_elems * sizeof(Complex));
-            if (a->has_shadow)
-                memcpy(a->delay_shift_judgment_pre_shadow_W,
-                       a->shadow_filter.W, w_elems * sizeof(Complex));
-            memcpy(a->delay_shift_judgment_pre_H_error,
-                   a->main_filter.H_error_per_bin,
-                   (size_t)a->n_freqs * sizeof(float));
-            a->current_delay = new_delay;
-            aec_bump_delay_generation(a);
-            a->has_pending = 0; a->pending_delay = -1; a->pending_delay_ttl = 0;
-            if (a->tun.dt_aware_recovery_soft && a->ne_recent_frames > 0) {
-                /* Soft realign: converged filter kept, IR shifted by the
-                 * applied delta (pbfdaf_warm_shift_ir) instead of a wipe. */
-                int soft_delta = new_delay - old_current_delay;
-                if (abs(soft_delta) < pbfdaf_tap_span(&a->main_filter.base)) {
-                    pbfdaf_warm_shift_ir(&a->main_filter.base, soft_delta);
-                    if (a->has_shadow)
-                        pbfdaf_warm_shift_ir(&a->shadow_filter, soft_delta);
-                }
-            } else {
-                /* Taps are matched to the pre-shift alignment: treat as Path
-                 * A. */
-                aec_apply_delay_shift_hard_reset(a, new_delay);
+    if (eligible && a->current_delay >= 0 && conf >= 0.5f && !aec_delay_value_rejected(a, new_delay)
+            && aec_delay_admission_offer(&a->delay_admission, a->current_delay, new_delay)) {
+        int old_current_delay = a->current_delay;
+        /* Snapshot the taps and the main H_error (a statistic of the taps)
+         * so a confirmed-bad relock can restore them; pre_erle is the
+         * reading just before the shift. */
+        float pre_shift_erle = a->last_erle_windowed;
+        size_t w_elems = (size_t)a->n_partitions * (size_t)a->n_freqs;
+        memcpy(a->delay_shift_judgment_pre_W, a->main_filter.base.W,
+               w_elems * sizeof(Complex));
+        if (a->has_shadow)
+            memcpy(a->delay_shift_judgment_pre_shadow_W,
+                   a->shadow_filter.W, w_elems * sizeof(Complex));
+        memcpy(a->delay_shift_judgment_pre_H_error,
+               a->main_filter.H_error_per_bin,
+               (size_t)a->n_freqs * sizeof(float));
+        a->current_delay = new_delay;
+        aec_bump_delay_generation(a);
+        if (a->tun.dt_aware_recovery_soft && a->ne_recent_frames > 0) {
+            /* Soft realign: converged filter kept, IR shifted by the
+             * applied delta (pbfdaf_warm_shift_ir) instead of a wipe. */
+            int soft_delta = new_delay - old_current_delay;
+            if (abs(soft_delta) < pbfdaf_tap_span(&a->main_filter.base)) {
+                pbfdaf_warm_shift_ir(&a->main_filter.base, soft_delta);
+                if (a->has_shadow)
+                    pbfdaf_warm_shift_ir(&a->shadow_filter, soft_delta);
             }
-            /* Bad-relock judgment (both branches): judged after
-             * AEC_DELAY_SHIFT_JUDGMENT_HOPS. */
-            a->delay_shift_judgment_active = 1;
-            a->delay_shift_judgment_pre_delay = old_current_delay;
-            a->delay_shift_judgment_pre_erle = pre_shift_erle;
-            a->delay_shift_judgment_hops_left = AEC_DELAY_SHIFT_JUDGMENT_HOPS;
         } else {
-            a->pending_delay = new_delay; a->has_pending = 1; a->pending_delay_ttl = AEC_ARRAY_DELAY_CHANGE_CANDIDATE_TTL;
+            /* Taps are matched to the pre-shift alignment: treat as Path
+             * A. */
+            aec_apply_delay_shift_hard_reset(a, new_delay);
         }
+        /* Bad-relock judgment (both branches): judged after
+         * AEC_DELAY_SHIFT_JUDGMENT_HOPS. */
+        a->delay_shift_judgment_active = 1;
+        a->delay_shift_judgment_pre_delay = old_current_delay;
+        a->delay_shift_judgment_pre_erle = pre_shift_erle;
+        a->delay_shift_judgment_hops_left = AEC_DELAY_SHIFT_JUDGMENT_HOPS;
     }
 }
 
@@ -2470,7 +2454,7 @@ static void aec_stage_linear(Aec* a, const float* mic_in, const float* ref_in,
         a->render_activity.active_prev = d->active_prev;
         a->render_activity.is_stationary = d->is_stationary;
     } else {
-        far_hop_mean_sq = mean_sq(a->far_hop, hop, a->scr_sq);
+        far_hop_mean_sq = mean_sq(a->far_hop, hop);
         ra = render_activity_update(&a->render_activity, a->far_hop, hop);
     }
     if (out) {
@@ -2891,6 +2875,10 @@ int aec_get_linear(const Aec* a, AecLinearView* out) {
 
 /* ---- test-only hooks (test/aec_test_hooks.h; compiled only under -DAEC_TESTING): the entry points with a caller-built tuning -- */
 #ifdef AEC_TESTING
+void aec_testing_track_delay_shift(Aec* a, int new_delay, int eligible) {
+    aec_track_delay_shift(a, new_delay, eligible);
+}
+
 void aec_testing_tuning_defaults(AecTuning* tun, const AecConfig* cfg) {
     aec_tuning_defaults(tun, cfg);
 }
