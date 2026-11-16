@@ -20,7 +20,7 @@
 | Python 檔:符號 | `` `<路徑>:<符號>` ``，路徑相對於 `python/`，符號是點分隔的 `類別.方法` 或模組層函式／類別名。一格可有多個，以 `<br>` 分隔；`—` 表示範圍內沒有。可在符號後加 `#錨點字串`：表示 C 函式只對應該符號內的一段（例如部分方法內的局部計算只對應某個 C 函式），測試會驗證錨點字串確實出現在該符號的原始碼裡。**符號名為準，行號不寫**（行號會漂移）。 |
 | 關係 | 開頭是下列關鍵字之一，後面可接括號說明：`mirror`＝同一運算單元、同數學（數值差異另見落差欄）；`partial`＝只對應一部分，或 C 與 Python 拆分的方式不同，括號內寫缺什麼；`C-only`＝範圍內沒有對應的 Python 函式（記憶體、SIMD 核心、除錯、測試鉤子等 C 專屬基礎設施）；`Python-only`＝範圍內沒有任何 C 函式對應到這個 Python 符號；`未能判斷`＝證據不足，不硬湊。括號說明以「推定：」開頭者，表示對應是讀兩邊程式碼後得出，註解與函式名都沒有直接說明，動到該函式時應複核。 |
 | 已知落差 | 落差編號，`；` 分隔，`—` 表示沒有已登記的落差。編號意義見附錄 A。EXPECTED_RED(S-xx) 標記應引用這一欄的編號。 |
-| 對拍工具／測試 | 標記語法見附錄 B（`live:`、`e2e:`、`manual:`、`ctest:`、`pytest:`）。`—` 表示沒有直接對拍或專屬測試，只被端到端間接覆蓋。 |
+| 對拍工具／測試 | 標記語法見附錄 B（`live:`、`manual:`、`ctest:`、`pytest:`）。`—` 表示沒有直接對拍或專屬測試，只被 `make test-pyc-parity` 間接覆蓋。 |
 
 ### 0.3 計數規則（逐字，先於數字）
 
@@ -72,7 +72,7 @@
 
 ### 0.7 與 `pyc_parity_aec.sh` 的關係
 
-`c_impl/test/pyc_parity_aec.sh`（`make test-pyc-parity`）是 Python↔C 數值對拍腳本；端到端閘門是 `make test-parity-e2e`（只在 `make test-full` 執行）。`make test-pyc-parity` 預設跑 10 個場景的精簡集，`PYC_ARGS=--full` 跑全部場景。分工是：
+`c_impl/test/pyc_parity_aec.sh`（`make test-pyc-parity`）是 Python↔C 數值對拍腳本，預設跑 10 個場景的精簡集，`PYC_ARGS=--full` 跑全部場景。分工是：
 該腳本以「情境」為單位量 C 對 Python 的數值差，兩層標準（std-math 建置貼近 Python、出貨建置落在固定近似預算內），並以 `EXPECTED_RED(S-xx)` 標記已知落差（登記在 `c_impl/test/pyc_parity/pyc_parity.py`）；本表以「函式」為單位回答「這段 C 對應 Python 哪裡、有哪些已登記落差」。情境紅燈時用本表由 C 函式反查 Python 符號，`EXPECTED_RED(S-xx)` 的編號則引用本表「已知落差」欄與附錄 A。本表不量任何數值，也不取代該腳本。
 
 ---
@@ -220,9 +220,9 @@
 | `src/aec.c:aec_erle_ring_max_last15` | `modules/orchestrator.py:AEC._acquire_delay#_erle_slope_buf` | partial（Python 在 process 內以 `max(list(self._erle_slope_buf)[-15:] or [0.0])` 內嵌） | — | — |
 | `src/aec.c:aec_linear_is_cancelling` | `modules/orchestrator.py:AEC.linear_is_cancelling` | mirror（Python 註解回指此 C 函式） | — | `ctest:test_external_realign.c` |
 | `src/aec.c:aec_get_last_timing` | — | C-only（效能計時） | — | `ctest:bench_rtf.c` |
-| `src/aec.c:aec_stage_linear` | `modules/orchestrator.py:AEC.process`<br>`modules/orchestrator.py:AEC._maybe_mark_diverged`<br>`modules/orchestrator.py:AEC._dt_from_energy`<br>`modules/orchestrator.py:AEC._dt_from_shadow`<br>`modules/orchestrator.py:AEC.get_erle_instant`<br>`modules/orchestrator.py:AEC._accept_delay_shift`<br>`modules/orchestrator.py:AEC._acquire_delay`<br>`modules/orchestrator.py:AEC._align_reference`<br>`modules/orchestrator.py:AEC._judge_delay_shift`<br>`modules/orchestrator.py:AEC._prepare_capture`<br>`modules/orchestrator.py:AEC._prepare_linear_gates`<br>`modules/orchestrator.py:AEC._process_frequency`<br>`modules/orchestrator.py:AEC._process_linear`<br>`modules/orchestrator.py:AEC._track_delay_shift`<br>`modules/orchestrator.py:AEC._track_erle_convergence`<br>`modules/orchestrator.py:AEC._track_linear_error`<br>`modules/orchestrator.py:AEC._update_delay_estimate`<br>`modules/orchestrator.py:AEC._update_path_changes`<br>`modules/orchestrator.py:AEC._update_render_gates`<br>`modules/orchestrator.py:AEC._update_render_stationarity`<br>`modules/orchestrator.py:AEC._update_residual_mu`<br>`modules/orchestrator.py:AEC._update_shadow`<br>`modules/orchestrator.py:AEC._update_shadow_leakage` | partial（逐 hop 主迴圈的線性 stage：前端、delay、shadow、主 filter 到 windowed ERLE；`aec_process()`／`aec_process_linear()` 共用；C 無 return_formed_output／res_audit／診斷） | T-02；T-17；D-10 | `e2e:parity_aec_e2e`<br>`ctest:test_split_entry.c`<br>`ctest:test_process_context.c` |
+| `src/aec.c:aec_stage_linear` | `modules/orchestrator.py:AEC.process`<br>`modules/orchestrator.py:AEC._maybe_mark_diverged`<br>`modules/orchestrator.py:AEC._dt_from_energy`<br>`modules/orchestrator.py:AEC._dt_from_shadow`<br>`modules/orchestrator.py:AEC.get_erle_instant`<br>`modules/orchestrator.py:AEC._accept_delay_shift`<br>`modules/orchestrator.py:AEC._acquire_delay`<br>`modules/orchestrator.py:AEC._align_reference`<br>`modules/orchestrator.py:AEC._judge_delay_shift`<br>`modules/orchestrator.py:AEC._prepare_capture`<br>`modules/orchestrator.py:AEC._prepare_linear_gates`<br>`modules/orchestrator.py:AEC._process_frequency`<br>`modules/orchestrator.py:AEC._process_linear`<br>`modules/orchestrator.py:AEC._track_delay_shift`<br>`modules/orchestrator.py:AEC._track_erle_convergence`<br>`modules/orchestrator.py:AEC._track_linear_error`<br>`modules/orchestrator.py:AEC._update_delay_estimate`<br>`modules/orchestrator.py:AEC._update_path_changes`<br>`modules/orchestrator.py:AEC._update_render_gates`<br>`modules/orchestrator.py:AEC._update_render_stationarity`<br>`modules/orchestrator.py:AEC._update_residual_mu`<br>`modules/orchestrator.py:AEC._update_shadow`<br>`modules/orchestrator.py:AEC._update_shadow_leakage` | partial（逐 hop 主迴圈的線性 stage：前端、delay、shadow、主 filter 到 windowed ERLE；`aec_process()`／`aec_process_linear()` 共用；C 無 return_formed_output／res_audit／診斷） | T-17；D-10 | `ctest:test_split_entry.c`<br>`ctest:test_process_context.c` |
 | `src/aec.c:aec_stage_residual` | `modules/orchestrator.py:AEC._process_residual` | partial（逐 hop 的後級 stage：post 區塊、後級 mu、收尾；`apply` 時另套增益並合成；`AecConfig.residual` 決定做到哪裡；Python 的 res-context 路徑對應 `FULL` 搭配拆開的進入點） | T-05 | `ctest:test_split_entry.c`<br>`ctest:test_process_context.c` |
-| `src/aec.c:aec_process` | `modules/orchestrator.py:AEC.process` | partial（離線包裝：兩個 stage 加輸出複製；`residual` 為 `FULL` 時另套增益、加舒適噪音並合成；結果溢位的 hop 回 `AEC_ERR_DSP`（C 專屬，見 `aec_closed_finite`）） | S-19；T-02 | `e2e:parity_aec_e2e`<br>`ctest:test_split_entry.c`<br>`ctest:test_process_context.c`<br>`ctest:test_dsp_refusal.c` |
+| `src/aec.c:aec_process` | `modules/orchestrator.py:AEC.process` | partial（離線包裝：兩個 stage 加輸出複製；`residual` 為 `FULL` 時另套增益、加舒適噪音並合成；結果溢位的 hop 回 `AEC_ERR_DSP`（C 專屬，見 `aec_closed_finite`）） | — | `ctest:test_split_entry.c`<br>`ctest:test_process_context.c`<br>`ctest:test_dsp_refusal.c` |
 | `src/aec.c:aec_process_linear` | `modules/orchestrator.py:AEC.process` | partial（只跑線性 stage 的入口；`residual` 為 `OFF` 時一呼叫結束整個 hop，其餘留待 `aec_process_residual`；結果溢位的 hop 回 `AEC_ERR_DSP`（C 專屬）） | D-12 | `ctest:test_split_entry.c`<br>`ctest:test_process_context.c`<br>`ctest:test_dsp_refusal.c` |
 | `src/aec.c:aec_process_linear_shared_far_from` | — | C-only（宣告在 `aec_internal.h`；同 hop 的遠端頻譜與精確 magnitude² 成對共用；各 lane 保留自身歷史） | D-12 | `ctest:test_shared_far_spec.c`<br>`ctest:test_spectral_reuse.c` |
 | `src/aec.c:aec_close_linear` | — | C-only（第一階段收尾：`residual == OFF` 時直接結束該 hop，否則把 hop 留在待後級的狀態） | — | `ctest:test_split_entry.c` |
@@ -267,7 +267,7 @@
 | `src/aec_post.c:aec_post_apply_output` | `modules/orchestrator.py:AEC._post_add_comfort_noise#cng_noise_terms`<br>`modules/orchestrator.py:AEC._post_synthesize` | partial（`_aec3_post` stage 6：對渲染底座套增益、注入 CNG、irfft、OLA；底座已由 `aec_post_eval_output_guard` 在每 hop 決定，這裡不再選；CNG 走 `aec_cng_fill`） | — | `ctest:test_guard_unify.c` |
 | `src/aec_post.c:aec_post_eval_output_guard` | `modules/orchestrator.py:AEC._post_output_base`<br>`modules/orchestrator.py:AEC._guard_energy` | mirror（輸出守衛，每 hop 在 usable 判定確定後、任何 context 提前離開之前求值一次；`sum(abs(E)²)` 與 `sum(abs(Y)²)` 同為 float32 pairwise 歸約、嚴格 `>`；相同頻譜得到相同決定；C 對 Python 的對拍允許雙方都 unusable 且相對能量差在 1e-6 tie band 內的 hop 不一致並逐 cell 計數，band 外不一致即失敗） | — | `ctest:test_guard_unify.c`<br>`pytest:test_guard_unify.py` |
 | `src/aec_post.c:aec_post_run_observer_step` | `modules/orchestrator.py:AEC._post_observer_residual#_observer_corrob_margin` | partial（live observer 注入步驟；C 缺 `live_observer_inject_dt_energy_max` 守衛） | S-02；D-15 | — |
-| `src/aec_post.c:aec_post_run` | `modules/orchestrator.py:AEC._aec3_post`<br>`modules/orchestrator.py:AEC._post_estimate_residual`<br>`modules/orchestrator.py:AEC._post_external_delay`<br>`modules/orchestrator.py:AEC._post_filter_bridge`<br>`modules/orchestrator.py:AEC._post_filter_taps`<br>`modules/orchestrator.py:AEC._post_nearend_power`<br>`modules/orchestrator.py:AEC._post_pending_changes`<br>`modules/orchestrator.py:AEC._post_stationary_residual`<br>`modules/orchestrator.py:AEC._post_suppression_gain` | partial（完整 `_aec3_post` 編排；C 版不含 Python-only 研究旋鈕） | S-22；T-03 | `e2e:parity_aec_e2e` |
+| `src/aec_post.c:aec_post_run` | `modules/orchestrator.py:AEC._aec3_post`<br>`modules/orchestrator.py:AEC._post_estimate_residual`<br>`modules/orchestrator.py:AEC._post_external_delay`<br>`modules/orchestrator.py:AEC._post_filter_bridge`<br>`modules/orchestrator.py:AEC._post_filter_taps`<br>`modules/orchestrator.py:AEC._post_nearend_power`<br>`modules/orchestrator.py:AEC._post_pending_changes`<br>`modules/orchestrator.py:AEC._post_stationary_residual`<br>`modules/orchestrator.py:AEC._post_suppression_gain` | partial（完整 `_aec3_post` 編排；C 版不含 Python-only 研究旋鈕） | S-22；T-03 | — |
 
 ### 1.3 `aec_res.c`　aec_res.c（RES 增益階段，內部模組，供陣列實例的融合後增益使用）
 
@@ -992,14 +992,12 @@ PBF/Kalman H-error refresh、partition power sums、subband ERLE accumulation/re
 | S-04 | HPF cutoff 範圍驗證（`0 < cutoff < 0.45·sr`）只有 C 檢查，Python 不檢查 |
 | S-08 | CLI 預設運作點不同（Python `aec.py` 與 C `aec_wav`，兩邊都不給旗標時） |
 | S-18 | （已關閉）`epc_mu_floor` 曾是 C-only 的死欄位；已隨 `AecConfig` 瘦身刪除 |
-| S-19 | 端到端閘門 `parity_aec_e2e` 的 8 kHz 列超出容差（`TOL_E2E` 2e-2）；`make test-parity-e2e` 把它當預期紅燈 |
 | S-22 | Python-only、預設 OFF 的研究旋鈕（C 沒有對應） |
 | S-26 | 4ch 後波束 RES 的 AEC preset：DT 地板（Python 版只設 far-active 地板，DT 地板留在預設 -20） |
 | S-34 | 設定範圍檢查不對稱：C 的 `validate` 嚴格 fail-closed，Python 幾乎不驗 |
-| T-02 | 端到端閘門 `parity_aec_e2e` 的覆蓋：只有一個場景（雙講）、產生器沒有 `--fft` 選項（16k/512 沒有端到端對拍）、容差 2e-2 |
-| T-03 | 沒有模組級 Python golden 的 C 模組：目前只有 `make test-detectors-parity-all` 是常設的模組級 Python↔C 閘門，其餘模組靠端到端閘門與 C 自洽測試間接覆蓋 |
+| T-03 | 沒有模組級 Python golden 的 C 模組：目前只有 `make test-detectors-parity-all` 是常設的模組級 Python↔C 閘門，其餘模組靠 `make test-pyc-parity` 與 C 自洽測試間接覆蓋 |
 | T-05 | 48k/1024 純線性（C `AEC_RESIDUAL_OFF`；Python 的後級旗標全關）瞬態偏差：HPF 關、雙講時約 -65.5 dB，未找到單一歸因 |
-| T-06 | HPF 沒有 Python↔C 專屬 golden，只有端到端間接覆蓋 |
+| T-06 | HPF 沒有 Python↔C 專屬 golden，只有 `make test-pyc-parity` 間接覆蓋 |
 | T-17 | mono 端到端 C 對 Python 非逐位元，`error_spec` 若干 hop 後分岔（歸屬 lib/aec） |
 
 ## 附錄 B：對拍工具／測試標記
@@ -1009,7 +1007,6 @@ PBF/Kalman H-error refresh、partition power sums、subband ERLE accumulation/re
 | 標記 | 意義 |
 |---|---|
 | `live:<make target>` | `c_impl/Makefile` 內存在的 target，會即時由 Python 重產 golden 再比對 C。目前唯一的常設 Python↔C 模組級閘門是 `test-detectors-parity-all`（四個格點，取樣率／hop：8k/128、16k/128、16k/256、48k/512），涵蓋 `RenderActivityDetector`、`FilterConvergenceAnalyzer`、`DoubleTalkAnalyzer`（C 端沒有 `FilterPlateauDetector`）。 |
-| `e2e:parity_aec_e2e` | `c_impl/test/parity_aec_e2e.c` 加 `python/diag/gen_aec_e2e_golden.py`：端到端對拍，由 `make test-parity-e2e` 建置並執行（16／48 kHz 通過，8 kHz 列為預期紅燈，見 S-19）；覆蓋限制見 T-02。 |
 | `manual:<檔名>` | `c_impl/test/` 下沒有接任何 Makefile target 的 harness；目前沒有任何列使用。 |
 | `ctest:<檔名>` | `c_impl/test/` 下的 C 測試。多數是 C 自洽的回歸或結構測試，不是 Python 數值對拍；`test_delay_*`、`test_external_realign`、`test_runtime_preset`、`test_res_nearend_gate`、`test_reset_parity` 與同名（或對應）的 pytest 用同一組場景。 |
 | `pytest:<檔名>` | `python/tests/` 下的 Python 測試。`test_signal_grid.py` 會讀 `c_impl/src/aec.c` 的文字比對格點表（`AEC_GRID_TABLE`），`test_preset_arg.py` 讀 `aec.h` 內 `AEC_LEVEL_*` 那四行的整數值；其餘只測 Python 行為。 |

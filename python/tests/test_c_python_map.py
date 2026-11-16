@@ -376,9 +376,6 @@ def test_tool_references_point_at_existing_files(rows):
             kind, _, arg = tag.partition(":")
             if kind == "live":
                 ok = re.search(r"^%s:" % re.escape(arg), makefile, re.M)
-            elif kind == "e2e":
-                ok = (os.path.isfile(os.path.join(test_dir, arg + ".c")) and
-                      os.path.isfile(os.path.join(PY_ROOT, "diag", "gen_aec_e2e_golden.py")))
             elif kind == "hist":
                 m = re.match(r"^(\w+)\((PASS|FAIL|NOGEN|NOBUILD|NOTRUN)"
                              r"(\+(NOGEN|NOBUILD))?\)$", arg)

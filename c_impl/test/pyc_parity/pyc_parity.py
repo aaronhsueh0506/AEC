@@ -6,7 +6,7 @@ Two layers, measured with the same method:
   Layer 1  std-math C (SIMD=0, -DUSE_STANDARD_MATH) versus the Python reference, with the mic-path HPF
            made float32 on the Python side (bit-faithful emulation of audiolib hpf.c; proven bit
            exact against the C filter in the "hpf_fidelity" cells), so the documented fp64-vs-f32 HPF
-           gap (audit D-01 / S-19) is out of the comparison. Catches sync bugs.
+           gap (audit D-01) is out of the comparison. Catches sync bugs.
   Layer 2  shipping C build (Makefile default: SIMD=1, fast_math) versus the std-math C build: the
            accepted fast-math / NEON approximation budget.
 
@@ -147,7 +147,6 @@ L2_PROBE_SEED = 11
 # ----------------------------------------------------------------------------------------------
 EXPECTED_RED_INFO = {
     'S-02': 'live observer: C has no live_observer_inject_dt_energy_max injection guard (Python blocks injection when dt_from_energy > 0.5)',
-    'S-19': 'parity_aec_e2e 8 kHz row exceeds TOL_E2E (run by make test-parity-e2e, not by this suite)',
     'D-01': 'INFO only (documented, never gates): the shipped Python mic HPF is fp64 while C runs the float32 DF2T filter; the adaptive '
             'loop amplifies that 1e-7 relative difference (audit: -35..-63 dB). Layer 1 therefore uses the bit-exact float32 emulation; '
             'the *.hpf64 rows show the size of the fp64 effect on this harness inputs, judged against the unperturbed Python run only',

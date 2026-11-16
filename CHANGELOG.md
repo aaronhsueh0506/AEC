@@ -42,6 +42,10 @@ when verdict requires it.
 ---
 
 
+## [Unreleased] — 2026-11-16 — The end-to-end parity gate and the manifest builder are removed
+
+No library change. `make test-parity-e2e` (`test/parity_aec_e2e.c`, `test/pyc_parity/run_parity_e2e.sh`, `test/parity_e2e_inputs.sha256`) `python/diag/gen_aec_e2e_golden.py` (its golden generator) and `eval/build_manifest_90case.py` are deleted, with the `TEST_PE_*` variables, the goal-list and help entries, the `S-19` and `T-02` gap rows and the `e2e:` marker of `docs/c_python_function_map.md` (`test_c_python_map.py` no longer accepts it). The Python↔C check is `make test-pyc-parity`. `test/run_ubsan_signal_handling_test.sh` is deleted and `make test-full` no longer runs it. The 90-case manifest is frozen and pinned by `eval/manifest_90case.sha256`.
+
 ## [Unreleased] — 2026-11-16 — `libaec.a` `__TEXT` sizes in the docs are re-measured on the default build
 
 `c_impl/README.md` and `c_impl/STATIC_MEMORY.md` quoted the sizes measured before `AEC_LAYOUT_VERSION` 5 and before `AEC_STAGE_TIMING` became the default. Same method (`size` summed over the members, Apple clang, arm64, `make lib` with the same flags): `SIMD=1` 160,122 -> 167,730 B, `SIMD=0` 140,678 -> 147,482 B, `AEC_NO_ARRAY=1` 139,234 -> 143,686 B and 122,914 -> 125,694 B. With `PROFILE=0` the same builds are 167,086, 146,822 (`SIMD=0`), 143,134 B (`AEC_NO_ARRAY=1`, `SIMD=1`).

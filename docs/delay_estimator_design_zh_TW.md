@@ -228,7 +228,7 @@ dominance 判準 + undecidable 閘；方法以 579.44 ms 已知案例與合成
    48 kHz 須顯式覆寫為 3072，`run_one_case.py` 另須 `--sample-rate 48000`
    （不符會 fail-fast 報錯）。
 3. C↔Python 的 48 kHz 差異（f32/f64 Kalman 捨入放大所致，容差見
-   `c_impl/test/parity_aec_e2e.c`）只影響跨語言 parity 測試與 C 部署驗證，
+   `c_impl/test/pyc_parity/pyc_parity.py`）只影響跨語言 parity 測試與 C 部署驗證，
    Python-only 的 dataset 生成不受影響。
 4. 未 retime 常數（`_simple_mu_ratio` 四常數、`erle_coh_gate_alpha`）為
    全 grid 共通；48 k/1024 的 hop（10.667 ms）最接近原 authoring grid，

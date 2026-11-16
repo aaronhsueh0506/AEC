@@ -31,7 +31,7 @@ The version is `__version__` in [aec.py](../../python/aec.py); the changelog is
 All production C is float32 end-to-end (delay chain, orchestrator scalars,
 post/state modules, `residual_echo_estimator`, mic-path HPF). Python↔C
 comparison is **tolerance-based**, never 0/0. The regression anchor is the
-end-to-end tolerance gate `c_impl/test/parity_aec_e2e.c`.
+Python↔C parity suite (`make test-pyc-parity`).
 
 The **FFT backend is NE10 (float32, ARM NEON)** for both the malloc build
 (`make`) and the embedded deployment (caller pool via
@@ -80,7 +80,7 @@ The manifest holds 61 cases (30 far-end, 30 doubletalk, 1 near-end; every clip i
 rule requires). The file names keep the original `90case` label: the set started as 90 cases and lost the 29 near-end stems whose
 clips are not official. The corpus under `wav/aec_challenge_blind/` is git-ignored local data. `eval/manifest_pin.py prepare`
 resolves each stem to its scenario directory and nowhere else, so the frozen set is compared unchanged (do not regenerate it:
-`build_manifest_90case.py` run today selects a different set). It stops naming every stem it cannot find, and verifies
+the manifest is frozen, and `eval/manifest_90case.sha256` pins the stems list and the manifest JSON, so a regenerated set would abort the run). It stops naming every stem it cannot find, and verifies
 `eval/manifest_90case.sha256` (sha256 of the 122 clips by scenario-relative name, of the stems list and of the manifest JSON), so
 drift of the corpus or the manifest aborts the run with the list of files. The resolved clips are linked into `$OUT/dataset_view`,
 which the renderer and `bench_aecmos.py --dataset` read; `python/eval_manifest90.py` applies the same resolution and check. After
@@ -114,7 +114,7 @@ for f in "$work"/cbe_after/*.wav; do \
     && echo "MATCH $(basename "$f")" || echo "DIFFER $(basename "$f")"; done
 ```
 
-Also re-run `test_static_aec` (static == dynamic) and `parity_aec_e2e`
+Also re-run `test_static_aec` (static == dynamic) and `make test-pyc-parity`
 (tolerance gate) — see `c_impl/STATIC_MEMORY.md`.
 
 **Python-side gate** (render a small case set before and after the edit and
@@ -195,7 +195,7 @@ AEC_TEST_BASELINE="$out" make test-split-entry        # AFTER editing: every lin
 
 Do this for each of the four tests, at `SIMD=1` and `SIMD=0`. A pool-size change shows up only in the `META` lines; every hop hash must stay
 identical. The files are valid for the host, compiler and FFT backend that wrote them. The Python-side goldens
-(`make test-detectors-parity`, `make test-parity-e2e`) are regenerated from the Python reference on every run and are not checked in.
+(`make test-detectors-parity`) are regenerated from the Python reference on every run and are not checked in.
 
 ## Architecture — what to read before changing things
 

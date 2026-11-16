@@ -242,10 +242,9 @@ The **FFT backend is NE10 (float32, ARM NEON)** (via the shared
 `audiolib` layer), which is not bit-exact to numpy's fp64 `np.fft`. Because
 PBFDKF and the post-filter are frequency-domain, this float32 FFT difference
 propagates through the whole pipeline, so the **end-to-end C output aligns
-with Python to ~float32 precision, not 0/0**. `parity_aec_e2e.c` asserts the
-linear `raw_output` and final `out[hop]` stay within a **2e-2 float32
-tolerance** at 16 kHz (1e-1 at 48 kHz; measured maxima are tabulated in the
-file header) and is the **authoritative C regression gate**.
+with Python to ~float32 precision, not 0/0**. The Python↔C parity
+suite (`make test-pyc-parity`) compares the two against tolerances set per
+scenario and is the **authoritative C regression gate**.
 
 ### Math backends
 

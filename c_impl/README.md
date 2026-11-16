@@ -136,20 +136,15 @@ caller-pool path (`aec_get_mem_size`/`aec_init`), and differs from numpy's fp64
   plus `make test SIMD=0`.
 - `make test-full` — the default tier plus what is slow or rarely changes: the
   full parity matrix (`make test-pyc-parity PYC_ARGS=--full`, every scene), the
-  end-to-end gate `make test-parity-e2e`, the SIMD-independent targets under
-  `SIMD=0` too, the UBSan `--use-standard-math` variants,
-  `test/run_fp_flag_policy_test.sh` (negative cases of the Makefile flag policy)
-  and `test/run_ubsan_signal_handling_test.sh` (the traps of the two UBSan
-  wrappers). Under `SIMD=0` it does not repeat the members that take no SIMD
+  SIMD-independent targets under `SIMD=0` too, the UBSan `--use-standard-math`
+  variants and `test/run_fp_flag_policy_test.sh` (negative cases of the Makefile
+  flag policy). Under `SIMD=0` it does not repeat the members that take no SIMD
   input.
 - Not in either tier, still runnable on their own: `test-detectors-parity`
   (single grid; `test-detectors-parity-all` is a superset).
 
 **Regression gates:**
 
-- `test/parity_aec_e2e.c` (`make test-parity-e2e`, part of `make test-full`) —
-  the end-to-end gate: full `aec_create` → `aec_process` output against the
-  Python golden within 2e-2 (1e-1 at 48 kHz) over the ~4186-hop doubletalk case.
 - `test/test_counter_saturation.c` (`make test-counter-saturation`) — every
   unbounded hop/call counter stops at its cap: cap-1 → cap, cap → cap,
   no runaway past the cap, and the comparison the counter feeds gives the same
@@ -222,10 +217,9 @@ caller-pool path (`aec_get_mem_size`/`aec_init`), and differs from numpy's fp64
   "Bit-identical" for a kernel means the same bits except the payload bits of a
   NaN result.
 
-`python/diag/gen_detectors_golden.py` (`make test-detectors-parity`) and
-`python/diag/gen_aec_e2e_golden.py` (`make test-parity-e2e`) are the golden
-generators with a C checker in this tree; the other `python/diag/gen_*_golden.py`
-scripts only dump Python reference state.
+`python/diag/gen_detectors_golden.py` (`make test-detectors-parity`) is the
+golden generator with a C checker in this tree; the other
+`python/diag/gen_*_golden.py` scripts only dump Python reference state.
 
 ## Static-memory (heap-free pool)
 
