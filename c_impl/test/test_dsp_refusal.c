@@ -12,6 +12,7 @@
  *
  * Run from c_impl/:  make test-dsp-refusal */
 #include "aec.h"
+#include "aec_pool_test_util.h"
 #include "aec_internal.h"
 
 #include <float.h>
@@ -91,11 +92,6 @@ static int all_finite(const float* x, int n) {
     int i;
     if (!x) return 1;
     for (i = 0; i < n; ++i) if (!isfinite(x[i])) return 0;
-    return 1;
-}
-static int all_zero(const float* x, int n) {
-    int i;
-    for (i = 0; i < n; ++i) if (x[i] != 0.0f) return 0;
     return 1;
 }
 
@@ -224,7 +220,7 @@ static void run_row(const Grid* g, int mode, Entry e, const Poison* p) {
         refused = h;
         CHECK(rc == AEC_ERR_DSP, "%s: hop %d refused with %d, want AEC_ERR_DSP", tag, h, rc);
         if (e == E_PROCESS) {
-            CHECK(all_zero(out, hop), "%s: aec_process() out is zeroed on the refused hop", tag);
+            CHECK(aec_test_all_zero_f32(out, hop), "%s: aec_process() out is zeroed on the refused hop", tag);
             st = mode == AEC_RESIDUAL_OFF ? AT_CLOSE : p->where;   /* one call: the stage is not observable */
         }
         {
@@ -239,9 +235,9 @@ static void run_row(const Grid* g, int mode, Entry e, const Poison* p) {
             AecResidualView rv;
             memset(&lv, 0, sizeof lv); lv.struct_size = sizeof lv;
             memset(&rv, 0, sizeof rv); rv.struct_size = sizeof rv;
-            CHECK(aec_get_linear(a, &lv) == AEC_OK && all_zero(lv.linear_hop, hop) &&
-                  all_zero((const float*)lv.echo_spec, 2 * lv.n_freqs) && all_zero((const float*)lv.near_spec, 2 * lv.n_freqs) &&
-                  all_zero((const float*)lv.far_spec, 2 * lv.n_freqs) && all_zero(lv.aligned_far_hop, hop),
+            CHECK(aec_get_linear(a, &lv) == AEC_OK && aec_test_all_zero_f32(lv.linear_hop, hop) &&
+                  aec_test_all_zero_f32((const float*)lv.echo_spec, 2 * lv.n_freqs) && aec_test_all_zero_f32((const float*)lv.near_spec, 2 * lv.n_freqs) &&
+                  aec_test_all_zero_f32((const float*)lv.far_spec, 2 * lv.n_freqs) && aec_test_all_zero_f32(lv.aligned_far_hop, hop),
                   "%s: the linear view reads zeros after the refusal", tag);
             CHECK(aec_get_residual(a, &rv) == (mode == AEC_RESIDUAL_OFF ? AEC_ERR_MODE : AEC_ERR_SEQUENCE),
                   "%s: no residual view after the refusal", tag);
@@ -288,7 +284,7 @@ static void run_sweep(const Grid* g) {
                     if (h >= POISON_HOP && h < POISON_HOP + 3) { if (side) ref[POISON_AT + h] = values[v]; else mic[POISON_AT + h] = values[v]; }
                     rc = aec_process(a, mic, ref, out);
                     if (rc == AEC_OK) bad += !hop_results_finite(a, mode, out, hop);
-                    else if (rc == AEC_ERR_DSP) { refused++; bad += !all_zero(out, hop); }
+                    else if (rc == AEC_ERR_DSP) { refused++; bad += !aec_test_all_zero_f32(out, hop); }
                     else bad++;
                 }
                 CHECK(bad == 0, "sweep %s %s %s %g: %d hops with a non-finite result or a bad refusal", g->name, MODE_NAME[mode],
@@ -540,9 +536,9 @@ static void run_array_lane_row(const Grid* g, int mode, int lane, int poison) {
             memset(&av, 0, sizeof av); av.struct_size = sizeof av;
             memset(&lv, 0, sizeof lv); lv.struct_size = sizeof lv;
             CHECK(aec_get_array(a, &av) == AEC_ERR_SEQUENCE, "%s: no array view after the refusal", tag);
-            CHECK(aec_get_linear(a, &lv) == AEC_OK && all_zero(lv.linear_hop, hop) &&
-                  all_zero((const float*)lv.echo_spec, 2 * lv.n_freqs) && all_zero((const float*)lv.near_spec, 2 * lv.n_freqs) &&
-                  all_zero((const float*)lv.far_spec, 2 * lv.n_freqs) && all_zero(lv.aligned_far_hop, hop),
+            CHECK(aec_get_linear(a, &lv) == AEC_OK && aec_test_all_zero_f32(lv.linear_hop, hop) &&
+                  aec_test_all_zero_f32((const float*)lv.echo_spec, 2 * lv.n_freqs) && aec_test_all_zero_f32((const float*)lv.near_spec, 2 * lv.n_freqs) &&
+                  aec_test_all_zero_f32((const float*)lv.far_spec, 2 * lv.n_freqs) && aec_test_all_zero_f32(lv.aligned_far_hop, hop),
                   "%s: the linear view reads zeros after the refusal", tag);
         }
         fresh = make_array(g, mode);

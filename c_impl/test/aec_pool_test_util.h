@@ -37,6 +37,13 @@ static inline int aec_test_split_hop(Aec *a, const float *mic, const float *ref)
     return st == AEC_OK ? aec_process_residual(a, NULL) : st;
 }
 
+/* 1 when all n floats are zero (n <= 0 counts as all zero). */
+static inline int aec_test_all_zero_f32(const float *x, int n) {
+    int i;
+    for (i = 0; i < n; ++i) if (x[i] != 0.0f) return 0;
+    return 1;
+}
+
 /* xorshift32 noise in [-amp, amp]; every test seeds its own state so its stimulus stays fixed. */
 static inline float aec_test_rng_uniform(unsigned *state, float amp) {
     *state ^= *state << 13;

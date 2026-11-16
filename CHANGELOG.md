@@ -42,6 +42,10 @@ when verdict requires it.
 ---
 
 
+## [Unreleased] — 2026-11-16 — Test helpers: one all-zero check and an explicit n_mics table
+
+Test only. `all_zero()` (`test_dsp_refusal.c`) and `all_zero_f()` (`test_linear_context.c`) were the same function; `aec_pool_test_util.h` now has `aec_test_all_zero_f32()`. In `test_linear_context.c` the comment of `scenario_fresh_view_reads_zeros()` sits above the scenario (it sat above the helper) and the `n_mics` loop `for (n = 1; n <= N_MICS_MAX; n += 3)` is an explicit `{1, AEC_ARRAY_MICS}` table (`{1}` with `AEC_NO_ARRAY`). The 36 fresh-view rows still run and still fail without the memsets (18 fail with the `far_hop` memset removed).
+
 ## [Unreleased] — 2026-11-16 — test_dsp_refusal: the whole-hop poison sample exists once
 
 Test only. `test/test_dsp_refusal.c` wrote the whole-hop poison expression twice (single channel and array); it is now `whole_hop_sample()`, and the array poison table carries a `whole_hop` flag like the single-channel one instead of a `poison < 3` index test. The row count is unchanged (1037); marking the array poisons as single samples turns 72 assertions red.

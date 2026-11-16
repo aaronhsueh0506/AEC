@@ -800,19 +800,14 @@ static void scenario_far_active_no_echo(int silent_mic, const char *label) {
     aec_destroy(a);
 }
 
+#ifdef AEC_NO_ARRAY
+static const int N_MICS_SET[] = { 1 };
+#else
+static const int N_MICS_SET[] = { 1, AEC_ARRAY_MICS };
+#endif
+
 /* An instance that has not run a hop reads zeros: linear_hop, aligned_far_hop and the three spectra do not depend on what the
  * pool held (dirty caller pools, single channel and array, the three delay modes, three grids). */
-static int all_zero_f(const float* x, int n) {
-    int i;
-    for (i = 0; i < n; ++i) if (x[i] != 0.0f) return 0;
-    return 1;
-}
-
-#ifdef AEC_NO_ARRAY
-#define N_MICS_MAX 1
-#else
-#define N_MICS_MAX 4
-#endif
 static void scenario_fresh_view_reads_zeros(void) {
     static const struct { int sr, fft; const char* tag; } grids[] = {
         { 16000,  256, "16k/256"  },
@@ -823,11 +818,13 @@ static void scenario_fresh_view_reads_zeros(void) {
     static const int fills[2] = { 0xAB, 0xFF };
     char msg[192];
     unsigned g;
-    int m, f, n_mics;
+    int m, f;
+    unsigned nm;
     for (g = 0; g < sizeof grids / sizeof grids[0]; ++g)
         for (m = 0; m < 3; ++m)
-            for (n_mics = 1; n_mics <= N_MICS_MAX; n_mics += 3)
+            for (nm = 0; nm < sizeof N_MICS_SET / sizeof N_MICS_SET[0]; ++nm)
                 for (f = 0; f < 2; ++f) {
+                    const int n_mics = N_MICS_SET[nm];
                     AecConfig cfg;
                     AecLinearView v;
                     void* mem = NULL;
@@ -843,9 +840,11 @@ static void scenario_fresh_view_reads_zeros(void) {
                     if (!a) { CHECK(0, msg); free(mem); continue; }
                     memset(&v, 0, sizeof v);
                     get_linear(a, &v);
-                    ok = v.linear_hop && v.aligned_far_hop && all_zero_f(v.linear_hop, v.hop_size) &&
-                         all_zero_f(v.aligned_far_hop, v.hop_size) && all_zero_f((const float*)v.echo_spec, 2 * v.n_freqs) &&
-                         all_zero_f((const float*)v.near_spec, 2 * v.n_freqs) && all_zero_f((const float*)v.far_spec, 2 * v.n_freqs);
+                    ok = v.linear_hop && v.aligned_far_hop && aec_test_all_zero_f32(v.linear_hop, v.hop_size) &&
+                         aec_test_all_zero_f32(v.aligned_far_hop, v.hop_size) &&
+                         aec_test_all_zero_f32((const float*)v.echo_spec, 2 * v.n_freqs) &&
+                         aec_test_all_zero_f32((const float*)v.near_spec, 2 * v.n_freqs) &&
+                         aec_test_all_zero_f32((const float*)v.far_spec, 2 * v.n_freqs);
                     CHECK(ok, msg);
                     free(mem);
                 }
