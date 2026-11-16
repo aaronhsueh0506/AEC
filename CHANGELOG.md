@@ -42,6 +42,14 @@ when verdict requires it.
 ---
 
 
+## [Unreleased] — 2026-11-16 — `AEC_STAGE_TIMING` is on by default
+
+`aec_get_last_timing()` and `aec_array_get_timing()` report real per-hop costs in the default build. `aec.h` defines `AEC_STAGE_TIMING` as 1 when the build does not say otherwise, and the Makefile's `PROFILE` defaults to 1 and always passes `-DAEC_STAGE_TIMING=$(PROFILE)`; `make PROFILE=0` is the way to turn it off (every field reads 0, the archive references no `clock_gettime`). `PROFILE` stays in `CFG_SIG`. No ABI change: `sizeof(Aec)`, every offset and every sample are unchanged. The four baseline streams (`split_entry`, `split_entry2`, `aec_array`, `aec_array2`, `SIMD=1`) compare byte-identical between the build before this change and the new default build, `META` lines included.
+
+- Cost: seven clock reads per mono hop, 18.5 ns each on the development host, about 0.13 µs per hop (0.4-0.9% of a 15-45 µs hop); the four-microphone array reads about thirty times per hop. Interleaved A/B of `bench_rtf --scene bursts` (library with and without timing, 7 rounds, medians): 16k/256 +0.4 µs, 16k/512 -2.5 µs (noise), 48k/1024 +1.6 µs on the per-pass median; on the fastest pass +0.1 / +0.1 / -0.6 µs. The spread between rounds (14-18, 27-36, 39-47 µs) is larger than any difference.
+- A target whose libc has no `CLOCK_MONOTONIC` builds with `make PROFILE=0` or supplies `-DAEC_NOW_US=<fn>`. Turning the macro off through `EXTRA_CFLAGS=-DAEC_STAGE_TIMING=0` is a redefinition; use `PROFILE=0`.
+- `test_aec_array_flow`: the check after a non-finite hop asserted that the record is zeroed, which `aec.h` does not say (a call refused before the hop starts leaves the record untouched) and which never ran with timing on. It now compares the record before and after the refusal.
+
 ## [Unreleased] — 2026-11-16 — The partition power sums as a kernel
 
 No output change: the four baseline streams compare with 0 mismatches at `SIMD=1` and `SIMD=0`, and `aec_wav` output on four clips (16 kHz / 256, 16 kHz / 512 twice, 48 kHz / 1024; levels 0 without the residual stage, 1 with `--cng`, 2) is byte-identical to the previous build at both settings.

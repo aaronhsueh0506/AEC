@@ -462,7 +462,7 @@ int app_run_hop(Aec *aec, const float *mics, const float *ref,
 
 **reset serial 與 OLA**：陣列的 `aec_post_reset_serial()` 是**四條 lane 計數之和**（模 2³²），所以 `aec_reset()` 讓它前進 **4**（單聲道是 1），處理中某條 lane 的硬 reset 也使它移動。只比較「是否與自己存的不同」，不要假設步長。函式庫自己持有的舒適噪音產生器在每次後級呼叫時依 serial 自動重設為 `AEC_CNG_SEED`；呼叫端仍要在本 hop 的 OLA push 之前清自己的 OLA 尾巴（§8.3）。
 
-**診斷**（唯讀，自建立或 `aec_reset()` 以來累計；單聲道實例回中性值）：`aec_far_fft_real_compute_count()`（四條 lane 的總和，正常每 hop +1）、`aec_array_realign_warm_lane_count()`／`aec_array_realign_soft_lane_count()`、`aec_array_matched_filter_count()`、`aec_array_linear_aec_count()`，以及 `-DAEC_STAGE_TIMING=1` 時的 `aec_array_get_timing()`（`delay_us`、`frontend_us`、`linear_us`、`lane_res_us`、`fuse_us`）。
+**診斷**（唯讀，自建立或 `aec_reset()` 以來累計；單聲道實例回中性值）：`aec_far_fft_real_compute_count()`（四條 lane 的總和，正常每 hop +1）、`aec_array_realign_warm_lane_count()`／`aec_array_realign_soft_lane_count()`、`aec_array_matched_filter_count()`、`aec_array_linear_aec_count()`，以及 `aec_array_get_timing()`（預設建置即量測；`make PROFILE=0` 時全讀 0）（`delay_us`、`frontend_us`、`linear_us`、`lane_res_us`、`fuse_us`）。
 
 **目前尚未做到的**：
 

@@ -30,11 +30,11 @@ ALLOW_DIRTY_PUBLISH ?= 0
 ALLOW_UNTRACKED_PUBLISH ?= 0
 ATTEST_STAMP ?=
 
-# PROFILE=1 enables the per-hop stage timing (aec_get_last_timing(), aec.h). It is off by default so a release build
-# takes no clock reads, and it is part of CFG_SIG so profile and release builds use separate obj/bin directories. The
-# spelling matches the pipeline Makefiles. A libc without POSIX CLOCK_MONOTONIC combines it with -DAEC_NOW_US=<fn> (see
-# src/aec.c).
-PROFILE ?= 0
+# PROFILE selects the per-hop stage timing (aec_get_last_timing(), aec.h): 1 (default) reads the clock seven times per hop per
+# instance, 0 builds with -DAEC_STAGE_TIMING=0 so the stamps fold to 0 and the archive links no clock. PROFILE is part of
+# CFG_SIG, so the two builds use separate obj/bin directories. A libc without POSIX CLOCK_MONOTONIC builds with PROFILE=0 or
+# supplies -DAEC_NOW_US=<fn> (see include/internal/aec_impl.h).
+PROFILE ?= 1
 ifneq ($(words $(PROFILE)),1)
 $(error PROFILE must be exactly 0 or 1, got '$(PROFILE)')
 endif
@@ -43,11 +43,7 @@ $(error PROFILE must be exactly 0 or 1, got '$(PROFILE)')
 endif
 # Passed through PROFILE_CFLAGS, like SIMD below, not EXTRA_CFLAGS: EXTRA_CFLAGS is forwarded to the audiolib sub-makes and
 # keyed into CFG_SIG, so the -D would reach them twice and re-key producers that never read the macro.
-ifeq ($(PROFILE),1)
-PROFILE_CFLAGS := -DAEC_STAGE_TIMING=1
-else
-PROFILE_CFLAGS :=
-endif
+PROFILE_CFLAGS := -DAEC_STAGE_TIMING=$(PROFILE)
 
 SIMD ?= 1
 ifneq ($(words $(SIMD)),1)

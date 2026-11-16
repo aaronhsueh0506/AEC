@@ -114,7 +114,7 @@ static inline void aec_ring_read(const float* ring, int ring_size, int at, float
     if (first < n) memcpy(dst + first, ring, (size_t)(n - first) * sizeof(float));
 }
 
-/* Stage timing is off by default (stamps fold to 0); build with -DAEC_STAGE_TIMING=1. A 32-bit microsecond monotonic stamp; a
+/* Stage timing is on by default; -DAEC_STAGE_TIMING=0 folds the stamps to 0. A 32-bit microsecond monotonic stamp; a
  * target without CLOCK_MONOTONIC defines -DAEC_NOW_US=<fn> (no-argument function returning monotonic uint32_t microseconds). */
 #if AEC_STAGE_TIMING
 #ifndef AEC_NOW_US

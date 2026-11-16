@@ -135,7 +135,7 @@ pre code{background:none;padding:0}
 <tr><td>被拒絕的呼叫</td><td><code>aec_process()</code>、<code>aec_process_linear_shared_far_from()</code>:<code>AEC_ERR_MODE</code>;<code>aec_apply_external_realign()</code>:<code>-1</code>(共用對齊改變時實例自己對四條 lane 做 realign)</td></tr>
 <tr><td>錯誤</td><td>非有限輸入 <code>AEC_ERR_ARG</code>(被拒絕的呼叫不改變任何狀態:上一個 hop 的檢視仍可讀、待處理的幀保留);<code>aec_process_residual()</code> 的權重(NULL／非有限／全零)或 <code>beamformed_error</code>(含非有限值)不合法也是 <code>AEC_ERR_ARG</code>,實例不動、該 hop 保持開啟;lane 結果不是有限值(<code>aec_process_linear()</code> 逐 lane 檢查,<code>STATE</code> 也檢查;mic 在帶它的那個 hop 被拒,ref 在對齊後的 ref hop 含有它的那個 hop 被拒:直接到達各 lane 時就是帶它的那個 hop,經對齊環則晚 floor((延遲＋位置)／hop_size) 個 hop),或引數檢查之後融合拒絕該 hop:<code>AEC_ERR_DSP</code>(<code>-4</code>),<b>實例已像 <code>aec_reset()</code> 重設</b></td></tr>
 <tr><td>reset serial</td><td><code>aec_post_reset_serial()</code> 是四條 lane 的計數之和,<code>aec_reset()</code> 前進 4;只比較是否與自己存的不同</td></tr>
-<tr><td>診斷</td><td><code>aec_array_realign_warm_lane_count()</code>／<code>_soft_lane_count()</code>、<code>aec_array_matched_filter_count()</code>、<code>aec_array_linear_aec_count()</code>、<code>aec_array_get_timing()</code>(需 <code>-DAEC_STAGE_TIMING=1</code>)</td></tr>
+<tr><td>診斷</td><td><code>aec_array_realign_warm_lane_count()</code>／<code>_soft_lane_count()</code>、<code>aec_array_matched_filter_count()</code>、<code>aec_array_linear_aec_count()</code>、<code>aec_array_get_timing()</code>(<code>PROFILE=0</code> 建置全讀 0)</td></tr>
 </table></div>
 <h3>陣列記憶池實測(balanced、MATCHED n=5、<code>n_mics = 4</code>)</h3>
 <div class="tblwrap"><table>
@@ -210,7 +210,7 @@ aec_get_linear(aec, &amp;lin);              /* 時域 seam:線性殘差 + 已對
 <tr><td><code>aec_synthesis_window(a, &amp;w, &amp;n)</code></td><td>免費;回傳函式庫自己做 OLA 前乘的合成窗(<code>n</code> = <code>fft_size</code> 個 float,唯讀、歸實例所有、實例存活期間有效)。外部合成器要與 <code>aec_process()</code> 逐位元相同,就把它設成 <code>AcStftConfig.window</code>(<code>AcIstft</code> 借用,不得比 <code>Aec</code> 活得久);audiolib 預設 sqrt-Hann 差在最後一個 float 位元</td><td>有(NULL 實例／window／length 回 −1,輸出不動)</td><td>—</td></tr>
 <tr><td><code>aec_debug_status()</code></td><td>免費(欄位本來就每 hop 維護)</td><td>有</td><td>—</td></tr>
 <tr><td><code>aec_linear_is_cancelling()</code></td><td>免費</td><td>有</td><td>—</td></tr>
-<tr><td><code>aec_get_last_timing()</code></td><td>一次 struct 複製</td><td>有</td><td><b>需 <code>-DAEC_STAGE_TIMING=1</code></b></td></tr>
+<tr><td><code>aec_get_last_timing()</code></td><td>一次 struct 複製</td><td>有</td><td><b>預設量測;<code>PROFILE=0</code> 建置全讀 0</b></td></tr>
 <tr><td><code>aec_get_mem_breakdown()</code></td><td><b>會重跑 validate,不要放 hot path</b></td><td>有</td><td>—</td></tr>
 <tr><td><code>aec_hop_size()</code></td><td>免費</td><td>有(NULL 與已銷毀的 handle 回 0)</td><td>—</td></tr>
 <tr><td><code>aec_far_fft_real_compute_count()</code></td><td>免費</td><td>有(NULL 回 0)</td><td>—</td></tr>
@@ -233,7 +233,7 @@ aec_get_linear(aec, &amp;lin);              /* 時域 seam:線性殘差 + 已對
 
 <h3><code>AecStageTiming</code>(需 build flag)</h3>
 <p>五個 <code>uint32_t</code> 微秒欄位:<code>delay_us</code>／<code>frontend_us</code>／<code>linear_us</code>／<code>res_us</code>／<code>steering_us</code>。</p>
-<div class="warn"><b>五者相加不等於整個呼叫</b>——<code>res_us</code> 收尾後還有 per-sample power EMA 與收斂偵測。做 breakdown 的 caller 必須明確帶出這個 remainder,否則百分比會說謊。<code>delay_us</code> 已從 <code>frontend_us</code> 減回去,兩者不重複計。解析度 μs,小於 1 μs 的 stage 讀 0。<br><b>必須建 library 本身</b>(<code>PROFILE=1</code>);只在 consumer 端開 flag 只會拿到一堆 0——而且函式<b>不會告訴你</b>它沒被啟用。</div>
+<div class="warn"><b>五者相加不等於整個呼叫</b>——<code>res_us</code> 收尾後還有 per-sample power EMA 與收斂偵測。做 breakdown 的 caller 必須明確帶出這個 remainder,否則百分比會說謊。<code>delay_us</code> 已從 <code>frontend_us</code> 減回去,兩者不重複計。解析度 μs,小於 1 μs 的 stage 讀 0。<br><b>開關在 library 本身</b>(<code>PROFILE</code>,預設 <code>1</code>);只在 consumer 端改 flag 不會改變 library 的量測——<code>PROFILE=0</code> 建出的 library 會回一堆 0,而且函式<b>不會告訴你</b>它沒被啟用。</div>
 <p class="small">缺 POSIX <code>CLOCK_MONOTONIC</code> 的板子:加 <code>-DAEC_NOW_US=&lt;fn&gt;</code>,<code>fn</code> 必須是無參數、回傳 <code>uint32_t</code> 微秒的<b>純識別字</b>,且必須單調。</p>
 
 <h2>11. 建置旗標</h2>
@@ -241,7 +241,7 @@ aec_get_linear(aec, &amp;lin);              /* 時域 seam:線性殘差 + 已對
 <tr><th>旗標</th><th>預設</th><th>效果</th><th>影響</th></tr>
 <tr><td><code>BACKEND=ne10</code></td><td><code>ne10</code></td><td>ARM NEON FFT(唯一後端;指定其他值 Makefile 直接報錯)</td><td>輸出與 <code>aec_get_mem_size()</code> 數值都以此後端為準</td></tr>
 <tr><td><code>SIMD=0|1</code></td><td><code>1</code></td><td><code>0</code> → <code>-DSIMD_KERNELS_FORCE_SCALAR</code></td><td>數值可能微差;ABI 不變</td></tr>
-<tr><td><code>PROFILE=0|1</code></td><td><code>0</code></td><td><code>1</code> → <code>-DAEC_STAGE_TIMING=1</code></td><td>每 hop 每 instance 7 次 clock 讀取。<b>struct layout 不變,ABI 相容</b></td></tr>
+<tr><td><code>PROFILE=0|1</code></td><td><code>1</code></td><td><code>-DAEC_STAGE_TIMING=$(PROFILE)</code>;<code>0</code> 關閉逐階段耗時</td><td>預設每 hop 每 instance 7 次 clock 讀取(約 0.13 µs)。<b>struct layout 不變,ABI 相容</b></td></tr>
 <tr><td><code>NO_STDIO=0|1</code></td><td><code>0</code></td><td><code>1</code> → 只換一個獨立的 obj/bin 目錄(函式庫本來就沒有 stdio,<code>0</code> 與 <code>1</code> 的 archive 內容相同)</td><td><b>只用於 <code>lib</code> target</b>(CLI 用 <code>FILE*</code>)。回歸閘門:<code>make audit-no-stdio</code>(archive 與連結出的執行檔都沒有 <code>fprintf</code>/<code>stderr</code> 引用)</td></tr>
 <tr><td><code>AEC_NO_ARRAY=0|1</code></td><td><code>0</code></td><td><code>1</code> → <code>-DAEC_NO_ARRAY</code>:不編陣列實例(<code>aec_array.c</code>、<code>aec_res.c</code>);<code>n_mics</code> 不是 1 時 <code>aec_get_mem_size()</code> 回 0、<code>aec_init()</code>／<code>aec_create()</code> 回 NULL,<code>aec_get_array()</code> 與 <code>aec_array_*()</code> 診斷函式不存在(呼叫即連結錯誤)</td><td>單聲道行為與完整函式庫逐位元相同,池大小相同;<code>libaec.a</code> 的 <code>__TEXT</code> 少約 21 kB(<code>SIMD=1</code> 160,122 → 139,234 B;<code>SIMD=0</code> 140,678 → 122,914 B;主機 Apple clang arm64,目標工具鏈的數字不同)</td></tr>
 <tr><td><code>AEC_TESTING</code></td><td><code>0</code></td><td>編入內部測試 hook</td><td class="dead"><b>絕不可出貨</b></td></tr>

@@ -158,28 +158,34 @@ EMA 與收斂偵測。要呈現完整分解的呼叫端得自己把餘額算出�
 每次 `aec_process*()` 在引數檢查之後清零，所以一個 hop 只會回報它真的跑到的階段；被引數檢查拒絕（NULL、已銷毀 handle、非有限樣本）的呼叫不動記錄。
 解析度是微秒，低於 1 µs 的階段會讀到 0。
 
-#### 預設關閉
+#### 預設開啟
 
-⚠ **量測要建置時開啟**，否則五個欄位每個 hop 都讀 0：
+量測在預設建置就有（`aec.h` 的 `AEC_STAGE_TIMING` 預設 1；Makefile 的 `PROFILE` 預設 1，
+並把 `-DAEC_STAGE_TIMING=$(PROFILE)` 放進 `CFLAGS`）。每 hop 每實例七次 clock 讀取：
+桌面主機上一次讀取約 19 ns，所以單聲道實例每 hop 約 0.13 µs（16 kHz／256 與 48 kHz／1024
+的 hop 成本約 15–45 µs，差異在量測雜訊內）；四麥克風陣列約三十次讀取。輸出逐位元不變。
+
+⚠ **要關掉就在建置函式庫時關**，五個欄位會每個 hop 都讀 0，archive 也不再引用 `clock_gettime`：
 
 ```bash
-make PROFILE=1              # 等同 EXTRA_CFLAGS=-DAEC_STAGE_TIMING=1
+make PROFILE=0              # 等同在 CFLAGS 加 -DAEC_STAGE_TIMING=0
 ```
 
-每 hop 每實例七次 clock 讀取，所以 release build 一次都不做——會被切掉的診斷
-不會不小心出貨。那個 0 就是呼叫端分辨「沒量」與「量了但很快」的唯一線索；
-想要分解的消費端必須建置**函式庫**時就帶旗標，只開自己的顯示旗標沒有用。
+不要用 `EXTRA_CFLAGS=-DAEC_STAGE_TIMING=0` 關閉：Makefile 已經帶了
+`-DAEC_STAGE_TIMING=$(PROFILE)`，兩個值不同會是重複定義。那個 0 就是呼叫端分辨
+「沒量」與「量了但很快」的唯一線索；消費端的 `#if AEC_STAGE_TIMING` 要用與函式庫
+相同的值（`aec.h` 預設 1，與預設建置一致）。
 
-`EXTRA_CFLAGS` 與 `PROFILE` 都折進 config hash，所以 profile build 與 release
-build 各有自己的 `bin/<backend>-<hash>/`，不會互相交出過期的 object。
+`PROFILE` 折進 config hash（`CFG_SIG`），所以 `PROFILE=0` 與預設建置各有自己的
+`bin/<backend>-<hash>/`，不會互相交出過期的 object；`EXTRA_CFLAGS` 同樣折進去。
 
 #### 目標平台沒有 `CLOCK_MONOTONIC` 時
 
 `clock_gettime(CLOCK_MONOTONIC, ...)` 是 POSIX 而非 C99，精簡 libc 的目標平台
-不一定有。這種平台這樣開：
+不一定有，預設建置會連結失敗。這種平台要嘛用 `make PROFILE=0` 關掉量測，要嘛換掉時鐘：
 
 ```bash
-make PROFILE=1 EXTRA_CFLAGS='-DAEC_NOW_US=board_timer_us -include my_timer.h'
+make EXTRA_CFLAGS='-DAEC_NOW_US=board_timer_us -include my_timer.h'
 ```
 
 `AEC_NOW_US` 要是**純識別字**（本 repo 的 FP policy 不允許 `EXTRA_CFLAGS` 出現

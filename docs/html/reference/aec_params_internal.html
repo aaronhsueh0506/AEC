@@ -75,7 +75,7 @@ pre code{background:none;padding:0}
 </table></div>
 
 <h2>4. 建置期旗標(內部)</h2>
-<p class="small"><code>SIMD</code>(<code>0</code> → <code>-DSIMD_KERNELS_FORCE_SCALAR</code>)、<code>NO_STDIO</code>、<code>PROFILE</code>(<code>-DAEC_STAGE_TIMING=1</code>)、<code>WERROR</code>、<code>EXTRA_CFLAGS</code>、<code>AEC_TESTING</code>(<b>絕不可出貨</b>)、<code>AEC_NO_ARRAY</code>(單聲道函式庫,不編陣列實例);<code>-ffp-contract=off -fno-math-errno</code> 由 Makefile 強制,不是選項。說明見 <a href="aec_c_api.html">AEC API</a> §11 與 <code>AEC/c_impl/README.md</code>。</p>
+<p class="small"><code>SIMD</code>(<code>0</code> → <code>-DSIMD_KERNELS_FORCE_SCALAR</code>)、<code>NO_STDIO</code>、<code>PROFILE</code>(預設 <code>1</code>;<code>-DAEC_STAGE_TIMING=$(PROFILE)</code>,<code>0</code> 關閉逐階段耗時)、<code>WERROR</code>、<code>EXTRA_CFLAGS</code>、<code>AEC_TESTING</code>(<b>絕不可出貨</b>)、<code>AEC_NO_ARRAY</code>(單聲道函式庫,不編陣列實例);<code>-ffp-contract=off -fno-math-errno</code> 由 Makefile 強制,不是選項。說明見 <a href="aec_c_api.html">AEC API</a> §11 與 <code>AEC/c_impl/README.md</code>。</p>
 
 </body>
 </html>

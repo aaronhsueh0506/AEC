@@ -166,12 +166,12 @@ int aec_default_fft_size(int sample_rate);
  * filter excluding delay_us. linear_us: main adaptive filter. steering_us:
  * stationarity, coarse-error publish, double-talk analyzer, EPV, shadow_rise,
  * misadjustment estimator. res_us: post-filter/RES block. The five do not sum
- * to the call; fields are cleared at the start of each call. Active only with
- * -DAEC_STAGE_TIMING=1 (otherwise every field reads 0); the stamp is
- * CLOCK_MONOTONIC, or -DAEC_NOW_US=<fn> returning microseconds. */
+ * to the call; fields are cleared at the start of each call. On by default; built with
+ * -DAEC_STAGE_TIMING=0 every field reads 0. The stamp is CLOCK_MONOTONIC, or
+ * -DAEC_NOW_US=<fn> returning microseconds. */
 /* Always defined so consumers can use #if AEC_STAGE_TIMING under -Wundef. */
 #ifndef AEC_STAGE_TIMING
-#define AEC_STAGE_TIMING 0
+#define AEC_STAGE_TIMING 1
 #endif
 
 typedef struct AecStageTiming {
@@ -476,7 +476,7 @@ long aec_array_realign_warm_lane_count(const Aec* a);
 long aec_array_realign_soft_lane_count(const Aec* a);
 int  aec_array_matched_filter_count(const Aec* a);                    /* 1 in MATCHED, else 0 */
 int  aec_array_linear_aec_count(const Aec* a);                        /* 4; single-channel: 1 */
-/* Wall clock of the most recent hop in microseconds, diagnostic only; all 0 unless built with -DAEC_STAGE_TIMING=1.
+/* Wall clock of the most recent hop in microseconds, diagnostic only; all 0 when built with -DAEC_STAGE_TIMING=0.
  * aec_get_last_timing() reports the same record without fuse_us (res_us = lane_res_us). A call refused before the hop starts
  * (NULL argument, handle not ready, non-finite sample) leaves the record untouched; any other aec_process_linear() first
  * zeroes the four linear-stage fields;

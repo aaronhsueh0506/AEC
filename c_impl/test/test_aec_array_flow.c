@@ -2723,12 +2723,11 @@ static void test_stage_timing(void) {
      * a microsecond, so a zero anywhere here means that window never ran.
      * frontend_us and lane_res_us come from aec_get_last_timing(); they read
      * zero if the AEC-side windows are ever dropped. */
-    /* Each half is asserted against its OWN flag, because the two are
-     * separate builds: AEC_STAGE_TIMING governs the wrapper's
-     * stages, AEC_STAGE_TIMING governs the three summed off the lanes. Both
-     * default off, and the zero branches are not filler -- they are what
-     * proves the flag removes the measurement rather than merely hiding it,
-     * and that a compiled-out build reports zeros instead of stale values. */
+    /* One flag, AEC_STAGE_TIMING, governs the wrapper's stages and the three
+     * summed off the lanes. It is on by default; the zero branches are what
+     * proves -DAEC_STAGE_TIMING=0 removes the measurement rather than merely
+     * hiding it, and that a compiled-out build reports zeros instead of stale
+     * values. */
 #if AEC_STAGE_TIMING
     CHECK(t.delay_us > 0, "timing: the delay estimator reports a real cost");
 #else
@@ -2756,10 +2755,8 @@ static void test_stage_timing(void) {
     CHECK(post_sum <= post_wall_us,
           "timing: the fuse stage must fit inside af_fuse's wall time");
 
-    /* A hop that is accepted and then bails out must report zeros for the
-     * stages it never reached, not the previous hop's numbers. The non-finite
-     * input check is the reachable bail-out: it runs after the record is
-     * cleared, so without that clearing the values above would survive. */
+    /* A call refused before the hop starts (a non-finite sample) leaves the record as the previous hop wrote it, as aec.h
+     * states; the good hop in `t` has non-zero stages when timing is on, so a refusal that cleared the record would differ. */
     {
         int hop = af_hop_size(p);
         float* nan_mics = (float*)malloc((size_t)hop * 4u * sizeof(float));
@@ -2776,10 +2773,9 @@ static void test_stage_timing(void) {
             /* Read into its own record: `t` still holds the good hop the
              * report below prints. */
             af_get_last_timing(p, &after_bail);
-            CHECK(after_bail.delay_us == 0 && after_bail.linear_us == 0 &&
-                  after_bail.frontend_us == 0 && after_bail.lane_res_us == 0,
-                  "timing: a bailed-out hop reports zeros, not the last "
-                  "hop's numbers");
+            CHECK(memcmp(&after_bail, &t, sizeof(t)) == 0,
+                  "timing: a hop refused before it starts leaves the record "
+                  "untouched");
         }
         free(nan_mics); free(far);
     }

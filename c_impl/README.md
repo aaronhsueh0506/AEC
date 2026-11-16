@@ -13,7 +13,7 @@ C implementation of the AEC algorithm. Top-level orchestration in
 make            # → bin/<backend>-<config-hash>/aec_wav (CLI binary)
 make lib        # → bin/<backend>-<config-hash>/libaec.a (static library)
 make SIMD=0     # force every optional SIMD path (including matched filter) to scalar
-make PROFILE=1  # compile the per-hop stage timing in (aec_get_last_timing(); off by default)
+make PROFILE=0  # build without the per-hop stage timing (on by default; aec_get_last_timing() then reads 0)
 make clean
 ```
 

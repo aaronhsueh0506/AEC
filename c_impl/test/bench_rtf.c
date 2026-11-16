@@ -19,7 +19,7 @@
  *                median_us_per_hop=<x.xx>
  *
  * total_s, us_per_hop and rtf come from the fastest pass; median_us_per_hop is the median over all passes. A build with
- * PROFILE=1 adds one line per stage, "buckets_us_per_hop", with the mean of each stage-timing bucket over the fastest pass.
+ * the default PROFILE=1 adds one line per stage, "buckets_us_per_hop", with the mean of each stage-timing bucket over the fastest pass.
  *
  * Stages:
  *   full   - production config (level's residual FULL, enable_cng=1; the same config aec_wav's `--level <p> --cng` builds).
@@ -195,7 +195,7 @@ static Aec* bench_create(const AecConfig* cfg, int live_observer) {
 /* Runs `repeat` full passes of aec_process() over [mic,ref) x n_hops hops
  * under `cfg`, prints the stage line, and returns the minimum total_s
  * observed (least-noise estimate); the line also carries the median over the
- * passes. With a PROFILE=1 build a second line gives the mean stage-timing
+ * passes. With the default PROFILE=1 build a second line gives the mean stage-timing
  * buckets of the fastest pass. One aec_create/aec_destroy per stage;
  * aec_reset() between repeats restores a cold-start state (no realloc) so
  * every repeat measures the same condition rather than a warmed-up tail. */
