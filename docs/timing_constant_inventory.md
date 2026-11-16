@@ -31,8 +31,8 @@ additive per-hop leak (dB/hop): scales LINEARLY, not by a power law:
 | category | count |
 |---|---:|
 | Retime | 25 |
-| Already retimed | 19 |
-| Keep: rejected retime | 5 |
+| Already retimed | 20 |
+| Keep: rejected retime | 4 |
 | Keep: event count | 6 |
 | Keep: fixed internal cadence | 2 |
 | Keep: dominated default | 1 |
@@ -303,7 +303,7 @@ Live on the default-ON audio path, semantically a wall-clock duration, and not c
 
 ---
 
-## Already retimed (19)
+## Already retimed (20)
 
 Verified to route through a retiming helper. Listed so that a future audit can tell 'checked and correct' from 'never looked at'.
 
@@ -424,6 +424,15 @@ Verified to route through a retiming helper. Listed so that a future audit can t
 - **Provenance**: (a)/(b) collapse here: the value is AEC3-structural (kNumBlocksPerSecond = sample_rate/64), not empirically tuned, so there is no bench anchor to recover. The Python side encodes the anchor: python/modules/delay/lag_aggregator.py:_num_blocks_per_second `max(1, round(sample_rate / 64.0))`, used by lag_aggregator.py:_HighestPeakAggregator.__init__ and lag_aggregator.py:_PreEchoLagAggregator.__init__. The C side used to ring-wrap at the bare capacity 250 (correct only at 16 kHz; native 8 kHz held 2000 ms of memory instead of 1000 ms) and its header said the arrays were 'NOT yet rate-parameterised for sample rates ABOVE 16 kHz', which mis-scoped the gap (48 kHz goes through the resample48 sidechain to effective_rate 16000, delay_aec.c:delay_aec_init). That gap is closed: the header comment on DA_HIST_WINDOW now reads 'Capacity of both aggregator rings ... the window in use is round(feed rate / 64): 250 at 16 kHz (48 kHz is decimated to a 16 kHz feed), 125 at 8 kHz', and delay_aec.c:da_hist_window_for_rate computes it.
 - **Reasoning**: Already retimed in both ports; recorded so the open item this entry used to carry is not re-flagged. The fix is the one this entry had recommended: DA_HIST_WINDOW stays as the compile-time CAPACITY and the runtime window (delay_aec.c:da_hist_window_for_rate) is used for the modulo and eviction -- 125 <= 250 at 8 kHz, so no allocation change. Same pattern as the consistent-estimate threshold (see the separate entry).
 
+### `PathChangeRegimeHandler.HYS_STREAK_MIN`
+
+- **Verdict**: already retimed (high confidence, closed)
+- **Anchor**: 80 ms of input; 10 hops on the 16 kHz hop-128 grid is the validated count (the 10 ms authoring grid gave 100 ms = 10 hops, and a 12-hop variant on that grid regressed a near-end clip)
+- **Effective today**: 80 ms of input rounded up to whole hops: 5 hops (80 ms) @8k 256/128, 10 hops (80 ms) @16k 256/128 (default, unchanged), 5 hops (80 ms) @16k 512/256, 8 hops (85.3 ms) @48k 1024/512; 10 hops when hop size or sample rate is not positive.
+- **Consumer**: python/modules/epc.py PathChangeRegimeHandler._streak_min_hops = ceil(sample_rate * 80 / (1000 * hop_size)) in integers, gating boost_q/main_pause together with config.shadow_copy_hysteresis; c_impl/src/epc_shadow.c sc_hys_streak_min computes the same integer expression and shadow_copy_init_for_grid stores max(hysteresis, streak_min) as the single copy_counter threshold (the two former counters always advanced and reset together). The counter resets on any non-qualifying hop, so it is a consecutive-hop requirement.
+- **Provenance**: (a) INTRODUCE = 5cde05c (2026-04-28, 'v3.0.2: Phase A+B+C decoupling refactor + ablation tooling'); `git show 5cde05c:python/aec.py | grep frame_size` -> `frame_size: int = -1 # Auto: sample_rate * 20ms` -> 320/160 @16k = 10 ms. (b) `git log -S"HYS_STREAK_MIN"` chain: 5cde05c (2026-04-28) -> 846ca8f/cbd38ea/9e17f16 (2026-05-11) -> 515f911 (2026-05-16 pure file move to modules/epc.py); a current run also lists later commits, among them 5afb049 and 3f1153a, which touch the identifier's lines. Last EMPIRICAL event = cbd38ea (2026-05-11), the P52 A.0 revert driven by the cohort post-mortem; grid there also 10 ms (verified in config.py at that commit). Both anchors = 10 hops on a 10 ms grid = 100 ms; carrying 100 ms over to the shipped 8 ms grid (12 hops) was rejected by measurement, and the span is fixed at the validated 10 hops there = 80 ms. The source comments state this rule.
+- **Reasoning**: Retimed in both languages with an integer rule, so C and Python agree exactly. A 100 ms retime (12 hops at 16 kHz hop 128) was measured on the 90-case blind subset (balanced, 832 taps, CNG) and broke one near-end single-talk clip whose reference is loud and echo-free: the rescue streak stopped completing, the main filter was never replaced, and the output sat 5 dB under the capture for 26 s (deg MOS 2.33 -> 1.54; NE mean -0.023). 11 hops fails identically; 10 restores the capture. 80 ms is exactly 10 hops on that grid, so the validated behaviour there is unchanged, and the other grids get the same wall-clock span instead of a fixed hop count (16 kHz hop 256 drops from 10 to 5 hops, 48 kHz hop 512 from 10 to 8). Rounding up keeps the span at or above 80 ms on every grid.
+
 ### `PBFDAF far-end power EMA retention (alpha_power)`
 
 - **Verdict**: already retimed (high confidence, closed)
@@ -484,18 +493,9 @@ Verified to route through a retiming helper. Listed so that a future audit can t
 
 ---
 
-## Keep: rejected retime (5)
+## Keep: rejected retime (4)
 
 Semantically time-based, but the measured retime failed the audio acceptance gate. The validated hop-authored values remain frozen as an explicit exception rather than being mislabeled as already retimed.
-
-### `PathChangeRegimeHandler.HYS_STREAK_MIN`
-
-- **Verdict**: keep: rejected retime (high confidence, closed)
-- **Anchor**: 100 ms (10 hops at the 10 ms grid); introduce and validate agree
-- **Effective today**: Frozen at 10 consecutive hops by the rejected-retime verdict: 160 ms @8k 256/128, 80 ms @16k 256/128 (default), 160 ms @16k 512/256, 106.7 ms @48k 1024/512. This grid dependence is a documented exception, not an invariant-duration claim.
-- **Consumer**: python/modules/epc.py PathChangeRegimeHandler._hys_streak_min = HYS_STREAK_MIN (10) on every grid, gating boost_q/main_pause together with config.shadow_copy_hysteresis; c_impl/src/epc_shadow.c stores max(hysteresis, SC_HYS_STREAK_MIN) as the single copy_counter threshold (the two former counters always advanced and reset together). The counter resets on any non-qualifying hop, so it is a consecutive-hop requirement.
-- **Provenance**: (a) INTRODUCE = 5cde05c (2026-04-28, 'v3.0.2: Phase A+B+C decoupling refactor + ablation tooling'); `git show 5cde05c:python/aec.py | grep frame_size` -> `frame_size: int = -1 # Auto: sample_rate * 20ms` -> 320/160 @16k = 10 ms. (b) `git log -S"HYS_STREAK_MIN"` chain: 5cde05c (2026-04-28) -> 846ca8f/cbd38ea/9e17f16 (2026-05-11) -> 515f911 (2026-05-16 pure file move to modules/epc.py); a current run also lists later commits, among them 5afb049 and 3f1153a, which touch the identifier's lines. Last EMPIRICAL event = cbd38ea (2026-05-11), the P52 A.0 revert driven by the cohort post-mortem; grid there also 10 ms (verified in config.py at that commit). Both anchors = 10 ms -> 100 ms. No stale wall-clock comment exists (there is no comment at all).
-- **Reasoning**: Retime REJECTED by measurement. ms_to_hops(100 ms) gives 12 hops at the shipped 16 kHz/128 grid; on the 90-case blind subset (balanced, 832 taps, CNG) that lengthening broke one near-end single-talk clip whose reference is loud and echo-free: the rescue streak stopped completing, the main filter was never replaced, and the output sat 5 dB under the capture for 26 s (deg MOS 2.33 -> 1.54; NE mean -0.023). 11 hops fails identically; 10 restores the capture; the sibling retention retime alone is neutral on the clip and on the subset. The gate is therefore a validated consecutive-hop count, kept at 10 on every grid, and the AIAEC 512/256 grid keeps its 10-hop (160 ms) behaviour rather than dropping to 6.
 
 ### `simple_mu_holdoff`
 
@@ -636,9 +636,9 @@ A configurable threshold that is not the binding term at the shipped default, so
 - **Verdict**: keep: dominated default (high confidence, closed)
 - **Anchor**: Not applicable -- dominated at the shipped default configuration.
 - **Effective today**: Not meaningful at the shipped default: the counter threshold is never the binding term.
-- **Consumer**: python/modules/epc.py keeps the explicit conjunction `copy_counter >= shadow_copy_hysteresis AND streak >= retimed_100_ms`; both counters advance/reset together. C implements the identical condition with one counter and stores `max(hysteresis, retimed_100_ms)` at init, after proving its former counters were redundant. At the shipped Python value 3, the retimed 100 ms term binds on every product grid, so 3 -> 4 remains a provable no-op.
+- **Consumer**: python/modules/epc.py keeps the explicit conjunction `copy_counter >= shadow_copy_hysteresis AND streak >= retimed_80_ms`; both counters advance/reset together. C implements the identical condition with one counter and stores `max(hysteresis, retimed_80_ms)` at init, after proving its former counters were redundant. At the shipped Python value 3, the retimed 80 ms term binds on every product grid, so 3 -> 4 remains a provable no-op.
 - **Provenance**: A textbook two-date case: 48 ms at introduce against 30 ms at the last commit that set it. Introduced on a 16 ms grid; the later commit that would be the validation anchor is a revert whose own message disclaims the 800-case run, so no commit ever measured and accepted a wall-clock span for this literal in either direction. That ambiguity is moot given the domination.
-- **Reasoning**: Not a retime and not dead code -- the two verdicts this candidate originally received, each correct about one half. Retiming it is pointless while it is dominated, and deleting it is wrong because Python exposes shadow_copy_hysteresis: a caller setting it ABOVE the retimed 100 ms minimum makes it the binding term and it starts behaving as a real duration. Keep the value, do not retime, record the domination. The duration that governs the shipped default is the per-grid 100 ms minimum in the PathChangeRegimeHandler.HYS_STREAK_MIN entry. Also on record: C's top-level AecConfig has no shadow_copy_hysteresis field, so the two ports are not externally configurable to the same degree; its internal init still applies the same max rule to the supplied value.
+- **Reasoning**: Not a retime and not dead code -- the two verdicts this candidate originally received, each correct about one half. Retiming it is pointless while it is dominated, and deleting it is wrong because Python exposes shadow_copy_hysteresis: a caller setting it ABOVE the retimed 80 ms minimum makes it the binding term and it starts behaving as a real duration. Keep the value, do not retime, record the domination. The duration that governs the shipped default is the per-grid 80 ms minimum in the PathChangeRegimeHandler.HYS_STREAK_MIN entry. Also on record: C's top-level AecConfig has no shadow_copy_hysteresis field, so the two ports are not externally configurable to the same degree; its internal init still applies the same max rule to the supplied value.
 
 ---
 

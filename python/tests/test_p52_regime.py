@@ -106,15 +106,16 @@ class HandlerActionTests(unittest.TestCase):
         self.assertTrue(fired, 'boost_q never fired on sustained shadow-better streak')
         # By the time boost_q fires, main should be paused
         self.assertTrue(h.main_paused, 'pause not set after boost_q')
-        # Hysteresis + streak min: the validated 10-hop count on every grid.
+        # Hysteresis + streak min: 80 ms of input is 10 hops on the default 16 kHz hop-128 grid.
         self.assertEqual(boost_frame, h.hys_streak_min - 1)
 
-    def test_shadow_retention_is_retimed_and_streak_count_is_kept(self):
+    def test_shadow_retention_and_streak_count_follow_wall_clock(self):
+        # Streak minimum: 80 ms of input rounded up to whole hops; 48 kHz hop 512 is 7.5 -> 8.
         expected = {
-            (8000, 256, 128): (10, 0.9920120080140337),
+            (8000, 256, 128): (5, 0.9920120080140337),
             (16000, 256, 128): (10, 0.9959979959889647),
-            (16000, 512, 256): (10, 0.9920120080140337),
-            (48000, 1024, 512): (10, 0.9946675569416230),
+            (16000, 512, 256): (5, 0.9920120080140337),
+            (48000, 1024, 512): (8, 0.9946675569416230),
         }
         for (sample_rate, frame_size, hop_size), (hops, retention) in expected.items():
             cfg = AecConfig(sample_rate=sample_rate, frame_size=frame_size,
@@ -146,6 +147,16 @@ class HandlerActionTests(unittest.TestCase):
                      dt_from_energy=0.0)
             self.assertAlmostEqual(h.copy_err_baseline, retention, places=12)
 
+    def test_streak_min_rounds_up_and_falls_back(self):
+        f = PathChangeRegimeHandler._streak_min_hops
+        self.assertEqual(f(128, 16000), 10)
+        self.assertEqual(f(256, 16000), 5)
+        self.assertEqual(f(160, 16000), 8)
+        self.assertEqual(f(512, 48000), 8)  # 7.5 hops: floor would give 7
+        self.assertEqual(f(160, 8000), 4)
+        self.assertEqual(f(0, 16000), 10)
+        self.assertEqual(f(128, 0), 10)
+
     def test_legacy_grid_keeps_authored_shadow_timing_exact(self):
         # The 320/160 grid is not a supported top-level AecConfig today, but
         # the handler itself accepts a config-like object. This pins the
@@ -155,7 +166,7 @@ class HandlerActionTests(unittest.TestCase):
         cfg.frame_size = 320
         cfg.hop_size = 160
         h = PathChangeRegimeHandler(cfg)
-        self.assertEqual(h.hys_streak_min, 10)
+        self.assertEqual(h.hys_streak_min, 8)
         self.assertEqual(h.copy_err_baseline_retention, 0.995)
 
     def test_reverse_copy_fires_when_main_beats_shadow(self):

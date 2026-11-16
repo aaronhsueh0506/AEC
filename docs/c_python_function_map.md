@@ -37,21 +37,21 @@
 <!-- stats:begin -->
 | key | 數值 | 說明 |
 |---|---|---|
-| `c_src_total` | 526 | `src/` 下 `.c` 的 C 函式總數（唯一 (檔, 函式名)） |
-| `c_src_mirror` | 221 | 關係為 mirror |
+| `c_src_total` | 527 | `src/` 下 `.c` 的 C 函式總數（唯一 (檔, 函式名)） |
+| `c_src_mirror` | 222 | 關係為 mirror |
 | `c_src_partial` | 124 | 關係為 partial |
 | `c_src_c_only` | 181 | 關係為 C-only（含 22 個 `aec_testing_*` 測試鉤子） |
 | `c_src_unknown` | 0 | 關係為 未能判斷 |
 | `c_hdr_total` | 2 | `include/internal/` 下 header 內 static inline 函式總數（規則 2；共用 SIMD 核心不列入） |
 | `c_hdr_c_only` | 1 | 其中 C-only |
 | `c_hdr_mapped` | 1 | 其中 mirror 或 partial |
-| `c_total` | 528 | C 函式合計（src 加 header） |
-| `c_mapped` | 346 | 已對應（mirror 加 partial）合計 |
+| `c_total` | 529 | C 函式合計（src 加 header） |
+| `c_mapped` | 347 | 已對應（mirror 加 partial）合計 |
 | `c_c_only` | 182 | C-only 合計 |
 | `c_unknown` | 0 | 未能判斷 合計 |
 | `inferred` | 28 | 關係說明以「推定：」開頭的列（已含在上列 mirror／partial 內） |
-| `py_total` | 575 | Python 符號總數（規則 4） |
-| `py_mapped` | 322 | 被 §1／§2 至少一列引用的 Python 符號 |
+| `py_total` | 576 | Python 符號總數（規則 4） |
+| `py_mapped` | 323 | 被 §1／§2 至少一列引用的 Python 符號 |
 | `py_only_struct` | 58 | §3 Python-only：C 以資料結構、列舉或常數承載 |
 | `py_only_field` | 58 | §3 Python-only：C 以結構欄位或回傳值直接取得 |
 | `py_only_none` | 137 | §3 Python-only：C 無此機制 |
@@ -734,6 +734,7 @@
 | `src/epc_shadow.c:epc_tick_hangover` | `modules/epc.py:EchoPathChangeDetector.tick_hangover` | mirror | T-03 | `ctest:test_counter_saturation.c` |
 | `src/epc_shadow.c:shadow_copy_init_for_grid` | `modules/epc.py:PathChangeRegimeHandler.__init__` | mirror | T-03 | `ctest:test_counter_saturation.c` |
 | `src/epc_shadow.c:shadow_copy_reset` | `modules/epc.py:PathChangeRegimeHandler.reset` | mirror | T-03 | `ctest:test_counter_saturation.c` |
+| `src/epc_shadow.c:sc_hys_streak_min` | `modules/epc.py:PathChangeRegimeHandler._streak_min_hops` | mirror | T-03 | `ctest:test_counter_saturation.c` |
 | `src/epc_shadow.c:dt_safe` | `modules/epc.py:PathChangeRegimeHandler._dt_safe` | mirror | T-03 | — |
 | `src/epc_shadow.c:shadow_copy_update` | `modules/epc.py:PathChangeRegimeHandler.update` | partial（C 不回傳決策，只更新 `ShadowCopy` 狀態；沒有 boost_q（Kalman Q 增強已從 C 移除），也沒有 reverse_copy） | T-03 | `ctest:test_counter_saturation.c` |
 

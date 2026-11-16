@@ -42,6 +42,10 @@ when verdict requires it.
 ---
 
 
+## [Unreleased] — 2026-11-16 — The shadow-copy rescue streak is 80 ms on every grid
+
+The streak minimum (`SC_HYS_STREAK_MIN`, `PathChangeRegimeHandler.HYS_STREAK_MIN`) is `ceil(sample_rate * 80 / (1000 * hop_size))` hops, computed in integers by both ports: 10 at 16 kHz hop 128, 5 at 16 kHz hop 256 and 8 kHz hop 128, 8 at 48 kHz hop 512 (it was 10 on every grid). Output changes on the other grids (16 kHz hop 256, 48 kHz hop 512); 16 kHz hop 128 is bit-identical; `docs/timing_constant_inventory.md` moves the entry to "Already retimed".
+
 ## [Unreleased] — 2026-11-16 — The fixed eval manifest keeps official clips only (61 cases)
 
 `eval/manifest_90case_stems.txt` and `eval/manifest_90case.json` lose the 29 near-end stems whose clips exist only under `nearend_singletalk/_quarantine_non_official/`: evaluation data comes from the official sets and own recordings. 61 cases remain (30 far-end singletalk, 30 doubletalk, 1 near-end singletalk), 122 clips. The file names keep the `90case` label so the runners, the pin keys and the references in older entries still resolve.

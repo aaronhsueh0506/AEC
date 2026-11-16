@@ -409,7 +409,7 @@ static void section_epc_shadow(void) {
         CHECK(max_seen > 0, "ShadowCopy(STREAK): streak actually grows under sustained qualifying calls");
     }
     {
-        ShadowCopy g8, g128, g256, g48, legacy;
+        ShadowCopy g8, g128, g256, g48, legacy, nogrid, wide;
         shadow_copy_init_for_grid(&g8, SC_GATE_ENERGY, 0.65f, 3, 5,
                                   128, 8000);
         shadow_copy_init_for_grid(&g128, SC_GATE_ENERGY, 0.65f, 3, 5,
@@ -420,19 +420,23 @@ static void section_epc_shadow(void) {
                                   512, 48000);
         shadow_copy_init_for_grid(&legacy, SC_GATE_ENERGY, 0.65f, 3, 5,
                                   160, 16000);
-        CHECK(g8.shadow_copy_hysteresis == 10 &&
+        shadow_copy_init_for_grid(&nogrid, SC_GATE_ENERGY, 0.65f, 3, 5, 0, 16000);
+        shadow_copy_init_for_grid(&wide, SC_GATE_ENERGY, 0.65f, 12, 5, 256, 16000);
+        CHECK(g8.shadow_copy_hysteresis == 5 &&
               g128.shadow_copy_hysteresis == 10 &&
-              g256.shadow_copy_hysteresis == 10 &&
-              g48.shadow_copy_hysteresis == 10,
-              "ShadowCopy: the 10-hop streak minimum is a hop count on every product grid");
+              g256.shadow_copy_hysteresis == 5 &&
+              g48.shadow_copy_hysteresis == 8,
+              "ShadowCopy: the streak minimum is 80 ms of input rounded up to whole hops (48 kHz hop 512: 7.5 -> 8)");
+        CHECK(nogrid.shadow_copy_hysteresis == 10 && wide.shadow_copy_hysteresis == 12,
+              "ShadowCopy: no grid falls back to 10 hops; a larger hysteresis still wins");
         CHECK(fabsf(g8.copy_err_baseline_retention - 0.992012008f) < 1e-7f &&
               fabsf(g128.copy_err_baseline_retention - 0.995997996f) < 1e-7f &&
               fabsf(g256.copy_err_baseline_retention - 0.992012008f) < 1e-7f &&
               fabsf(g48.copy_err_baseline_retention - 0.994667557f) < 1e-7f,
               "ShadowCopy: copy-error EMA keeps its ~2 s envelope on every product grid");
-        CHECK(legacy.shadow_copy_hysteresis == 10 &&
+        CHECK(legacy.shadow_copy_hysteresis == 8 &&
               legacy.copy_err_baseline_retention == 0.995f,
-              "ShadowCopy: legacy 10 ms authoring grid keeps its authored coefficients");
+              "ShadowCopy: legacy 10 ms authoring grid keeps its authored retention and gets 80 ms = 8 hops");
         {
             const int expected_warmup_hops[] = {31, 62, 31, 47};
             const int hop_sizes[] = {128, 128, 256, 512};
@@ -461,7 +465,7 @@ static void section_epc_shadow(void) {
         }
         {
             ShadowCopy* grids[] = {&g8, &g128, &g256, &g48};
-            const int fire_hops[] = {10, 10, 10, 10};
+            const int fire_hops[] = {5, 10, 5, 8};
             const float retentions[] = {
                 0.992012008f, 0.995997996f,
                 0.992012008f, 0.994667557f,
@@ -474,7 +478,7 @@ static void section_epc_shadow(void) {
                         live, 200 + i, 50, 1e-2f, 1e-3f, 1e-7f,
                         0, 0.0f, 0.0f, 0.0f, 1);
                     CHECK(live->main_paused == (i == fire_hops[grid] - 1),
-                          "ShadowCopy: the 10-hop streak minimum decides the live pause hop");
+                          "ShadowCopy: the 80 ms streak minimum decides the live pause hop on each grid");
                 }
 
                 shadow_copy_reset(live);

@@ -106,9 +106,17 @@ void epc_tick_hangover(EpcDetector* e) {
 
 static const float SC_BASELINE_INIT       = 1e-6f;
 static const float SC_BASELINE_RETENTION  = 0.995f;
-/* Hop counts, not durations; not retimed (a 100 ms retime stops the rescue streak completing). */
-static const int   SC_HYS_STREAK_MIN      = 10;
+/* Rescue-gate streak minimum: 80 ms of input rounded up to whole hops (10 hops at 16 kHz hop 128). */
+static const int   SC_HYS_STREAK_MS       = 80;
+static const int   SC_HYS_STREAK_FALLBACK = 10;
 static const int   SC_STREAK_FRAMES  = 5;
+
+static int sc_hys_streak_min(int hop_size, int sample_rate) {
+    long long den;
+    if (hop_size <= 0 || sample_rate <= 0) return SC_HYS_STREAK_FALLBACK;
+    den = 1000LL * hop_size;
+    return (int)(((long long)sample_rate * SC_HYS_STREAK_MS + den - 1) / den);
+}
 
 void shadow_copy_init_for_grid(ShadowCopy* s, ShadowCopyGateMode mode,
                                float threshold, int hysteresis,
@@ -127,8 +135,10 @@ void shadow_copy_init_for_grid(ShadowCopy* s, ShadowCopyGateMode mode,
     s->pause_resume = 0;
     s->shadow_copy_threshold  = threshold;
     /* One counter against the larger threshold serves both the hysteresis and streak conditions. */
-    s->shadow_copy_hysteresis = hysteresis > SC_HYS_STREAK_MIN
-                              ? hysteresis : SC_HYS_STREAK_MIN;
+    {
+        int streak_min = sc_hys_streak_min(hop_size, sample_rate);
+        s->shadow_copy_hysteresis = hysteresis > streak_min ? hysteresis : streak_min;
+    }
     s->epc_hangover           = epc_hangover;
 }
 

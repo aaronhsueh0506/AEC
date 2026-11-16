@@ -129,8 +129,9 @@ class PathChangeRegimeHandler:
     """
 
     BASELINE_INIT = 1e-6
-    # Consecutive-hop count, not a duration; not retimed.
-    HYS_STREAK_MIN = 10
+    # Rescue-gate streak minimum: 80 ms of input rounded up to whole hops (10 hops at 16 kHz hop 128).
+    HYS_STREAK_MS = 80
+    HYS_STREAK_FALLBACK = 10
     # Authored on the 10 ms grid; live instances use a wall-clock-preserving retention.
     COPY_ERR_BASELINE_RETENTION = 0.995
     AEC3_STREAK_FRAMES = 5  # gate_mode='streak_only': consecutive-block rule
@@ -144,7 +145,7 @@ class PathChangeRegimeHandler:
     def __init__(self, config: 'AecConfig', gate_mode: str = 'energy'):
         self.config = config
         self.gate_mode = gate_mode
-        self._hys_streak_min = self.HYS_STREAK_MIN
+        self._hys_streak_min = self._streak_min_hops(config.hop_size, config.sample_rate)
         self._copy_err_baseline_retention = _aec3_scale.growth_rehop(
             self.COPY_ERR_BASELINE_RETENTION, 160, 16000,
             config.hop_size, config.sample_rate)
@@ -155,6 +156,13 @@ class PathChangeRegimeHandler:
         self._streak = 0
         self._main_paused = False
         self._pause_resume = 0
+
+    @classmethod
+    def _streak_min_hops(cls, hop_size: int, sample_rate: int) -> int:
+        if hop_size <= 0 or sample_rate <= 0:
+            return cls.HYS_STREAK_FALLBACK
+        den = 1000 * hop_size
+        return (sample_rate * cls.HYS_STREAK_MS + den - 1) // den
 
     def reset(self) -> None:
         self._copy_err_baseline = self.BASELINE_INIT
