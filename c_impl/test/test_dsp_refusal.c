@@ -46,15 +46,20 @@ typedef struct {
     int on_ref;          /* 0: the sample is on the microphone, 1: on the reference */
     float value;
     Where where;         /* with AEC_RESIDUAL_OFF the linear call is the closing one */
+    int whole_hop;       /* 1: the whole microphone hop is +-value noise, so the hop's sum of squares overflows before the
+                          * smoothed power does; skipped with AEC_RESIDUAL_OFF, where no detector state runs */
 } Poison;
 
 /* All refused on POISON_HOP itself. mic / ref 3e38: the linear stage's spectra overflow. ref 1e20 and mic 1e25: the linear view
- * stays finite; the hop is refused when it closes. */
+ * stays finite; the hop is refused when it closes. mic hop 3e18 / 1e19: every sample of the hop is large; the smoothed power and
+ * the linear view stay finite but the detector state (dt_indicator, the instantaneous ERLE) does not, so the closing call refuses. */
 static const Poison POISONS[] = {
-    { "mic 3e38", 0, 3.0e38f, AT_LINEAR },
-    { "ref 3e38", 1, 3.0e38f, AT_LINEAR },
-    { "ref 1e20", 1, 1.0e20f, AT_CLOSE },
-    { "mic 1e25", 0, 1.0e25f, AT_CLOSE },
+    { "mic 3e38", 0, 3.0e38f, AT_LINEAR, 0 },
+    { "ref 3e38", 1, 3.0e38f, AT_LINEAR, 0 },
+    { "ref 1e20", 1, 1.0e20f, AT_CLOSE, 0 },
+    { "mic 1e25", 0, 1.0e25f, AT_CLOSE, 0 },
+    { "mic hop 3e18", 0, 3.0e18f, AT_CLOSE, 1 },
+    { "mic hop 1e19", 0, 1.0e19f, AT_CLOSE, 1 },
 };
 #define N_POISONS ((int)(sizeof(POISONS) / sizeof(POISONS[0])))
 
@@ -103,7 +108,7 @@ static int hop_results_finite(const Aec* a, int mode, const float* out, int hop)
     memset(&lv, 0, sizeof lv); lv.struct_size = sizeof lv;
     if (aec_get_linear(a, &lv) != AEC_OK) return 0;
     n = lv.n_freqs;
-    ok = all_finite(lv.linear_hop, hop) && all_finite((const float*)lv.echo_spec, 2 * n) &&
+    ok = isfinite(lv.dt_indicator) && all_finite(lv.linear_hop, hop) && all_finite((const float*)lv.echo_spec, 2 * n) &&
          all_finite((const float*)lv.near_spec, 2 * n) && all_finite((const float*)lv.far_spec, 2 * n);
     if (mode != AEC_RESIDUAL_OFF) {
         memset(&rv, 0, sizeof rv); rv.struct_size = sizeof rv;
@@ -174,6 +179,7 @@ static void run_row(const Grid* g, int mode, Entry e, const Poison* p) {
     int hop, h, refused = -1, compared = 0, differ = 0, accepted_bad = 0;
     char tag[160];
     snprintf(tag, sizeof tag, "%s %s %s %s", g->name, MODE_NAME[mode], ENTRY_NAME[e], p->name);
+    if (p->whole_hop && mode == AEC_RESIDUAL_OFF) return;
     g_rows++;
     if (!a || (e == E_SHARED && !donor)) { CHECK(0, "%s: create", tag); aec_destroy(a); aec_destroy(donor); return; }
     hop = aec_hop_size(a);
@@ -183,7 +189,15 @@ static void run_row(const Grid* g, int mode, Entry e, const Poison* p) {
         uint32_t serial_before = aec_post_reset_serial(a);
         memcpy(mic, g_mic[h], (size_t)hop * sizeof(float));
         memcpy(ref, g_far[h], (size_t)hop * sizeof(float));
-        if (h == POISON_HOP) { if (p->on_ref) ref[POISON_AT] = p->value; else mic[POISON_AT] = p->value; }
+        if (h == POISON_HOP) {
+            if (p->whole_hop) {
+                for (int i = 0; i < hop; ++i) mic[i] = ((i * 7 + 3) % 5 < 2 ? -1.0f : 1.0f) * p->value * (0.5f + 0.1f * (float)(i % 6));
+            } else if (p->on_ref) {
+                ref[POISON_AT] = p->value;
+            } else {
+                mic[POISON_AT] = p->value;
+            }
+        }
         for (int i = 0; i < hop; ++i) out[i] = 7.0f;
         rc = run_hop(a, donor, g_mic[h], e, mode, mic, ref, e == E_PROCESS ? out : NULL, &st);
         if (fresh) {
@@ -392,8 +406,9 @@ static void run_array_row(void) {
 /* ---- the array's lanes are checked as single channels ---------------------------------------------------------------- */
 
 #define ARR_REC_MAX (5 * HOP_MAX + 26 * NB_MAX + 2)   /* aligned far + 4 lane hops; up to 25 floats per bin; delay pair */
-static const char* const ARR_POISON_NAME[3] = { "mic 3e38", "mic 1e25", "mic 1e20" };
-static const float ARR_POISON[3] = { 3.0e38f, 1.0e25f, 1.0e20f };
+#define ARR_N_POISONS 5   /* the last two put the value on every sample of the lane's hop */
+static const char* const ARR_POISON_NAME[ARR_N_POISONS] = { "mic 3e38", "mic 1e25", "mic 1e20", "mic hop 3e18", "mic hop 1e19" };
+static const float ARR_POISON[ARR_N_POISONS] = { 3.0e38f, 1.0e25f, 1.0e20f, 3.0e18f, 1.0e19f };
 
 static Aec* make_array(const Grid* g, int mode) {
     AecConfig c;
@@ -477,7 +492,14 @@ static void run_array_lane_row(const Grid* g, int mode, int lane, int poison) {
         int rc, lin_rc;
         uint32_t serial_before = aec_post_reset_serial(a);
         array_hop(h, hop, mics);
-        if (h == POISON_HOP) mics[POISON_AT * AEC_ARRAY_MICS + lane] = ARR_POISON[poison];
+        if (h == POISON_HOP) {
+            if (poison < 3) {
+                mics[POISON_AT * AEC_ARRAY_MICS + lane] = ARR_POISON[poison];
+            } else {
+                for (int i = 0; i < hop; ++i)
+                    mics[i * AEC_ARRAY_MICS + lane] = ((i * 7 + 3) % 5 < 2 ? -1.0f : 1.0f) * ARR_POISON[poison] * (0.5f + 0.1f * (float)(i % 6));
+            }
+        }
         rc = array_run(a, mode, mics, g_far[h], w, gained, &lin_rc);
         if (fresh) {
             int rf = array_run(fresh, mode, mics, g_far[h], w, gained_f, &lin_rc);
@@ -622,7 +644,7 @@ int main(void) {
         make_scene(GRIDS[g].fft / 2);
         for (mode = AEC_RESIDUAL_STATE; mode <= AEC_RESIDUAL_FULL; ++mode)
             for (lane = 0; lane < AEC_ARRAY_MICS; ++lane)
-                for (poison = 0; poison < 3; ++poison) run_array_lane_row(&GRIDS[g], mode, lane, poison);
+                for (poison = 0; poison < ARR_N_POISONS; ++poison) run_array_lane_row(&GRIDS[g], mode, lane, poison);
         run_array_sweep(&GRIDS[g]);
         run_array_controls(&GRIDS[g]);
     }

@@ -42,6 +42,13 @@ when verdict requires it.
 ---
 
 
+## [Unreleased] — 2026-11-16 — A hop whose detector state overflows is refused
+
+**Behaviour change (integrators read this).** A hop of large finite microphone samples whose sum of squares overflows `float` (`hop_size * rms^2` above 3.4e38: about 1.6e18 rms at `hop_size` 128, 1.15e18 at 256, 8e17 at 512) was accepted with `AEC_OK` although the detector state it produced was not finite: `aec_get_linear().dt_indicator` read NaN on every later hop and the instantaneous ERLE stayed NaN until `aec_reset()`, so the double-talk gate and, in an array, the lane-maximum DT never fired. `aec_closed_finite()` now also requires `inst_erle_smooth` and `last_dt_indicator` to be finite (with `AEC_RESIDUAL_OFF` neither runs): such a hop is `AEC_ERR_DSP` with the instance reset, a single channel and an array lane alike. Normal input is unchanged: the four baseline streams (`SIMD=1` / `0`) are byte-identical to the previous commit's.
+
+- `test/test_dsp_refusal.c`: two whole-hop poisons (`mic hop 3e18`, `mic hop 1e19`; single channel, STATE / ESTIMATE / FULL, the three entries, three grids) and the same two on every lane of the array rows; `hop_results_finite()` also requires `dt_indicator` finite. Without the check 84 single-channel and 72 array assertions fail; with it all 1005 rows pass.
+- The measured whole-hop threshold is exactly `sqrt(3.4e38 / hop_size)` rms (bisection on `aec_process()`, and on lane 0 of an `n_mics = 4` array through `aec_process_linear()`, `STATE` / `ESTIMATE` / `FULL`, three grids); the threshold sentences in `aec.h`, `lifecycle.md` and the user manual are not changed here.
+
 ## [Unreleased] — 2026-11-16 — A refused array hop leaves the linear view reading zeros, as a single channel
 
 After an array `AEC_ERR_DSP`, `aec_get_linear()` (lane 0's view with the shared alignment) still answered `AEC_OK` with the refused hop's lane-0 buffers, which the reset does not clear; with `3e38` on microphone 0 they were not finite. `aec_refuse_hop()` now zeroes that lane's `linear_hop` and spectra as it does a single channel's (`aec_array_impl_linear_lane()`); `aligned_far_hop` was already zero. Output of accepted hops unchanged (the four baseline streams byte-identical, `SIMD=1` / `0`).
