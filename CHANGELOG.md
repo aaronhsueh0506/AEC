@@ -42,6 +42,12 @@ when verdict requires it.
 ---
 
 
+## [Unreleased] — 2026-11-16 — A fresh instance's linear view reads zeros
+
+`aec_get_linear()` before the first hop returned `AEC_OK` with `linear_hop` and `aligned_far_hop` pointing at two pool buffers the carve never cleared, so a caller read whatever the pool (or `aec_create()`'s heap block) held: 128 of 128 samples of a `0xAB` pool, stale heap bytes after a freed block. The same for an array through lane 0. `aec_carve_hop_scratch()` now zeroes `raw_output` and `far_hop` (once, at init; both `aec_init()` and `aec_create()`, every lane). Processing is unchanged: the four baseline streams (`SIMD=1` / `0`) are byte-identical to the previous commit's. `aec_reset()` still leaves the last hop's views readable until the next hop (only a refused hop zeroes them).
+
+- `test/test_linear_context.c`: `scenario_fresh_view_reads_zeros()` initialises dirty (`0xAB`, `0xFF`) caller pools on three grids, three delay modes, `n_mics` 1 and 4, and requires `linear_hop`, `aligned_far_hop` and the three spectra to read zeros; all 36 rows fail without the memsets.
+
 ## [Unreleased] — 2026-11-16 — aec_build_sg_config() zeroes the tuning it hands out
 
 `aec_build_sg_config()` assigned three fields of a local `SuppressionGainTuning` and copied the struct out, so the four ENR/SU table pointers its comment promises to be NULL carried whatever the stack held (the lane carve stores the struct without decoding the tables, so the values reached `sg->tun`; no code reads them there, hence no behaviour change, but a valgrind / MSan run saw undefined values). The local is now zeroed first. No output changes.

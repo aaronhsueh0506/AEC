@@ -1202,8 +1202,11 @@ static uint8_t* aec_carve_hop_scratch(Aec* a, uint8_t* ptr, const AecResolved* r
     a->shadow_out = (float*)ptr; ptr += ALIGN16((size_t)hop * sizeof(float));
     a->final_out  = (float*)ptr; ptr += ALIGN16((size_t)hop * sizeof(float));
     a->filter_taps_full = (float*)ptr; ptr += ALIGN16((size_t)np * hop * sizeof(float));
+    /* The two buffers AecLinearView exposes read zeros until the first hop writes them. */
+    memset(a->far_hop, 0, (size_t)hop * sizeof(float));
+    memset(a->raw_output, 0, (size_t)hop * sizeof(float));
 
-    a->scr_sq        = (float*)ptr; ptr += ALIGN16((size_t)hop * sizeof(float));
+    a->scr_sq       = (float*)ptr; ptr += ALIGN16((size_t)hop * sizeof(float));
     a->scr_e2_echo   = (float*)ptr; ptr += ALIGN16((size_t)K   * sizeof(float));
     a->scr_e2_near   = (float*)ptr; ptr += ALIGN16((size_t)K   * sizeof(float));
     a->scr_rsa_mask  = (float*)ptr; ptr += ALIGN16((size_t)K   * sizeof(float));
