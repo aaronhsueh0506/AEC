@@ -658,17 +658,6 @@ static void test_pairwise_sum_tailfold_b(void) {
  * canary, exactly the "n==0 performs zero reads/writes" contract this
  * section exists to check. exit(1) with a precise diagnostic on the first
  * violation, same house style as check_bits_or_die. */
-/* Complex-array counterparts: Complex is {float r; float i;} contiguous, so
- * a Complex arena is just a float arena with every length/offset doubled --
- * reuses the float helpers above instead of duplicating the canary logic. */
-static void edge_fill_canary_c(Complex *arena, int len) {
-    edge_fill_canary_f((float *)arena, len * 2);
-}
-static void edge_check_canary_c(const char *label, const Complex *arena, int len,
-                                 int win_lo, int win_len) {
-    edge_check_canary_f(label, (const float *)arena, len * 2, win_lo * 2, win_len * 2);
-}
-
 /* Byte-mask counterpart (coherence_ema_gate's mask output, mask_zero's mask
  * input): 0xAA is neither a legal 0 nor 1 mask value, so any leaked write
  * into the guard region is unambiguous, same intent as the float pattern. */
