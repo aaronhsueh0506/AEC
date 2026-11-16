@@ -215,6 +215,7 @@ static double run_stage(const char* name, const AecConfig* cfg, int live_observe
     }
 
     double best = -1.0;
+    long refused = 0;
 #if AEC_STAGE_TIMING
     double sum[5] = {0}, best_sum[5] = {0};
 #endif
@@ -228,7 +229,13 @@ static double run_stage(const char* name, const AecConfig* cfg, int live_observe
 
         double t0 = now_s();
         for (int h = 0; h < n_hops; ++h) {
-            aec_process(aec, mp, rp, out);
+            int rc = aec_process(aec, mp, rp, out);
+            if (rc == AEC_ERR_DSP) {
+                refused++;
+            } else if (rc != AEC_OK) {
+                fprintf(stderr, "ERROR: aec_process failed (%d) in stage '%s' at hop %d\n", rc, name, h);
+                exit(5);
+            }
 #if AEC_STAGE_TIMING
             {
                 AecStageTiming t;
@@ -263,6 +270,7 @@ static double run_stage(const char* name, const AecConfig* cfg, int live_observe
     double rtf = audio_seconds > 0.0 ? best / audio_seconds : 0.0;
     printf("stage=%s hops=%d total_s=%.6f us_per_hop=%.2f rtf=%.6f median_us_per_hop=%.2f\n",
            name, n_hops, best, us_per_hop, rtf, median_us_per_hop);
+    if (refused) fprintf(stderr, "WARNING: stage '%s': %ld hops refused (AEC_ERR_DSP); the timing includes them\n", name, refused);
 #if AEC_STAGE_TIMING
     if (n_hops > 0)
         printf("buckets_us_per_hop stage=%s delay=%.3f frontend=%.3f linear=%.3f steering=%.3f res=%.3f\n",

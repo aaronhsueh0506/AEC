@@ -42,6 +42,10 @@ when verdict requires it.
 ---
 
 
+## [Unreleased] — 2026-11-16 — bench_rtf and parity_aec_e2e check the aec_process return
+
+Test drivers only. `bench_rtf` counts `AEC_ERR_DSP` hops, prints a warning with the stage and the count, and stops with exit code 5 on any other non-`AEC_OK` return; `parity_aec_e2e` stops with exit code 2 on any non-`AEC_OK` return instead of comparing a reset instance's zeroed output against the golden. `test-parity-e2e` still passes (the 8 kHz row stays the documented expected-red one).
+
 ## [Unreleased] — 2026-11-16 — Test helpers: one all-zero check and an explicit n_mics table
 
 Test only. `all_zero()` (`test_dsp_refusal.c`) and `all_zero_f()` (`test_linear_context.c`) were the same function; `aec_pool_test_util.h` now has `aec_test_all_zero_f32()`. In `test_linear_context.c` the comment of `scenario_fresh_view_reads_zeros()` sits above the scenario (it sat above the helper) and the `n_mics` loop `for (n = 1; n <= N_MICS_MAX; n += 3)` is an explicit `{1, AEC_ARRAY_MICS}` table (`{1}` with `AEC_NO_ARRAY`). The 36 fresh-view rows still run and still fail without the memsets (18 fail with the `far_hop` memset removed).

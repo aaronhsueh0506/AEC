@@ -113,7 +113,8 @@ int main(int argc, char **argv) {
             !rd(f, ref, (size_t)hop * 4) ||
             !rd(f, exp, (size_t)hop * 4) ||
             !rd(f, exp_raw, (size_t)hop * 4)) { fprintf(stderr, "row %d\n", hi); return 2; }
-        aec_process(aec, mic, ref, out);
+        int rc = aec_process(aec, mic, ref, out);
+        if (rc != AEC_OK) { fprintf(stderr, "hop %d: aec_process returned %d\n", hi, rc); return 2; }
         const float *raw = aec->raw_output;   /* linear residual (struct exposed) */
         for (int k = 0; k < hop; ++k) {
             if (out[k] != exp[k]) {
