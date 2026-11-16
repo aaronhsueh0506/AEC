@@ -85,8 +85,7 @@ resolves each stem to its scenario directory and nowhere else, so the frozen set
 drift of the corpus or the manifest aborts the run with the list of files. The resolved clips are linked into `$OUT/dataset_view`,
 which the renderer and `bench_aecmos.py --dataset` read; `python/eval_manifest90.py` applies the same resolution and check. After
 an intended corpus change, re-pin with `python3 eval/manifest_pin.py write --dataset wav/aec_challenge_blind`. `SELF_CHECK=1
-eval/run_c_ab.sh` accepts two byte-identical builds: a null run in which every delta must be exactly 0 (all 61 byte-equal at 16k/256
-and 16k/512). Run the scripts from a scratch copy of the tree, not from inside the repository.
+eval/run_c_ab.sh` accepts two byte-identical builds: a null run in which every delta must be exactly 0. Run the scripts from a scratch copy of the tree, not from inside the repository.
 
 ### Byte-equal regression check (behaviour-neutral changes)
 
