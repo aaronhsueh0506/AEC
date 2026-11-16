@@ -42,6 +42,9 @@ static inline int aec_unusable(const Aec* a) { return !a || !a->ready; }
  * returns AEC_ERR_DSP. */
 int aec_cvec_finite(const Complex* v, int count);
 int aec_refuse_hop(Aec* a);
+/* Reference ring capacity in samples for a resolved configuration: 0 for EXTERNAL_ALIGNED, an estimator that cannot be sized or an
+ * int overflow (aec.c; the single channel and the array size the ring through it). */
+int aec_ref_ring_samples(const AecResolved* rs, int hop);
 
 typedef struct AecArray AecArray;      /* the flow state, defined in aec_array.c */
 

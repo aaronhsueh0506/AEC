@@ -544,7 +544,7 @@ Aec* aec_create(const AecConfig* cfg) {
  * delay is eligible only up to capacity - hop_size); FIXED fixed_delay_samples
  * + hop_size; EXTERNAL_ALIGNED 0. Returns 0 for EXTERNAL_ALIGNED or an int
  * overflow. */
-static int aec_ref_ring_samples(const AecResolved* rs, int hop) {
+int aec_ref_ring_samples(const AecResolved* rs, int hop) {
     const AecConfig* cfg = &rs->cfg;
     if (cfg->delay_mode == AEC_DELAY_EXTERNAL_ALIGNED) return 0;
     if (hop <= 0) return 0;
@@ -1440,16 +1440,8 @@ long aec_far_fft_real_compute_count(const Aec* a) {
     if (aec_unusable(a)) return 0;
     if (AEC_IS_ARRAY(a)) return aec_array_impl_far_fft_count(a);
     long total = a->main_filter.base.far_fft_real_compute_count;
-    if (a->has_shadow) {
-        long extra = a->shadow_filter.far_fft_real_compute_count;
-        if (extra > LONG_MAX - total) return LONG_MAX;
-        total += extra;
-    }
-    if (a->has_observer) {
-        long extra = a->observer_filter.far_fft_real_compute_count;
-        if (extra > LONG_MAX - total) return LONG_MAX;
-        total += extra;
-    }
+    if (a->has_shadow) total = aec_array_count_add_sat(total, a->shadow_filter.far_fft_real_compute_count);
+    if (a->has_observer) total = aec_array_count_add_sat(total, a->observer_filter.far_fft_real_compute_count);
     return total;
 }
 
@@ -2761,6 +2753,11 @@ int aec_process_residual(Aec* a, const AecBeam* beam) {
     return aec_closed_finite(a) ? AEC_OK : aec_refuse_hop(a);
 }
 
+/* The spectrum the gain is applied to: the output guard's base while it is active, else the selected error. */
+static const Complex* aec_render_base(const Aec* a) {
+    return a->post.output_guard_active ? a->a3_sc.output_base : a->a3_sc.sel_esw;
+}
+
 int aec_get_residual(const Aec* a, AecResidualView* out) {
     /* The caller's declared size is validated before anything is written: a short struct is left untouched, a
      * larger one gets only the known prefix. */
@@ -2779,7 +2776,7 @@ int aec_get_residual(const Aec* a, AecResidualView* out) {
     out->near_spec   = a->a3_sc.ybase;
     out->far_spec    = a->main_filter.base.far_spec;
     out->guard_active = a->post.output_guard_active;
-    out->base_spec   = out->guard_active ? a->a3_sc.output_base : a->a3_sc.sel_esw;
+    out->base_spec   = aec_render_base(a);
     if (a->cfg.residual >= AEC_RESIDUAL_ESTIMATE) {
         out->r2            = a->a3_sc.r2;
         out->comfort_noise = a->post.comfort_noise;
@@ -2789,17 +2786,12 @@ int aec_get_residual(const Aec* a, AecResidualView* out) {
     out->usable_linear = aec_state_usable_linear_estimate(&a->a3_state);
     out->post_reset_serial = a->post.reset_serial;
     /* The gain stage's inputs, from this instance's own linear stage. */
-    {
-        AecLinearView lv;
-        memset(&lv, 0, sizeof lv); lv.struct_size = sizeof lv;
-        (void)aec_get_linear(a, &lv);
-        out->all_converged = lv.filter_converged;
-        out->max_dt = lv.dt_indicator;
-        out->max_saturation = lv.saturation_level;
-        out->clock_drift = (a->cfg.delay_mode == AEC_DELAY_MATCHED && a->has_delay) ? delay_aec_has_clockdrift(&a->delay) : 0;
-        out->guard_lanes = out->guard_active ? 1u : 0u;
-        out->far_hop = a->far_hop;
-    }
+    out->all_converged = a->convergence.converged;
+    out->max_dt = a->last_dt_indicator;
+    out->max_saturation = a->saturation_level;
+    out->clock_drift = (a->cfg.delay_mode == AEC_DELAY_MATCHED && a->has_delay) ? delay_aec_has_clockdrift(&a->delay) : 0;
+    out->guard_lanes = out->guard_active ? 1u : 0u;
+    out->far_hop = a->far_hop;
     return AEC_OK;
 }
 
@@ -2816,8 +2808,7 @@ int aec_apply_gain(const Aec* a, const float* extra_gain, Complex* out_spec) {
     int rc = aec_gain_ready(a);
     if (rc != AEC_OK) return rc;
     if (!out_spec) return AEC_ERR_ARG;
-    const Complex* base = a->post.output_guard_active ? a->a3_sc.output_base : a->a3_sc.sel_esw;
-    aec_apply_gain_spec(out_spec, base, a->a3_sg.gain, extra_gain, a->n_freqs);
+    aec_apply_gain_spec(out_spec, aec_render_base(a), a->a3_sg.gain, extra_gain, a->n_freqs);
     return AEC_OK;
 }
 

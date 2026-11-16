@@ -42,6 +42,13 @@ when verdict requires it.
 ---
 
 
+## [Unreleased] — 2026-11-16 — The array shares the single channel's reference-ring sizing; smaller view and counter helpers
+
+**No output change.** `aec_array.c`'s `array_dims()` repeated the reference-ring sizing of `aec_ref_ring_samples()` (MATCHED: the estimator's reach + hop; FIXED: fixed delay + hop) in two arms, without the single channel's overflow guard; it now calls `aec_ref_ring_samples()` (declared in `aec_array_internal.h`), so the two cannot drift. `aec_far_fft_real_compute_count()` uses `aec_array_count_add_sat()` instead of two hand-written saturating adds. `aec_get_residual()` reads `convergence.converged`, `last_dt_indicator` and `saturation_level` directly instead of filling a whole `AecLinearView` for three fields, and `aec_render_base()` names the guard-or-selected base the residual view and `aec_apply_gain()` both pick.
+
+- The four baseline streams (`SIMD=1` / `0`) and `test_memory_layout` (every pool size and pin) are unchanged. `test_linear_context.c`: `scenario_residual_scalars_match_linear()` pins the residual view's three scalars to the linear view's, bit for bit, over a run that converges, has double talk and clips; each of the three direct reads, replaced by a constant, turns it red (the baseline streams do not exercise them). Dropping the shadow term of the saturating count turns `test_aec_array` red (69 mismatches).
+- Docs: the function map (new C-only row `aec_render_base`; `c_src_total` 515, `c_src_c_only` 168, `c_total` 517, `c_c_only` 169).
+
 ## [Unreleased] — 2026-11-16 — The hop's mean squares are computed once
 
 **No output change.** A hop with a residual stage computed the mean square of `raw_output` twice (`aec_prepare_post_dt()`, then `update_simple_mu_ratio()`), of the reference three times (`aec_stage_linear()`, `update_simple_mu_ratio()`, and `aec_post_run()` for the active-render test), and the residual `OFF` path repeated the same pairs; each is now computed once and passed on. `update_simple_mu_ratio()` takes the two powers; `aec_hop_powers()` returns the reference / microphone / residual triple; `aec_steer_mu()` is the one converged-mu-freeze-or-simple-ratio rule that `aec_update_post_mu()` and the `OFF` branch of `aec_update_linear_only_steering()` each spelled out. `AecPostRunIn.shared_far_active` and `AecPost::far_active` (whose only reader was the donor-lane copy) are replaced by `AecPostRunIn.far_mean_sq`; `aec_post.c`'s one-line `sum_sq_f32_pairwise()` wrapper is gone.

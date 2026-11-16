@@ -851,7 +851,47 @@ static void scenario_fresh_view_reads_zeros(void) {
                 }
 }
 
+/* The residual view's gain-stage inputs (all_converged, max_dt, max_saturation) are the linear view's filter_converged, dt_indicator and
+ * saturation_level, bit for bit, on every hop of a run that converges, has double talk and clips. */
+static void scenario_residual_scalars_match_linear(void) {
+    AecConfig cfg;
+    Aec* a;
+    int hop, i, h, mism = 0, saw_conv = 0, saw_dt = 0, saw_sat = 0;
+    const int HOPS = 700;
+    float *mic, *far;
+    g_rng_state = 0x5CA1A125u;
+    context_only_config(&cfg, 16000, 256);
+    if ((a = aec_create(&cfg)) == NULL) { CHECK(0, "scalars: create"); return; }
+    hop = aec_hop_size(a);
+    mic = (float*)malloc((size_t)hop * sizeof(float));
+    far = (float*)malloc((size_t)hop * sizeof(float));
+    for (h = 0; h < HOPS; ++h) {
+        AecLinearView lv;
+        AecResidualView rv;
+        for (i = 0; i < hop; ++i) {
+            far[i] = rng_uniform(0.3f);
+            mic[i] = 0.5f * far[i] + (h % 200 > 120 ? rng_uniform(0.2f) : 0.01f * rng_uniform(1.0f));
+            if (h % 150 > 140 && i < 40) mic[i] = (i & 1) ? 1.0f : -1.0f;
+        }
+        split_hop(a, mic, far);
+        memset(&lv, 0, sizeof lv); lv.struct_size = sizeof lv;
+        memset(&rv, 0, sizeof rv); rv.struct_size = sizeof rv;
+        get_linear(a, &lv);
+        if (aec_get_residual(a, &rv) != AEC_OK) { CHECK(0, "scalars: residual view"); break; }
+        mism += rv.all_converged != lv.filter_converged || memcmp(&rv.max_dt, &lv.dt_indicator, sizeof(float)) != 0 ||
+                memcmp(&rv.max_saturation, &lv.saturation_level, sizeof(float)) != 0;
+        saw_conv |= lv.filter_converged != 0;
+        saw_dt |= lv.dt_indicator > 0.0f;
+        saw_sat |= lv.saturation_level > 0.0f;
+    }
+    CHECK(mism == 0, "scalars: all_converged / max_dt / max_saturation equal the linear view's on every hop");
+    CHECK(saw_conv && saw_dt && saw_sat, "scalars: the run converged, had a nonzero dt_indicator and a nonzero saturation_level");
+    free(mic); free(far);
+    aec_destroy(a);
+}
+
 int main(void) {
+    scenario_residual_scalars_match_linear();
     scenario_fresh_view_reads_zeros();
     scenario_acquire_and_verify(16000, 0,   1600, "16k/fft256");
     scenario_acquire_and_verify(16000, 512, 1600, "16k/fft512");

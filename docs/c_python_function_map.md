@@ -37,17 +37,17 @@
 <!-- stats:begin -->
 | key | 數值 | 說明 |
 |---|---|---|
-| `c_src_total` | 514 | `src/` 下 `.c` 的 C 函式總數（唯一 (檔, 函式名)） |
+| `c_src_total` | 515 | `src/` 下 `.c` 的 C 函式總數（唯一 (檔, 函式名)） |
 | `c_src_mirror` | 221 | 關係為 mirror |
 | `c_src_partial` | 126 | 關係為 partial |
-| `c_src_c_only` | 167 | 關係為 C-only（含 21 個 `aec_testing_*` 測試鉤子） |
+| `c_src_c_only` | 168 | 關係為 C-only（含 21 個 `aec_testing_*` 測試鉤子） |
 | `c_src_unknown` | 0 | 關係為 未能判斷 |
 | `c_hdr_total` | 2 | `include/internal/` 下 header 內 static inline 函式總數（規則 2；共用 SIMD 核心不列入） |
 | `c_hdr_c_only` | 1 | 其中 C-only |
 | `c_hdr_mapped` | 1 | 其中 mirror 或 partial |
-| `c_total` | 516 | C 函式合計（src 加 header） |
+| `c_total` | 517 | C 函式合計（src 加 header） |
 | `c_mapped` | 348 | 已對應（mirror 加 partial）合計 |
-| `c_c_only` | 168 | C-only 合計 |
+| `c_c_only` | 169 | C-only 合計 |
 | `c_unknown` | 0 | 未能判斷 合計 |
 | `inferred` | 28 | 關係說明以「推定：」開頭的列（已含在上列 mirror／partial 內） |
 | `py_total` | 575 | Python 符號總數（規則 4） |
@@ -233,6 +233,7 @@
 | `src/aec.c:aec_process_residual` | `modules/orchestrator.py:AEC.process` | partial（緊接線性 stage 的後級入口，不套用增益、不合成；等同 Python 的 res-context 路徑；結果溢位的 hop 回 `AEC_ERR_DSP`（C 專屬）） | T-05 | `ctest:test_split_entry.c`<br>`ctest:test_process_context.c`<br>`ctest:test_dsp_refusal.c` |
 | `src/aec.c:aec_get_residual` | `modules/orchestrator.py:AEC._build_res_context#AecResContext`<br>`modules/orchestrator.py:AEC._post_stash_context`<br>`modules/orchestrator.py:AEC._build_res_context#output_base_spec`<br>`modules/orchestrator.py:AEC._post_stash_context#_res_output_base` | partial（後級檢視：分析 seam 與渲染底座 `base_spec`／`guard_active` 在同一個結構，帶 `struct_size` 檢查；Python 在 process 內建構兩者並放進同一個 res-context 資料類別，欄位集合兩邊不同；底座與 `formed_hop` 不配對） | D-05 | `ctest:test_split_entry.c`<br>`ctest:test_process_context.c`<br>`ctest:test_guard_unify.c`<br>`pytest:test_guard_unify.py` |
 | `src/aec.c:aec_gain_ready` | — | C-only（`aec_apply_gain`／`aec_apply_cng` 的前置檢查：需 `FULL` 且該 hop 已處理完） | D-12 | `ctest:test_split_entry.c` |
+| `src/aec.c:aec_render_base` | — | C-only（增益套用的底座頻譜：輸出守衛啟動時為守衛的底座，否則為選定的誤差頻譜；`aec_get_residual`／`aec_apply_gain` 共用） | D-12 | `ctest:test_split_entry.c` |
 | `src/aec_post.c:aec_apply_gain_spec` | `modules/orchestrator.py:AEC._aec3_post#_output_base * gain` | partial（無實例形式：底座乘增益，可帶外部增益取 min；Python 在 post 內部直接套用） | — | `ctest:test_split_entry.c`<br>`ctest:test_guard_unify.c` |
 | `src/aec_post.c:aec_apply_cng_spec` | `modules/cng.py:cng_fill`<br>`modules/orchestrator.py:AEC._post_add_comfort_noise` | partial（無實例形式：以呼叫端持有的產生器狀態加舒適噪音，薄包裝 `aec_cng_fill`） | — | `ctest:test_split_entry.c`<br>`ctest:test_guard_unify.c` |
 | `src/aec.c:aec_apply_gain` | — | C-only（實例形式：對 `aec_get_residual().base_spec` 乘 `G_res`，可帶外部增益；Python 無獨立入口） | D-12 | `ctest:test_split_entry.c`<br>`ctest:test_guard_unify.c` |

@@ -194,16 +194,13 @@ static int array_dims(const AecResolved* rs, ArrayDims* d) {
     d->matched = cfg->delay_mode == AEC_DELAY_MATCHED;
     array_derive_lane(rs, &d->lane);
 
+    d->ring = aec_ref_ring_samples(rs, d->hop);
     if (d->matched) {
-        /* As the single channel: the estimator's largest reportable delay + hop (eligible up to ring - hop). */
-        int reach = delay_aec_max_delay_samples(cfg->sample_rate, cfg->delay_num_filters);
-        d->ring = reach > 0 ? reach + d->hop : 0;
         d->delay_bytes = delay_aec_get_mem_size(cfg->sample_rate, d->hop, cfg->delay_num_filters);
         /* An estimator that cannot be sized makes the config invalid. */
         if (d->ring <= 0 || d->delay_bytes == 0) return 0;
-    } else if (cfg->delay_mode == AEC_DELAY_FIXED) {
-        d->ring = cfg->fixed_delay_samples + d->hop;
-        if (d->ring <= 0) return 0;
+    } else if (cfg->delay_mode == AEC_DELAY_FIXED && d->ring <= 0) {
+        return 0;
     }
     d->ctl_bytes = ck_align16_size(sizeof(struct AecArray));
     d->buf_bytes = flow_buffer_size(d->hop, d->fft, d->n, d->ring, d->post);
