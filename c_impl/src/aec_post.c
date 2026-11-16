@@ -504,8 +504,8 @@ void aec_post_run(AecPost *p,
                     int usable = output_usable;
 
                     /* DT-gated min-gain floor lift (read when the gain is computed below). The
-                     * energy-based near-recent latch decides it; the result is exported via
-                     * AecResidualView.res_floor_protect so fused consumers do not derive a second rule. */
+                     * energy-based near-recent latch decides it; the result is the hop's DT-floor decision
+                     * (dt_protect_active), the one rule the array's gain stage mirrors from max_dt. */
                     obj->sg->dt_protect_active =
                         (in->dt_floor_enabled && in->nearend_recent) ? 1 : 0;
 
