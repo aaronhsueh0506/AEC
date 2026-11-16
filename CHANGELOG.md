@@ -42,6 +42,10 @@ when verdict requires it.
 ---
 
 
+## [Unreleased] — 2026-11-16 — aec.h declaration comments cut to three lines
+
+Comments only; `cc -E -P` of every source, header, test and example file is identical before and after. Nine declaration comments in `aec.h` (the refused-hop block, the array-instance block, `aec_post_reset_serial()`, `aec_synthesis_window()`, `AecResidualView`, the linear-view seam, `aec_create()` / `aec_destroy()` / `aec_reset()`, `aec_apply_external_realign()`, the array diagnostics) were 9 to 56 lines each and repeated what `docs/reference/lifecycle.md` and `integration.md` state. Each is now three lines that keep the contract (the reset and what the caller does after a refused hop, ownership, error codes, units) and point to the docs for the rest. `aec.h` goes from 643 to 503 lines.
+
 ## [Unreleased] — 2026-11-16 — bench_rtf and parity_aec_e2e check the aec_process return
 
 Test drivers only. `bench_rtf` counts `AEC_ERR_DSP` hops, prints a warning with the stage and the count, and stops with exit code 5 on any other non-`AEC_OK` return; `parity_aec_e2e` stops with exit code 2 on any non-`AEC_OK` return instead of comparing a reset instance's zeroed output against the golden. `test-parity-e2e` still passes (the 8 kHz row stays the documented expected-red one).

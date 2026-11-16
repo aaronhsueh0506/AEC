@@ -186,29 +186,16 @@ typedef struct AecStageTiming {
  * out must not be NULL. */
 void aec_get_last_timing(const Aec* a, AecStageTiming* out);
 
-/* Heap construction: one allocation of aec_get_mem_size(cfg) bytes, 16-byte aligned, holding the instance and everything it
- * carves, built as aec_init() builds one in a pool of that size. Returns NULL for a NULL or invalid cfg or a failed allocation.
- * aec_destroy() releases it (NULL-safe); the pointer is dead afterwards, as after free(), and the caller never frees it. A
- * pool instance from aec_init() is not freed by aec_destroy(): it stays refused (not ready) until it is built again, and a
- * repeated aec_destroy() on it is harmless as long as its pool has not been freed or overwritten. aec_reset restores the
- * initial state (NULL-safe; a handle that is not ready is left as it is).
- * A handle that is not ready: NULL, zero-filled or never built, or a destroyed pool instance. Every entry point refuses it
- * (AEC_ERR_ARG, -1, 0, NULL or a zeroed record, as each function states) until aec_init() builds it; aec_hop_size() reads 0.
- * Using a handle whose memory has been freed or reused is undefined, as for any C object; so is the pointer of a view obtained
- * before the destroy. */
+/* Heap construction: one aligned allocation of aec_get_mem_size(cfg) bytes; NULL for a NULL or invalid cfg or a failed
+ * allocation. aec_destroy() frees it (NULL-safe); aec_reset() restores the initial state. A handle that is not ready (NULL,
+ * zero-filled, never built or destroyed) is refused by every entry point; a freed handle or its views must not be used. */
 Aec* aec_create(const AecConfig* cfg);
 void aec_destroy(Aec* a);
 void aec_reset(Aec* a);
 
-/* Realigns an AEC_DELAY_EXTERNAL_ALIGNED instance after a caller-side change
- * of the far alignment, without a full reset; delta_samples = new_alignment -
- * old_alignment. If the filter is cancelling (aec_linear_is_cancelling()) and
- * the shift fits the tap span, the learned IR is shifted (warm transfer);
- * otherwise the filter alone is reset and the output stays continuous. A
- * negative delta exposes echo for up to about ceil((|delta| + tap offset) /
- * hop_size) + 1 hops. Bumps the alignment generation. Returns 1 for warm
- * transfer, 0 for filter reset (or delta_samples == 0), -1 on NULL or another
- * delay mode. */
+/* Realigns an AEC_DELAY_EXTERNAL_ALIGNED instance after a caller-side far alignment change (delta_samples = new - old): a
+ * cancelling filter keeps its IR shifted by delta when it fits the tap span, else only the filter resets. Returns 1 for the
+ * warm transfer, 0 for a filter reset or delta 0, -1 on NULL or another delay mode; bumps the alignment generation. */
 int aec_apply_external_realign(Aec* a, int delta_samples);
 
 /* Retargets the residual-echo strength of a running instance and stores it as the instance's level; filter, delay
@@ -252,24 +239,9 @@ typedef struct AecBeam {
  * linear path, so compare a linear part with the full chain only on STATE or above.
  * Returns AEC_OK, or AEC_ERR_ARG / AEC_ERR_MODE / AEC_ERR_SEQUENCE with the instance untouched, or AEC_ERR_DSP (below).
  *
- * Refused hop (AEC_ERR_DSP). A single-channel instance checks what each call hands out: aec_process_linear() the AecLinearView
- * vectors; the call that closes the hop (aec_process(), aec_process_residual(), aec_process_linear() with AEC_RESIDUAL_OFF)
- * its power trackers and the AecResidualView vectors as far as AecConfig.residual reaches. A finite sample large enough to
- * overflow one of them makes that call return AEC_ERR_DSP with the instance reset as by aec_reset(). Measured on one scene
- * (full scale is 1.0): |mic| from about 1.9e19; |ref| about 1e19 with OFF / STATE, about 3e13 to 6e14 with ESTIMATE / FULL
- * (r2 squares the echo). A whole microphone hop is refused once hop_size * rms^2 exceeds 3.4e38 (rms 1.6e18 at hop 128, 1.2e18 at
- * 256, 8.2e17 at 512), in every residual mode. The onsets depend on the scene and are not guarantees; PCM16 input cannot reach
- * them. A reference sample is refused on the hop that carried it when it reaches the filters at once (AEC_DELAY_EXTERNAL_ALIGNED,
- * or a delay not yet locked or shorter than the sample's offset in the hop), otherwise when the ring delay brings it there, up to
- * ceil(delay / hop_size) hops later.
- *   - aec_process() has written hop_size zeros to `out`;
- *   - aec_post_reset_serial() has moved; no hop is open (aec_process_residual() after a refused aec_process_linear() is
- *     AEC_ERR_SEQUENCE); aec_get_residual() returns AEC_ERR_SEQUENCE until the next hop, and with FULL so do aec_apply_gain()
- *     and aec_apply_cng() (with STATE or ESTIMATE they return AEC_ERR_MODE on any hop); AecLinearView reads zeros;
- *   - the caller renders this hop as silence, clears its own inverse-transform / overlap-add tail and comfort-noise state
- *     (as for any serial change), restarts a stage it fed from this instance if that stage keeps history (a denoiser, a
- *     model stream), and continues with the next hop. From that hop on the instance behaves as a fresh one.
- * An array instance checks each lane the same way, inside aec_process_linear() (see "Array instance"). */
+ * Refused hop (AEC_ERR_DSP; an array per lane): a call whose results overflow resets the instance as aec_reset(), moves
+ * aec_post_reset_serial(), zeroes `out` and the linear view and leaves no hop open. The caller renders that hop as silence,
+ * clears its overlap-add tail and comfort-noise state, restarts stages fed from here and goes on (docs/reference/lifecycle.md). */
 int aec_process(Aec* a, const float* mic, const float* ref, float* out);
 int aec_process_linear(Aec* a, const float* mic, const float* ref);
 int aec_process_residual(Aec* a, const AecBeam* beam);
@@ -287,22 +259,9 @@ int aec_linear_is_cancelling(const Aec* a);
 /* Samples per process call (fft_size / 2); 0 for a handle that is not ready. */
 int  aec_hop_size(const Aec* a);
 
-/* Everything the residual stage knows about the last hop, kept inside the instance and read through this view. The
- * pointers alias internal buffers, are valid until the next process or reset call, and follow AecConfig.residual:
- *   STATE     formed_hop, error_spec, echo_spec, near_spec, base_spec and the flags; r2, comfort_noise, res_gain NULL.
- *   ESTIMATE  + r2, comfort_noise.            FULL  + res_gain.
- * ANALYSIS spectra (error_spec, echo_spec, near_spec, formed_hop): the formed linear residual E(f) (50% overlap,
- * periodic sqrt-Hann STFT of [previous formed hop | current formed hop], audio scale), its echo estimate, and
- * near = E + echo. The output guard never alters them. r2 and comfort_noise are int16^2 power: divide by 32768^2 for
- * audio power. RENDERING base_spec: what a gain is multiplied on. The guard evaluates once per hop, after the usable-
- * linear verdict is final: guard_active is 1 when the estimate is unusable and sum|E|^2 > sum|E + echo|^2 (strict,
- * windowed spectra, float32 pairwise reduction); then base_spec is the capture spectrum E + echo, otherwise E. base_spec
- * is not the transform of any formed hop; use formed_hop / error_spec for analysis and base_spec only for rendering.
- * far_spec is the filter's own rectangular-block far spectrum (not sqrt-Hann): not a chain-standard spectrum.
- * The linear stage's status (convergence, double-talk, saturation, ...) is in AecLinearView, not here.
- * struct_size is an input (sizeof(AecResidualView)); a shorter one is refused untouched, a larger one gets the known
- * prefix and struct_size is set to sizeof(AecResidualView). Returns AEC_OK, or AEC_ERR_ARG (NULL, short struct_size) /
- * AEC_ERR_MODE (residual == OFF: the view is zeroed apart from struct_size). */
+/* Everything the residual stage knows about the last hop; pointers alias internal buffers (valid until the next process or reset
+ * call) and follow AecConfig.residual: STATE has no r2 / comfort_noise / res_gain, ESTIMATE no res_gain. r2 and comfort_noise are
+ * int16^2 power; render base_spec, not error_spec (output guard). struct_size is an input; AEC_OK, AEC_ERR_ARG, AEC_ERR_MODE. */
 typedef struct AecResidualView {
     size_t         struct_size;
     int            n_freqs;
@@ -359,64 +318,19 @@ void aec_apply_cng_spec(uint32_t* rng, Complex* spec, const float* cn, const flo
  * start from AEC_CNG_SEED. Nothing in the API reveals that an old renderer of error_spec has lost the guard; the migration
  * steps are in docs/sdk_migration_output_guard.md. */
 
-/* Counter of hard post-chain resets (wrapping uint32_t, 0 on a freshly created instance), read without
- * consuming it. Compare it only for inequality with the stored value: a single channel advances by one on each of the events
- * below, an array instance by four (the sum of its four lanes' counters). The events:
- *   - aec_reset(): a separate call, not part of any processing call; the serial has already moved when
- *     aec_reset() returns, and the next processing call starts from the cleared state.
- *   - a hard reset inside a processing call (aec_process / aec_process_linear), done before that hop's
- *     synthesis: the hard branch of a first delay acquisition (Path A: no warm tap transfer and no
- *     DT-aware soft acquisition) and the hard branch of a confirmed delay shift (Path B: no DT-aware soft
- *     realign).
- *   - a call that returns AEC_ERR_DSP: it has reset the instance as aec_reset() does ("Refused hop").
- * It never moves on the bad-relock revert (a soft revert to the pre-shift delay and its tap snapshot), on
- * warm tap transfers or DT-aware soft acquisitions / realignments, on aec_apply_external_realign(), or
- * when only AecLinearView.generation changes. At each counted reset the library clears its own OLA
- * tail and reseeds its CNG to AEC_CNG_SEED.
- * An application that synthesizes outside the library keeps its own last-handled serial; when the value
- * after a processing call (or after aec_reset()) differs from it, the application must, BEFORE its first
- * CNG draw and BEFORE the inverse-transform/overlap-add push of the hop it renders from that processing
- * call (the hop just processed; after aec_reset(), the first hop processed afterwards), clear its OLA
- * tail (e.g. ac_istft_reset) and reseed its comfort-noise state to AEC_CNG_SEED, then store the new
- * serial. It must not reset the AEC in response, and NR/NN state is not touched by the library:
- * following the reset there is application policy. Returns 0 for NULL. */
+/* Counter of hard post-chain resets (wrapping, 0 on a fresh instance); compare it only for inequality (a single channel moves it
+ * by one per event, an array by four). Events: aec_reset(), a hard delay-acquisition or delay-shift reset inside a call, and
+ * AEC_ERR_DSP. At each the library clears its OLA tail and reseeds its CNG; a caller that synthesizes must too. Returns 0 for NULL. */
 uint32_t aec_post_reset_serial(const Aec* a);
 
-/* The synthesis window the library itself applies before overlap-add: a block_size table (block_size ==
- * fft_size, the AecConfig grid the instance was created with). An external synthesizer that must reproduce
- * aec_process() bit for bit has to use this table, not the audiolib default sqrt-Hann: the two differ in the
- * last float bit.
- *
- * With audiolib (audio_stft.h):
- *     const float* w; int n;
- *     AcStftConfig sc;
- *     aec_synthesis_window(aec, &w, &n);              // n == the fft_size of the AcIstft below
- *     ac_stft_config_default(&sc, n);
- *     sc.window = w;                                  // borrowed table; AcIstft carves none
- *     size_t sz = ac_istft_get_mem_size(&sc);         // then ac_istft_init(mem, sz, &sc) as usual
- * The AcIstft is configured with fft_size = the returned length. The pointer is read-only and lives in the
- * instance's own pool (built by aec_init() / aec_create()): it is valid until aec_destroy() and does not change
- * across processing or reset calls. The AcIstft borrows it, so it must not outlive the Aec (after aec_destroy() of
- * an aec_create() instance the memory is freed). *window and *length are set only on success.
- * Returns 0, or -1 for a NULL instance, window or length (outputs untouched). */
+/* The synthesis window aec_process() applies before overlap-add (fft_size floats in the instance's pool, valid until
+ * aec_destroy()). An external synthesizer that must match aec_process() bit for bit borrows it instead of audiolib's sqrt-Hann.
+ * Returns 0, or -1 for a NULL instance, window or length (outputs untouched); setup: docs/sdk_migration_output_guard.md. */
 int aec_synthesis_window(const Aec* a, const float** window, int* length);
 
-/* Linear-AEC / NN post-filter seam: read-only view for an external post-filter.
- *   - aligned_far_hop aliases the instance's aligned far hop, valid until the next process/reset call.
- *   - UNLOCKED: aligned_far_hop is the raw far (not delay-compensated).
- *   - generation increments (saturating) on every ring-offset change (first
- *     acquisition, confirmed shift, reset); poll it to invalidate cross-hop caches.
- *     CHANGED is reported on the hop whose processing bumped it.
- *   - An out-of-range bulk delay is not detectable here; the product owns that policy.
- * Per mode (cfg.delay_mode):
- *   MATCHED           delay_samples = applied ring offset (-1 before acquisition);
- *                     delay_confidence = the estimator's 0.0 / 0.5 / 1.0.
- *   FIXED             delay_samples = fixed_delay_samples; confidence 1.0;
- *                     generation moves only on aec_reset(); UNLOCKED until the ring
- *                     holds fixed_delay_samples + hop_size samples.
- *   EXTERNAL_ALIGNED  aligned_far_hop is the caller's far hop; delay_samples 0,
- *                     LOCKED, confidence 1.0; generation moves only via
- *                     aec_apply_external_realign() and aec_reset(). */
+/* Read-only seam for an external post-filter: aligned_far_hop aliases the aligned far hop (raw while UNLOCKED), valid until the
+ * next process or reset call; generation increments (saturating) on every ring-offset change and CHANGED marks the hop that
+ * bumped it. Per-mode delay_samples / delay_confidence and the bulk-delay policy: docs/reference/integration.md. */
 typedef enum AecLinearDelayState {
     AEC_LINEAR_DELAY_UNLOCKED = 0,  /* far_hop is raw / not compensated */
     AEC_LINEAR_DELAY_LOCKED   = 1,  /* compensated with a stable offset */
@@ -456,63 +370,9 @@ typedef struct AecLinearView {
 
 int aec_get_linear(const Aec* a, AecLinearView* out);
 
-/* ---- Array instance (AecConfig.n_mics == AEC_ARRAY_MICS) ---------------------------------------------------------
- * One aec_init() builds the whole four-microphone linear flow: four lanes, the shared delay estimator, the aligned far
- * and the fusion buffers, in one caller pool. The beamformer between the lanes and the fusion is the CALLER's (SRP-PHAT,
- * BF, VAD and the like are not part of this library). Per hop:
- *
- *     aec_process_linear(a, mics, ref)        mics = interleaved float [hop][n_mics], ref = float [hop].
- *                                             Shared delay + the lanes' linear and per-lane residual stages.
- *     aec_get_array(a, &av)                   the lanes' error spectra: what the caller's beamformer reads.
- *     (caller: weights W[n_mics][n_freqs], beamformed spectrum E)
- *     aec_process_residual(a, &beam)          fuse the lanes (R^2 coherently, comfort noise as a power sum, near, far,
- *                                             rendering base) and, with AEC_RESIDUAL_FULL, compute the one G_res on the
- *                                             fused spectra.
- *     aec_get_residual(a, &rv)                the fused E, base, r2, comfort noise, flags (AecResidualView).
- *     aec_apply_gain / aec_apply_cng          called as for a single channel (same arguments, same
- *                                             out = base * min(G_res, extra_gain)); the gain itself is not the single-channel
- *                                             one, see "Fused gain" below.
- *
- * residual selects what the lanes and the fusion do: STATE = lanes only (no fusion, aec_process_residual refused with
- * AEC_ERR_MODE: the beamformed spectrum is rendered by the caller); ESTIMATE = fusion without a gain; FULL = fusion with
- * the gain. aec_process() needs one microphone and returns AEC_ERR_MODE on an array instance.
- *
- * Errors. A non-finite input sample (mics / ref) is AEC_ERR_ARG with the state untouched. aec_process_residual() validates the
- * beam up front: weights that are NULL, non-finite or all zero, or a beamformed_error with a non-finite bin, are AEC_ERR_ARG
- * with the instance untouched (no reset; the hop stays open and the previous views stay readable, so the caller can fix the
- * beam and call again). Refused hop: aec_process_linear() checks each lane as a single channel (its linear view, power
- * trackers and residual view; every residual mode, STATE included). A lane whose results are not finite (measured: a
- * microphone sample from about 1.9e19 on any lane, the reference about 1.3e19 with STATE and 3e13 to 6e14 with ESTIMATE /
- * FULL; scene-dependent, and PCM16 input cannot reach them) makes it return AEC_ERR_DSP with the whole instance reset, as by
- * aec_reset(): no hop is open (aec_process_residual() is AEC_ERR_SEQUENCE, AEC_ERR_MODE with STATE; aec_get_array() is
- * AEC_ERR_SEQUENCE), AecLinearView reads zeros, and from the next hop the instance behaves as a fresh one. A microphone sample
- * is refused on the hop that carried it; a reference sample on the hop that carried it when it reaches the lanes at once, otherwise
- * when the ring delay brings it there, up to ceil(delay / hop_size) hops later.
- * The fusion refusing a hop after the beam check (finite weights whose projections overflow, an internal consistency check) is
- * AEC_ERR_DSP with the same reset.
- * Call order. A second aec_process_linear() before the residual stage replaces the pending hop (the four filters have already
- * adapted on the first). A second aec_process_residual() on the same hop is AEC_ERR_SEQUENCE with AEC_RESIDUAL_FULL (the gain
- * stage advances once per hop) and allowed with ESTIMATE (a stateless re-fusion, e.g. of another weight set). aec_set_level()
- * retargets the fused gain stage; the lanes' own level has no effect.
- * Views. In an array view formed_hop and echo_spec of AecResidualView are NULL (the lanes' hops are in AecArrayView), and
- * AecLinearView is lane 0's with the shared alignment. res_floor_protect is max_dt > 0.2 (a single channel: the near-recent
- * latch), and all_converged / max_dt / max_saturation vote over the lanes with a nonzero weight. Lifetimes: the lane pointers
- * of AecArrayView are valid until the next aec_process_linear() or aec_reset() (a reset does not clear the lanes' buffers, so
- * an old pointer reads stale values, not a fault, but no longer describes a hop); AecResidualView.error_spec and, when no
- * lane's output guard fired, base_spec ARE the caller's beamformed_error buffer when one was passed (it must outlive the
- * reads, and an in-place aec_apply_gain() on it changes what they read), otherwise internal buffers valid until the next
- * process or reset call.
- * Shared alignment. The delay estimator (MATCHED) is fed by ONE microphone, capture_proxy_channel; the other three are never
- * seen by it, so a dead or blocked proxy microphone leaves the array without an acquired delay (all lanes run on the raw
- * far end). FIXED and EXTERNAL_ALIGNED use no estimator.
- * Differences from a single channel: the fused gain's DT floor applies whenever the worst lane double-talk indicator is above 0.2
- * (the lanes still use their own near-end-recent gate for echo-path-change recovery), the duty-cycle hold is a fixed 0.3 s,
- * and 8 kHz is refused. The shared ring is sized as a single channel's (the estimator's reach plus one hop).
- * Fused gain. With AEC_RESIDUAL_FULL the gain comes from a stand-alone gain stage fed with the fused spectra: near power is
- * |near|^2, limited by |E|^2 once every contributing lane has converged; the fused r2 serves as both the bounded and the
- * unbounded residual-echo estimate; the comfort-noise PSD is the weighted power sum; the far level is the aligned far hop's.
- * A single channel runs the instance's own post chain, which keeps separate bounded / unbounded estimates, so the array gain
- * is not guaranteed to equal a single channel's on the same lane. */
+/* ---- Array instance (AecConfig.n_mics == AEC_ARRAY_MICS): four lanes, a shared delay estimator and the fusion in one pool; the
+ * caller supplies the beamformer. Per hop: aec_process_linear(mics, ref), aec_get_array(), aec_process_residual(&beam), then
+ * aec_get_residual() / aec_apply_gain() / aec_apply_cng(). Errors, views, alignment, fused gain: docs/reference. ---- */
 
 /* Shared alignment of an array instance (a single-channel instance fills it from its own alignment).
  * `changed`: a new usable alignment generation begins on this hop; a consumer holding history derived from the aligned far
@@ -614,15 +474,9 @@ typedef struct AecMemBreakdown {
 
 int aec_get_mem_breakdown(const AecConfig* cfg, AecMemBreakdown* out);
 
-/* ---- Array diagnostics ----------------------------------------------------------------------------------------------
- * Read-only instrumentation of an array instance (cumulative since construction or aec_reset()). On a single-channel
- * instance they answer with the neutral value noted. A handle that is not ready answers 0 / -1 / a zeroed record.
- *   aec_far_fft_real_compute_count()   (above) on an array: the four lanes' counts summed; lane 0 runs the far FFT and lanes
- *                                      1-3 borrow it, so +1 per hop (+4 on a hop whose lanes could not borrow).
- * aec_array_realign_*_lane_count: aec_apply_external_realign() outcomes of the lanes after a shared-alignment change; a
- *   `changed` hop adds 4 to the pair (warm: IR shifted, soft: filter-only reset); fewer means a lane rejected the call. A
- *   `changed` hop whose delta is 0 (e.g. a first acquisition at delay 0) also adds 4 soft although no filter was reset.
- *   Saturate at LONG_MAX. Single-channel: 0. */
+/* ---- Array diagnostics: read-only counters since construction or aec_reset(); a single channel answers 0 / -1, a handle that is
+ * not ready 0 / -1 / a zeroed record. Far FFT count: the four lanes summed (+1 per hop; +4 when the lanes could not borrow lane
+ * 0's FFT). aec_array_realign_*_lane_count: lane outcomes, 4 per `changed` hop (also 4 soft for delta 0), saturating. ---- */
 typedef struct AecArrayTiming {
     uint32_t delay_us;       /* shared delay estimator */
     uint32_t frontend_us;    /* four lanes: entry to the main filter */
