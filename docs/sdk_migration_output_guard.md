@@ -112,9 +112,9 @@ context API 的應用。只呼叫 `aec_process()`（`AecConfig.residual` 維持�
 | 5 | 舒適噪音 | 自己的 CNG，自選種子 | `aec_apply_cng()`（實例內產生器，函式庫自己重設），或自己持有狀態的 `aec_apply_cng_spec()`，種子 `AEC_CNG_SEED`（§7） |
 | 6 | 驗收 | 與舊輸出比較 | 與同一份輸入下 `aec_process()` 逐位元比較（§9） |
 
-分析用途（`r2`、ERLE 類統計、訓練特徵、AI 模型的分析輸入、需要與 `formed_hop` 配對的重建）
-**繼續讀 `error_spec`**，不要改成底座；底座只用來渲染。NR 的輸入頻譜由整合者選：出貨單聲道鏈交 `base_spec`（NR 估計的就是增益要乘上去的那張頻譜），
-出貨 4ch 鏈交 `error_spec`；兩者只在守衛 hop 上不同。
+分析用途（`r2`、ERLE 類統計、訓練特徵、Align-ULCNet 等讀 `formed_hop` 的模型輸入、需要與 `formed_hop` 配對的重建）
+**繼續讀 `error_spec`**，不要改成底座。NR 與 DFN2 的估計輸入由整合者選：出貨的單聲道與 4ch 鏈都交 `base_spec`
+（估計的就是增益要乘上去的那張頻譜）；兩者只在守衛 hop 上不同。
 
 ## 4. 前後對照程式碼
 

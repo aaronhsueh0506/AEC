@@ -278,7 +278,7 @@ g_nr = anr_process_gain_with_residual_psd(nr, rv.base_spec, extra);   /* NR 增�
 aec_apply_gain(aec, g_nr, spec);                               /* P = base_spec * min(g_nr, g_res)(渲染 base_spec,不是 error_spec) */
 if (use_cng) aec_apply_cng(aec, g_nr, spec);                   /* 開 CNG 時:實例內產生器,下限 AEC_CNG_NR_GAIN_FLOOR */
 ac_istft_push(istft, spec, out);                               /* 反 FFT + 合成 + OLA */</code></pre>
-<p class="small"><b>NR 的輸入頻譜:</b>函式庫不替你選;<code>error_spec</code> 與 <code>base_spec</code> 只在輸出守衛 hop 上不同(其餘 hop 逐位元相同)。出貨的單聲道鏈把 <code>base_spec</code> 交給 NR,NR 估計的就是增益要乘上去的那張頻譜;出貨的 4ch 鏈(<code>array_sample_anr_gain()</code>)交 <code>error_spec</code>(beamformer 輸出 E)。<code>error_spec</code>／<code>formed_hop</code> 是 AI 模型與 ERLE 類統計用的分析 seam。Audio_ALG 之外的板端 sample 目前把 <code>error_spec</code> 交給 NR,這是已知差異,不是建議。</p>
+<p class="small"><b>NR 的輸入頻譜:</b>函式庫不替你選;<code>error_spec</code> 與 <code>base_spec</code> 只在輸出守衛 hop 上不同(其餘 hop 逐位元相同)。出貨的單聲道鏈與 4ch 鏈(<code>array_sample_anr_gain()</code>,讀融合後的 <code>base_spec</code>)都把 <code>base_spec</code> 交給 NR,NR 估計的就是增益要乘上去的那張頻譜;DFN2 的估計輸入同樣是 <code>base_spec</code>。<code>error_spec</code>／<code>formed_hop</code> 是 Align-ULCNet 與 ERLE 類統計用的分析 seam。</p>
 <p class="small">上列 <code>anr_*</code> 屬 NR 庫,<code>sk_*</code>／<code>ac_istft_push</code> 屬 audiolib,只有 <code>aec_*</code> 是 AEC 庫的 API;流程時序見 <a href="aec_sequence.html">aec_sequence</a> §3,各 stage 的介面見各庫自己的文件。</p>
 
 </body>

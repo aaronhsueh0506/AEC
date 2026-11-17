@@ -304,9 +304,9 @@ mic, ref (hop 個 float)
   （`AEC_CNG_NR_GAIN_FLOOR`，`0.31622777f`）為下限縮放填補量。
 - **渲染 `rv.base_spec`，不是 `rv.error_spec`**：底座已套用輸出守衛（§8.1），`aec_apply_gain()` 已經替你這麼做。
 - **NR 的輸入頻譜**：函式庫不替你選；分析用的 `error_spec` 與渲染用的 `base_spec` 只在守衛 hop 上不同（其餘 hop 逐位元相同）。
-  出貨的單聲道鏈（Audio_ALG `pipelines/mono/aec_nr_res`）把 `base_spec` 交給 `anr_process_gain*()`：NR 估計的就是增益要乘上去的那張頻譜。
-  出貨的 4ch 鏈（`array_sample_anr_gain()`）交 `error_spec`，即 beamformer 輸出 E。`error_spec`／`formed_hop` 是 AI 模型與 ERLE 類統計
-  用的分析 seam。Audio_ALG 之外的板端 sample 目前把 `error_spec` 交給 NR，這是已知差異，不是建議；新的整合以出貨單聲道鏈為準。
+  出貨的單聲道鏈（Audio_ALG `pipelines/mono/aec_nr_res`）與 4ch 鏈（`array_sample_anr_gain()`，讀融合後的 `base_spec`）都把
+  `base_spec` 交給 `anr_process_gain*()`：NR 估計的就是增益要乘上去的那張頻譜；DFN2 的估計輸入同樣是 `base_spec`。
+  `error_spec`／`formed_hop` 是 Align-ULCNet 與 ERLE 類統計用的分析 seam。
 - **舒適噪音產生器在 `Aec` 裡**（`aec_apply_cng()`），起點是 `AEC_CNG_SEED`（42，`aec.h`），與 `aec_process()`
   內部相同，硬 post 鏈 reset 時函式庫自己重設。每個 hop 在 `ac_istft_push` 之前先比對 `aec_post_reset_serial()`：值變了就
   `ac_istft_reset()`、存下新值（§8.3）；**不要**為此呼叫 `aec_reset()`。自己持有產生器狀態、改走 `aec_apply_cng_spec()` 的整合者

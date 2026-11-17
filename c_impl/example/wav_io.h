@@ -1,6 +1,6 @@
 /** wav_io.h -- thin shim onto the shared WAV reader/writer in audiolib/common/include/wav_io.h.
- * Keeps `#include "wav_io.h"` resolving. The writer style is the shared header's default (AEC style): PCM16 output by
- * default, AEC_OUT_FLOAT=1 selects raw float32, PCM16 quantization rounds half away from zero. */
+ * Keeps `#include "wav_io.h"` resolving. PCM16 output by default, AEC_OUT_FLOAT=1 selects raw float32; PCM16
+ * quantization rounds half away from zero. */
 #ifndef AEC_WAV_IO_SHIM_H
 #define AEC_WAV_IO_SHIM_H
 /* The guard is deliberately not WAV_IO_H, which belongs to the shared header included below. */
